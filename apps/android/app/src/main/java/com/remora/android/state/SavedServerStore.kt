@@ -302,7 +302,7 @@ object SavedServerStore {
         return try {
             val array = JSONArray(json)
             val decoded = (0 until array.length()).map { SavedServer.fromJson(array.getJSONObject(it)) }
-            val migrated = decoded.map { migrateDisplayName(it.normalizedForPersistence()) }
+            val migrated = decoded.map { migrateDisplayNameForCompatibility(it.normalizedForPersistence()) }
             if (decoded != migrated) {
                 save(context, migrated)
             }
@@ -438,13 +438,13 @@ object SavedServerStore {
         return withoutScope.lowercase()
     }
 
-    private fun migrateDisplayName(server: SavedServer): SavedServer {
+    internal fun migrateDisplayNameForCompatibility(server: SavedServer): SavedServer {
         val nodeId = server.alleycatNodeId?.trim()?.takeIf { it.isNotEmpty() } ?: return server
         val name = server.name.trim()
         if (name.isNotEmpty() && !name.equals("Alleycat Host", ignoreCase = true)) {
             return server
         }
-        return server.copy(name = "Remote host ${shortNodeId(nodeId)}")
+        return server.copy(name = "Remora ${shortNodeId(nodeId)}")
     }
 
     private fun shortNodeId(raw: String): String =

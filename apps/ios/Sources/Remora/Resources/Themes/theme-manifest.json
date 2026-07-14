@@ -251,17 +251,17 @@
     "slug": "remora-dark",
     "name": "Remora",
     "type": "dark",
-    "accentHex": "#F59E0B",
-    "backgroundHex": "#1F2937",
-    "foregroundHex": "#E5E7EB"
+    "accentHex": "#00FF9C",
+    "backgroundHex": "#000000",
+    "foregroundHex": "#E0E0E0"
   },
   {
     "slug": "remora-light",
     "name": "Remora Light",
     "type": "light",
-    "accentHex": "#F59E0B",
-    "backgroundHex": "#FAF7F0",
-    "foregroundHex": "#1F2937"
+    "accentHex": "#00995D",
+    "backgroundHex": "#FFFFFF",
+    "foregroundHex": "#1A1A1A"
   },
   {
     "slug": "laserwave",

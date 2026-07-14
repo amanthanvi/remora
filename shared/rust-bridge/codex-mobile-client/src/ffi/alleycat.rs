@@ -105,7 +105,7 @@ pub(crate) fn map_alleycat_error(error: AlleycatError) -> ClientError {
     match error {
         AlleycatError::InvalidPayload(message) => ClientError::InvalidParams(message),
         AlleycatError::ProtocolMismatch { payload, client } => ClientError::InvalidParams(format!(
-            "alleycat protocol mismatch: payload={payload} client={client}"
+            "pairing protocol mismatch: payload={payload} client={client}"
         )),
         AlleycatError::Transport(message) => ClientError::Transport(message),
     }

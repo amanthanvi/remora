@@ -29,10 +29,7 @@ enum SavedServerStore {
                     agentName: saved.alleycatAgentName,
                     agentWire: saved.alleycatAgentWire
                 )
-            if shouldReplaceLegacyAlleycatPlaceholder(restored) {
-                return restored.withName(alleycatFallbackDisplayName(restored))
-            }
-            return restored
+            return migrateDisplayNameForCompatibility(restored)
         }
         if migrated != decoded {
             save(migrated)
@@ -205,6 +202,11 @@ enum SavedServerStore {
         }
 
         return normalized.lowercased()
+    }
+
+    static func migrateDisplayNameForCompatibility(_ server: SavedServer) -> SavedServer {
+        guard shouldReplaceLegacyAlleycatPlaceholder(server) else { return server }
+        return server.withName(alleycatFallbackDisplayName(server))
     }
 
     private static func shouldReplaceLegacyAlleycatPlaceholder(_ server: SavedServer) -> Bool {

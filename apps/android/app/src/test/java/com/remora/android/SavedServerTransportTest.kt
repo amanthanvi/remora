@@ -1,6 +1,7 @@
 package com.remora.android
 
 import com.remora.android.state.SavedServer
+import com.remora.android.state.SavedServerStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -8,6 +9,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SavedServerTransportTest {
+    @Test
+    fun legacyPairingPlaceholderMigratesToNeutralRemoraName() {
+        val migrated = SavedServerStore.migrateDisplayNameForCompatibility(
+            SavedServer(
+                id = "alleycat:node-1",
+                name = "Alleycat Host",
+                hostname = "0123456789abcdef0123456789abcdef",
+                port = 0,
+                alleycatNodeId = "0123456789abcdef0123456789abcdef",
+            ),
+        )
+
+        assertEquals("Remora 01234567...89abcdef", migrated.name)
+    }
+
     @Test
     fun codexAndSshDiscoveryRequiresChoiceUntilPreferenceIsSet() {
         val server =

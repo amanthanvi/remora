@@ -93,6 +93,30 @@ final class HomeDashboardSupportTests: XCTestCase {
         XCTAssertFalse(discovered.hasCodexServer)
     }
 
+    func testLegacyPairingPlaceholderMigratesToNeutralRemoraName() {
+        let saved = SavedServer(
+            id: "alleycat:node-1",
+            name: "Alleycat Host",
+            hostname: "0123456789abcdef0123456789abcdef",
+            port: 0,
+            codexPorts: [],
+            sshPort: nil,
+            source: .manual,
+            hasCodexServer: true,
+            wakeMAC: nil,
+            preferredConnectionMode: nil,
+            preferredCodexPort: nil,
+            sshPortForwardingEnabled: nil,
+            websocketURL: nil,
+            rememberedByUser: true,
+            alleycatNodeId: "0123456789abcdef0123456789abcdef"
+        )
+
+        let migrated = SavedServerStore.migrateDisplayNameForCompatibility(saved)
+
+        XCTAssertEqual(migrated.name, "Remora 01234567...89abcdef")
+    }
+
     func testHomeDashboardModelRefreshesWhenObservedSnapshotChanges() async {
         let appModel = AppModel()
         let model = HomeDashboardModel()

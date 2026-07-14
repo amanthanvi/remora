@@ -659,7 +659,7 @@ impl MobileClient {
                 self.app_store
                     .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
                 return Err(TransportError::ConnectionFailed(
-                    "no selected Alleycat runtime streams are available".to_string(),
+                    "no selected remote runtime streams are available".to_string(),
                 ));
             }
             vec![(
@@ -808,7 +808,7 @@ impl MobileClient {
             self.app_store
                 .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
             return Err(TransportError::ConnectionFailed(
-                "no available Alleycat runtime streams connected".to_string(),
+                "no available remote runtime streams connected".to_string(),
             ));
         }
 

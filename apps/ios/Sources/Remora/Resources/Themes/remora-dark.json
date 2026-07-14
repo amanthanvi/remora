@@ -2,67 +2,67 @@
   "name": "Remora",
   "type": "dark",
   "colors": {
-    "activityBar.activeBorder": "#F59E0B",
-    "activityBar.background": "#2A3544",
-    "activityBar.foreground": "#E5E7EB",
-    "activityBarBadge.background": "#F59E0B",
-    "activityBarBadge.foreground": "#1F2937",
-    "button.background": "#F59E0B",
-    "button.foreground": "#1F2937",
-    "button.hoverBackground": "#FCD472",
-    "editor.background": "#1F2937",
-    "editor.foreground": "#E5E7EB",
-    "editor.lineHighlightBackground": "#2A3544",
-    "editor.selectionBackground": "#F59E0B40",
-    "editorCursor.foreground": "#F59E0B",
-    "editorGroup.border": "#374151",
-    "editorGroupHeader.tabsBackground": "#2A3544",
-    "editorLineNumber.foreground": "#6B7280",
-    "editorLineNumber.activeForeground": "#FCD472",
-    "panel.background": "#2A3544",
-    "panel.border": "#374151",
-    "sideBar.background": "#2A3544",
-    "sideBar.foreground": "#E5E7EB",
-    "sideBar.border": "#374151",
-    "sideBarTitle.foreground": "#E5E7EB",
-    "statusBar.background": "#1F2937",
-    "statusBar.foreground": "#D98A53",
-    "textLink.foreground": "#F59E0B",
+    "activityBar.activeBorder": "#00FF9C",
+    "activityBar.background": "#0A0A0A",
+    "activityBar.foreground": "#E0E0E0",
+    "activityBarBadge.background": "#00FF9C",
+    "activityBarBadge.foreground": "#000000",
+    "button.background": "#00FF9C",
+    "button.foreground": "#000000",
+    "button.hoverBackground": "#66FFC0",
+    "editor.background": "#000000",
+    "editor.foreground": "#E0E0E0",
+    "editor.lineHighlightBackground": "#0A0A0A",
+    "editor.selectionBackground": "#00FF9C33",
+    "editorCursor.foreground": "#00FF9C",
+    "editorGroup.border": "#242424",
+    "editorGroupHeader.tabsBackground": "#0A0A0A",
+    "editorLineNumber.foreground": "#555555",
+    "editorLineNumber.activeForeground": "#00FF9C",
+    "panel.background": "#0A0A0A",
+    "panel.border": "#242424",
+    "sideBar.background": "#0A0A0A",
+    "sideBar.foreground": "#E0E0E0",
+    "sideBar.border": "#242424",
+    "sideBarTitle.foreground": "#FFFFFF",
+    "statusBar.background": "#000000",
+    "statusBar.foreground": "#00FF9C",
+    "textLink.foreground": "#00FF9C",
     "gitDecoration.addedResourceForeground": "#6EA676",
     "gitDecoration.deletedResourceForeground": "#FF5555"
   },
   "tokenColors": [
     {
       "scope": ["comment", "punctuation.definition.comment"],
-      "settings": { "foreground": "#6B7280" }
+      "settings": { "foreground": "#666666" }
     },
     {
       "scope": ["string", "constant.other.symbol"],
-      "settings": { "foreground": "#FCD472" }
+      "settings": { "foreground": "#B5FFD9" }
     },
     {
       "scope": ["constant.numeric", "constant.language.boolean"],
-      "settings": { "foreground": "#D98A53" }
+      "settings": { "foreground": "#66FFC0" }
     },
     {
       "scope": ["keyword", "keyword.control", "storage", "storage.type", "storage.modifier"],
-      "settings": { "foreground": "#F59E0B" }
+      "settings": { "foreground": "#00FF9C" }
     },
     {
       "scope": ["entity.name.type", "entity.other.inherited-class", "support.class", "support.type"],
-      "settings": { "foreground": "#C27A45" }
+      "settings": { "foreground": "#85E6BB" }
     },
     {
       "scope": ["entity.name.function", "support.function", "variable.function", "meta.function-call"],
-      "settings": { "foreground": "#E5E7EB" }
+      "settings": { "foreground": "#FFFFFF" }
     },
     {
       "scope": ["variable", "variable.parameter"],
-      "settings": { "foreground": "#D98A53" }
+      "settings": { "foreground": "#E0E0E0" }
     },
     {
       "scope": ["punctuation", "meta.brace"],
-      "settings": { "foreground": "#B06535" }
+      "settings": { "foreground": "#8F8F8F" }
     }
   ]
 }
