@@ -92,7 +92,8 @@ pub(crate) fn init_tls_roots() {
     };
     let pem_path = codex_home.join("cacert.pem");
     if !pem_path.exists() {
-        static CACERT_PEM: &[u8] = include_bytes!("cacert.pem");
+        static CACERT_PEM: &[u8] =
+            include_bytes!("../../codex-mobile-client/src/cacert.pem");
         if let Err(e) = fs::write(&pem_path, CACERT_PEM) {
             eprintln!("[codex-bridge] failed to write cacert.pem: {e}");
             return;
