@@ -4,13 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,33 +14,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.outlined.DesktopWindows
-import androidx.compose.material.icons.outlined.DeveloperBoard
-import androidx.compose.material.icons.outlined.Dns
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.Lan
-import androidx.compose.material.icons.outlined.Laptop
-import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -60,7 +40,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -71,10 +50,7 @@ import com.remora.android.state.SavedSshCredential
 import com.remora.android.state.ChatGPTOAuth
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
-import com.remora.android.state.connectionProgressDetail
 import com.remora.android.state.isConnected
-import com.remora.android.state.statusColor
-import com.remora.android.state.statusLabel
 import com.remora.android.auth.ChatGPTOAuthActivity
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.LocalAppModel
@@ -83,18 +59,9 @@ import com.remora.android.ui.common.AgentIconView
 import com.remora.android.ui.common.BetaBadge
 import com.remora.android.ui.common.isBeta
 import com.remora.android.util.LLog
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.net.URI
 import java.io.File
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.AgentAvailabilityStatus
 import com.remora.android.ui.common.AgentRuntimeKind
 import com.remora.android.ui.common.metadata
@@ -122,7 +89,7 @@ private const val LEGACY_REMOTE_BRIDGE_STATE_DIRECTORY = "alleycat-bridges"
 
 /**
  * Server discovery and connection screen.
- * Displays discovered + saved servers merged.
+ * Presents the supported connection paths and owns their orchestration.
  */
 @Composable
 fun DiscoveryScreen(
@@ -155,7 +122,6 @@ fun DiscoveryScreen(
     var authorizedSlingshotConnect by remember { mutableStateOf<Pair<AppSlingshotEnvironment, String>?>(null) }
     var wakingServerId by remember { mutableStateOf<String?>(null) }
     var connectError by remember { mutableStateOf<String?>(null) }
-    var renameTarget by remember { mutableStateOf<SavedServer?>(null) }
     val slingshotStepUpLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -177,11 +143,6 @@ fun DiscoveryScreen(
         authorizedSlingshotConnect = environment to stepUpToken
     }
 
-    var savedServers by remember { mutableStateOf(SavedServerStore.load(context)) }
-    LaunchedEffect(Unit) {
-        savedServers = SavedServerStore.load(context)
-    }
-
     LaunchedEffect(showManualEntry, pendingManualSshServer) {
         if (!showManualEntry && pendingManualSshServer != null) {
             sshServer = pendingManualSshServer
@@ -201,14 +162,6 @@ fun DiscoveryScreen(
                 connectError = message
             }
         }
-    }
-
-    val merged = remember(discoveredServers, savedServers) {
-        mergeServers(discoveredServers, savedServers)
-    }
-
-    suspend fun reloadSavedServers() {
-        savedServers = SavedServerStore.load(context)
     }
 
     suspend fun loadSlingshotEnvironments() {
@@ -253,7 +206,6 @@ fun DiscoveryScreen(
             stepUpToken,
         )
         SavedServerStore.remember(context, server.normalizedForPersistence())
-        reloadSavedServers()
         appModel.refreshSnapshot()
     }
 
@@ -476,7 +428,6 @@ fun DiscoveryScreen(
                     )
                     appModel.restoreStoredLocalAuthState(prepared.id)
                     SavedServerStore.remember(context, prepared.normalizedForPersistence())
-                    reloadSavedServers()
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -484,7 +435,6 @@ fun DiscoveryScreen(
                 prepared.websocketURL != null -> {
                     connectPreparedRemoteUrl(prepared)
                     SavedServerStore.remember(context, prepared.normalizedForPersistence())
-                    reloadSavedServers()
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -508,7 +458,6 @@ fun DiscoveryScreen(
                         context,
                         prepared.withPreferredConnection("directCodex", prepared.directCodexPort),
                     )
-                    reloadSavedServers()
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -656,7 +605,6 @@ fun DiscoveryScreen(
                                             context,
                                             server.withPreferredConnection("directCodex", port),
                                         )
-                                        reloadSavedServers()
                                         appModel.refreshSnapshot()
                                         onDismiss()
                                     } catch (e: Exception) {
@@ -754,7 +702,6 @@ fun DiscoveryScreen(
                             context,
                             server.withPreferredConnection("ssh"),
                         )
-                        reloadSavedServers()
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = server.id
                         LLog.t(
@@ -805,7 +752,6 @@ fun DiscoveryScreen(
                         context,
                         agentContext.server.withPreferredConnection("ssh"),
                     )
-                    reloadSavedServers()
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = agentContext.server.id
                     sshAgentContext = null
@@ -833,7 +779,6 @@ fun DiscoveryScreen(
                     )
                     appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
                     SavedServerStore.remember(context, server)
-                    reloadSavedServers()
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = result.serverId
                     sshAgentContext = null
@@ -850,24 +795,6 @@ fun DiscoveryScreen(
                     )
                     e.message ?: "Unable to connect SSH bridge agents."
                 }
-            },
-        )
-    }
-
-    renameTarget?.let { server ->
-        RenameServerDialog(
-            server = server,
-            onDismiss = { renameTarget = null },
-            onRename = { newName ->
-                scope.launch {
-                    SavedServerStore.upsert(
-                        context,
-                        server.copy(name = newName.ifBlank { server.hostname }).normalizedForPersistence(),
-                    )
-                    reloadSavedServers()
-                    appModel.refreshSnapshot()
-                }
-                renameTarget = null
             },
         )
     }
@@ -907,7 +834,6 @@ fun DiscoveryScreen(
                             agentName = result.agentName,
                             agentWire = remotePairingWireStorageValue(result.agentWire),
                         )
-                        reloadSavedServers()
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = result.serverId
                     }
@@ -915,619 +841,6 @@ fun DiscoveryScreen(
             )
         }
     }
-}
-
-/**
- * Canonical agent list shown on the remote pairing chooser card. Mirrors
- * the splash carousel order so cold-start presentation stays consistent.
- * New agents added in the remote host manifest still surface on connected
- * hosts via the real metadata store; this list only seeds the
- * pre-pair preview.
- */
-private val RemotePairingAgents: List<AgentRuntimeKind> = listOf(
-    "codex",
-    "pi",
-    "amp",
-    "opencode",
-    "claude",
-    "droid",
-    "hermes",
-    "devin",
-    "grok",
-)
-
-private val CodexOnlyAgents: List<AgentRuntimeKind> = listOf("codex")
-
-@Composable
-private fun ChooserCard(
-    title: String,
-    subtitle: String,
-    badge: String?,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    supportedAgents: List<AgentRuntimeKind>,
-    isRecommended: Boolean,
-    onClick: () -> Unit,
-) {
-    val borderColor = if (isRecommended) {
-        RemoraTheme.accent.copy(alpha = 0.45f)
-    } else {
-        RemoraTheme.accent.copy(alpha = 0.18f)
-    }
-    val backgroundColor = if (isRecommended) {
-        RemoraTheme.surface.copy(alpha = 0.85f)
-    } else {
-        RemoraTheme.surface.copy(alpha = 0.6f)
-    }
-    val iconBubble = RemoraTheme.accent.copy(alpha = if (isRecommended) 0.16f else 0.10f)
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(backgroundColor, RoundedCornerShape(14.dp))
-            .border(
-                width = if (isRecommended) 1.dp else 0.8.dp,
-                color = borderColor,
-                shape = RoundedCornerShape(14.dp),
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 2.dp)
-                    .size(36.dp)
-                    .background(iconBubble, RoundedCornerShape(50)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = RemoraTheme.accent,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = title,
-                        color = RemoraTheme.textPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    if (badge != null) {
-                        Box(
-                            modifier = Modifier
-                                .background(
-                                    RemoraTheme.accent.copy(alpha = 0.14f),
-                                    RoundedCornerShape(50),
-                                )
-                                .border(
-                                    width = 0.6.dp,
-                                    color = RemoraTheme.accent.copy(alpha = 0.45f),
-                                    shape = RoundedCornerShape(50),
-                                )
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                        ) {
-                            Text(
-                                text = badge,
-                                color = RemoraTheme.accent,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.5.sp,
-                            )
-                        }
-                    }
-                }
-                Text(
-                    text = subtitle,
-                    color = RemoraTheme.textSecondary,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = RemoraTheme.textMuted,
-                modifier = Modifier.padding(top = 10.dp),
-            )
-        }
-
-        if (supportedAgents.isNotEmpty()) {
-            SupportedAgentsStrip(supportedAgents)
-        }
-    }
-}
-
-@Composable
-private fun SupportedAgentsStrip(agents: List<AgentRuntimeKind>) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(
-            text = "Works with",
-            color = RemoraTheme.textMuted,
-            fontSize = 10.sp,
-            letterSpacing = 0.4.sp,
-            maxLines = 1,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            agents.forEach { agent ->
-                com.remora.android.ui.common.AgentIconView(
-                    kind = agent,
-                    sizeDp = 18,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ServerRow(
-    entry: SavedServer,
-    connectedServer: AppServerSnapshot?,
-    isWaking: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    onRename: (() -> Unit)?,
-) {
-    val displayHost = connectedServer?.host ?: entry.hostname
-    val subtitle = connectedServer?.connectionProgressDetail
-        ?: buildString {
-            append(displayHost)
-            if (entry.os != null) {
-                append(" - ")
-                append(entry.os)
-            }
-            if (entry.availableDirectCodexPorts.isNotEmpty()) {
-                append(" - codex ")
-                append(entry.availableDirectCodexPorts.joinToString(", "))
-            }
-            if (entry.canConnectViaSsh) {
-                append(" - ssh ")
-                append(entry.resolvedSshPort)
-            }
-            if (entry.wakeMAC != null) {
-                append(" - wake")
-            }
-        }
-    val serverIcon = serverIconForEntry(entry)
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = serverIcon,
-            contentDescription = entry.os ?: entry.source,
-            tint = if (entry.hasCodexServer) RemoraTheme.accent else RemoraTheme.textMuted,
-            modifier = Modifier.size(20.dp),
-        )
-        Spacer(Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(entry.name.ifBlank { entry.hostname }, color = RemoraTheme.textPrimary, fontSize = 14.sp)
-            Text(subtitle, color = RemoraTheme.textSecondary, fontSize = 11.sp)
-        }
-        val (sourceColor, sourceLabel) = when (entry.source) {
-            "bonjour" -> RemoraTheme.info to "Bonjour"
-            "tailscale" -> Color(0xFFC797D8) to "Tailscale"
-            "lanProbe" -> RemoraTheme.accent to "LAN"
-            "arpScan" -> RemoraTheme.textSecondary to "ARP"
-            "ssh" -> Color(0xFFFF9500) to "SSH"
-            "local" -> RemoraTheme.accent to "Local"
-            else -> RemoraTheme.textMuted to "Manual"
-        }
-        Text(
-            text = sourceLabel,
-            color = sourceColor,
-            fontSize = 10.sp,
-            modifier = Modifier
-                .background(sourceColor.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-        )
-        if (connectedServer != null && connectedServer.health != AppServerHealth.DISCONNECTED) {
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = connectedServer.statusLabel,
-                color = connectedServer.statusColor,
-                fontSize = 10.sp,
-                modifier = Modifier
-                    .background(connectedServer.statusColor.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
-        if (isWaking) {
-            Spacer(Modifier.width(6.dp))
-            CircularProgressIndicator(
-                modifier = Modifier.size(14.dp),
-                strokeWidth = 2.dp,
-                color = RemoraTheme.accent,
-            )
-        }
-        if (onRename != null) {
-            Spacer(Modifier.width(2.dp))
-            IconButton(
-                onClick = onRename,
-                enabled = enabled,
-                modifier = Modifier.size(28.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Edit,
-                    contentDescription = "Rename server",
-                    tint = RemoraTheme.textMuted,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConnectedComputersDialog(
-    environments: List<AppSlingshotEnvironment>,
-    loading: Boolean,
-    error: String?,
-    onDismiss: () -> Unit,
-    onRefresh: () -> Unit,
-    onSelect: (AppSlingshotEnvironment) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Connected Computers") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = "These computers come from ChatGPT using your signed-in account. Start Codex on the computer first so it appears here.",
-                    color = RemoraTheme.textSecondary,
-                    fontSize = 12.sp,
-                )
-                when {
-                    loading && environments.isEmpty() -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp,
-                                color = RemoraTheme.accent,
-                            )
-                            Text(
-                                text = "Loading connected computers...",
-                                color = RemoraTheme.textSecondary,
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-
-                    error != null -> {
-                        Text(
-                            text = error,
-                            color = RemoraTheme.danger,
-                            fontSize = 12.sp,
-                        )
-                    }
-
-                    environments.isEmpty() -> {
-                        Text(
-                            text = "No connected computers were found for this account.",
-                            color = RemoraTheme.textSecondary,
-                            fontSize = 12.sp,
-                        )
-                    }
-
-                    else -> {
-                        if (loading) {
-                            LinearProgressIndicator(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = RemoraTheme.accent,
-                                trackColor = RemoraTheme.border,
-                            )
-                        }
-                        LazyColumn(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.height(340.dp),
-                        ) {
-                            items(environments, key = { it.id }) { environment ->
-                                ConnectedComputerRow(
-                                    environment = environment,
-                                    onClick = { onSelect(environment) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onRefresh,
-                enabled = !loading,
-            ) {
-                Text("Refresh")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        },
-    )
-}
-
-@Composable
-private fun ConnectedComputerRow(
-    environment: AppSlingshotEnvironment,
-    onClick: () -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
-            .clickable(enabled = environment.online, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Icon(
-            imageVector = slingshotEnvironmentIcon(environment),
-            contentDescription = null,
-            tint = if (environment.online) RemoraTheme.accent else RemoraTheme.textMuted,
-            modifier = Modifier.size(22.dp),
-        )
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = environment.displayName,
-                color = if (environment.online) RemoraTheme.textPrimary else RemoraTheme.textSecondary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = slingshotEnvironmentSubtitle(environment),
-                color = RemoraTheme.textSecondary,
-                fontSize = 11.sp,
-            )
-        }
-        Text(
-            text = slingshotEnvironmentStatus(environment),
-            color = if (environment.online && !environment.busy) RemoraTheme.accent else RemoraTheme.textMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-private fun slingshotSavedServer(environment: AppSlingshotEnvironment): SavedServer =
-    SavedServer(
-        id = "slingshot-${environment.id}",
-        name = environment.displayName,
-        hostname = environment.id,
-        port = 0,
-        codexPorts = emptyList(),
-        source = "manual",
-        hasCodexServer = true,
-        preferredConnectionMode = "directCodex",
-        websocketURL = environment.connectionUrl,
-        os = environment.operatingSystem,
-        rememberedByUser = true,
-    )
-
-private fun slingshotEnvironmentSubtitle(environment: AppSlingshotEnvironment): String {
-    val parts = buildList {
-        environment.hostName?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-        listOfNotNull(
-            environment.operatingSystem.trim().takeIf { it.isNotEmpty() },
-            environment.architecture?.trim()?.takeIf { it.isNotEmpty() },
-        ).joinToString(" ").takeIf { it.isNotEmpty() }?.let(::add)
-        environment.appServerVersion?.trim()?.takeIf { it.isNotEmpty() }?.let { add("Codex $it") }
-    }
-    return parts.ifEmpty { listOf(environment.id) }.joinToString(" - ")
-}
-
-private fun slingshotEnvironmentStatus(environment: AppSlingshotEnvironment): String =
-    when {
-        !environment.online -> "offline"
-        environment.busy -> "busy"
-        else -> "online"
-    }
-
-private fun slingshotEnvironmentIcon(
-    environment: AppSlingshotEnvironment,
-): androidx.compose.ui.graphics.vector.ImageVector =
-    when (environment.operatingSystem.lowercase()) {
-        "linux" -> Icons.Outlined.Dns
-        "windows" -> Icons.Outlined.DesktopWindows
-        "macos", "darwin" -> Icons.Outlined.DesktopWindows
-        else -> Icons.Outlined.Laptop
-    }
-
-@Composable
-private fun ManualEntryDialog(
-    onDismiss: () -> Unit,
-    onSubmit: (ManualEntryAction) -> Unit,
-) {
-    var mode by remember { mutableStateOf(ManualConnectionMode.SSH) }
-    var codexUrl by remember { mutableStateOf("") }
-    var host by remember { mutableStateOf("") }
-    var sshPort by remember { mutableStateOf("22") }
-    var wakeMac by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Add Server") },
-        text = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = mode == ManualConnectionMode.CODEX,
-                        onClick = { mode = ManualConnectionMode.CODEX },
-                        label = { Text(ManualConnectionMode.CODEX.label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = RemoraTheme.accent.copy(alpha = 0.18f),
-                            selectedLabelColor = RemoraTheme.textPrimary,
-                        ),
-                    )
-                    FilterChip(
-                        selected = mode == ManualConnectionMode.SSH,
-                        onClick = { mode = ManualConnectionMode.SSH },
-                        label = { Text(ManualConnectionMode.SSH.label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = RemoraTheme.accent.copy(alpha = 0.18f),
-                            selectedLabelColor = RemoraTheme.textPrimary,
-                        ),
-                    )
-                }
-
-                when (mode) {
-                    ManualConnectionMode.CODEX -> {
-                        OutlinedTextField(
-                            value = codexUrl,
-                            onValueChange = {
-                                codexUrl = it
-                                errorMessage = null
-                            },
-                            label = { Text("Codex URL") },
-                            placeholder = { Text("ws://host:8390 or host:8390") },
-                            singleLine = true,
-                        )
-                        Text(
-                            text = "Prefer the SSH flow — it binds 127.0.0.1 on the remote and forwards the port. " +
-                                "If you run manually, bind loopback and tunnel yourself: " +
-                                "codex app-server --listen ws://127.0.0.1:8390",
-                            color = RemoraTheme.textMuted,
-                            fontSize = 11.sp,
-                        )
-                    }
-
-                    ManualConnectionMode.SSH -> {
-                        OutlinedTextField(
-                            value = host,
-                            onValueChange = {
-                                host = it
-                                errorMessage = null
-                            },
-                            label = { Text("SSH host") },
-                            placeholder = { Text("hostname or IP") },
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = sshPort,
-                            onValueChange = {
-                                sshPort = it
-                                errorMessage = null
-                            },
-                            label = { Text("SSH port") },
-                            singleLine = true,
-                        )
-                        OutlinedTextField(
-                            value = wakeMac,
-                            onValueChange = {
-                                wakeMac = it
-                                errorMessage = null
-                            },
-                            label = { Text("Wake MAC (optional)") },
-                            placeholder = { Text("aa:bb:cc:dd:ee:ff") },
-                            singleLine = true,
-                        )
-                    }
-                }
-
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        color = RemoraTheme.danger,
-                        fontSize = 12.sp,
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    errorMessage = when (val action = buildManualEntryAction(
-                        mode,
-                        codexUrl,
-                        host,
-                        sshPort,
-                        wakeMac,
-                    )) {
-                        is ManualEntryBuild.Action -> {
-                            onSubmit(action.action)
-                            null
-                        }
-
-                        is ManualEntryBuild.Error -> action.message
-                    }
-                },
-            ) {
-                Text(mode.primaryButtonTitle)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        },
-    )
-}
-
-@Composable
-private fun RenameServerDialog(
-    server: SavedServer,
-    onDismiss: () -> Unit,
-    onRename: (String) -> Unit,
-) {
-    var newName by remember(server.id) {
-        mutableStateOf(server.name.ifBlank { server.hostname })
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Rename Server") },
-        text = {
-            OutlinedTextField(
-                value = newName,
-                onValueChange = { newName = it },
-                label = { Text("Name") },
-                singleLine = true,
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { onRename(newName.trim()) }) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        },
-    )
 }
 
 @Composable
@@ -1707,111 +1020,11 @@ private fun sshBridgeStateRoot(context: Context, host: String): String {
     return stateDirectory.absolutePath
 }
 
-private fun serverIconForEntry(entry: SavedServer): androidx.compose.ui.graphics.vector.ImageVector {
-    if (entry.source == "local") return Icons.Outlined.PhoneAndroid
-    val os = entry.os?.lowercase()
-    if (os != null) {
-        if (os.contains("windows")) return Icons.Outlined.DesktopWindows
-        if (os.contains("raspbian")) return Icons.Outlined.DeveloperBoard
-        if (
-            os.contains("ubuntu") ||
-            os.contains("debian") ||
-            os.contains("fedora") ||
-            os.contains("red hat") ||
-            os.contains("freebsd") ||
-            os.contains("linux")
-        ) {
-            return Icons.Outlined.Dns
-        }
-    }
-    return when (entry.source) {
-        "bonjour" -> Icons.Outlined.Laptop
-        "tailscale" -> Icons.Outlined.Lan
-        "ssh" -> Icons.Outlined.Terminal
-        else -> Icons.Outlined.Dns
-    }
-}
-
 private fun connectedSnapshot(
     entry: SavedServer,
     servers: List<AppServerSnapshot>,
 ): AppServerSnapshot? = servers.firstOrNull { it.serverId == entry.id }
     ?: servers.firstOrNull { it.host.lowercase().trim().trimStart('[').trimEnd(']') == entry.deduplicationKey }
-
-private fun mergeServers(
-    discovered: List<AppDiscoveredServer>,
-    saved: List<SavedServer>,
-): List<SavedServer> {
-    val merged = linkedMapOf<String, SavedServer>()
-
-    fun sourceRank(source: String): Int = when (source) {
-        "bonjour" -> 0
-        "tailscale" -> 1
-        "lanProbe" -> 2
-        "arpScan" -> 3
-        "ssh" -> 4
-        "manual" -> 5
-        "local" -> 6
-        else -> 7
-    }
-
-    fun mergeCandidate(existing: SavedServer, candidate: SavedServer): SavedServer {
-        val betterSource = sourceRank(candidate.source) < sourceRank(existing.source)
-        val hasCodexUpgrade = candidate.hasCodexServer && !existing.hasCodexServer
-        val betterCodexPort = candidate.availableDirectCodexPorts.any { it !in existing.availableDirectCodexPorts }
-        val betterName = existing.name == existing.hostname && candidate.name != candidate.hostname
-        val preferCandidate = betterSource || hasCodexUpgrade || betterCodexPort || betterName
-
-        val mergedCodexPorts = buildList {
-            addAll(existing.availableDirectCodexPorts)
-            addAll(candidate.availableDirectCodexPorts)
-        }.distinct()
-
-        val mergedOs = if (candidate.sshBanner != null) candidate.os else (candidate.os ?: existing.os)
-        val mergedBanner = candidate.sshBanner ?: existing.sshBanner
-
-        val mergedServer = if (preferCandidate) {
-            candidate.copy(
-                id = existing.id,
-                codexPorts = mergedCodexPorts,
-                wakeMAC = candidate.wakeMAC ?: existing.wakeMAC,
-                preferredConnectionMode = existing.resolvedPreferredConnectionMode ?: candidate.resolvedPreferredConnectionMode,
-                preferredCodexPort = existing.resolvedPreferredCodexPort ?: candidate.resolvedPreferredCodexPort,
-                sshPortForwardingEnabled = null,
-                websocketURL = candidate.websocketURL ?: existing.websocketURL,
-                os = mergedOs,
-                sshBanner = mergedBanner,
-            )
-        } else {
-            existing.copy(
-                codexPorts = mergedCodexPorts,
-                sshPort = existing.sshPort ?: candidate.sshPort,
-                wakeMAC = existing.wakeMAC ?: candidate.wakeMAC,
-                preferredConnectionMode = existing.resolvedPreferredConnectionMode ?: candidate.resolvedPreferredConnectionMode,
-                preferredCodexPort = existing.resolvedPreferredCodexPort ?: candidate.resolvedPreferredCodexPort,
-                sshPortForwardingEnabled = null,
-                websocketURL = existing.websocketURL ?: candidate.websocketURL,
-                os = mergedOs,
-                sshBanner = mergedBanner,
-            )
-        }
-
-        return mergedServer.normalizedForPersistence()
-    }
-
-    for (server in saved) {
-        merged[server.deduplicationKey] = server
-    }
-
-    for (server in discovered.map(SavedServer::from)) {
-        val key = server.deduplicationKey
-        merged[key] = merged[key]?.let { existing -> mergeCandidate(existing, server) } ?: server
-    }
-
-    return merged.values.sortedWith(
-        compareBy<SavedServer> { sourceRank(it.source) }.thenBy { it.name.lowercase() },
-    )
-}
 
 private fun connectionChoiceMessage(server: SavedServer): String {
     val directPorts = server.availableDirectCodexPorts.map(Int::toString)
@@ -1824,153 +1037,6 @@ private fun connectionChoiceMessage(server: SavedServer): String {
     return "Choose a Codex app-server port on ${server.hostname}."
 }
 
-private sealed interface ManualEntryAction {
-    data class Connect(val server: SavedServer) : ManualEntryAction
-    data class ContinueWithSsh(val server: SavedServer) : ManualEntryAction
-}
-
-private sealed interface ManualEntryBuild {
-    data class Action(val action: ManualEntryAction) : ManualEntryBuild
-    data class Error(val message: String) : ManualEntryBuild
-}
-
-private enum class ManualConnectionMode(
-    val label: String,
-    val primaryButtonTitle: String,
-) {
-    CODEX("Codex", "Connect"),
-    SSH("SSH", "Continue to SSH Login"),
-}
-
-private fun buildManualEntryAction(
-    mode: ManualConnectionMode,
-    codexUrl: String,
-    host: String,
-    sshPort: String,
-    wakeMac: String,
-): ManualEntryBuild = when (mode) {
-    ManualConnectionMode.CODEX -> buildManualCodexEntry(codexUrl)
-    ManualConnectionMode.SSH -> buildManualSshEntry(host, sshPort, wakeMac)
-}
-
-private fun buildManualCodexEntry(rawInput: String): ManualEntryBuild {
-    val raw = rawInput.trim()
-    if (raw.isEmpty()) {
-        return ManualEntryBuild.Error("Enter a ws:// URL or host:port.")
-    }
-
-    runCatching { URI(raw) }
-        .getOrNull()
-        ?.let { uri ->
-            val scheme = uri.scheme?.lowercase()
-            val host = uri.host?.takeIf { it.isNotBlank() }
-            if ((scheme == "ws" || scheme == "wss") && host != null) {
-                val port = uri.port.takeIf { it > 0 }
-                return ManualEntryBuild.Action(
-                    ManualEntryAction.Connect(
-                        SavedServer(
-                            id = "manual-url-$raw",
-                            name = host,
-                            hostname = host,
-                            port = port ?: 0,
-                            codexPorts = port?.let(::listOf) ?: emptyList(),
-                            source = "manual",
-                            hasCodexServer = true,
-                            preferredConnectionMode = "directCodex",
-                            preferredCodexPort = port,
-                            websocketURL = raw,
-                        ).normalizedForPersistence(),
-                    ),
-                )
-            }
-        }
-
-    val (host, port) = parseBareHostAndPort(raw) ?: return ManualEntryBuild.Error("Enter a ws:// URL or host:port.")
-    if (host.isBlank()) {
-        return ManualEntryBuild.Error("Enter a hostname or IP address.")
-    }
-
-    return ManualEntryBuild.Action(
-        ManualEntryAction.Connect(
-            SavedServer(
-                id = "manual-$host:$port",
-                name = host,
-                hostname = host,
-                port = port,
-                codexPorts = listOf(port),
-                source = "manual",
-                hasCodexServer = true,
-                preferredConnectionMode = "directCodex",
-                preferredCodexPort = port,
-            ).normalizedForPersistence(),
-        ),
-    )
-}
-
-private fun buildManualSshEntry(
-    hostInput: String,
-    sshPortInput: String,
-    wakeMacInput: String,
-): ManualEntryBuild {
-    val host = hostInput.trim()
-    if (host.isEmpty()) {
-        return ManualEntryBuild.Error("Enter a hostname or IP address.")
-    }
-
-    val sshPort = sshPortInput.trim().toIntOrNull()
-    if (sshPort == null || sshPort !in 1..65535) {
-        return ManualEntryBuild.Error("SSH port must be a valid number.")
-    }
-
-    val wakeInput = wakeMacInput.trim()
-    val normalizedWakeMac = SavedServer.normalizeWakeMac(wakeInput)
-    if (wakeInput.isNotEmpty() && normalizedWakeMac == null) {
-        return ManualEntryBuild.Error("Wake MAC must look like aa:bb:cc:dd:ee:ff.")
-    }
-
-    return ManualEntryBuild.Action(
-        ManualEntryAction.ContinueWithSsh(
-            SavedServer(
-                id = "manual-ssh-$host:$sshPort",
-                name = host,
-                hostname = host,
-                port = sshPort,
-                sshPort = sshPort,
-                source = "manual",
-                hasCodexServer = false,
-                wakeMAC = normalizedWakeMac,
-                preferredConnectionMode = "ssh",
-            ).normalizedForPersistence(),
-        ),
-    )
-}
-
-private fun parseBareHostAndPort(raw: String): Pair<String, Int>? {
-    if (raw.startsWith("[")) {
-        val closing = raw.indexOf(']')
-        if (closing > 1) {
-            val host = raw.substring(1, closing)
-            val portPart = raw.substring(closing + 1)
-            val port = when {
-                portPart.isEmpty() -> 8390
-                portPart.startsWith(":") -> portPart.drop(1).toIntOrNull() ?: return null
-                else -> return null
-            }
-            return host to port
-        }
-    }
-
-    val colonCount = raw.count { it == ':' }
-    if (colonCount == 1) {
-        val index = raw.lastIndexOf(':')
-        val host = raw.substring(0, index)
-        val port = raw.substring(index + 1).toIntOrNull() ?: return null
-        return host to port
-    }
-
-    return raw to 8390
-}
-
 private fun isSlingshotUrl(rawUrl: String): Boolean =
     runCatching { Uri.parse(rawUrl).scheme?.equals("slingshot", ignoreCase = true) == true }
         .getOrDefault(false)
@@ -1980,104 +1046,3 @@ private suspend fun loadSlingshotTokens(context: Context) =
         context,
         "Sign in with ChatGPT before connecting with Slingshot.",
     )
-
-private sealed interface WakeSignalResult {
-    data class Codex(val port: Int) : WakeSignalResult
-    data class Ssh(val port: Int) : WakeSignalResult
-    data object None : WakeSignalResult
-}
-
-private suspend fun waitForWakeSignal(
-    host: String,
-    preferredCodexPort: Int?,
-    preferredSshPort: Int?,
-    timeoutMillis: Long,
-    wakeMac: String?,
-): WakeSignalResult = withContext(Dispatchers.IO) {
-    val codexPorts = orderedCodexPorts(preferredCodexPort)
-    val sshPorts = orderedSshPorts(preferredSshPort)
-    val deadline = System.currentTimeMillis() + maxOf(timeoutMillis, 500L)
-    var lastWakePacketAt = 0L
-
-    while (System.currentTimeMillis() < deadline) {
-        val now = System.currentTimeMillis()
-        if (!wakeMac.isNullOrBlank() && now - lastWakePacketAt >= 2_000L) {
-            sendWakeMagicPacket(wakeMac, host)
-            lastWakePacketAt = now
-        }
-
-        for (port in codexPorts) {
-            if (isPortOpen(host, port, 700)) {
-                return@withContext WakeSignalResult.Codex(port)
-            }
-        }
-
-        for (port in sshPorts) {
-            if (isPortOpen(host, port, 700)) {
-                return@withContext WakeSignalResult.Ssh(port)
-            }
-        }
-
-        delay(350)
-    }
-
-    WakeSignalResult.None
-}
-
-private fun orderedCodexPorts(preferred: Int?): List<Int> = buildList {
-    preferred?.let(::add)
-    addAll(listOf(8390, 9234, 4222))
-}.filter { it in 1..65535 }.distinct()
-
-private fun orderedSshPorts(preferred: Int?): List<Int> = buildList {
-    preferred?.let(::add)
-    add(22)
-}.filter { it in 1..65535 }.distinct()
-
-private fun sendWakeMagicPacket(wakeMac: String, hostHint: String) {
-    val mac = SavedServer.normalizeWakeMac(wakeMac) ?: return
-    val macBytes = mac.split(':').mapNotNull { it.toIntOrNull(16)?.toByte() }
-    if (macBytes.size != 6) {
-        return
-    }
-
-    val packet = ByteArray(6 + 16 * macBytes.size)
-    repeat(6) { packet[it] = 0xFF.toByte() }
-    for (index in 0 until 16) {
-        macBytes.forEachIndexed { byteIndex, value ->
-            packet[6 + index * macBytes.size + byteIndex] = value
-        }
-    }
-
-    wakeBroadcastTargets(hostHint).forEach { target ->
-        sendBroadcastUdp(packet, target, 9)
-        sendBroadcastUdp(packet, target, 7)
-    }
-}
-
-private fun wakeBroadcastTargets(host: String): Set<String> {
-    val targets = linkedSetOf("255.255.255.255")
-    val ipv4Parts = host.split('.')
-    if (ipv4Parts.size == 4 && ipv4Parts.all { it.toIntOrNull() != null }) {
-        targets += "${ipv4Parts[0]}.${ipv4Parts[1]}.${ipv4Parts[2]}.255"
-    }
-    return targets
-}
-
-private fun sendBroadcastUdp(packet: ByteArray, host: String, port: Int) {
-    runCatching {
-        DatagramSocket().use { socket ->
-            socket.broadcast = true
-            val address = InetAddress.getByName(host)
-            socket.send(DatagramPacket(packet, packet.size, address, port))
-        }
-    }
-}
-
-private fun isPortOpen(host: String, port: Int, timeoutMillis: Int): Boolean =
-    runCatching {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), timeoutMillis)
-            true
-        }
-    }.getOrDefault(false)
