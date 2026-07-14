@@ -59,7 +59,7 @@ object PathDisplay {
     }
 
     private fun realTmp(): String {
-        // Set by `Java_com_remora_android_core_bridge_UniffiInit_nativeBridgeInit`
+        // Set by `Java_com_remora_android_core_bridge_UniffiInit_nativeMobileClientInit`
         // at JNI boot. Strip trailing slash so comparisons are uniform.
         val raw = System.getenv("TMPDIR") ?: return ""
         return if (raw.endsWith("/")) raw.dropLast(1) else raw
