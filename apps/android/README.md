@@ -11,7 +11,7 @@ Android runtime is now on the same Rust-first architecture as iOS:
 - Direct server operations come from the shared Rust `AppClient` surface.
 - Discovery uses Android NSD only for mDNS seeds; merge/dedupe/probing live in Rust `DiscoveryBridge`.
 - SSH uses Rust `SshBridge`.
-- Voice runtime uses Rust store/RPC for realtime state and Android-only code for audio capture/playback, AEC, and services.
+- Voice runtime uses Rust store/RPC for signaling and state, plus Android `RealtimeWebRtcSession`; libwebrtc owns native audio, AEC, and noise suppression.
 
 ## Local Runtime
 
@@ -19,6 +19,7 @@ Android runtime is now on the same Rust-first architecture as iOS:
 - `MainActivity` connects the default local server through `ServerBridge.connectLocalServer(...)`.
 - There is no separate bundled Android Codex process in the active app path.
 - `codex-mobile-client` owns both the runtime surface and Android JNI bootstrap.
+- The embedded app-server is not a local terminal; Android does not bundle an Alpine rootfs or proot.
 
 Examples:
 
@@ -47,6 +48,7 @@ Optional Rust rebuild or non-interactive use:
 ```
 
 QA matrix and regression command list: `apps/android/docs/qa-matrix.md`.
+Product boundary and glossary: [`CONTEXT.md`](../../CONTEXT.md).
 
 ## Rust Bridge (Android)
 

@@ -1,5 +1,8 @@
 # Development Guide
 
+See [CONTEXT.md](../CONTEXT.md) for the supported product boundary, architecture
+ownership, and interop terminology.
+
 ## Prerequisites
 
 - **Xcode.app** (full install, not only Command Line Tools):
@@ -72,6 +75,10 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
 
 5. Thread/session listing is `cwd`-scoped. If expected sessions are missing, choose the same working directory used when those sessions were created.
 
+Terminal views are remote-only. The in-process Rust app-server remains a
+supported Codex runtime and must not be confused with the removed on-device
+shell/rootfs.
+
 ## Codex Submodule + Patches
 
 Upstream Codex is vendored as a submodule at `shared/third_party/codex`. The
@@ -123,3 +130,16 @@ make android-emulator-fast                              # Rust JNI + debug APK
 cd apps/android && ./gradlew :app:testDebugUnitTest    # unit tests
 cd apps/android && ./gradlew :app:assembleDebug        # Gradle-only debug assemble
 ```
+
+## Verification
+
+Run the same core checks used for mobile changes:
+
+```bash
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make rebuild-bindings
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make rust-test
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make ios-sim-fast
+cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
+```
+
+The branch CI definition is [`.github/workflows/mobile-ci.yml`](../.github/workflows/mobile-ci.yml).

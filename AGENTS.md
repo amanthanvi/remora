@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 - `apps/ios/Sources/Remora/` contains the iOS app code.
-- `apps/ios/Sources/Remora/Views/` holds SwiftUI screens, `Models/` contains app state/session logic, and `Bridge/` contains JSON-RPC + C FFI bridge code.
+- `apps/ios/Sources/Remora/Views/` holds SwiftUI screens, `Models/` contains app state/session logic, and `Bridge/` contains UniFFI helpers plus Ghostty Objective-C/C interop.
 - `apps/android/app/src/main/java/com/remora/android/ui/` contains Android Compose shell/screens.
 - `apps/android/app/src/main/java/com/remora/android/state/` contains Android app state, server/session manager, SSH, and websocket transport.
 - `apps/android/core/bridge/` contains Android UniFFI bootstrap and generated Rust bindings.

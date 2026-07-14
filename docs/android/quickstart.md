@@ -1,5 +1,8 @@
 # Android Quickstart
 
+See [CONTEXT.md](../../CONTEXT.md) for the supported product boundary and shared
+runtime glossary.
+
 ## Prerequisites
 
 - Java 17 or newer
@@ -19,10 +22,10 @@
 3. Build only the Kotlin/Compose app against existing JNI artifacts:
    - `cd apps/android && ./gradlew :app:assembleDebug`
 
+Android packages `codex-mobile-client` and Ghostty, not Alpine/proot. Terminal
+sessions are remote-only.
+
 ## Modules
+
 - `:app`
-- `:core:network`
 - `:core:bridge`
-- `:feature:discovery`
-- `:feature:sessions`
-- `:feature:conversation`

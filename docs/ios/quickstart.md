@@ -1,5 +1,8 @@
 # iOS Quickstart
 
+See [CONTEXT.md](../../CONTEXT.md) for the supported product boundary and shared
+runtime glossary.
+
 ## Prerequisites
 
 - Xcode.app
@@ -27,6 +30,10 @@ make ios-run
 This handles submodule sync, patching, UniFFI bindings, Rust
 cross-compilation, Ghostty renderer artifacts, Xcode project generation, and
 the Xcode build, with stamp caching for repeated runs.
+
+The iOS lanes build Remora, `codex-mobile-client`, and Ghostty. They do not
+download or package an on-device Linux environment; terminal sessions require
+SSH or a paired remote host.
 
 ## Build manually (step by step)
 

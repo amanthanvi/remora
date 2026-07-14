@@ -26,7 +26,7 @@ enum class RemoraFeature(
     TERMINAL(
         id = "terminal",
         displayName = "Terminal",
-        description = "Show the local and remote terminal launcher on the home screen.",
+        description = "Show the remote terminal launcher on the home screen.",
         defaultEnabled = false,
     ),
 }

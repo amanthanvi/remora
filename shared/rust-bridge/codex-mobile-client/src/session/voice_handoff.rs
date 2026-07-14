@@ -7,8 +7,8 @@
 //!   tool-result text accumulation, thread-reuse mapping, and the
 //!   stream-items-to-handoff polling logic
 //!
-//! The audio pipeline (AVAudioEngine) and Live Activity updates remain on
-//! the Swift side.
+//! Native audio/session handling remains in Swift and Kotlin; this module owns
+//! only the shared routing and handoff state.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -2,7 +2,8 @@
 
 ## Scope
 
-This matrix covers transport reliability and startup behavior for Android app-server flows.
+This matrix covers Android app-server behavior and the mobile parity checks that
+must stay aligned with iOS.
 
 ## Automated Regression Scaffolding
 
@@ -17,12 +18,15 @@ Current automated checks:
 - `RuntimeFlavorConfigTest`
   - validates startup mode/build config parity (`ENABLE_ON_DEVICE_BRIDGE`, `RUNTIME_STARTUP_MODE`)
   - validates canonical app runtime transport declaration (`APP_RUNTIME_TRANSPORT`)
-- `BridgeTransportReliabilityPolicyTest`
-  - validates reconnect detection policy for healthy/stale websocket state
-- `CodexRuntimeStartupPolicyTest`
-  - validates startup toggle parsing and precedence logic
-- `ThreadPlaceholderPrunePolicyTest`
-  - validates placeholder prune-on-refresh behavior (including active-thread exemption)
+- `SavedServerTransportTest` and `RealtimeWebRtcTransportTest`
+  - validate persisted transport selection and WebRTC request shaping
+- `ChatGPTOAuthLoopbackServerTest`
+  - validates the loopback callback response and OAuth error paths
+- `ActiveTerminalRegistryTest` and `GhosttySurfaceSnapshotTest`
+  - validate remote-terminal selection and Ghostty surface behavior
+- Composer, snapshot, session-derivation, and rendering tests
+  - cover payload shaping, snapshot projections, session grouping, Markdown,
+    slash commands, response errors, and text sizing
 
 ## Manual Matrix
 
@@ -38,10 +42,11 @@ Current automated checks:
 | Thread turn pagination (newer remotes)  | Conversation opens with last 5 turns; "Load earlier messages" fetches older 5-turn pages via `thread/turns/list`        |
 | Thread turn pagination fallback         | Capability flips off via response inspection; embedded turns load fully; "Load earlier messages" is hidden             |
 
-## Terminal UX Matrix
+## Remote Terminal UX Matrix
 
-The terminal screen renders through Ghostty on both platforms; this section
-tracks parity between iOS (UIKit + Metal) and Android (Compose + SurfaceView).
+The remote terminal screen renders through Ghostty on both platforms; this
+section tracks parity between iOS (UIKit + Metal) and Android (Compose +
+SurfaceView). Neither app bundles a local shell/rootfs.
 
 | Area                                    | iOS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Android                                                                                      |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -56,7 +61,7 @@ tracks parity between iOS (UIKit + Metal) and Android (Compose + SurfaceView).
 | Cell-grid math                          | Driven by Ghostty `surfaceMetrics`; falls back to font-size-aware estimate on first frame                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Same path via `nativeSurfaceSize`                                                            |
 | Resize on rotation / keyboard show-hide | `layoutSubviews` plus `UIResponder.keyboardWillChangeFrame` triggers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | `onSizeChanged` re-fires through Compose's `imePadding` insets                               |
 | Mouse-tracking apps (vim / htop)        | Single-finger drag forwards to Ghostty when `mouseCaptured`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Same                                                                                         |
-| Alleycat remote host                    | Discovery toolbar QR button opens `AlleycatAddServerSheet`; CameraX + ML Kit scan parses the Alleycat payload via `AlleycatBridge.parsePairPayload`; debug builds expose paste-JSON path; after token-authenticated pairing the sheet calls `serverBridge.listAlleycatAgents`, lets the user choose Codex/Pi/OpenCode, connects with `serverBridge.connectRemoteOverAlleycat`, and persists the token through `AlleycatCredentialStore`; `SavedServerStore.rememberAlleycat` writes `{node_id, relay?, agent}` records, reconnect attaches the encrypted-store token directly, and legacy Alleycat records require a new QR scan. | Same                                                                                         |
+| Remote pairing                         | Discovery opens `RemotePairingSheet`; AVFoundation scans the pairing QR, with paste-JSON fallback. The shared pairing bridge parses the payload, lists agents, connects, and persists credentials.                                                                                                                                                                                                                                                                                                                                                                                                                                  | Discovery opens `RemotePairingSheet`; CameraX + ML Kit scan the pairing QR, with paste-JSON fallback. The same pairing bridge and credential flow applies. |
 
 ## Plugin `@`-mention parity (follow-up)
 
