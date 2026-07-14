@@ -53,7 +53,7 @@ import com.remora.android.ui.ConversationPrefs
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.RemoraThemeManager
-import com.remora.android.ui.discovery.SSHLoginDialog
+import com.remora.android.ui.connection.SSHLoginDialog
 import com.remora.android.util.LLog
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.Account
