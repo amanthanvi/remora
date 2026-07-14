@@ -74,11 +74,22 @@ final class AppModel {
         didSet {
             guard oldValue != snapshot else { return }
             snapshotRevision &+= 1
+            refreshConversationObservations()
         }
     }
     private(set) var snapshotRevision: UInt64 = 0
     private(set) var lastError: String?
-    private(set) var composerPrefillRequest: ComposerPrefillRequest?
+    private(set) var composerPrefillRequest: ComposerPrefillRequest? {
+        didSet {
+            guard oldValue != composerPrefillRequest else { return }
+            if let oldValue {
+                refreshConversationObservation(for: oldValue.threadKey)
+            }
+            if let composerPrefillRequest {
+                refreshConversationObservation(for: composerPrefillRequest.threadKey)
+            }
+        }
+    }
 
     @ObservationIgnored private var subscription: AppStoreSubscription?
     @ObservationIgnored private var updateTask: Task<Void, Never>?
@@ -95,6 +106,7 @@ final class AppModel {
     @ObservationIgnored private var pendingCommandRowMutations: [String: PendingCommandRowMutation] = [:]
     @ObservationIgnored private var pendingCommandRowMutationTask: Task<Void, Never>?
     @ObservationIgnored private var cachedThreadSnapshots: [ThreadKey: AppThreadSnapshot] = [:]
+    @ObservationIgnored private var conversationObservations: [ThreadKey: WeakAppModelConversationObservation] = [:]
     @ObservationIgnored private var loadingTurnPageThreadKeys: Set<ThreadKey> = []
 
     init(
@@ -1250,7 +1262,7 @@ final class AppModel {
         return true
     }
 
-    private func removeThreadSnapshot(
+    func removeThreadSnapshot(
         for key: ThreadKey,
         agentDirectoryVersion: UInt64? = nil,
         clearCache: Bool = true
@@ -1266,7 +1278,7 @@ final class AppModel {
         }
         self.snapshot = snapshot
         if clearCache {
-            cachedThreadSnapshots.removeValue(forKey: key)
+            removeCachedThreadSnapshot(for: key)
         }
     }
 
@@ -1657,6 +1669,38 @@ final class AppModel {
         snapshot?.threadSnapshot(for: key) ?? cachedThreadSnapshots[key]
     }
 
+    func conversationObservation(for key: ThreadKey) -> AppModelConversationObservation {
+        if let observation = conversationObservations[key]?.value {
+            return observation
+        }
+        let observation = AppModelConversationObservation(threadKey: key)
+        conversationObservations[key] = WeakAppModelConversationObservation(observation)
+        refreshConversationObservation(for: key)
+        return observation
+    }
+
+    private func refreshConversationObservations() {
+        for key in Array(conversationObservations.keys) {
+            guard conversationObservations[key]?.value != nil else {
+                conversationObservations.removeValue(forKey: key)
+                continue
+            }
+            refreshConversationObservation(for: key)
+        }
+    }
+
+    private func refreshConversationObservation(for key: ThreadKey) {
+        guard let observation = conversationObservations[key]?.value else {
+            conversationObservations.removeValue(forKey: key)
+            return
+        }
+        observation.refresh(
+            snapshot: snapshot,
+            cachedThread: cachedThreadSnapshots[key],
+            composerPrefillRequest: composerPrefillRequest
+        )
+    }
+
     private func hasAuthoritativePermissions(_ thread: AppThreadSnapshot) -> Bool {
         threadPermissionsAreAuthoritative(
             approvalPolicy: thread.effectiveApprovalPolicy,
@@ -1687,6 +1731,12 @@ final class AppModel {
 
     private func cacheThreadSnapshot(_ thread: AppThreadSnapshot) {
         cachedThreadSnapshots[thread.key] = thread
+        refreshConversationObservation(for: thread.key)
+    }
+
+    private func removeCachedThreadSnapshot(for key: ThreadKey) {
+        cachedThreadSnapshots.removeValue(forKey: key)
+        refreshConversationObservation(for: key)
     }
 
     private func mergedThreadSnapshotPreservingHydratedItems(_ thread: AppThreadSnapshot) -> AppThreadSnapshot {

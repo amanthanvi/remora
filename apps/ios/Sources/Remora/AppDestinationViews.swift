@@ -12,37 +12,31 @@ struct ConversationDestinationScreen: View {
     @Environment(AppState.self) private var appState
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @State private var screenModel = ConversationScreenModel()
+    @State private var conversationObservation: AppModelConversationObservation?
     let threadKey: ThreadKey
     let bottomInset: CGFloat
     let onResumeSessions: (String) -> Void
     let onOpenConversation: (ThreadKey) -> Void
     var onInfo: (() -> Void)?
 
+    private var routeObservation: AppModelConversationObservation? {
+        conversationObservation?.matching(threadKey: threadKey)
+    }
+
     private var conversationThread: AppThreadSnapshot? {
-        appModel.threadSnapshot(for: threadKey)
+        routeObservation?.thread
     }
 
     private var resolvedThreadKey: ThreadKey {
         conversationThread?.key ?? threadKey
     }
 
-    private var pendingUserInputsForThread: [PendingUserInputRequest] {
-        guard let snapshot = appModel.snapshot else { return [] }
-        let key = resolvedThreadKey
-        return snapshot.pendingUserInputs.filter {
-            $0.isRelevant(to: key)
-        }
-    }
-
-    private var relevantServerSnapshot: AppServerSnapshot? {
-        appModel.snapshot?.serverSnapshot(for: resolvedThreadKey.serverId)
-    }
-
     private func bindScreenModel(for thread: AppThreadSnapshot) {
+        guard let conversationObservation = routeObservation else { return }
         screenModel.bind(
             thread: thread,
             appModel: appModel,
-            agentDirectoryVersion: appModel.snapshot?.agentDirectoryVersion ?? 0
+            conversationObservation: conversationObservation
         )
     }
 
@@ -81,18 +75,6 @@ struct ConversationDestinationScreen: View {
                 .onChange(of: conversationThread) { _, updatedThread in
                     bindScreenModel(for: updatedThread)
                 }
-                .onChange(of: appModel.snapshotRevision) { _, _ in
-                    bindScreenModel(for: conversationThread)
-                }
-                .onChange(of: pendingUserInputsForThread) { _, _ in
-                    bindScreenModel(for: conversationThread)
-                }
-                .onChange(of: relevantServerSnapshot) { _, _ in
-                    bindScreenModel(for: conversationThread)
-                }
-                .onChange(of: appModel.composerPrefillRequest) { _, _ in
-                    bindScreenModel(for: conversationThread)
-                }
             } else {
                 VStack(spacing: 16) {
                     Spacer()
@@ -105,6 +87,11 @@ struct ConversationDestinationScreen: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(RemoraTheme.backgroundGradient.ignoresSafeArea())
+            }
+        }
+        .onChange(of: routeObservation?.revision) { _, _ in
+            if let conversationThread {
+                bindScreenModel(for: conversationThread)
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -141,12 +128,14 @@ struct ConversationDestinationScreen: View {
                 threadKey.serverId,
                 threadKey.threadId
             )
+            let observation = appModel.conversationObservation(for: threadKey)
+            conversationObservation = observation
             appModel.activateThread(threadKey)
-            if appModel.threadSnapshot(for: threadKey) == nil {
+            if observation.thread == nil {
                 _ = await appModel.ensureThreadLoaded(key: threadKey)
             }
             await appModel.loadConversationMetadataIfNeeded(serverId: threadKey.serverId)
-            if let thread = conversationThread,
+            if let thread = observation.thread,
                let cwd = thread.info.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
                !cwd.isEmpty {
                 workDir = cwd
@@ -162,16 +151,21 @@ struct ReplayDestinationScreen: View {
     let bottomInset: CGFloat
     @State private var screenModel = ConversationScreenModel()
     @State private var replayThreadKey: ThreadKey?
+    @State private var conversationObservation: AppModelConversationObservation?
     @State private var recorder = MessageRecorder.shared
 
+    private var routeObservation: AppModelConversationObservation? {
+        conversationObservation?.matching(threadKey: replayThreadKey)
+    }
+
     private var conversationThread: AppThreadSnapshot? {
-        guard let key = replayThreadKey else { return nil }
-        return appModel.threadSnapshot(for: key)
+        routeObservation?.thread
     }
 
     var body: some View {
         Group {
-            if let thread = conversationThread, let key = replayThreadKey {
+            if let thread = conversationThread,
+               let key = replayThreadKey {
                 @Bindable var bindableScreenModel = screenModel
                 ConversationView(
                     thread: thread,
@@ -189,9 +183,6 @@ struct ReplayDestinationScreen: View {
                 )
                 .onAppear { bindScreenModel(for: thread) }
                 .onChange(of: thread) { _, t in bindScreenModel(for: t) }
-                .onChange(of: appModel.snapshotRevision) { _, _ in
-                    if let t = conversationThread { bindScreenModel(for: t) }
-                }
             } else {
                 VStack(spacing: 16) {
                     Spacer()
@@ -206,6 +197,11 @@ struct ReplayDestinationScreen: View {
                 .background(RemoraTheme.backgroundGradient.ignoresSafeArea())
             }
         }
+        .onChange(of: routeObservation?.revision) { _, _ in
+            if let conversationThread {
+                bindScreenModel(for: conversationThread)
+            }
+        }
         .navigationTitle("Replay")
         .navigationBarTitleDisplayMode(.inline)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -218,6 +214,7 @@ struct ReplayDestinationScreen: View {
                 targetKey = ThreadKey(serverId: "replay", threadId: UUID().uuidString)
             }
             replayThreadKey = targetKey
+            conversationObservation = appModel.conversationObservation(for: targetKey)
             appModel.activateThread(targetKey)
             recorder.startReplay(url: recordingUrl, store: appModel.store, targetKey: targetKey)
         }
@@ -227,10 +224,11 @@ struct ReplayDestinationScreen: View {
     }
 
     private func bindScreenModel(for thread: AppThreadSnapshot) {
+        guard let conversationObservation = routeObservation else { return }
         screenModel.bind(
             thread: thread,
             appModel: appModel,
-            agentDirectoryVersion: appModel.snapshot?.agentDirectoryVersion ?? 0
+            conversationObservation: conversationObservation
         )
     }
 }

@@ -105,6 +105,9 @@ final class ConversationScreenModel {
     @ObservationIgnored private var thread: AppThreadSnapshot?
     @ObservationIgnored private var appModel: AppModel?
     @ObservationIgnored private var agentDirectoryVersion: UInt64 = 0
+    @ObservationIgnored private var pendingUserInputRequest: PendingUserInputRequest?
+    @ObservationIgnored private var serverSnapshot: AppServerSnapshot?
+    @ObservationIgnored private var composerPrefillRequest: AppModel.ComposerPrefillRequest?
     @ObservationIgnored private var cachedConversationItemProjections: [String: CachedConversationItemProjection] = [:]
     @ObservationIgnored private var cachedHydratedConversationItems: [HydratedConversationItem] = []
     @ObservationIgnored private var cachedProjectedConversationItems: [ConversationItem] = []
@@ -116,6 +119,43 @@ final class ConversationScreenModel {
         appModel: AppModel,
         agentDirectoryVersion: UInt64
     ) {
+        bind(
+            thread: thread,
+            appModel: appModel,
+            agentDirectoryVersion: agentDirectoryVersion,
+            pendingUserInputRequest: appModel.snapshot?.pendingUserInputs.first {
+                $0.isRelevant(to: thread.key)
+            },
+            serverSnapshot: appModel.snapshot?.serverSnapshot(for: thread.key.serverId),
+            composerPrefillRequest: appModel.composerPrefillRequest.flatMap { request in
+                request.threadKey == thread.key ? request : nil
+            }
+        )
+    }
+
+    func bind(
+        thread: AppThreadSnapshot,
+        appModel: AppModel,
+        conversationObservation: AppModelConversationObservation
+    ) {
+        bind(
+            thread: thread,
+            appModel: appModel,
+            agentDirectoryVersion: conversationObservation.agentDirectoryVersion,
+            pendingUserInputRequest: conversationObservation.pendingUserInputRequest,
+            serverSnapshot: conversationObservation.server,
+            composerPrefillRequest: conversationObservation.composerPrefillRequest
+        )
+    }
+
+    private func bind(
+        thread: AppThreadSnapshot,
+        appModel: AppModel,
+        agentDirectoryVersion: UInt64,
+        pendingUserInputRequest: PendingUserInputRequest?,
+        serverSnapshot: AppServerSnapshot?,
+        composerPrefillRequest: AppModel.ComposerPrefillRequest?
+    ) {
         let threadChanged =
             self.thread?.key != thread.key ||
             self.appModel !== appModel
@@ -123,6 +163,9 @@ final class ConversationScreenModel {
         self.thread = thread
         self.appModel = appModel
         self.agentDirectoryVersion = agentDirectoryVersion
+        self.pendingUserInputRequest = pendingUserInputRequest
+        self.serverSnapshot = serverSnapshot
+        self.composerPrefillRequest = composerPrefillRequest
 
         if threadChanged {
             followScrollToken = 0
@@ -162,13 +205,7 @@ final class ConversationScreenModel {
             activeTurnId = nil
         }
         let hasTurnInFlight = activeTurnId != nil || thread.info.status == .active
-        let pendingUserInputRequest = appModel.snapshot?.pendingUserInputs.first {
-            $0.isRelevant(to: thread.key)
-        }
         let activeTaskSummary = items.latestActiveTaskSummary
-        let composerPrefillRequest = appModel.composerPrefillRequest.flatMap { request in
-            request.threadKey == thread.key ? request : nil
-        }
         let composerSnapshot = ConversationComposerSnapshot(
             threadKey: thread.key,
             collaborationMode: thread.collaborationMode,
@@ -186,12 +223,11 @@ final class ConversationScreenModel {
             threadReasoningEffort: thread.reasoningEffort,
             modelContextWindow: thread.modelContextWindow.map(Int64.init),
             contextTokensUsed: thread.contextTokensUsed.map(Int64.init),
-            rateLimits: appModel.rateLimits(
-                forServer: thread.key.serverId,
-                runtime: thread.agentRuntimeKind
-            ),
-            availableModels: appModel.availableModels(for: thread.key.serverId),
-            isConnected: appModel.snapshot?.serverSnapshot(for: thread.key.serverId)?.isConnected ?? false
+            rateLimits: serverSnapshot?.rateLimitsByRuntime.first {
+                $0.runtimeKind == thread.agentRuntimeKind
+            }?.rateLimits,
+            availableModels: serverSnapshot?.availableModels ?? [],
+            isConnected: serverSnapshot?.isConnected ?? false
         )
 
         let transcriptChanged =
