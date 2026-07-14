@@ -167,6 +167,7 @@
 		425C5C211EE7DDC53C594C7F /* ConversationComposerAttachSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5E886C9D0C3764A26394932 /* ConversationComposerAttachSheet.swift */; };
 		42C5710E0911A9F65ED8F0FA /* TipJarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12378398F53A8739CDD11737 /* TipJarView.swift */; };
 		43176DB10E35CCA50FDF95B7 /* SshSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD18C3A72ED6BFB1F348B95E /* SshSessionStore.swift */; };
+		4371DDF84CF9D63E380E3BAD /* ConversationTimelineDiffPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */; };
 		43D7219C9571FDD03D95C767 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1B0300A1F31C8D6F5F1C3DA0 /* Security.framework */; };
 		443519283476C4C1AC50560F /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CCA2ECA0E1534620A05BDA27 /* NukeUI */; };
 		44EE902D515B75093E12DC3E /* dark-plus-B1yOZ-Hy.json in Resources */ = {isa = PBXBuildFile; fileRef = B9EF6EBF16F30E7D1D172976 /* dark-plus-B1yOZ-Hy.json */; };
@@ -466,6 +467,7 @@
 		D88DC8FEAB8DCE33327F6CA0 /* poimandres.json in Resources */ = {isa = PBXBuildFile; fileRef = 974822255928A225B0097573 /* poimandres.json */; };
 		D92946804EB942637B096C64 /* ConversationAttachmentSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B9677738C5ED3C786BBD78 /* ConversationAttachmentSupport.swift */; };
 		D9567B09C2C1EB1C8AFB1B05 /* material-theme.json in Resources */ = {isa = PBXBuildFile; fileRef = D2BD4E542E90283E648FE6F7 /* material-theme.json */; };
+		D99CD801B09EBDA749180795 /* ConversationTimelineDiffPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */; };
 		D9CFEA880C640AF835E1189F /* BerkeleyMono-Oblique.otf in Resources */ = {isa = PBXBuildFile; fileRef = 8726E0A36FD619D284CE651B /* BerkeleyMono-Oblique.otf */; };
 		DA3904022BF46FC4AB37E244 /* monokai.json in Resources */ = {isa = PBXBuildFile; fileRef = 0778A0C2DA7B6B27296DEF91 /* monokai.json */; };
 		DB3E984C71F18787685BB52B /* catppuccin-mocha-Ry8aD-5u.json in Resources */ = {isa = PBXBuildFile; fileRef = 1D42D7FDB28457A89DD5CA6D /* catppuccin-mocha-Ry8aD-5u.json */; };
@@ -779,6 +781,7 @@
 		CD5761CEFDCBA5714B138C06 /* RemoraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraApp.swift; sourceTree = "<group>"; };
 		CE2F32E473C7C7417DDBE66F /* QuickReplySheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickReplySheet.swift; sourceTree = "<group>"; };
 		CEE2FC98264335A31DC32B63 /* usgc-highk.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "usgc-highk.json"; sourceTree = "<group>"; };
+		CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTimelineDiffPresentation.swift; sourceTree = "<group>"; };
 		D1DC4BB3589F8A25A38404DD /* pierre-light.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "pierre-light.json"; sourceTree = "<group>"; };
 		D2A2037285CE8B757B6D3F79 /* MacCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCommands.swift; sourceTree = "<group>"; };
 		D2BD4E542E90283E648FE6F7 /* material-theme.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "material-theme.json"; sourceTree = "<group>"; };
@@ -1127,6 +1130,7 @@
 				B5D00081043C0583D4A7FD2F /* ConversationInfoView.swift */,
 				A69C895FCA3EB35C443834D8 /* ConversationOptionsSheet.swift */,
 				1FEB27716FDEC3062A93C6CD /* ConversationScreenModel.swift */,
+				CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */,
 				F02770F7A68121156258AAFD /* ConversationTimelineView.swift */,
 				BD64F146D9F8F34C3CAD1D72 /* ConversationView.swift */,
 				44C232BEA7BD43E9944CB954 /* ConversationWarmupView.swift */,
@@ -1620,6 +1624,7 @@
 				CF23C01257D0F2C9C5F8B549 /* ConversationItem.swift in Sources */,
 				75D0293A53E7EFA833D17391 /* ConversationOptionsSheet.swift in Sources */,
 				750E44A857658DA09CAB8F9B /* ConversationScreenModel.swift in Sources */,
+				4371DDF84CF9D63E380E3BAD /* ConversationTimelineDiffPresentation.swift in Sources */,
 				11963E5F0A1DF39D480C42AF /* ConversationTimelineView.swift in Sources */,
 				D5C41E51A42E5C3F72365A96 /* ConversationView.swift in Sources */,
 				988ED6600E9318A546CC1C9D /* ConversationWarmupCoordinator.swift in Sources */,
@@ -1808,6 +1813,7 @@
 				B9D3B94BE745FBED61FAB6AD /* ConversationItem.swift in Sources */,
 				F5BF6084C5B199CC3DAA02C0 /* ConversationOptionsSheet.swift in Sources */,
 				9E5A0726919FCCD84EB226E1 /* ConversationScreenModel.swift in Sources */,
+				D99CD801B09EBDA749180795 /* ConversationTimelineDiffPresentation.swift in Sources */,
 				9D8CDEA63D74EB68ADC02939 /* ConversationTimelineView.swift in Sources */,
 				18AEE3E309FEE6F6A8CA6FFB /* ConversationView.swift in Sources */,
 				4249AD64B16B6E8CF0494B0E /* ConversationWarmupCoordinator.swift in Sources */,
