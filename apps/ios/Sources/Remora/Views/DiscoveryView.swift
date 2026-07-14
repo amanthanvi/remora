@@ -153,7 +153,7 @@ struct DiscoveryView: View {
             slingshotHostsSheet
         }
         .sheet(isPresented: $showAlleycatSheet) {
-            AlleycatAddServerSheet(appModel: appModel, startScanningOnAppear: true) { result in
+            RemotePairingSheet(appModel: appModel, startScanningOnAppear: true) { result in
                 showAlleycatSheet = false
                 Task { await connectAlleycatTarget(result) }
             }
@@ -936,7 +936,7 @@ struct DiscoveryView: View {
     /// Called by the pairing sheet after it has already opened a
     /// fully connected ServerSession. Persist the stable node/agent metadata
     /// and navigate; the token stays in Keychain.
-    private func connectAlleycatTarget(_ result: AlleycatConnectedTarget) async {
+    private func connectAlleycatTarget(_ result: RemotePairingTarget) async {
         let synthesized = DiscoveredServer(
             id: result.serverId,
             name: result.displayName,

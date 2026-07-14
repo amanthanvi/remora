@@ -2,7 +2,7 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-struct AlleycatConnectedTarget: Equatable {
+struct RemotePairingTarget: Equatable {
     let serverId: String
     let nodeId: String
     let displayName: String
@@ -11,10 +11,10 @@ struct AlleycatConnectedTarget: Equatable {
     let agentWire: AppAlleycatAgentWire
 }
 
-struct AlleycatAddServerSheet: View {
+struct RemotePairingSheet: View {
     let appModel: AppModel
     let startScanningOnAppear: Bool
-    let onConnected: (AlleycatConnectedTarget) -> Void
+    let onConnected: (RemotePairingTarget) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var displayName: String = ""
@@ -39,7 +39,7 @@ struct AlleycatAddServerSheet: View {
     init(
         appModel: AppModel,
         startScanningOnAppear: Bool = false,
-        onConnected: @escaping (AlleycatConnectedTarget) -> Void
+        onConnected: @escaping (RemotePairingTarget) -> Void
     ) {
         self.appModel = appModel
         self.startScanningOnAppear = startScanningOnAppear
@@ -462,7 +462,7 @@ struct AlleycatAddServerSheet: View {
                 await MainActor.run {
                     isConnecting = false
                     onConnected(
-                        AlleycatConnectedTarget(
+                        RemotePairingTarget(
                             serverId: result.serverId,
                             nodeId: result.nodeId,
                             displayName: resolvedName,

@@ -7,6 +7,8 @@ use base64::Engine;
 use codex_app_server_protocol as upstream;
 use url::Url;
 
+const PET_RUNTIME_UNAVAILABLE_MESSAGE: &str = "pets require a connected Codex runtime; pair a remote host with the Codex agent or connect to a Codex server";
+
 /// Execute a simple one-shot command on a remote server.
 pub(crate) async fn exec_command_simple(
     client: &MobileClient,
@@ -282,7 +284,7 @@ fn ensure_pet_runtime_available(client: &MobileClient, server_id: &str) -> Resul
         return Ok(());
     }
     Err(ClientError::Rpc(
-        "pets require a connected Codex runtime; select the Codex Alleycat agent or connect to a Codex server".to_string(),
+        PET_RUNTIME_UNAVAILABLE_MESSAGE.to_string(),
     ))
 }
 
@@ -408,7 +410,18 @@ fn inline_image_data(raw: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageViewSource, image_read_command, normalized_image_path};
+    use super::{
+        ImageViewSource, PET_RUNTIME_UNAVAILABLE_MESSAGE, image_read_command, normalized_image_path,
+    };
+
+    #[test]
+    fn pet_runtime_error_uses_neutral_remote_pairing_copy() {
+        assert_eq!(
+            PET_RUNTIME_UNAVAILABLE_MESSAGE,
+            "pets require a connected Codex runtime; pair a remote host with the Codex agent or connect to a Codex server"
+        );
+        assert!(!PET_RUNTIME_UNAVAILABLE_MESSAGE.contains("Alleycat"));
+    }
 
     #[test]
     fn parses_inline_image_data() {

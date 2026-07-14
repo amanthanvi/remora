@@ -80,7 +80,6 @@
 		1DCF7B936804C7019E6D921E /* ConversationComposerPopupOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F32C908C1D5DA7D4A3B78C0 /* ConversationComposerPopupOverlayView.swift */; };
 		1E68871EAC7908A7B1446910 /* CloudKVSBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73F0F152AE99E6C600E886D0 /* CloudKVSBridge.swift */; };
 		1F079C016DCC97439FCA579B /* WallpaperAdjustView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E3E89BB78639F6CA24B1038 /* WallpaperAdjustView.swift */; };
-		1F44ECC68B45FFC8530EE291 /* AlleycatAddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0DD23A2152568CF9D46D56 /* AlleycatAddServerSheet.swift */; };
 		1F8E5CEC458817150CEF6E1F /* linear-light.json in Resources */ = {isa = PBXBuildFile; fileRef = FFB662741D4B8B7848C23F32 /* linear-light.json */; };
 		1FCF21461DA61084814CAC40 /* proof-light.json in Resources */ = {isa = PBXBuildFile; fileRef = A851361747B6E4C53B7CA7A7 /* proof-light.json */; };
 		1FD7046B16E009FA6F1FA489 /* MessageContentBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8915A44939DB3D359637ABCE /* MessageContentBridge.swift */; };
@@ -196,6 +195,7 @@
 		4B8D56CC9362B6DB2B0C68B9 /* vitesse-black.json in Resources */ = {isa = PBXBuildFile; fileRef = 4D134C574A157872FF78AEED /* vitesse-black.json */; };
 		4C06AC074A390F3FC9FFC6D5 /* github-light-default.json in Resources */ = {isa = PBXBuildFile; fileRef = 6FFB952D635DDA258C9C3ACE /* github-light-default.json */; };
 		4C0C06E5F8CF1E74B03E5B4C /* AppRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 791F18D8228DD7ED97271F85 /* AppRuntimeController.swift */; };
+		4C1302F88692E4D16B7A98D5 /* RemotePairingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */; };
 		4D7B9A08148276F6027D3AD5 /* RealtimeVoiceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7856B1F3573FCEE4176F1D73 /* RealtimeVoiceScreen.swift */; };
 		4E3F39986EE3FFBD4A583947 /* github-dark-high-contrast.json in Resources */ = {isa = PBXBuildFile; fileRef = 21E9881F291B1B17E94ED2B7 /* github-dark-high-contrast.json */; };
 		4E83D7CBE68E8E80BA2FFEE4 /* AnimatedSplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */; };
@@ -290,6 +290,7 @@
 		78508EC12D0EFCA7AFC0F090 /* HomeBottomBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB89DEC132EB48E0230739F8 /* HomeBottomBar.swift */; };
 		78B54C385F8AC96E36C55AF4 /* RemoraTransmissionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A443BFB18FB8A3CBE8D0307 /* RemoraTransmissionView.swift */; };
 		78CCDD1C371FE0C8F15F1F3A /* SavedAppsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90F4DDDFBCFCDE3E795ACFF /* SavedAppsStoreTests.swift */; };
+		78D43BBBBE31B91F89CD7346 /* RemotePairingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */; };
 		7C149B03C9B5FB9B8BA17A00 /* TerminalSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D82F87B8442CEB3AFF729F95 /* TerminalSessionController.swift */; };
 		7D2C714F716612A4A4BE5962 /* TranscriptTurn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 660A3713BA57FFBD71F9A029 /* TranscriptTurn.swift */; };
 		7F3739962A41A464B0DAA2D5 /* pierre-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = D99090F1D6E31559F746EBBE /* pierre-dark.json */; };
@@ -465,7 +466,6 @@
 		CE552C33581A9CBAD158B0D8 /* catppuccin-frappe.json in Resources */ = {isa = PBXBuildFile; fileRef = 16A75DE7C93BC1EB2ECFBAA6 /* catppuccin-frappe.json */; };
 		CF23C01257D0F2C9C5F8B549 /* ConversationItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4500F76A04BEF96541BD479 /* ConversationItem.swift */; };
 		CF34E2096A3B13C701052EF1 /* DebugBuildLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6015513380C96D72A11BF22 /* DebugBuildLabel.swift */; };
-		CFD863CE6A5BAD8E02946850 /* AlleycatAddServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0DD23A2152568CF9D46D56 /* AlleycatAddServerSheet.swift */; };
 		CFFB6594DA6EC45E1D166F16 /* AgentRuntimePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5980F713B685B44B1F5A365 /* AgentRuntimePresentation.swift */; };
 		D02B5B2A6EEF807E0390DACE /* ToolCallCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD7EA4509BF07CC1A7DEBB7 /* ToolCallCardView.swift */; };
 		D0EE74B07ABA4D6A554A1BFA /* RustVoiceHandoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6305EC9D1BC87A0DF3E94B3 /* RustVoiceHandoff.swift */; };
@@ -713,6 +713,7 @@
 		71775B453F85C386905AD982 /* WallpaperSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperSelectionView.swift; sourceTree = "<group>"; };
 		718F957070F808D5FDA61A2A /* NetworkDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiscovery.swift; sourceTree = "<group>"; };
 		73F0F152AE99E6C600E886D0 /* CloudKVSBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKVSBridge.swift; sourceTree = "<group>"; };
+		74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePairingSheet.swift; sourceTree = "<group>"; };
 		757AB7CBCDDEF4D98C4B53FB /* light-plus.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "light-plus.json"; sourceTree = "<group>"; };
 		765C6F054278979294EB4C5C /* ConversationDisplayUITestHarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDisplayUITestHarnessView.swift; sourceTree = "<group>"; };
 		77F095379103ADA9D48967A2 /* SavedAppUpdateOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedAppUpdateOverlay.swift; sourceTree = "<group>"; };
@@ -884,7 +885,6 @@
 		FE3F3E3429E28E287B99098F /* github-dark-default.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "github-dark-default.json"; sourceTree = "<group>"; };
 		FE9A35E0CC19CAAE04FA183D /* VoiceTranscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTranscriptionManager.swift; sourceTree = "<group>"; };
 		FEC73C042CDE6FA746706C07 /* StreamingAssistantRenderCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAssistantRenderCache.swift; sourceTree = "<group>"; };
-		FF0DD23A2152568CF9D46D56 /* AlleycatAddServerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlleycatAddServerSheet.swift; sourceTree = "<group>"; };
 		FF4667F859803B0B47F6F0F0 /* CrossServerToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossServerToolResultView.swift; sourceTree = "<group>"; };
 		FFB662741D4B8B7848C23F32 /* linear-light.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "linear-light.json"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -1155,7 +1155,6 @@
 			children = (
 				A61302752B97898048071234 /* AccountView.swift */,
 				D5980F713B685B44B1F5A365 /* AgentRuntimePresentation.swift */,
-				FF0DD23A2152568CF9D46D56 /* AlleycatAddServerSheet.swift */,
 				915C44E2734A36B30186D373 /* AmbientSuggestionsList.swift */,
 				A83C0FA7F9D2F3CD3F082CC9 /* AnimatedLogo.swift */,
 				F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */,
@@ -1229,6 +1228,7 @@
 				7856B1F3573FCEE4176F1D73 /* RealtimeVoiceScreen.swift */,
 				30C0DF13F976468BCB6AC957 /* RemoraLogo.swift */,
 				0A443BFB18FB8A3CBE8D0307 /* RemoraTransmissionView.swift */,
+				74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */,
 				8DE6FA60E3022A166C304F20 /* RollingMetricText.swift */,
 				9881D07E83E43E0C084A41F0 /* SavedAppDetailView.swift */,
 				77F095379103ADA9D48967A2 /* SavedAppUpdateOverlay.swift */,
@@ -1643,7 +1643,6 @@
 				D3FDA2FC1B382006A22E8437 /* AccountView.swift in Sources */,
 				1775BC875667E00B55F3BFDB /* AgentLabelFormatter.swift in Sources */,
 				E7006E4F8630BD29BC4C9F22 /* AgentRuntimePresentation.swift in Sources */,
-				1F44ECC68B45FFC8530EE291 /* AlleycatAddServerSheet.swift in Sources */,
 				91AA2606D2103CA1286407A0 /* AlleycatCredentialStore.swift in Sources */,
 				7F9394E9D5773D4B0091C81A /* AmbientSuggestionsList.swift in Sources */,
 				F66E770F06058AAD39769072 /* AnimatedLogo.swift in Sources */,
@@ -1757,6 +1756,7 @@
 				48F6601A255EEE6962E8B824 /* RemoraPalette.swift in Sources */,
 				63A3E2F93FE53D868E632F6F /* RemoraPlatform.swift in Sources */,
 				CCCF96AAD68F90B03D5E8C03 /* RemoraTransmissionView.swift in Sources */,
+				4C1302F88692E4D16B7A98D5 /* RemotePairingSheet.swift in Sources */,
 				3543DB19BA8168D6EBF47D74 /* RollingMetricText.swift in Sources */,
 				260F3A0B219389F607A7F3F2 /* RustAlleycatBridge.swift in Sources */,
 				D0EE74B07ABA4D6A554A1BFA /* RustVoiceHandoff.swift in Sources */,
@@ -1845,7 +1845,6 @@
 				9E0D24868B6EA851C183364A /* AccountView.swift in Sources */,
 				3664CCAB8238AE066B43CCB0 /* AgentLabelFormatter.swift in Sources */,
 				CFFB6594DA6EC45E1D166F16 /* AgentRuntimePresentation.swift in Sources */,
-				CFD863CE6A5BAD8E02946850 /* AlleycatAddServerSheet.swift in Sources */,
 				860027B949C93D0CDA87F413 /* AlleycatCredentialStore.swift in Sources */,
 				75263F215C77946249790BF7 /* AmbientSuggestionsList.swift in Sources */,
 				85FD12518678E31522BA2D05 /* AnimatedLogo.swift in Sources */,
@@ -1966,6 +1965,7 @@
 				513B0D0290540C59D36F14DD /* RemoraPalette.swift in Sources */,
 				58BAC018B4CB4D08A8939A0E /* RemoraPlatform.swift in Sources */,
 				78B54C385F8AC96E36C55AF4 /* RemoraTransmissionView.swift in Sources */,
+				78D43BBBBE31B91F89CD7346 /* RemotePairingSheet.swift in Sources */,
 				2A2A117E9E5DC1AE87F2A372 /* RollingMetricText.swift in Sources */,
 				FBA1DE115E6C9FB52FB48DDA /* RustAlleycatBridge.swift in Sources */,
 				C960E610C8E5FF481E3F88BD /* RustVoiceHandoff.swift in Sources */,

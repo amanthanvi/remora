@@ -334,7 +334,7 @@ object SavedServerStore {
     }
 
     /**
-     * Legacy Alleycat persistence path. Current remote-host pairings use
+     * Legacy relay-based persistence path. Current remote-host pairings use
      * [rememberAlleycat].
      */
     fun rememberAlleycat(
@@ -444,7 +444,7 @@ object SavedServerStore {
         if (name.isNotEmpty() && !name.equals("Alleycat Host", ignoreCase = true)) {
             return server
         }
-        return server.copy(name = "Alleycat ${shortNodeId(nodeId)}")
+        return server.copy(name = "Remote host ${shortNodeId(nodeId)}")
     }
 
     private fun shortNodeId(raw: String): String =

@@ -739,7 +739,7 @@ private fun normalized(value: String?): String? =
     value?.trim()?.takeIf { it.isNotEmpty() }
 
 private fun terminalEmptyMessage(): String =
-    "Pair an Alleycat host or save SSH credentials to open a remote shell.\n"
+    "Pair a remote host or save SSH credentials to open a remote shell.\n"
 
 private data class TerminalGridSize(
     val cols: Int,
