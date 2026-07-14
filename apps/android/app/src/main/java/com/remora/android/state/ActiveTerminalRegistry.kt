@@ -13,17 +13,27 @@ import uniffi.codex_mobile_client.ThreadKey
  * metadata.
  */
 object ActiveTerminalRegistry {
+    fun interface SelectionSource {
+        /** Return a freshly captured selection on the terminal view thread. */
+        fun readFreshSelection(onResult: (String?) -> Unit)
+    }
+
     @Volatile
     private var rendererRef: WeakReference<TerminalRenderer>? = null
 
-    fun register(renderer: TerminalRenderer) {
+    @Volatile
+    private var selectionSourceRef: WeakReference<SelectionSource>? = null
+
+    fun register(renderer: TerminalRenderer, selectionSource: SelectionSource) {
         rendererRef = WeakReference(renderer)
+        selectionSourceRef = WeakReference(selectionSource)
     }
 
     fun unregister(renderer: TerminalRenderer) {
         val current = rendererRef?.get()
         if (current === renderer) {
             rendererRef = null
+            selectionSourceRef = null
         }
     }
 
@@ -35,10 +45,13 @@ object ActiveTerminalRegistry {
     /// Read the current painted selection, if any. The "Send to AI" path
     /// prefers this over the bundled output buffer so the user can scope
     /// the message to a specific block.
-    fun readSelection(): String? {
-        val renderer = rendererRef?.get() ?: return null
-        val text = renderer.readSelection() ?: return null
-        return text.takeIf { it.isNotEmpty() }
+    fun readSelection(onResult: (String?) -> Unit) {
+        val source = selectionSourceRef?.get()
+        dispatchFreshSelection(source) { text ->
+            // Discard a result from a view that was unregistered or replaced
+            // while its main-thread refresh was queued.
+            onResult(text.takeIf { selectionSourceRef?.get() === source })
+        }
     }
 
     /**
@@ -61,5 +74,20 @@ object ActiveTerminalRegistry {
             ),
             selection = selection,
         )
+    }
+}
+
+/** Callback dispatcher extracted so the asynchronous freshness contract can
+ * be unit-tested without constructing a native Ghostty surface. */
+internal fun dispatchFreshSelection(
+    source: ActiveTerminalRegistry.SelectionSource?,
+    onResult: (String?) -> Unit,
+) {
+    if (source == null) {
+        onResult(null)
+        return
+    }
+    source.readFreshSelection { text ->
+        onResult(text?.takeIf { it.isNotEmpty() })
     }
 }

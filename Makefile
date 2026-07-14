@@ -350,7 +350,7 @@ android-device-run: android-fast
 rust-ios: rust-ios-package
 
 alleycat-main:
-	@$(UPDATE_ALLEYCAT_MAIN) --all
+	@$(UPDATE_ALLEYCAT_MAIN) --shared
 
 rust-ios-package: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Packaging Rust for iOS (device + simulator + xcframework)..."

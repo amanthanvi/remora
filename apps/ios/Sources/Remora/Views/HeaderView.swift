@@ -1274,7 +1274,9 @@ private struct ModelRuntimeIcon: View {
 #Preview("Header") {
     let appModel = RemoraPreviewData.makeConversationAppModel()
     RemoraPreviewScene(appModel: appModel) {
-        HeaderView(thread: appModel.snapshot!.threads[0])
+        if let thread = appModel.snapshot?.threads.first {
+            HeaderView(thread: thread)
+        }
     }
 }
 #endif

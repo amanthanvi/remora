@@ -11,8 +11,11 @@ final class PiPHostView: UIView {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
 
     var displayLayer: AVSampleBufferDisplayLayer {
-        // swiftlint:disable:next force_cast
-        layer as! AVSampleBufferDisplayLayer
+        guard let displayLayer = layer as? AVSampleBufferDisplayLayer else {
+            assertionFailure("PiPHostView must use AVSampleBufferDisplayLayer")
+            return AVSampleBufferDisplayLayer()
+        }
+        return displayLayer
     }
 
     override init(frame: CGRect) {

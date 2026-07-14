@@ -196,9 +196,12 @@ final class HomeDashboardModel {
             )
             let nextAllSessions = HomeDashboardSupport.recentConnectedSessions(
                 from: appSnapshot?.sessionSummaries ?? [],
-                serversById: Dictionary(uniqueKeysWithValues: nextConnectedServers
-                    .filter(\.canLaunchSessions)
-                    .map { ($0.id, $0) }),
+                serversById: Dictionary(
+                    nextConnectedServers
+                        .filter(\.canLaunchSessions)
+                        .map { ($0.id, $0) },
+                    uniquingKeysWith: { _, latest in latest }
+                ),
                 limit: nil
             )
             return Snapshot(
@@ -284,10 +287,14 @@ final class HomeDashboardModel {
             !hiddenSet.contains(SavedThreadsStore.PinnedKey(threadKey: $0.key))
         }
         if !pinned.isEmpty {
-            let byKey = Dictionary(uniqueKeysWithValues: candidates.map {
-                (SavedThreadsStore.PinnedKey(threadKey: $0.key), $0)
-            })
-            let serversById = Dictionary(uniqueKeysWithValues: connectedServers.map { ($0.id, $0) })
+            let byKey = Dictionary(
+                candidates.map { (SavedThreadsStore.PinnedKey(threadKey: $0.key), $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            let serversById = Dictionary(
+                connectedServers.map { ($0.id, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
             return pinned.compactMap { pin in
                 if let existing = byKey[pin] {
                     return existing

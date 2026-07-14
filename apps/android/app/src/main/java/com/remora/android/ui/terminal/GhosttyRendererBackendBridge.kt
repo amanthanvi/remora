@@ -10,14 +10,15 @@ import uniffi.codex_mobile_client.TerminalKeyCode
 import uniffi.codex_mobile_client.TerminalKeyEvent
 import uniffi.codex_mobile_client.TerminalKeyMods
 import uniffi.codex_mobile_client.TerminalRendererBackend
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Kotlin implementation of the Rust-defined `TerminalRendererBackend` callback
  * interface. The Rust [`uniffi.codex_mobile_client.TerminalRenderer`] tick task
- * invokes these methods from a tokio worker; we hop to the main thread before
- * touching the (non-thread-safe) Ghostty surface APIs.
+ * invokes these methods from a tokio worker; mutations hop to the main thread.
+ * Synchronous queries only read snapshots captured on the view thread, so no
+ * callback thread blocks waiting for Android's main looper.
  *
  * Selection state lives here because Ghostty's C surface doesn't expose a
  * public setter for the painted overlay — the platform paints handles
@@ -32,10 +33,14 @@ internal class GhosttyRendererBackendBridge(
     /// PTY input direction (terminal → shell). Bracketed-paste payloads
     /// flow through here so they reach the running process unmodified.
     private val onPasteBytes: (ByteArray) -> Unit,
+    private val onSurfaceMutation: () -> Unit,
 ) : TerminalRendererBackend {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val selectionRange = AtomicReference<TerminalCellRange?>(null)
+    private val selectionText = AtomicReference<String?>(null)
+    private val selectionGeneration = AtomicLong(0)
+    private val surfaceSnapshot = AtomicReference(GhosttySurfaceSnapshot.EMPTY)
 
     /// Main-thread callback fired whenever the stored selection range
     /// changes. The terminal surface installs this to drive handle
@@ -56,10 +61,10 @@ internal class GhosttyRendererBackendBridge(
     }
 
     override fun applyConfigFile(path: String) {
-        runOnMainBlocking {
+        runOnMain {
             surface.applyConfig(path)
             onRequestRedraw()
-            true
+            onSurfaceMutation()
         }
     }
 
@@ -94,13 +99,7 @@ internal class GhosttyRendererBackendBridge(
     }
 
     override fun readSelection(): String? {
-        val range = selectionRange.get() ?: return null
-        return readTextBlocking(
-            startRow = range.start.row.toInt(),
-            startCol = range.start.col.toInt(),
-            endRow = range.end.row.toInt(),
-            endCol = range.end.col.toInt(),
-        )
+        return selectionText.get()
     }
 
     override fun readText(
@@ -108,7 +107,7 @@ internal class GhosttyRendererBackendBridge(
         startCol: UInt,
         endRow: UInt,
         endCol: UInt,
-    ): String? = readTextBlocking(
+    ): String? = surfaceSnapshot.get().text(
         startRow = startRow.toInt(),
         startCol = startCol.toInt(),
         endRow = endRow.toInt(),
@@ -116,61 +115,81 @@ internal class GhosttyRendererBackendBridge(
     )
 
     override fun cellMetrics(): TerminalCellMetrics {
-        val size = runOnMainBlocking { surface.surfaceSize() }
-        if (size == null) {
-            return TerminalCellMetrics(
-                cellWidthPx = 0f,
-                cellHeightPx = 0f,
-                cols = 0u,
-                rows = 0u,
-                viewportTop = 0u,
-            )
-        }
-        return TerminalCellMetrics(
-            cellWidthPx = size.cellWidthPx.toFloat(),
-            cellHeightPx = size.cellHeightPx.toFloat(),
-            cols = size.columns.toUInt(),
-            rows = size.rows.toUInt(),
-            // Selection coords are viewport-relative; scrollback gating
-            // is the OSC parser's job, not ours.
-            viewportTop = 0u,
-        )
+        return surfaceSnapshot.get().metrics
     }
 
     override fun setSelectionOverlay(range: TerminalCellRange?) {
         selectionRange.set(range)
-        val callback = onSelectionRangeChanged
-        runOnMain { callback?.invoke(range) }
+        selectionText.set(null)
+        val generation = selectionGeneration.incrementAndGet()
+        runOnMain {
+            if (selectionGeneration.get() == generation) {
+                onSelectionRangeChanged?.invoke(range)
+            }
+        }
     }
 
     /// Snapshot the current selection range (for the overlay view / edit
     /// menu without going through Rust).
     fun currentSelectionRange(): TerminalCellRange? = selectionRange.get()
 
-    private fun readTextBlocking(
-        startRow: Int,
-        startCol: Int,
-        endRow: Int,
-        endCol: Int,
-    ): String? = runOnMainBlocking {
-        surface.readText(startRow, startCol, endRow, endCol)
+    fun currentSelectionText(): String? = selectionText.get()
+
+    /** Refresh only live metrics; performs no physical-row text reads. */
+    fun refreshMetricsSnapshot(): TerminalCellMetrics {
+        val size = surface.surfaceSize()
+        if (size == null) {
+            surfaceSnapshot.set(
+                GhosttySurfaceSnapshot(
+                    metrics = GhosttySurfaceSnapshot.EMPTY.metrics,
+                    rows = surfaceSnapshot.get().rows,
+                ),
+            )
+            return GhosttySurfaceSnapshot.EMPTY.metrics
+        }
+        val metrics = TerminalCellMetrics(
+            cellWidthPx = size.cellWidthPx.toFloat(),
+            cellHeightPx = size.cellHeightPx.toFloat(),
+            cols = size.columns.toUInt(),
+            rows = size.rows.toUInt(),
+            viewportTop = 0u,
+        )
+        surfaceSnapshot.updateAndGet { snapshot -> snapshot.copy(metrics = metrics) }
+        return metrics
     }
 
-    private fun <T> runOnMainBlocking(block: () -> T?): T? {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return block()
-        }
-        val result = AtomicReference<T?>(null)
-        val latch = CountDownLatch(1)
-        mainHandler.post {
-            try {
-                result.set(block())
-            } finally {
-                latch.countDown()
+    /** Capture live physical rows on the view thread for lock-free queries. */
+    fun captureSurfaceSnapshot(): GhosttySurfaceSnapshot {
+        val metrics = refreshMetricsSnapshot()
+        return GhosttySurfaceSnapshot.capture(metrics) { row ->
+            if (metrics.cols > 0u) {
+                surface.readText(row, 0, row, metrics.cols.toInt() - 1)
+            } else {
+                ""
             }
+        }.also(surfaceSnapshot::set)
+    }
+
+    fun invalidateSelectionSnapshot() {
+        selectionText.set(null)
+    }
+
+    fun refreshSelectionSnapshot() {
+        val generation = selectionGeneration.get()
+        val range = selectionRange.get()
+        val text = if (range == null) {
+            null
+        } else {
+            surface.readText(
+                range.start.row.toInt(),
+                range.start.col.toInt(),
+                range.end.row.toInt(),
+                range.end.col.toInt(),
+            )
         }
-        latch.await()
-        return result.get()
+        if (selectionGeneration.get() == generation) {
+            selectionText.set(text)
+        }
     }
 
     private fun packMods(mods: TerminalKeyMods): Int {
@@ -209,5 +228,51 @@ internal class GhosttyRendererBackendBridge(
         } else {
             mainHandler.post(block)
         }
+    }
+}
+
+internal data class GhosttySurfaceSnapshot(
+    val metrics: TerminalCellMetrics,
+    val rows: List<String>,
+) {
+    fun text(startRow: Int, startCol: Int, endRow: Int, endCol: Int): String? {
+        if (startRow < 0 || startRow > endRow || startRow >= rows.size) return null
+        val lastRow = endRow.coerceAtMost(rows.lastIndex)
+        return (startRow..lastRow).joinToString("\n") { rowIndex ->
+            val codePoints = rows[rowIndex].codePoints().toArray()
+            if (codePoints.isEmpty()) return@joinToString ""
+            val lower = if (rowIndex == startRow) startCol.coerceAtLeast(0) else 0
+            val upper = if (rowIndex == lastRow) endCol else codePoints.lastIndex
+            if (lower >= codePoints.size || lower > upper) return@joinToString ""
+            String(codePoints, lower, upper.coerceAtMost(codePoints.lastIndex) - lower + 1)
+        }
+    }
+
+    companion object {
+        val EMPTY = GhosttySurfaceSnapshot(
+            metrics = TerminalCellMetrics(
+                cellWidthPx = 0f,
+                cellHeightPx = 0f,
+                cols = 0u,
+                rows = 0u,
+                viewportTop = 0u,
+            ),
+            rows = emptyList(),
+        )
+
+        /**
+         * Capture exactly one entry per physical Ghostty grid row. A single
+         * viewport read unwraps soft-wrapped lines and cannot preserve row
+         * coordinates used by hit-testing and selection ranges.
+         */
+        fun capture(
+            metrics: TerminalCellMetrics,
+            readRow: (Int) -> String?,
+        ): GhosttySurfaceSnapshot = GhosttySurfaceSnapshot(
+            metrics = metrics,
+            rows = List(metrics.rows.toInt()) { row ->
+                readRow(row).orEmpty().trimEnd('\r', '\n')
+            },
+        )
     }
 }

@@ -31,6 +31,8 @@ final class GhosttyTerminalRenderer {
     private var didSetConfigDir = false
     private var isInvalidated = false
     private var currentConfig: TerminalConfig?
+    private var surfaceSnapshotGate = GhosttySnapshotRefreshGate()
+    private var viewportRefreshWorkItem: DispatchWorkItem?
 
     func attach(to view: UIView) {
         guard !isInvalidated else { return }
@@ -60,6 +62,7 @@ final class GhosttyTerminalRenderer {
             self.backendBridge = bridge
             let renderer = TerminalRenderer(backend: bridge)
             self.renderer = renderer
+            refreshMetricsSnapshot()
             let listener = TerminalRendererBellListener { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.onBell?()
@@ -79,6 +82,8 @@ final class GhosttyTerminalRenderer {
 
     func resize(width: CGFloat, height: CGFloat, scale: CGFloat) {
         terminal?.resize(toWidth: width, height: height, scale: scale)
+        refreshMetricsSnapshot()
+        surfaceSnapshotGate.markDirty()
     }
 
     func setGridSize(cols: UInt16, rows: UInt16) {
@@ -205,15 +210,21 @@ final class GhosttyTerminalRenderer {
     // MARK: - Selection bridge
 
     func hitTest(x: CGFloat, y: CGFloat) -> TerminalCellPosition? {
-        renderer?.hitTest(xPx: Float(x), yPx: Float(y))
+        return renderer?.hitTest(xPx: Float(x), yPx: Float(y))
     }
 
     func wordRange(at pos: TerminalCellPosition) -> TerminalCellRange? {
-        renderer?.wordRangeAt(pos: pos)
+        return renderer?.wordRangeAt(pos: pos)
     }
 
     func lineRange(at pos: TerminalCellPosition) -> TerminalCellRange? {
-        renderer?.lineRangeAt(pos: pos)
+        return renderer?.lineRangeAt(pos: pos)
+    }
+
+    /// Prepare one fresh physical-row snapshot for a gesture that may issue
+    /// multiple cached renderer queries (for example hit-test + word range).
+    func prepareSurfaceQueries() {
+        refreshSurfaceSnapshotIfNeeded()
     }
 
     func selectionSet(_ range: TerminalCellRange) {
@@ -226,11 +237,13 @@ final class GhosttyTerminalRenderer {
 
     @discardableResult
     func selectionAll() -> TerminalCellRange? {
-        renderer?.selectionAll()
+        refreshMetricsSnapshot()
+        return renderer?.selectionAll()
     }
 
     func readSelection() -> String? {
-        renderer?.readSelection()
+        refreshSelectionSnapshot()
+        return renderer?.readSelection()
     }
 
     func currentSelectionRange() -> TerminalCellRange? {
@@ -238,7 +251,8 @@ final class GhosttyTerminalRenderer {
     }
 
     func cellMetrics() -> TerminalCellMetrics? {
-        renderer?.cellMetrics()
+        refreshMetricsSnapshot()
+        return renderer?.cellMetrics()
     }
 
     func surfaceMetrics() -> RemoraGhosttySurfaceMetrics? {
@@ -249,18 +263,14 @@ final class GhosttyTerminalRenderer {
     }
 
     func linkAtPoint(x: CGFloat, y: CGFloat) -> TerminalLink? {
-        renderer?.linkAtPoint(xPx: Float(x), yPx: Float(y))
+        return renderer?.linkAtPoint(xPx: Float(x), yPx: Float(y))
     }
 
     /// Feed the renderer the most recent viewport rows so plain-text URL
     /// detection has fresh content. The host view calls this on a
     /// debounce after writes.
     func updateViewportLinks() {
-        guard let renderer, let terminal else { return }
-        let text = terminal.visibleText()
-        if text.isEmpty { return }
-        let rows: [String] = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        renderer.setViewportText(startRow: 0, rows: rows)
+        refreshSurfaceSnapshotIfNeeded()
     }
 
     func invalidate() {
@@ -280,6 +290,8 @@ final class GhosttyTerminalRenderer {
         pendingOutput.removeAll()
         pendingWriteBuffer.removeAll(keepingCapacity: false)
         outputFlushScheduled = false
+        viewportRefreshWorkItem?.cancel()
+        viewportRefreshWorkItem = nil
         didSetConfigDir = false
         setNativeOutputVisible(false)
     }
@@ -290,7 +302,9 @@ final class GhosttyTerminalRenderer {
             setNativeOutputVisible(false)
             return
         }
+        invalidateSelectionSnapshot()
         terminal.writeOutput(Data([0x1B, 0x63]))
+        markSurfaceSnapshotDirtyAndScheduleRefresh()
         pendingWriteBuffer.removeAll(keepingCapacity: true)
         outputFlushScheduled = false
         setNativeOutputVisible(false)
@@ -337,8 +351,48 @@ final class GhosttyTerminalRenderer {
         let data = pendingWriteBuffer
         pendingWriteBuffer.removeAll(keepingCapacity: true)
         renderer?.feedOutput(bytes: data)
+        invalidateSelectionSnapshot()
         terminal.writeOutput(data)
+        markSurfaceSnapshotDirtyAndScheduleRefresh()
         updateNativeOutputVisibility(terminal: terminal)
+    }
+
+    private func refreshMetricsSnapshot() {
+        guard let renderer, let backendBridge else { return }
+        renderer.updateSurfaceMetrics(metrics: backendBridge.refreshMetricsSnapshot())
+    }
+
+    private func refreshSurfaceSnapshotIfNeeded() {
+        guard let renderer, let backendBridge else { return }
+        guard surfaceSnapshotGate.consumeCapture() else { return }
+        let snapshot = backendBridge.captureSurfaceSnapshot()
+        renderer.updateSurfaceSnapshot(
+            metrics: snapshot.metrics,
+            startRow: 0,
+            rows: snapshot.rows
+        )
+    }
+
+    private func markSurfaceSnapshotDirtyAndScheduleRefresh() {
+        surfaceSnapshotGate.markDirty()
+        viewportRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.viewportRefreshWorkItem = nil
+            self?.refreshSurfaceSnapshotIfNeeded()
+        }
+        viewportRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200), execute: workItem)
+    }
+
+    private func refreshSelectionSnapshot() {
+        guard let renderer, let backendBridge else { return }
+        backendBridge.refreshSelectionSnapshotOnMain()
+        renderer.updateSelectionSnapshot(text: backendBridge.currentSelectionText())
+    }
+
+    private func invalidateSelectionSnapshot() {
+        backendBridge?.invalidateSelectionSnapshot()
+        renderer?.updateSelectionSnapshot(text: nil)
     }
 
     private func updateNativeOutputVisibility(terminal: RemoraGhosttyTerminal) {
@@ -1336,6 +1390,7 @@ final class GhosttyHostView: UIView, UIGestureRecognizerDelegate, UIEditMenuInte
         switch gesture.state {
         case .began:
             // Pick the cell under the finger; seed word selection.
+            renderer.prepareSurfaceQueries()
             guard let pos = renderer.hitTest(x: location.x * scale, y: location.y * scale) else { return }
             selectionAnchorPos = pos
             selectionDragInProgress = true

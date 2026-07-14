@@ -195,17 +195,19 @@ fun TerminalScreen(
                 (nativeRendererAvailable || controller.output.isNotEmpty()),
             onSendToAssistant = {
                 val key = activeThreadKey ?: return@TerminalAccessoryRow
-                val selection = ActiveTerminalRegistry.readSelection()
-                val fallback = controller.output.trim()
-                val payload = (selection?.takeIf { it.isNotEmpty() } ?: fallback)
-                if (payload.isEmpty()) return@TerminalAccessoryRow
-                scope.launch {
-                    runCatching {
-                        ActiveTerminalRegistry.sendTextToAssistant(
-                            store = AppModel.shared.store,
-                            threadKey = key,
-                            selection = payload,
-                        )
+                ActiveTerminalRegistry.readSelection { selection ->
+                    val fallback = controller.output.trim()
+                    val payload = selection ?: fallback
+                    if (payload.isNotEmpty()) {
+                        scope.launch {
+                            runCatching {
+                                ActiveTerminalRegistry.sendTextToAssistant(
+                                    store = AppModel.shared.store,
+                                    threadKey = key,
+                                    selection = payload,
+                                )
+                            }
+                        }
                     }
                 }
             },

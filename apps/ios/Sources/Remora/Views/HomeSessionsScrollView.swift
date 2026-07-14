@@ -119,7 +119,10 @@ private final class PinchVignetteView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
-        let g = layer as! CAGradientLayer
+        guard let g = layer as? CAGradientLayer else {
+            assertionFailure("PinchVignetteView must use CAGradientLayer")
+            return
+        }
         g.startPoint = CGPoint(x: 0.5, y: 0)
         g.endPoint = CGPoint(x: 0.5, y: 1)
         g.colors = [

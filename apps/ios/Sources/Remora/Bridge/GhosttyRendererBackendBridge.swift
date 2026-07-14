@@ -2,9 +2,10 @@ import Foundation
 
 /// Thin Swift implementation of the Rust-defined `TerminalRendererBackend`
 /// callback interface. Holds a weak reference to the platform-side
-/// `RemoraGhosttyTerminal` and hops every Ghostty C call onto the main
-/// thread (Ghostty's surface APIs are not thread-safe). The Rust tick task
-/// invokes these methods on the shared tokio runtime.
+/// `RemoraGhosttyTerminal` and hops Ghostty mutations onto the main thread
+/// (Ghostty's surface APIs are not thread-safe). Synchronous queries only
+/// read snapshots previously captured on main, so Rust callback threads never
+/// block waiting for UIKit.
 ///
 /// Selection state lives here because Ghostty's C surface doesn't expose a
 /// public setter for the painted selection range — the platform paints the
@@ -17,10 +18,13 @@ final class GhosttyRendererBackendBridge: TerminalRendererBackend, @unchecked Se
     /// Most recently pushed selection range (viewport-relative). `nil` when
     /// no selection is active. Written from the Rust runtime via
     /// `setSelectionOverlay` and read from the main thread by the overlay
-    /// view + edit menu. Guarded by `selectionLock` to keep the write/read
-    /// race safe — the storage is a single optional, no fancy state.
-    private let selectionLock = NSLock()
+    /// view + edit menu. Guarded by `snapshotLock` with the other immutable
+    /// surface snapshots consumed by Rust callback threads.
+    private let snapshotLock = NSLock()
     private var selectionRange: TerminalCellRange?
+    private var selectionText: String?
+    private var selectionGeneration: UInt64 = 0
+    private var surfaceSnapshot = GhosttySurfaceSnapshot.empty
 
     /// Callback fired on the main thread whenever the stored selection
     /// range changes. The terminal view installs this to drive handle
@@ -105,81 +109,179 @@ final class GhosttyRendererBackendBridge: TerminalRendererBackend, @unchecked Se
     }
 
     func readSelection() -> String? {
-        let range = currentSelectionRange()
-        guard let range else { return nil }
-        // `read_text` must run on the same thread as other Ghostty surface
-        // calls. We're invoked from the Rust tick task, so hop to main and
-        // block long enough to return — bounded waits keep this safe under
-        // a misbehaving renderer (no deadlock with the renderer's tokio
-        // runtime because no main-thread caller is waiting on us).
-        return runOnMainBlocking { [weak terminal] in
-            terminal?.readText(
-                fromRow: range.start.row,
-                column: range.start.col,
-                toRow: range.end.row,
-                column: range.end.col
-            )
-        }
+        snapshotLock.withLock { selectionText }
     }
 
     func readText(startRow: UInt32, startCol: UInt32, endRow: UInt32, endCol: UInt32) -> String? {
-        runOnMainBlocking { [weak terminal] in
-            terminal?.readText(
-                fromRow: startRow,
-                column: startCol,
-                toRow: endRow,
-                column: endCol
+        snapshotLock.withLock {
+            surfaceSnapshot.text(
+                startRow: startRow,
+                startCol: startCol,
+                endRow: endRow,
+                endCol: endCol
             )
         }
     }
 
     func cellMetrics() -> TerminalCellMetrics {
-        let metrics = runOnMainBlocking { [weak terminal] in
-            terminal?.surfaceMetrics()
-        } ?? RemoraGhosttySurfaceMetrics()
-        return TerminalCellMetrics(
-            cellWidthPx: Float(metrics.cellWidthPx),
-            cellHeightPx: Float(metrics.cellHeightPx),
-            cols: UInt32(metrics.columns),
-            rows: UInt32(metrics.rows),
-            // Viewport-relative selection: top-left of the visible area is
-            // always row 0 in our coordinate system. Scrollback rows live
-            // outside the viewport and aren't selectable through long-press
-            // yet — the OSC parser's absolute-row tracking is separate.
-            viewportTop: 0
-        )
+        snapshotLock.withLock { surfaceSnapshot.metrics }
     }
 
     func setSelectionOverlay(range: TerminalCellRange?) {
-        selectionLock.lock()
-        selectionRange = range
-        selectionLock.unlock()
-        let callback = onSelectionRangeChanged
-        DispatchQueue.main.async {
-            callback?(range)
+        let generation = snapshotLock.withLock {
+            selectionRange = range
+            selectionText = nil
+            selectionGeneration &+= 1
+            return selectionGeneration
+        }
+        Task { @MainActor [weak self] in
+            guard let self, self.snapshotLock.withLock({ self.selectionGeneration == generation }) else {
+                return
+            }
+            self.onSelectionRangeChanged?(range)
         }
     }
 
     /// Snapshot the current selection range. Used by `readSelection` and
     /// by the overlay view via `currentRange` to repaint.
     func currentSelectionRange() -> TerminalCellRange? {
-        selectionLock.lock()
-        defer { selectionLock.unlock() }
-        return selectionRange
+        snapshotLock.withLock { selectionRange }
     }
 
-    /// Run `work` on the main thread synchronously, returning its result.
-    /// If we're already on main, runs inline; otherwise dispatches and
-    /// waits. `DispatchQueue.main.sync` from a background thread is fine
-    /// here because the Rust tick task never holds a lock the main thread
-    /// could be waiting on.
-    private func runOnMainBlocking<T>(_ work: @MainActor @Sendable () -> T) -> T {
-        if Thread.isMainThread {
-            return MainActor.assumeIsolated { work() }
+    func currentSelectionText() -> String? {
+        snapshotLock.withLock { selectionText }
+    }
+
+    /// Refresh only live grid metrics. This is safe for layout/resize paths:
+    /// it performs no per-row Ghostty text reads.
+    @MainActor
+    func refreshMetricsSnapshot() -> TerminalCellMetrics {
+        guard let terminal else { return snapshotLock.withLock { surfaceSnapshot.metrics } }
+        let native = terminal.surfaceMetrics()
+        let metrics = TerminalCellMetrics(
+            cellWidthPx: Float(native.cellWidthPx),
+            cellHeightPx: Float(native.cellHeightPx),
+            cols: UInt32(native.columns),
+            rows: UInt32(native.rows),
+            viewportTop: 0
+        )
+        snapshotLock.withLock {
+            surfaceSnapshot = GhosttySurfaceSnapshot(metrics: metrics, rows: surfaceSnapshot.rows)
         }
-        return DispatchQueue.main.sync {
-            MainActor.assumeIsolated { work() }
+        return metrics
+    }
+
+    /// Capture the live physical Ghostty rows while already on main. Rust and
+    /// its callback threads only consume this immutable copy.
+    @MainActor
+    func captureSurfaceSnapshot() -> GhosttySurfaceSnapshot {
+        guard let terminal else { return snapshotLock.withLock { surfaceSnapshot } }
+        let metrics = refreshMetricsSnapshot()
+        let snapshot = GhosttySurfaceSnapshot.capture(metrics: metrics) { row in
+            guard metrics.cols > 0 else { return "" }
+            return terminal.readText(
+                fromRow: UInt32(row),
+                column: 0,
+                toRow: UInt32(row),
+                column: metrics.cols - 1
+            )
         }
+        snapshotLock.withLock { surfaceSnapshot = snapshot }
+        return snapshot
+    }
+
+    @MainActor
+    func refreshSelectionSnapshotOnMain() {
+        let (range, generation) = snapshotLock.withLock { (selectionRange, selectionGeneration) }
+        let text: String?
+        if let range, let terminal {
+            text = terminal.readText(
+                fromRow: range.start.row,
+                column: range.start.col,
+                toRow: range.end.row,
+                column: range.end.col
+            )
+        } else {
+            text = nil
+        }
+        snapshotLock.withLock {
+            guard selectionGeneration == generation else { return }
+            selectionText = text
+        }
+    }
+
+    func invalidateSelectionSnapshot() {
+        snapshotLock.withLock { selectionText = nil }
+    }
+}
+
+struct GhosttySurfaceSnapshot {
+    let metrics: TerminalCellMetrics
+    let rows: [String]
+
+    static let empty = GhosttySurfaceSnapshot(
+        metrics: TerminalCellMetrics(
+            cellWidthPx: 0,
+            cellHeightPx: 0,
+            cols: 0,
+            rows: 0,
+            viewportTop: 0
+        ),
+        rows: []
+    )
+
+    /// Capture one string for every physical Ghostty grid row. Reading the
+    /// whole viewport at once is incorrect because Ghostty unwraps soft-wrapped
+    /// lines in selection text, which shifts all following row coordinates.
+    static func capture(
+        metrics: TerminalCellMetrics,
+        readRow: (Int) -> String?
+    ) -> GhosttySurfaceSnapshot {
+        let rows = (0..<Int(metrics.rows)).map { row in
+            var text = readRow(row) ?? ""
+            while text.last == "\n" || text.last == "\r" {
+                text.removeLast()
+            }
+            return text
+        }
+        return GhosttySurfaceSnapshot(metrics: metrics, rows: rows)
+    }
+
+    func text(startRow: UInt32, startCol: UInt32, endRow: UInt32, endCol: UInt32) -> String? {
+        guard startRow <= endRow, Int(startRow) < rows.count else { return nil }
+        let lastRow = min(Int(endRow), rows.count - 1)
+        return (Int(startRow)...lastRow).map { rowIndex in
+            let characters = Array(rows[rowIndex])
+            guard !characters.isEmpty else { return "" }
+            let lower = rowIndex == Int(startRow) ? Int(startCol) : 0
+            let upper = rowIndex == lastRow ? Int(endCol) : characters.count - 1
+            guard lower < characters.count, lower <= upper else { return "" }
+            return String(characters[lower...min(upper, characters.count - 1)])
+        }.joined(separator: "\n")
+    }
+}
+
+/// Coalesces repeated layout/gesture/debounce requests into one physical-row
+/// capture for each dirty surface generation. Main-actor owned by the view.
+struct GhosttySnapshotRefreshGate {
+    private(set) var isDirty = true
+
+    mutating func markDirty() {
+        isDirty = true
+    }
+
+    mutating func consumeCapture() -> Bool {
+        guard isDirty else { return false }
+        isDirty = false
+        return true
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 

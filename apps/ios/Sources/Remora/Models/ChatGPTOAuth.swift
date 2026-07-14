@@ -310,12 +310,10 @@ enum ChatGPTOAuth {
     ) async throws -> ChatGPTOAuthTokenBundle {
         let components = try validateCallbackURL(callbackURL)
 
-        let queryItems = Dictionary(
-            uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") }
-        )
+        let queryItems = try callbackQueryItems(from: components)
         if let error = queryItems["error"], !error.isEmpty {
             let description = queryItems["error_description"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw ChatGPTOAuthError.oauthError(description?.isEmpty == false ? description! : error)
+            throw ChatGPTOAuthError.oauthError(nonEmpty(description) ?? error)
         }
         guard queryItems["state"] == expectedState else {
             throw ChatGPTOAuthError.stateMismatch
@@ -339,12 +337,10 @@ enum ChatGPTOAuth {
     ) async throws -> String {
         let components = try validateCallbackURL(callbackURL)
 
-        let queryItems = Dictionary(
-            uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") }
-        )
+        let queryItems = try callbackQueryItems(from: components)
         if let error = queryItems["error"], !error.isEmpty {
             let description = queryItems["error_description"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw ChatGPTOAuthError.oauthError(description?.isEmpty == false ? description! : error)
+            throw ChatGPTOAuthError.oauthError(nonEmpty(description) ?? error)
         }
         guard queryItems["state"] == expectedState else {
             throw ChatGPTOAuthError.stateMismatch
@@ -373,6 +369,20 @@ enum ChatGPTOAuth {
             throw ChatGPTOAuthError.invalidCallbackURL
         }
         return components
+    }
+
+    static func callbackQueryItems(from components: URLComponents) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for item in components.queryItems ?? [] {
+            guard result.updateValue(item.value ?? "", forKey: item.name) == nil else {
+                throw ChatGPTOAuthError.invalidCallbackURL
+            }
+        }
+        return result
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private static func exchangeAuthorizationCode(

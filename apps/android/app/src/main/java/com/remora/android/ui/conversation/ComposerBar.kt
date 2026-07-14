@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -44,7 +43,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Close
@@ -835,60 +833,15 @@ fun ComposerBar(
                 }
             }
 
-            // Text field
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 36.dp, max = 120.dp)
-                    .background(RemoraTheme.codeBackground, RoundedCornerShape(18.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(modifier = Modifier.weight(1f)) {
-                    if (text.isEmpty()) {
-                        Text(
-                            text = "Message\u2026",
-                            color = RemoraTheme.textMuted,
-                            fontSize = RemoraTextStyle.body.scaled,
-                        )
-                    }
-                    BasicTextField(
-                        value = textFieldValue,
-                        onValueChange = { textFieldValue = it },
-                        textStyle = TextStyle(
-                            color = RemoraTheme.textPrimary,
-                            fontSize = RemoraTextStyle.body.scaled,
-                            fontFamily = RemoraTheme.monoFont,
-                        ),
-                        cursorBrush = SolidColor(RemoraTheme.accent),
-                        // Always reserve trailing space for the expand icon so
-                        // wrapped lines don't slide under it when the icon
-                        // appears (and it doesn't cause a layout jump when it
-                        // toggles on/off at the 60-char threshold).
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(end = 24.dp)
-                            .focusRequester(inlineFocusRequester),
-                    )
-
-                    val shouldShowExpand = (text.contains('\n') || text.length > 60) &&
-                        !isRecording && !isTranscribing
-                    if (shouldShowExpand) {
-                        IconButton(
-                            onClick = { showExpanded = true },
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(20.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.OpenInFull,
-                                contentDescription = "Expand composer",
-                                tint = RemoraTheme.textSecondary,
-                                modifier = Modifier.size(12.dp),
-                            )
-                        }
-                    }
-
+            ComposerTextInputChrome(
+                value = textFieldValue,
+                onValueChange = { textFieldValue = it },
+                showExpand = (text.contains('\n') || text.length > 60) &&
+                    !isRecording && !isTranscribing,
+                onExpand = { showExpanded = true },
+                modifier = Modifier.weight(1f),
+                textFieldModifier = Modifier.focusRequester(inlineFocusRequester),
+                overlays = {
                     // Slash command popup
                     DropdownMenu(
                         expanded = showSlashMenu,
@@ -937,8 +890,8 @@ fun ComposerBar(
                             )
                         }
                     }
-                }
-
+                },
+            ) {
                 when {
                     isRecording -> {
                         Spacer(Modifier.width(8.dp))

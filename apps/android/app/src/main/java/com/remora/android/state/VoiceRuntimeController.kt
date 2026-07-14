@@ -1,6 +1,7 @@
 package com.remora.android.state
 
 import android.content.Context
+import com.remora.android.util.LLog
 import com.remora.android.voice.RealtimeWebRtcSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ class VoiceRuntimeController {
 
     companion object {
         val shared: VoiceRuntimeController by lazy { VoiceRuntimeController() }
+        private const val TAG = "VoiceRuntime"
         private const val LOCAL_SERVER_ID = "local"
         private const val VOICE_PREFS_NAME = "remora.voice"
         private const val PERSISTED_LOCAL_VOICE_THREAD_ID_KEY = "remora.voice.local.thread_id"
@@ -132,7 +134,7 @@ class VoiceRuntimeController {
     suspend fun retryActiveSession(appModel: AppModel) {
         val session = _activeSession.value ?: return
         val threadKey = session.threadKey
-        android.util.Log.i("VoiceRuntime", "Retrying active session for ${threadKey.threadId}")
+        LLog.debug(TAG) { "Retrying active session for ${threadKey.threadId}" }
         cleanup()
         startRealtimeSession(appModel, threadKey)
     }
@@ -142,28 +144,29 @@ class VoiceRuntimeController {
         val hasPermission = android.content.pm.PackageManager.PERMISSION_GRANTED ==
             appModel.appContext.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
         if (!hasPermission) {
-            android.util.Log.e("VoiceRuntime", "RECORD_AUDIO permission not granted, cannot start voice session")
+            LLog.e(TAG, "Microphone permission unavailable for voice session")
             return
         }
 
         val resolvedThreadKey = appModel.ensureThreadLoaded(threadKey) ?: threadKey
         val hasKnownThread = appModel.snapshot.value?.threads?.any { it.key == resolvedThreadKey } == true
         if (!hasKnownThread) {
-            android.util.Log.w(
-                "VoiceRuntime",
-                "Refusing to start realtime for missing thread ${resolvedThreadKey.serverId}/${resolvedThreadKey.threadId}",
-            )
+            LLog.w(TAG, "Refusing to start voice session for an unavailable thread")
+            LLog.debug(TAG) {
+                "Unavailable voice thread: ${resolvedThreadKey.serverId}/${resolvedThreadKey.threadId}"
+            }
             return
         }
 
-        android.util.Log.i(
-            "VoiceRuntime",
-            "Starting realtime session for ${resolvedThreadKey.serverId}/${resolvedThreadKey.threadId}",
-        )
+        LLog.debug(TAG) {
+            "Starting realtime session for ${resolvedThreadKey.serverId}/${resolvedThreadKey.threadId}"
+        }
         synchronized(sessionLock) {
             val active = _activeSession.value
             if (active?.threadKey == resolvedThreadKey && sessionJob?.isActive == true) {
-                android.util.Log.i("VoiceRuntime", "Realtime session already starting/active for ${resolvedThreadKey.threadId}")
+                LLog.debug(TAG) {
+                    "Realtime session already starting/active for ${resolvedThreadKey.threadId}"
+                }
                 return
             }
             if (sessionJob?.isActive == true || active != null) {
@@ -176,20 +179,21 @@ class VoiceRuntimeController {
             cleanupKnownRealtimeVoiceSessions(appModel, keepThreadKey = resolvedThreadKey)
 
             // Subscribe BEFORE starting realtime — otherwise we miss the RealtimeStarted event
-            android.util.Log.i("VoiceRuntime", "Subscribing to updates first...")
+            LLog.debug(TAG) { "Subscribing to realtime updates first" }
             val subscription = appModel.store.subscribeUpdates()
 
             // Start the event loop in background — it will block on nextUpdate()
             sessionJob = scope.launch(Dispatchers.Default) {
-                android.util.Log.i("VoiceRuntime", "Event loop started, waiting for updates...")
+                LLog.debug(TAG) { "Realtime event loop started" }
                 while (true) {
                     try {
                         val update = subscription.nextUpdate()
-                        android.util.Log.d("VoiceRuntime", "Got update: ${update::class.simpleName}")
+                        LLog.debug(TAG) { "Received realtime update: ${update::class.simpleName}" }
                         handleRealtimeUpdate(appModel, update)
-                    } catch (e: Exception) {
-                        android.util.Log.e("VoiceRuntime", "Event loop failed", e)
-                        throw e
+                    } catch (error: Exception) {
+                        LLog.e(TAG, "Realtime event loop failed")
+                        LLog.debug(TAG, error) { "Realtime event loop failure details" }
+                        throw error
                     }
                 }
             }
@@ -197,7 +201,7 @@ class VoiceRuntimeController {
             // Give the event loop a moment to start consuming
             kotlinx.coroutines.delay(50)
 
-            android.util.Log.i("VoiceRuntime", "Creating WebRTC peer connection and offer...")
+            LLog.debug(TAG) { "Creating WebRTC peer connection and offer" }
             val session = RealtimeWebRtcSession(appModel.appContext)
             val claimed = synchronized(sessionLock) {
                 if (webRtcSession != null) {
@@ -208,16 +212,13 @@ class VoiceRuntimeController {
                 }
             }
             if (!claimed) {
-                android.util.Log.w(
-                    "VoiceRuntime",
-                    "Racing start detected; another peer connection already claimed — aborting this attempt",
-                )
+                LLog.w(TAG, "Concurrent voice session start rejected")
                 session.stop()
                 return
             }
             val offerSdp = session.start()
 
-            android.util.Log.i("VoiceRuntime", "Calling threadRealtimeStart with WebRTC offer...")
+            LLog.debug(TAG) { "Starting server realtime session with WebRTC offer" }
             _activeSession.value = VoiceSessionState(threadKey = resolvedThreadKey)
             appModel.client.startRealtimeSession(
                 resolvedThreadKey.serverId,
@@ -230,10 +231,11 @@ class VoiceRuntimeController {
                     dynamicTools = buildDynamicToolSpecs(),
                 ),
             )
-            android.util.Log.i("VoiceRuntime", "threadRealtimeStart succeeded, creating HandoffManager")
+            LLog.debug(TAG) { "Server realtime session started; creating handoff manager" }
             handoffManager = HandoffManager.create(resolvedThreadKey.serverId)
-        } catch (e: Exception) {
-            android.util.Log.e("VoiceRuntime", "startRealtimeSession failed", e)
+        } catch (error: Exception) {
+            LLog.e(TAG, "Voice session startup failed")
+            LLog.debug(TAG, error) { "Voice session startup failure details" }
             cleanup()
         }
     }
@@ -332,23 +334,24 @@ class VoiceRuntimeController {
     private suspend fun handleRealtimeUpdate(appModel: AppModel, update: AppStoreUpdateRecord) {
         when (update) {
             is AppStoreUpdateRecord.RealtimeStarted -> {
-                android.util.Log.i("VoiceRuntime", "RealtimeStarted!")
+                LLog.debug(TAG) { "Realtime session started" }
             }
 
             is AppStoreUpdateRecord.RealtimeSdp -> {
                 val threadId = update.notification.threadId
-                android.util.Log.i("VoiceRuntime", "RealtimeSdp received for thread=$threadId")
+                LLog.debug(TAG) { "Realtime SDP received for thread=$threadId" }
                 val active = _activeSession.value ?: return
                 if (active.threadKey.threadId != threadId || isStopRequested(active.threadKey)) return
                 val session = webRtcSession ?: run {
-                    android.util.Log.w("VoiceRuntime", "RealtimeSdp arrived with no local WebRTC session")
+                    LLog.w(TAG, "Realtime SDP received without a local WebRTC session")
                     return
                 }
                 try {
                     session.applyAnswer(update.notification.sdp)
-                    android.util.Log.i("VoiceRuntime", "Applied WebRTC answer SDP")
-                } catch (e: Exception) {
-                    android.util.Log.e("VoiceRuntime", "Failed to apply answer SDP", e)
+                    LLog.debug(TAG) { "Applied WebRTC answer SDP" }
+                } catch (error: Exception) {
+                    LLog.e(TAG, "Failed to apply WebRTC answer")
+                    LLog.debug(TAG, error) { "WebRTC answer application failure details" }
                     cleanupForThread(active.threadKey)
                 }
             }
@@ -362,10 +365,10 @@ class VoiceRuntimeController {
 
             is AppStoreUpdateRecord.VoiceSessionChanged -> {
                 val voiceSession = appModel.snapshot.value?.voiceSession
-                android.util.Log.i(
-                    "VoiceRuntime",
-                    "VoiceSessionChanged: active=${voiceSession?.activeThread != null} phase=${voiceSession?.phase} error=${voiceSession?.lastError}",
-                )
+                LLog.debug(TAG) {
+                    "Voice session changed: active=${voiceSession?.activeThread != null} " +
+                        "phase=${voiceSession?.phase} error=${voiceSession?.lastError}"
+                }
             }
 
             is AppStoreUpdateRecord.RealtimeHandoffRequested -> {
@@ -379,20 +382,20 @@ class VoiceRuntimeController {
 
             is AppStoreUpdateRecord.RealtimeError -> {
                 if (!matchesCurrentSession(update.key)) return
-                android.util.Log.e(
-                    "VoiceRuntime",
-                    "RealtimeError thread=${update.key.threadId} message=${update.notification.message}",
-                )
+                LLog.e(TAG, "Realtime voice session reported an error")
+                LLog.debug(TAG) {
+                    "Realtime error for thread=${update.key.threadId}: ${update.notification.message}"
+                }
                 if (!update.notification.message.contains("active response in progress", ignoreCase = true)) {
                     cleanupForThread(update.key)
                 }
             }
             is AppStoreUpdateRecord.RealtimeClosed -> {
                 if (!matchesCurrentSession(update.key)) return
-                android.util.Log.i(
-                    "VoiceRuntime",
-                    "RealtimeClosed thread=${update.key.threadId} reason=${update.notification.reason}",
-                )
+                LLog.debug(TAG) {
+                    "Realtime session closed for thread=${update.key.threadId} " +
+                        "reason=${update.notification.reason}"
+                }
                 cleanupForThread(update.key)
             }
             else -> {}
@@ -488,7 +491,8 @@ class VoiceRuntimeController {
             }
 
             is uniffi.codex_mobile_client.HandoffAction.Error -> {
-                android.util.Log.e("VoiceRuntime", "Handoff error: ${action.message}")
+                LLog.e(TAG, "Voice handoff failed")
+                LLog.debug(TAG) { "Voice handoff failure details: ${action.message}" }
             }
 
             else -> {}
@@ -614,8 +618,9 @@ class VoiceRuntimeController {
         sessionJob = null
         try {
             webRtcSession?.stop()
-        } catch (t: Throwable) {
-            android.util.Log.w("VoiceRuntime", "webRtcSession.stop failed: ${t.message}")
+        } catch (error: Throwable) {
+            LLog.w(TAG, "WebRTC session cleanup failed")
+            LLog.debug(TAG, error) { "WebRTC session cleanup failure details" }
         }
         webRtcSession = null
         handoffManager = null

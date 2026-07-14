@@ -106,9 +106,10 @@ enum SessionsDerivation {
         let sortedWorkspaceGroups = sortWorkspaceGroups(workspaceGroups, by: workspaceSortMode)
         let workspaceSections = workspaceSections(for: sortedWorkspaceGroups, sortMode: workspaceSortMode)
         let workspaceGroupIDs = sortedWorkspaceGroups.map(\.id)
-        let workspaceGroupIDByThreadKey = Dictionary(uniqueKeysWithValues: filteredThreads.map {
-            ($0.key, workspaceGroupID(for: $0))
-        })
+        let workspaceGroupIDByThreadKey = Dictionary(
+            filteredThreads.map { ($0.key, workspaceGroupID(for: $0)) },
+            uniquingKeysWith: { _, latest in latest }
+        )
 
         return SessionsDerivedData(
             allThreads: allThreads,
@@ -135,7 +136,10 @@ enum SessionsDerivation {
             return threads.sorted { $0.updatedAtDate > $1.updatedAtDate }
         }
 
-        let positions = Dictionary(uniqueKeysWithValues: frozenMostRecentOrder.enumerated().map { ($1, $0) })
+        let positions = Dictionary(
+            frozenMostRecentOrder.enumerated().map { ($1, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         return threads.sorted { lhs, rhs in
             let lhsPosition = positions[lhs.key]
             let rhsPosition = positions[rhs.key]
@@ -247,7 +251,10 @@ enum SessionsDerivation {
         for threads: [AppSessionSummary],
         parentByKey: [ThreadKey: AppSessionSummary]
     ) -> [SessionTreeNode] {
-        let threadsByKey = Dictionary(uniqueKeysWithValues: threads.map { ($0.key, $0) })
+        let threadsByKey = Dictionary(
+            threads.map { ($0.key, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         var childrenByParentKey: [ThreadKey: [AppSessionSummary]] = [:]
 
         for thread in threads {

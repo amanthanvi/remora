@@ -157,11 +157,13 @@ final class VoiceTranscriptionManager {
     private func transcribe(wav: Data, authMethod: AuthMode?, token: String) async throws -> String {
         let isChatGPT = authMethod == .chatgpt || authMethod == .chatgptAuthTokens
 
-        let url: URL
-        if isChatGPT {
-            url = URL(string: "https://chatgpt.com/backend-api/transcribe")!
-        } else {
-            url = URL(string: "https://api.openai.com/v1/audio/transcriptions")!
+        let endpoint = isChatGPT
+            ? "https://chatgpt.com/backend-api/transcribe"
+            : "https://api.openai.com/v1/audio/transcriptions"
+        guard let url = URL(string: endpoint) else {
+            throw NSError(domain: "Transcription", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "Transcription endpoint is invalid."
+            ])
         }
 
         let boundary = UUID().uuidString
@@ -171,17 +173,17 @@ final class VoiceTranscriptionManager {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.appendUTF8("--\(boundary)\r\n")
+        body.appendUTF8("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n")
+        body.appendUTF8("Content-Type: audio/wav\r\n\r\n")
         body.append(wav)
-        body.append("\r\n".data(using: .utf8)!)
+        body.appendUTF8("\r\n")
         if !isChatGPT {
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
-            body.append("\(Self.transcribeModel)\r\n".data(using: .utf8)!)
+            body.appendUTF8("--\(boundary)\r\n")
+            body.appendUTF8("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
+            body.appendUTF8("\(Self.transcribeModel)\r\n")
         }
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        body.appendUTF8("--\(boundary)--\r\n")
         request.httpBody = body
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -236,6 +238,10 @@ private final class AudioBufferCollector: @unchecked Sendable {
 }
 
 private extension Data {
+    mutating func appendUTF8(_ value: String) {
+        append(contentsOf: value.utf8)
+    }
+
     mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
         var le = value.littleEndian
         Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }

@@ -2331,8 +2331,8 @@ private struct ConversationInputBar: View {
                 params: AppListExperimentalFeaturesRequest(cursor: nil, limit: 200)
             )
             experimentalFeatures = features.sorted { lhs, rhs in
-                let left = (lhs.displayName?.isEmpty == false ? lhs.displayName! : lhs.name).lowercased()
-                let right = (rhs.displayName?.isEmpty == false ? rhs.displayName! : rhs.name).lowercased()
+                let left = (lhs.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? lhs.name).lowercased()
+                let right = (rhs.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? rhs.name).lowercased()
                 return left < right
             }
         } catch {

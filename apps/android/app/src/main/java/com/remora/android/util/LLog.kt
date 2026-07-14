@@ -2,6 +2,7 @@ package com.remora.android.util
 
 import android.content.Context
 import android.util.Log
+import com.remora.android.BuildConfig
 import com.remora.android.core.bridge.UniffiInit
 import org.json.JSONObject
 
@@ -23,6 +24,18 @@ object LLog {
 
     fun d(tag: String, message: String, fields: Map<String, Any?> = emptyMap(), payloadJson: String? = null) {
         Log.d(tag, render(message, fields, payloadJson))
+    }
+
+    inline fun debug(tag: String, message: () -> String) {
+        if (BuildConfig.DEBUG) {
+            Log.d(tag, message())
+        }
+    }
+
+    inline fun debug(tag: String, throwable: Throwable, message: () -> String) {
+        if (BuildConfig.DEBUG) {
+            Log.d(tag, message(), throwable)
+        }
     }
 
     fun i(tag: String, message: String, fields: Map<String, Any?> = emptyMap(), payloadJson: String? = null) {

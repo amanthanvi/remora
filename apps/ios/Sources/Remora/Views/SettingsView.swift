@@ -676,9 +676,9 @@ private struct SettingsServerConnectionEditor: View {
         let resolvedCodexPort = saved?.preferredCodexPort ?? saved?.port ?? (server.port == 0 ? nil : server.port)
         let resolvedSSHPort = saved?.sshPort ?? (resolvedMode == .ssh ? server.port : nil) ?? 22
 
-        _displayName = State(initialValue: name?.isEmpty == false ? name! : server.displayName)
+        _displayName = State(initialValue: name.flatMap { $0.isEmpty ? nil : $0 } ?? server.displayName)
         _connectionMode = State(initialValue: resolvedMode)
-        _host = State(initialValue: resolvedHost?.isEmpty == false ? resolvedHost! : server.host)
+        _host = State(initialValue: resolvedHost.flatMap { $0.isEmpty ? nil : $0 } ?? server.host)
         _codexPort = State(initialValue: resolvedCodexPort.map(String.init) ?? "8390")
         _websocketURL = State(initialValue: saved?.websocketURL ?? "")
         _sshPort = State(initialValue: String(resolvedSSHPort))

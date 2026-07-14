@@ -90,9 +90,9 @@ struct RealtimeVoiceScreen: View {
         let liveText = session.transcriptText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !liveText.isEmpty else { return entries }
 
-        let speaker = session.transcriptSpeaker?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? session.transcriptSpeaker!
-            : (session.phase == .speaking ? "Codex" : "You")
+        let trimmedSpeaker = session.transcriptSpeaker?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speaker = trimmedSpeaker.flatMap { $0.isEmpty ? nil : $0 }
+            ?? (session.phase == .speaking ? "Codex" : "You")
         let liveId = session.transcriptLiveMessageID ?? "live-\(speaker.lowercased())"
         let timestamp = entries.first(where: { $0.id == liveId })?.timestamp ?? Date()
         let entry = VoiceSessionTranscriptEntry(

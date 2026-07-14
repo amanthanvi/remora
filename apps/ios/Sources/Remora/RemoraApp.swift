@@ -844,7 +844,10 @@ private struct HomeNavigationView: View {
         .sheet(isPresented: $showProjectPicker) {
             ProjectPickerSheet(
                 projects: homeDashboardModel.projects,
-                serverNamesById: Dictionary(uniqueKeysWithValues: homeDashboardModel.connectedServers.map { ($0.id, $0.displayName) }),
+                serverNamesById: Dictionary(
+                    homeDashboardModel.connectedServers.map { ($0.id, $0.displayName) },
+                    uniquingKeysWith: { _, latest in latest }
+                ),
                 onSelect: { project in
                     homeDashboardModel.selectedServerId = project.serverId
                     homeDashboardModel.selectedProject = project

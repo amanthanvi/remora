@@ -153,9 +153,10 @@ struct HomeDashboardView: View {
         // paginated threads, loaded items and attached live listeners are now
         // separate states.
         let visible = visibleSessions
-        let byPinnedKey = Dictionary(uniqueKeysWithValues: visible.map {
-            (SavedThreadsStore.PinnedKey(threadKey: $0.key), $0)
-        })
+        let byPinnedKey = Dictionary(
+            visible.map { (SavedThreadsStore.PinnedKey(threadKey: $0.key), $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         let pinnedFirst = pinnedThreadKeys.compactMap { byPinnedKey[$0] }
         for session in pinnedFirst where !session.isResumed {
             let id = hydrationId(session.key)

@@ -40,6 +40,17 @@ final class ChatGPTOAuthTests: XCTestCase {
         XCTAssertThrowsError(try ChatGPTOAuth.validateCallbackURL(url))
     }
 
+    func testCallbackQueryItemsRejectDuplicateKeysInsteadOfTrapping() throws {
+        let url = try XCTUnwrap(URL(string: "http://localhost:1455/auth/callback?code=first&code=second&state=xyz"))
+        let components = try ChatGPTOAuth.validateCallbackURL(url)
+
+        XCTAssertThrowsError(try ChatGPTOAuth.callbackQueryItems(from: components)) { error in
+            guard case ChatGPTOAuthError.invalidCallbackURL = error else {
+                return XCTFail("Expected invalidCallbackURL, got \(error)")
+            }
+        }
+    }
+
     func testTransientKeychainAvailabilityDetectionMatchesRelevantStatuses() {
         XCTAssertTrue(ChatGPTOAuthError.keychain(errSecInteractionNotAllowed).isTransientKeychainAvailabilityFailure)
         XCTAssertTrue(ChatGPTOAuthError.keychain(errSecNotAvailable).isTransientKeychainAvailabilityFailure)

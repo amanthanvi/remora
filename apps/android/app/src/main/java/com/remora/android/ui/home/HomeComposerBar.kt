@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
@@ -26,13 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,11 +53,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,6 +70,7 @@ import com.remora.android.ui.RemoraTextStyle
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.scaled
+import com.remora.android.ui.conversation.ComposerTextInputChrome
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.AppProject
@@ -360,57 +356,17 @@ fun HomeComposerBar(
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 36.dp, max = 120.dp)
-                    .background(RemoraTheme.codeBackground, RoundedCornerShape(18.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            ComposerTextInputChrome(
+                value = textFieldValue,
+                onValueChange = { textFieldValue = it },
+                showExpand = (text.contains('\n') || text.length > 60) &&
+                    !isRecording && !isTranscribing,
+                onExpand = { showExpanded = true },
+                modifier = Modifier.weight(1f),
+                textFieldModifier = Modifier
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { isFocused = it.isFocused },
             ) {
-                Box(modifier = Modifier.weight(1f)) {
-                    if (text.isEmpty()) {
-                        Text(
-                            text = "Message\u2026",
-                            color = RemoraTheme.textMuted,
-                            fontSize = RemoraTextStyle.body.scaled,
-                        )
-                    }
-                    BasicTextField(
-                        value = textFieldValue,
-                        onValueChange = { textFieldValue = it },
-                        textStyle = TextStyle(
-                            color = RemoraTheme.textPrimary,
-                            fontSize = RemoraTextStyle.body.scaled,
-                            fontFamily = RemoraTheme.monoFont,
-                        ),
-                        cursorBrush = SolidColor(RemoraTheme.accent),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(end = 24.dp)
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { isFocused = it.isFocused },
-                    )
-
-                    val shouldShowExpand = (text.contains('\n') || text.length > 60) &&
-                        !isRecording && !isTranscribing
-                    if (shouldShowExpand) {
-                        IconButton(
-                            onClick = { showExpanded = true },
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(20.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.OpenInFull,
-                                contentDescription = "Expand composer",
-                                tint = RemoraTheme.textSecondary,
-                                modifier = Modifier.size(12.dp),
-                            )
-                        }
-                    }
-                }
-
                 when {
                     isRecording -> {
                         Spacer(Modifier.width(8.dp))

@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import Remora
 
@@ -108,6 +109,35 @@ final class HomeDashboardSupportTests: XCTestCase {
         await flushMainQueue()
 
         XCTAssertEqual(model.connectedServers.map(\.id), ["server-a"])
+    }
+
+    func testPiPHostViewProvidesItsTypedBackingLayer() {
+        let view = PiPHostView(frame: .zero)
+
+        XCTAssertTrue(view.layer is AVSampleBufferDisplayLayer)
+        XCTAssertTrue(view.displayLayer === view.layer)
+    }
+
+    func testSessionsDerivationToleratesDuplicateThreadKeys() throws {
+        let snapshot = makeSnapshot(
+            servers: [makeServerSnapshot(id: "server-a", name: "Server A")],
+            threads: [makeThreadSnapshot(serverId: "server-a", threadId: "thread-1", updatedAt: 20)],
+            activeThread: nil
+        )
+        let session = try XCTUnwrap(snapshot.sessionSummaries.first)
+
+        let result = SessionsDerivation.build(
+            sessions: [session, session],
+            selectedServerFilterId: nil,
+            showOnlyForks: false,
+            selectedRuntimeKind: nil,
+            workspaceSortMode: .mostRecent,
+            searchQuery: "",
+            frozenMostRecentOrder: [session.key, session.key]
+        )
+
+        XCTAssertEqual(result.workspaceGroupIDByThreadKey.count, 1)
+        XCTAssertNotNil(result.workspaceGroupIDByThreadKey[session.key])
     }
 
     func testSortedConnectedServersDeduplicatesEquivalentHostsAndPrefersActiveConnection() {
@@ -427,6 +457,7 @@ final class HomeDashboardSupportTests: XCTestCase {
     }
 
     private func flushMainQueue() async {
+        try? await Task.sleep(nanoseconds: 160_000_000)
         await Task.yield()
         await Task.yield()
     }

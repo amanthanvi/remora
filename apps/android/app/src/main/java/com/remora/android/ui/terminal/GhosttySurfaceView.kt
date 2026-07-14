@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.view.Choreographer
@@ -305,6 +306,21 @@ private class GhosttySurfaceHolder {
     var view: GhosttyAndroidSurfaceView? = null
 }
 
+internal class GhosttySnapshotRefreshGate {
+    var isDirty: Boolean = true
+        private set
+
+    fun markDirty() {
+        isDirty = true
+    }
+
+    fun consumeCapture(): Boolean {
+        if (!isDirty) return false
+        isDirty = false
+        return true
+    }
+}
+
 private class GhosttyAndroidSurfaceView(
     context: Context,
     private val rendererStatus: GhosttyRendererStatus,
@@ -313,7 +329,7 @@ private class GhosttyAndroidSurfaceView(
     private val onRendererUnavailable: () -> Unit,
     inputCallback: GhosttyInputCallback?,
     var onFontSizeChanged: ((Float) -> Unit)? = null,
-) : SurfaceView(context), SurfaceHolder.Callback {
+) : SurfaceView(context), SurfaceHolder.Callback, ActiveTerminalRegistry.SelectionSource {
     private val pendingBytes = ArrayDeque<ByteArray>()
     private val outputLock = Any()
     private val outputBuffer = ByteArrayOutputStream()
@@ -327,6 +343,7 @@ private class GhosttyAndroidSurfaceView(
     private var rendererUnavailableReported = false
     private var didSetConfigDir = false
     private var pendingConfig: TerminalConfig? = null
+    private val surfaceSnapshotGate = GhosttySnapshotRefreshGate()
     @Volatile
     private var outputFlushScheduled = false
 
@@ -372,6 +389,10 @@ private class GhosttyAndroidSurfaceView(
 
     private val outputFlushRunnable = Runnable {
         flushTerminalBytesOnViewThread()
+    }
+
+    private val viewportRefreshRunnable = Runnable {
+        refreshRendererSnapshotIfNeeded()
     }
 
     private val scaleGestureDetector = ScaleGestureDetector(
@@ -420,6 +441,7 @@ private class GhosttyAndroidSurfaceView(
 
             override fun onLongPress(e: MotionEvent) {
                 val renderer = terminalRenderer ?: return
+                refreshRendererSnapshotIfNeeded()
                 val pos = renderer.hitTest(e.x * scale, e.y * scale) ?: return
                 val initial = renderer.wordRangeAt(pos)
                     ?: TerminalCellRange(pos, pos, false)
@@ -436,7 +458,7 @@ private class GhosttyAndroidSurfaceView(
                     clearSelection()
                     return true
                 }
-                renderer.updateViewportLinksFromSurface()
+                refreshRendererSnapshotIfNeeded()
                 val link = renderer.linkAtPoint(e.x * scale, e.y * scale)
                 if (link != null) {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(link.url))
@@ -576,6 +598,8 @@ private class GhosttyAndroidSurfaceView(
         widthPx = width.coerceAtLeast(1)
         heightPx = height.coerceAtLeast(1)
         rendererSurface?.resize(widthPx, heightPx, scale) ?: createRendererSurface(holder)
+        refreshRendererMetrics()
+        surfaceSnapshotGate.markDirty()
         scheduleFrame()
         onMetricsChanged?.invoke(cellMetrics())
     }
@@ -583,6 +607,7 @@ private class GhosttyAndroidSurfaceView(
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stopFrameLoop()
         removeCallbacks(outputFlushRunnable)
+        removeCallbacks(viewportRefreshRunnable)
         synchronized(outputLock) {
             outputBuffer.reset()
             outputFlushScheduled = false
@@ -627,7 +652,9 @@ private class GhosttyAndroidSurfaceView(
             // Tee bytes through the Rust OSC parser + bell detector before
             // writing to Ghostty, so bell events fire and OSC8 cwd updates.
             terminalRenderer?.feedOutput(bytes)
+            invalidateSelectionSnapshot()
             activeRenderer.write(bytes)
+            markSurfaceSnapshotDirtyAndScheduleRefresh()
             return
         }
 
@@ -661,14 +688,19 @@ private class GhosttyAndroidSurfaceView(
             surface = createdRenderer,
             onRequestRedraw = { scheduleFrame() },
             onPasteBytes = { bytes -> inputCallback?.onInput(bytes) },
+            onSurfaceMutation = {
+                refreshRendererMetrics()
+                surfaceSnapshotGate.markDirty()
+            },
         )
+        val renderer = TerminalRenderer(backend = bridge)
         bridge.onSelectionRangeChanged = { range ->
             onSelectionRangeChanged?.invoke(range)
         }
         backendBridge = bridge
-        val renderer = TerminalRenderer(backend = bridge)
         terminalRenderer = renderer
-        ActiveTerminalRegistry.register(renderer)
+        refreshRendererMetrics()
+        ActiveTerminalRegistry.register(renderer, this)
         val bellListener = object : TerminalBellListener {
             override fun onBell() {
                 post { fireBellHaptic() }
@@ -677,10 +709,16 @@ private class GhosttyAndroidSurfaceView(
         renderer.subscribeBell(bellListener)
         bellListenerRef = bellListener
 
+        var wrotePendingOutput = false
         while (pendingBytes.isNotEmpty()) {
             val bytes = pendingBytes.removeFirst()
             renderer.feedOutput(bytes)
+            invalidateSelectionSnapshot()
             createdRenderer.write(bytes)
+            wrotePendingOutput = true
+        }
+        if (wrotePendingOutput) {
+            markSurfaceSnapshotDirtyAndScheduleRefresh()
         }
         pendingConfig?.let { config ->
             pendingConfig = null
@@ -719,7 +757,10 @@ private class GhosttyAndroidSurfaceView(
         onMetricsChanged?.invoke(cellMetrics())
     }
 
-    fun cellMetrics(): TerminalCellMetrics? = terminalRenderer?.cellMetrics()
+    fun cellMetrics(): TerminalCellMetrics? {
+        refreshRendererMetrics()
+        return terminalRenderer?.cellMetrics()
+    }
 
     fun currentSelectionRange(): TerminalCellRange? = backendBridge?.currentSelectionRange()
 
@@ -728,11 +769,13 @@ private class GhosttyAndroidSurfaceView(
     }
 
     fun selectAll() {
+        refreshRendererMetrics()
         terminalRenderer?.selectionAll()
     }
 
     fun copySelectionToClipboard() {
         val renderer = terminalRenderer ?: return
+        refreshSelectionSnapshot()
         val text = renderer.readSelection().orEmpty()
         if (text.isNotEmpty()) {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
@@ -762,6 +805,55 @@ private class GhosttyAndroidSurfaceView(
         val dir = File(context.cacheDir, "remora/terminal")
         renderer.setConfigDir(dir.absolutePath)
         didSetConfigDir = true
+    }
+
+    private fun refreshRendererMetrics() {
+        val renderer = terminalRenderer ?: return
+        val bridge = backendBridge ?: return
+        renderer.updateSurfaceMetrics(bridge.refreshMetricsSnapshot())
+    }
+
+    private fun refreshRendererSnapshotIfNeeded() {
+        val renderer = terminalRenderer ?: return
+        val bridge = backendBridge ?: return
+        if (!surfaceSnapshotGate.consumeCapture()) return
+        val snapshot = bridge.captureSurfaceSnapshot()
+        renderer.updateSurfaceSnapshot(snapshot.metrics, 0u, snapshot.rows)
+    }
+
+    private fun markSurfaceSnapshotDirtyAndScheduleRefresh() {
+        surfaceSnapshotGate.markDirty()
+        removeCallbacks(viewportRefreshRunnable)
+        postDelayed(viewportRefreshRunnable, 200L)
+    }
+
+    private fun refreshSelectionSnapshot() {
+        val renderer = terminalRenderer ?: return
+        val bridge = backendBridge ?: return
+        bridge.refreshSelectionSnapshot()
+        renderer.updateSelectionSnapshot(bridge.currentSelectionText())
+    }
+
+    private fun invalidateSelectionSnapshot() {
+        backendBridge?.invalidateSelectionSnapshot()
+        terminalRenderer?.updateSelectionSnapshot(null)
+    }
+
+    override fun readFreshSelection(onResult: (String?) -> Unit) {
+        val readOnViewThread = {
+            val renderer = terminalRenderer
+            if (renderer == null) {
+                onResult(null)
+            } else {
+                refreshSelectionSnapshot()
+                onResult(renderer.readSelection()?.takeIf { it.isNotEmpty() })
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            readOnViewThread()
+        } else {
+            post(readOnViewThread)
+        }
     }
 
     internal fun exposedRendererSurface(): GhosttyRendererBridge.GhosttyRendererSurface? =
@@ -816,21 +908,6 @@ private class GhosttyAndroidSurfaceView(
             ?: return
         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
-}
-
-/// Helper extension that snapshots the current viewport text and feeds
-/// it to the Rust renderer's URL detector. Called once just before a
-/// single-tap dispatches so OSC8 + plain-text URL detection is fresh.
-private fun TerminalRenderer.updateViewportLinksFromSurface() {
-    // The Rust renderer is fed PTY bytes via `feedOutput` so OSC8 anchors
-    // accumulate as the shell emits them. The plain-text URL detector
-    // needs an explicit viewport snapshot — but we don't have one
-    // immediately available from the Android JNI surface here (the
-    // helper exists for iOS where the bridge exposes `visibleText`).
-    //
-    // Skipping this on Android is fine for OSC8 hyperlinks (the parser
-    // already tracked them); plain-text URL detection lights up once the
-    // bridge wires a `read_text(viewport)` helper at the Kotlin layer.
 }
 
 /**

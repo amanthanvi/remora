@@ -21,10 +21,6 @@ struct TailscaleAvailability: Equatable, Sendable {
     var shouldSurfaceDiscoveryNotice: Bool {
         appInstalled || likelyActiveTunnel
     }
-
-    var logDescription: String {
-        "installed=\(appInstalled) likelyActive=\(likelyActiveTunnel)"
-    }
 }
 
 enum TailscalePeerParseError: Error, Equatable {
@@ -33,46 +29,11 @@ enum TailscalePeerParseError: Error, Equatable {
 }
 
 private struct TailscaleInterfaceSnapshot: Sendable {
-    struct InterfaceRecord: Sendable {
-        let name: String
-        let family: String
-        let address: String
-        let flags: [String]
-        let isTailscaleAddress: Bool
-    }
-
-    let localWiFiAddress: String?
-    let localWiFiInterface: String?
-    let activeTunnelInterfaces: [String]
-    let tailscaleInterfaces: [String]
-    let records: [InterfaceRecord]
+    let activeTunnelCount: Int
+    let tailscaleInterfaceCount: Int
 
     var hasLikelyActiveTailscaleTunnel: Bool {
-        !activeTunnelInterfaces.isEmpty && !tailscaleInterfaces.isEmpty
-    }
-
-    var logDescription: String {
-        let wifiSummary: String
-        if let localWiFiInterface, let localWiFiAddress {
-            wifiSummary = "\(localWiFiInterface)=\(localWiFiAddress)"
-        } else {
-            wifiSummary = "none"
-        }
-
-        let tunnelSummary = activeTunnelInterfaces.isEmpty
-            ? "none"
-            : activeTunnelInterfaces.joined(separator: ",")
-        let tailscaleSummary = tailscaleInterfaces.isEmpty
-            ? "none"
-            : tailscaleInterfaces.joined(separator: ",")
-        let recordsSummary = records.isEmpty
-            ? "none"
-            : records.map { record in
-                let flags = record.flags.joined(separator: "+")
-                return "\(record.name):\(record.family):\(record.address):\(flags)\(record.isTailscaleAddress ? ":tailscale" : "")"
-            }.joined(separator: " | ")
-
-        return "wifi=\(wifiSummary) likelyActive=\(hasLikelyActiveTailscaleTunnel) utun=\(tunnelSummary) tailscale=\(tailscaleSummary) records=\(recordsSummary)"
+        activeTunnelCount > 0 && tailscaleInterfaceCount > 0
     }
 }
 
@@ -522,11 +483,12 @@ final class NetworkDiscovery {
             appInstalled: appInstalled,
             likelyActiveTunnel: interfaceSnapshot.hasLikelyActiveTailscaleTunnel
         )
-        NSLog(
-            "[tailscale] availability=%@ interface snapshot before request: %@",
-            availability.logDescription,
-            interfaceSnapshot.logDescription
-        )
+        LLog.debug("discovery", "tailscale probe started", fields: [
+            "app_installed": appInstalled,
+            "likely_active_tunnel": availability.likelyActiveTunnel,
+            "active_tunnel_count": interfaceSnapshot.activeTunnelCount,
+            "tailscale_interface_count": interfaceSnapshot.tailscaleInterfaceCount,
+        ])
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -543,22 +505,43 @@ final class NetworkDiscovery {
         do {
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse {
-                let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
-                NSLog("[tailscale] response status=%d contentType=%@", http.statusCode, contentType)
+                LLog.debug("discovery", "tailscale probe response received", fields: [
+                    "status_code": http.statusCode,
+                ])
             }
             let peers = try parseTailscalePeerCandidates(data: data, response: response)
             await diagnostics.markSuccess()
-            NSLog("[tailscale] got %d peers", peers.count)
+            LLog.debug("discovery", "tailscale probe completed", fields: ["peer_count": peers.count])
         } catch {
-            let responsePreview = (error as NSError).localizedDescription
-            if let notice = Self.tailscaleDiscoveryNotice(for: error, availability: availability) {
+            let notice = Self.tailscaleDiscoveryNotice(for: error, availability: availability)
+            if let notice {
                 await diagnostics.record(notice)
+                LLog.warn("discovery", "tailscale probe failed", fields: [
+                    "failure_kind": tailscaleDiscoveryFailureKind(for: error),
+                    "notice_surfaced": true,
+                ])
             } else {
-                NSLog("[tailscale] suppressing notice because Tailscale does not look installed or active")
+                LLog.debug("discovery", "tailscale probe failure suppressed", fields: [
+                    "failure_kind": tailscaleDiscoveryFailureKind(for: error),
+                    "notice_surfaced": false,
+                ])
             }
-            NSLog("[tailscale] request error: %@", responsePreview)
-            NSLog("[tailscale] interface snapshot after error: %@", tailscaleInterfaceSnapshot().logDescription)
         }
+    }
+
+    nonisolated static func tailscaleDiscoveryFailureKind(for error: Error) -> String {
+        if let parseError = error as? TailscalePeerParseError {
+            switch parseError {
+            case .unsupportedSurface:
+                return "unsupported_surface"
+            case .invalidPayload:
+                return "invalid_payload"
+            }
+        }
+        if let urlError = error as? URLError {
+            return urlError.code == .timedOut ? "timeout" : "transport"
+        }
+        return "unexpected"
     }
 
     @MainActor
@@ -614,16 +597,6 @@ final class NetworkDiscovery {
         value.lowercased().hasPrefix("fd7a:115c:a1e0:")
     }
 
-    nonisolated private static func interfaceFlagDescriptions(_ flags: Int32) -> [String] {
-        var out: [String] = []
-        if flags & IFF_UP != 0 { out.append("up") }
-        if flags & IFF_RUNNING != 0 { out.append("running") }
-        if flags & IFF_LOOPBACK != 0 { out.append("loopback") }
-        if flags & IFF_POINTOPOINT != 0 { out.append("ptp") }
-        if flags & IFF_MULTICAST != 0 { out.append("multicast") }
-        return out
-    }
-
     nonisolated private static func ipAddress(fromSockaddr pointer: UnsafePointer<sockaddr>) -> (family: String, address: String)? {
         let family = pointer.pointee.sa_family
         switch family {
@@ -652,20 +625,14 @@ final class NetworkDiscovery {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
             return TailscaleInterfaceSnapshot(
-                localWiFiAddress: nil,
-                localWiFiInterface: nil,
-                activeTunnelInterfaces: [],
-                tailscaleInterfaces: [],
-                records: []
+                activeTunnelCount: 0,
+                tailscaleInterfaceCount: 0
             )
         }
         defer { freeifaddrs(ifaddr) }
 
-        var localWiFiAddress: String?
-        var localWiFiInterface: String?
         var activeTunnelInterfaces = Set<String>()
         var tailscaleInterfaces = Set<String>()
-        var records: [TailscaleInterfaceSnapshot.InterfaceRecord] = []
 
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
             guard let sockaddr = ptr.pointee.ifa_addr else { continue }
@@ -673,9 +640,7 @@ final class NetworkDiscovery {
 
             let name = String(cString: ptr.pointee.ifa_name)
             let flags = Int32(ptr.pointee.ifa_flags)
-            let flagDescriptions = interfaceFlagDescriptions(flags)
             let isUp = flags & IFF_UP != 0
-            let isLoopback = flags & IFF_LOOPBACK != 0
             let isTunnel = name.hasPrefix("utun")
             let hasTailscaleAddress = isTailscaleIPv4Address(entry.address) || isTailscaleIPv6Address(entry.address)
             let isLikelyTailscaleInterface = isTunnel && hasTailscaleAddress
@@ -686,40 +651,11 @@ final class NetworkDiscovery {
             if isLikelyTailscaleInterface {
                 tailscaleInterfaces.insert(name)
             }
-            if isUp && !isLoopback && localWiFiAddress == nil && entry.family == "ipv4" && name.hasPrefix("en") {
-                localWiFiInterface = name
-                localWiFiAddress = entry.address
-            }
-
-            if isTunnel || isLikelyTailscaleInterface || (isUp && !isLoopback) {
-                records.append(
-                    TailscaleInterfaceSnapshot.InterfaceRecord(
-                        name: name,
-                        family: entry.family,
-                        address: entry.address,
-                        flags: flagDescriptions,
-                        isTailscaleAddress: isLikelyTailscaleInterface
-                    )
-                )
-            }
-        }
-
-        records.sort { lhs, rhs in
-            if lhs.name != rhs.name {
-                return lhs.name < rhs.name
-            }
-            if lhs.family != rhs.family {
-                return lhs.family < rhs.family
-            }
-            return lhs.address < rhs.address
         }
 
         return TailscaleInterfaceSnapshot(
-            localWiFiAddress: localWiFiAddress,
-            localWiFiInterface: localWiFiInterface,
-            activeTunnelInterfaces: activeTunnelInterfaces.sorted(),
-            tailscaleInterfaces: tailscaleInterfaces.sorted(),
-            records: records
+            activeTunnelCount: activeTunnelInterfaces.count,
+            tailscaleInterfaceCount: tailscaleInterfaces.count
         )
     }
 

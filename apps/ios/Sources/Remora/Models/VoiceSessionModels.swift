@@ -1,8 +1,8 @@
 import Foundation
 
 // MIGRATION: The handoff state tracking (e.g. `handoffRemoteThreadKey`) in
-// `VoiceSessionState` is now managed by `RustVoiceHandoffManager` in
-// RustVoiceBridge.swift, mirroring the Rust `VoiceHandoffManager`. The UI
+// `VoiceSessionState` is now managed by `RustHandoffManager` in
+// RustVoiceHandoff.swift, mirroring the Rust `HandoffManager`. The UI
 // display types (`VoiceSessionPhase`, `VoiceSessionAudioRoute`, display
 // helpers) remain iOS-specific. See Task #24.
 

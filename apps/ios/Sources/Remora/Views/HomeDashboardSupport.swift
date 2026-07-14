@@ -193,7 +193,7 @@ enum HomeDashboardSupport {
         savedServers: [SavedServer] = [],
         activeServerId: String?
     ) -> [HomeDashboardServer] {
-        let liveServers = servers
+        let projectedLiveServers = servers
             .filter { $0.health != .disconnected || $0.connectionProgress != nil }
             .map { server in
                 HomeDashboardServer(
@@ -210,6 +210,21 @@ enum HomeDashboardSupport {
                     agentRuntimes: server.agentRuntimes
                 )
             }
+
+        var liveServerByKey: [String: HomeDashboardServer] = [:]
+        var liveServerKeys: [String] = []
+        for server in projectedLiveServers {
+            let key = server.deduplicationKey
+            guard let existing = liveServerByKey[key] else {
+                liveServerByKey[key] = server
+                liveServerKeys.append(key)
+                continue
+            }
+            if existing.id != activeServerId, server.id == activeServerId {
+                liveServerByKey[key] = server
+            }
+        }
+        let liveServers = liveServerKeys.compactMap { liveServerByKey[$0] }
 
         var seenServerIds = Set(liveServers.map(\.id))
         var seenServerKeys = Set(liveServers.map(\.deduplicationKey))

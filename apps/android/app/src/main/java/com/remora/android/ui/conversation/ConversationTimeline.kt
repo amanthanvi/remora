@@ -502,7 +502,7 @@ private fun AssistantRenderBlocks(
                     if (isMathLanguage(block.language)) {
                         MarkdownText(text = mathMarkdownBlock(block.code))
                     } else {
-                        CodeBlockSegment(
+                        ConversationCodeBlock(
                             language = block.language,
                             code = block.code,
                         )
@@ -2162,48 +2162,6 @@ private fun workspaceTitle(path: String): String {
         .trimEnd('/')
         .substringAfterLast('/')
         .ifBlank { path }
-}
-
-@Composable
-private fun CodeBlockSegment(
-    language: String?,
-    code: String,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        language?.takeIf { it.isNotBlank() }?.let {
-            Text(
-                text = it.uppercase(),
-                color = RemoraTheme.textSecondary,
-                fontSize = RemoraTextStyle.caption2.scaled,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(RemoraTheme.codeBackground, RoundedCornerShape(8.dp))
-                .padding(10.dp),
-        ) {
-            if (isDiffLanguage(language)) {
-                SyntaxHighlightedDiffBlock(
-                    diff = code,
-                    titleHint = language,
-                    fontSize = RemoraTextStyle.caption.sp,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            } else {
-                SelectableConversationText {
-                    Text(
-                        text = code,
-                        color = RemoraTheme.textBody,
-                        fontFamily = RemoraTheme.monoFont,
-                        fontSize = RemoraTextStyle.body.scaled,
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    )
-                }
-            }
-        }
-    }
 }
 
 @Composable

@@ -74,7 +74,10 @@ final class TipJarStore {
         do {
             let productIDs = tiers.map(\.id)
             let fetched = try await Product.products(for: productIDs)
-            let byID = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+            let byID = Dictionary(
+                fetched.map { ($0.id, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
             for i in tiers.indices {
                 if let product = byID[tiers[i].id] {
                     tiers[i] = TipTier(

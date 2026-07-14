@@ -45,6 +45,22 @@ final class NetworkDiscoveryTests: XCTestCase {
         XCTAssertNil(notice)
     }
 
+    func testTailscaleDiscoveryFailureKindDoesNotExposeLocalizedErrorText() {
+        let sensitiveError = NSError(
+            domain: "private.example",
+            code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "failed to reach secret-host.example"]
+        )
+
+        XCTAssertEqual(NetworkDiscovery.tailscaleDiscoveryFailureKind(for: URLError(.timedOut)), "timeout")
+        XCTAssertEqual(NetworkDiscovery.tailscaleDiscoveryFailureKind(for: URLError(.cannotConnectToHost)), "transport")
+        XCTAssertEqual(
+            NetworkDiscovery.tailscaleDiscoveryFailureKind(for: TailscalePeerParseError.unsupportedSurface),
+            "unsupported_surface"
+        )
+        XCTAssertEqual(NetworkDiscovery.tailscaleDiscoveryFailureKind(for: sensitiveError), "unexpected")
+    }
+
     func testParseTailscalePeerCandidatesFiltersOfflineAndNonIPv4Peers() throws {
         let data = """
         {

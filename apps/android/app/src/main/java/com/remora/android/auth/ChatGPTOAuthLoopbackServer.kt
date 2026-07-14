@@ -3,107 +3,187 @@ package com.remora.android.auth
 import android.net.Uri
 import com.remora.android.state.ChatGPTOAuthException
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketException
-import java.net.SocketTimeoutException
 import java.net.URI
+import java.nio.channels.CancelledKeyException
+import java.nio.channels.ClosedSelectorException
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.ServerSocketChannel
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 
 internal class ChatGPTOAuthLoopbackServer private constructor(
-    private val redirectUri: Uri,
-    private val serverSockets: List<ServerSocket>,
-    private val appReturnUri: Uri,
+    private val redirectUri: String,
+    private val serverChannels: List<ServerSocketChannel>,
+    private val selector: Selector,
+    private val appReturnUri: String,
+    private val clientReadTimeoutMs: Int,
 ) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+    private val activeClient = AtomicReference<Socket?>(null)
+
     fun awaitCallback(): Uri {
-        while (true) {
-            for (serverSocket in serverSockets) {
-                val socket = try {
-                    serverSocket.accept()
-                } catch (_: SocketTimeoutException) {
-                    null
-                } catch (error: SocketException) {
-                    if (serverSockets.all { it.isClosed }) {
-                        throw CancellationException("ChatGPT login loopback server closed.", error)
-                    }
-                    null
-                }
-                if (socket != null) {
-                    return handleCallbackSocket(socket)
-                }
-            }
-        }
+        return Uri.parse(awaitCallbackUriString())
     }
 
-    private fun handleCallbackSocket(socket: Socket): Uri {
+    internal fun awaitCallbackUriString(): String {
+        while (!closed.get()) {
+            try {
+                selector.select()
+                if (closed.get()) throw closedCancellation()
+                val selectedKeys = selector.selectedKeys().iterator()
+                while (selectedKeys.hasNext()) {
+                    val key = selectedKeys.next()
+                    selectedKeys.remove()
+                    if (!key.isValid || !key.isAcceptable) continue
+
+                    val client = (key.channel() as ServerSocketChannel).accept()?.socket() ?: continue
+                    activeClient.set(client)
+                    if (closed.get()) {
+                        closeActiveClient(client)
+                        throw closedCancellation()
+                    }
+                    try {
+                        client.soTimeout = clientReadTimeoutMs
+                        return handleCallbackSocket(client)
+                    } catch (_: ChatGPTOAuthException) {
+                        continue
+                    } catch (_: IllegalArgumentException) {
+                        continue
+                    } catch (error: IOException) {
+                        if (closed.get()) throw closedCancellation(error)
+                        continue
+                    } finally {
+                        activeClient.compareAndSet(client, null)
+                    }
+                }
+            } catch (error: ClosedSelectorException) {
+                throw closedCancellation(error)
+            } catch (error: CancelledKeyException) {
+                if (closed.get()) throw closedCancellation(error)
+            } catch (error: IOException) {
+                if (closed.get()) throw closedCancellation(error)
+            }
+        }
+        throw closedCancellation()
+    }
+
+    private fun handleCallbackSocket(socket: Socket): String {
         socket.use { client ->
             val requestTarget = readRequestTarget(client)
                 ?: throw ChatGPTOAuthException("ChatGPT login callback was malformed.")
-            val callbackUri = callbackUriForRequest(redirectUri, requestTarget)
+            val callbackUri = callbackUriStringForRequest(redirectUri, requestTarget)
             writeHtmlResponse(
                 client = client,
                 statusLine = "HTTP/1.1 200 OK",
-                body = successHtml(appReturnUri.toString()),
+                body = successHtml(appReturnUri),
             )
             return callbackUri
         }
     }
 
     override fun close() {
-        serverSockets.forEach { socket ->
-            runCatching { socket.close() }
+        if (!closed.compareAndSet(false, true)) return
+        selector.wakeup()
+        activeClient.getAndSet(null)?.let(::closeActiveClient)
+        serverChannels.forEach { channel ->
+            runCatching { channel.close() }
+        }
+        runCatching { selector.close() }
+    }
+
+    private fun closeActiveClient(client: Socket) {
+        runCatching { client.close() }
+    }
+
+    internal fun hasActiveClientForTest(): Boolean = activeClient.get() != null
+
+    private fun closedCancellation(cause: Throwable? = null): CancellationException {
+        return CancellationException("ChatGPT login loopback server closed.").also { cancellation ->
+            if (cause != null) cancellation.initCause(cause)
         }
     }
 
     companion object {
-        private const val ACCEPT_POLL_TIMEOUT_MS = 250
+        private const val CLIENT_READ_TIMEOUT_MS = 5_000
 
         fun create(
             redirectUri: String,
             appReturnUri: Uri,
         ): ChatGPTOAuthLoopbackServer {
-            val parsedRedirect = Uri.parse(redirectUri)
+            return create(
+                redirectUri = redirectUri,
+                appReturnUri = appReturnUri.toString(),
+                clientReadTimeoutMs = CLIENT_READ_TIMEOUT_MS,
+            )
+        }
+
+        internal fun createForTest(
+            redirectUri: String,
+            appReturnUri: String,
+            clientReadTimeoutMs: Int = CLIENT_READ_TIMEOUT_MS,
+        ): ChatGPTOAuthLoopbackServer {
+            return create(redirectUri, appReturnUri, clientReadTimeoutMs)
+        }
+
+        private fun create(
+            redirectUri: String,
+            appReturnUri: String,
+            clientReadTimeoutMs: Int,
+        ): ChatGPTOAuthLoopbackServer {
+            val parsedRedirect = try {
+                URI.create(redirectUri)
+            } catch (_: IllegalArgumentException) {
+                throw ChatGPTOAuthException("ChatGPT login redirect URI is malformed.")
+            }
             val host = parsedRedirect.host?.takeIf { it.isNotBlank() }
                 ?: throw ChatGPTOAuthException("ChatGPT login redirect URI is missing a host.")
             val port = parsedRedirect.port.takeIf { it > 0 }
                 ?: throw ChatGPTOAuthException("ChatGPT login redirect URI is missing a port.")
 
-            val sockets = mutableListOf<ServerSocket>()
+            val selector = Selector.open()
+            val channels = mutableListOf<ServerSocketChannel>()
             val errors = mutableListOf<String>()
             for (bindHost in bindHostsForRedirectHost(host)) {
-                val socket = ServerSocket().apply {
-                    reuseAddress = true
-                    soTimeout = ACCEPT_POLL_TIMEOUT_MS
-                }
+                val channel = ServerSocketChannel.open()
                 try {
-                    socket.bind(
+                    channel.configureBlocking(false)
+                    channel.socket().reuseAddress = true
+                    channel.bind(
                         InetSocketAddress(
                             InetAddress.getByName(bindHost),
                             port,
                         ),
                         1,
                     )
-                    sockets += socket
+                    channel.register(selector, SelectionKey.OP_ACCEPT)
+                    channels += channel
                 } catch (error: Exception) {
-                    runCatching { socket.close() }
+                    runCatching { channel.close() }
                     errors += "$bindHost: ${error.localizedMessage ?: error.message ?: error::class.java.simpleName}"
                 }
             }
 
-            if (sockets.isEmpty()) {
+            if (channels.isEmpty()) {
+                runCatching { selector.close() }
                 throw ChatGPTOAuthException(
                     "ChatGPT login could not bind a localhost callback server. ${errors.joinToString("; ")}",
                 )
             }
 
             return ChatGPTOAuthLoopbackServer(
-                redirectUri = parsedRedirect,
-                serverSockets = sockets,
+                redirectUri = redirectUri,
+                serverChannels = channels,
+                selector = selector,
                 appReturnUri = appReturnUri,
+                clientReadTimeoutMs = clientReadTimeoutMs,
             )
         }
 

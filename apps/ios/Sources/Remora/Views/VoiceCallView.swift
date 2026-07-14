@@ -657,9 +657,9 @@ private struct VoiceTranscriptEntry: Identifiable, Equatable {
     static func live(from session: VoiceSessionState) -> VoiceTranscriptEntry? {
         let text = session.transcriptText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else { return nil }
-        let speaker = session.transcriptSpeaker?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? session.transcriptSpeaker!
-            : (session.phase == .speaking ? "Codex" : "You")
+        let trimmedSpeaker = session.transcriptSpeaker?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speaker = trimmedSpeaker.flatMap { $0.isEmpty ? nil : $0 }
+            ?? (session.phase == .speaking ? "Codex" : "You")
         let kind: VoiceTranscriptEntryKind = speaker == "Codex" ? .liveAssistant : .liveUser
         let title = speaker == "Codex" ? "CODEX LIVE" : "YOU LIVE"
         return VoiceTranscriptEntry(

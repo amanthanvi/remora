@@ -5,7 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
-import android.util.Log
+import com.remora.android.util.LLog
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
@@ -53,17 +53,17 @@ class RealtimeWebRtcSession(private val context: Context) {
         }
         isClosed.set(false)
 
-        Log.i(TAG, "start: configuring audio session")
+        LLog.debug(TAG) { "start: configuring audio session" }
         configureAudio()
 
-        Log.i(TAG, "start: acquiring shared PeerConnectionFactory")
+        LLog.debug(TAG) { "start: acquiring shared PeerConnectionFactory" }
         val factory = sharedFactory(context)
         val rtcConfig = PeerConnection.RTCConfiguration(emptyList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }
 
-        Log.i(TAG, "start: creating PeerConnection")
+        LLog.debug(TAG) { "start: creating PeerConnection" }
         val connection = factory.createPeerConnection(rtcConfig, DelegateAdapter())
             ?: run {
                 releaseAudio()
@@ -89,52 +89,52 @@ class RealtimeWebRtcSession(private val context: Context) {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
         }
 
-        Log.i(TAG, "start: creating offer")
+        LLog.debug(TAG) { "start: creating offer" }
         val offer = try {
             createOffer(connection, offerConstraints)
-        } catch (t: Throwable) {
-            Log.e(TAG, "start: createOffer failed", t)
+        } catch (error: Throwable) {
+            LLog.debug(TAG, error) { "WebRTC offer creation failed" }
             cleanup()
-            throw t
+            throw error
         }
 
-        Log.i(TAG, "start: setting local description")
+        LLog.debug(TAG) { "start: setting local description" }
         try {
             setLocalDescription(connection, offer)
-        } catch (t: Throwable) {
-            Log.e(TAG, "start: setLocalDescription failed", t)
+        } catch (error: Throwable) {
+            LLog.debug(TAG, error) { "WebRTC local description setup failed" }
             cleanup()
-            throw t
+            throw error
         }
 
-        Log.i(TAG, "start: awaiting ICE gathering complete")
+        LLog.debug(TAG) { "start: awaiting ICE gathering completion" }
         awaitIceGatheringComplete(connection)
 
         if (isClosed.get() || peerConnection !== connection) {
-            Log.w(TAG, "start: session closed while awaiting ICE gathering")
+            LLog.w(TAG, "WebRTC session closed before ICE gathering completed")
             throw RealtimeWebRtcSessionException("session stopped before local description was ready")
         }
 
         val localSdp = connection.localDescription?.description
             ?: run {
-                Log.e(TAG, "start: local description unavailable after ICE gathering")
+                LLog.debug(TAG) { "WebRTC local description unavailable after ICE gathering" }
                 cleanup()
                 throw RealtimeWebRtcSessionException("local description unavailable after ICE gathering")
             }
-        Log.i(TAG, "start: offer ready (${localSdp.length} bytes)")
+        LLog.debug(TAG) { "start: offer ready (${localSdp.length} bytes)" }
         return localSdp
     }
 
     suspend fun applyAnswer(sdp: String) {
         val connection = peerConnection
             ?: throw RealtimeWebRtcSessionException("cannot apply answer: session not started")
-        Log.i(TAG, "applyAnswer: setting remote description (${sdp.length} bytes)")
+        LLog.debug(TAG) { "applyAnswer: setting remote description (${sdp.length} bytes)" }
         setRemoteDescription(connection, SessionDescription(SessionDescription.Type.ANSWER, sdp))
-        Log.i(TAG, "applyAnswer: remote description applied")
+        LLog.debug(TAG) { "applyAnswer: remote description applied" }
     }
 
     fun stop() {
-        Log.i(TAG, "stop: closing peer connection")
+        LLog.debug(TAG) { "stop: closing peer connection" }
         cleanup()
     }
 
@@ -146,8 +146,9 @@ class RealtimeWebRtcSession(private val context: Context) {
         }
         try {
             dataChannel?.close()
-        } catch (t: Throwable) {
-            Log.w(TAG, "dataChannel.close failed: ${t.message}")
+        } catch (error: Throwable) {
+            LLog.w(TAG, "WebRTC data channel cleanup failed")
+            LLog.debug(TAG, error) { "WebRTC data channel cleanup failure details" }
         }
         dataChannel?.dispose()
         dataChannel = null
@@ -156,8 +157,9 @@ class RealtimeWebRtcSession(private val context: Context) {
         audioSource = null
         try {
             peerConnection?.close()
-        } catch (t: Throwable) {
-            Log.w(TAG, "peerConnection.close failed: ${t.message}")
+        } catch (error: Throwable) {
+            LLog.w(TAG, "WebRTC peer connection cleanup failed")
+            LLog.debug(TAG, error) { "WebRTC peer connection cleanup failure details" }
         }
         peerConnection?.dispose()
         peerConnection = null
@@ -274,7 +276,7 @@ class RealtimeWebRtcSession(private val context: Context) {
     }
 
     private fun onIceGatheringState(state: PeerConnection.IceGatheringState) {
-        Log.i(TAG, "onIceGatheringChange: $state")
+        LLog.debug(TAG) { "onIceGatheringChange: $state" }
         if (state != PeerConnection.IceGatheringState.COMPLETE) return
         val cont = iceGatheringContinuation ?: return
         iceGatheringContinuation = null
@@ -283,11 +285,11 @@ class RealtimeWebRtcSession(private val context: Context) {
 
     private inner class DelegateAdapter : PeerConnection.Observer {
         override fun onSignalingChange(newState: PeerConnection.SignalingState) {
-            Log.i(TAG, "onSignalingChange: $newState")
+            LLog.debug(TAG) { "onSignalingChange: $newState" }
         }
 
         override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
-            Log.i(TAG, "onIceConnectionChange: $newState")
+            LLog.debug(TAG) { "onIceConnectionChange: $newState" }
         }
 
         override fun onIceConnectionReceivingChange(receiving: Boolean) {}
@@ -300,12 +302,12 @@ class RealtimeWebRtcSession(private val context: Context) {
         override fun onAddStream(stream: MediaStream) {}
         override fun onRemoveStream(stream: MediaStream) {}
         override fun onDataChannel(channel: DataChannel) {
-            Log.i(TAG, "onDataChannel: ${channel.label()}")
+            LLog.debug(TAG) { "onDataChannel: ${channel.label()}" }
         }
 
         override fun onRenegotiationNeeded() {}
         override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
-            Log.i(TAG, "onAddTrack: streams=${streams.size}")
+            LLog.debug(TAG) { "onAddTrack: streams=${streams.size}" }
         }
     }
 

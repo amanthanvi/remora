@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$IOS_DIR/../.." && pwd)"
-source "$REPO_DIR/tools/scripts/load-sccache-aws-creds.sh"
 RUST_BRIDGE_DIR="$REPO_DIR/shared/rust-bridge"
 CARGO_TARGET_DIR_EFFECTIVE="${CARGO_TARGET_DIR:-$RUST_BRIDGE_DIR/target}"
 FRAMEWORKS_DIR="$IOS_DIR/Frameworks"

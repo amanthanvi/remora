@@ -40,7 +40,6 @@ final class RealtimeWebRtcSession: NSObject {
     }
 
     func start() async throws -> String {
-        LLog.info("webrtc", "session.start entry")
         guard peerConnection == nil else {
             LLog.warn("webrtc", "session.start called while already started")
             throw RealtimeWebRtcSessionError.sessionAlreadyStarted
@@ -48,7 +47,6 @@ final class RealtimeWebRtcSession: NSObject {
 
         configureAudioSession()
         installRouteObserver()
-        LLog.info("webrtc", "audio session configured")
 
         let config = RTCConfiguration()
         config.iceServers = []
@@ -63,7 +61,6 @@ final class RealtimeWebRtcSession: NSObject {
             throw RealtimeWebRtcSessionError.peerConnectionCreationFailed
         }
         self.peerConnection = connection
-        LLog.info("webrtc", "peer connection created")
 
         let audioSource = Self.factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
         let track = Self.factory.audioTrack(with: audioSource, trackId: "realtime-audio")
@@ -87,34 +84,33 @@ final class RealtimeWebRtcSession: NSObject {
         let offer: RTCSessionDescription
         do {
             offer = try await createOffer(connection: connection, constraints: offerConstraints)
-            LLog.info("webrtc", "offer created", fields: ["sdp_len": offer.sdp.count])
         } catch {
-            LLog.error("webrtc", "offer creation failed", error: error)
+            LLog.error(
+                "webrtc",
+                "offer creation failed",
+                fields: LLog.operationalFailureFields(operation: "create_offer", error: error)
+            )
             cleanup()
             throw error
         }
 
         do {
             try await setLocalDescription(connection: connection, description: offer)
-            LLog.info("webrtc", "local description set")
         } catch {
-            LLog.error("webrtc", "setLocalDescription failed", error: error)
+            LLog.error(
+                "webrtc",
+                "local description setup failed",
+                fields: LLog.operationalFailureFields(operation: "set_local_description", error: error)
+            )
             cleanup()
             throw error
         }
 
-        LLog.info("webrtc", "awaiting ICE gathering complete")
         let timedOut = await awaitIceGatheringComplete(connection: connection)
         if timedOut {
             LLog.warn(
                 "webrtc",
                 "ICE gathering timed out; sending partial offer",
-                fields: ["candidates_gathered": candidatesGathered]
-            )
-        } else {
-            LLog.info(
-                "webrtc",
-                "ICE gathering complete",
                 fields: ["candidates_gathered": candidatesGathered]
             )
         }
@@ -124,13 +120,11 @@ final class RealtimeWebRtcSession: NSObject {
             cleanup()
             throw RealtimeWebRtcSessionError.localDescriptionUnavailable
         }
-        LLog.info("webrtc", "session.start success", fields: ["sdp_len": final.count])
         emitRoute()
         return final
     }
 
     func applyAnswer(_ sdp: String) async throws {
-        LLog.info("webrtc", "applyAnswer entry", fields: ["sdp_len": sdp.count])
         guard let connection = peerConnection else {
             LLog.error("webrtc", "applyAnswer called without active session")
             throw RealtimeWebRtcSessionError.sessionNotStarted
@@ -138,15 +132,17 @@ final class RealtimeWebRtcSession: NSObject {
         let answer = RTCSessionDescription(type: .answer, sdp: sdp)
         do {
             try await setRemoteDescription(connection: connection, description: answer)
-            LLog.info("webrtc", "applyAnswer success")
         } catch {
-            LLog.error("webrtc", "applyAnswer failed", error: error)
+            LLog.error(
+                "webrtc",
+                "remote description setup failed",
+                fields: LLog.operationalFailureFields(operation: "set_remote_description", error: error)
+            )
             throw error
         }
     }
 
     func stop() {
-        LLog.info("webrtc", "session.stop entry")
         cleanup()
     }
 
@@ -198,7 +194,11 @@ final class RealtimeWebRtcSession: NSObject {
             try session.setActive(true)
             didConfigureAudioSession = true
         } catch {
-            LLog.error("webrtc", "failed to configure RTC audio session", error: error)
+            LLog.error(
+                "webrtc",
+                "RTC audio session configuration failed",
+                fields: LLog.operationalFailureFields(operation: "configure_audio_session", error: error)
+            )
         }
     }
 
@@ -211,7 +211,11 @@ final class RealtimeWebRtcSession: NSObject {
         do {
             try session.setActive(false)
         } catch {
-            LLog.warn("webrtc", "failed to deactivate RTC audio session: \(error.localizedDescription)")
+            LLog.warn(
+                "webrtc",
+                "RTC audio session deactivation failed",
+                fields: LLog.operationalFailureFields(operation: "deactivate_audio_session", error: error)
+            )
         }
     }
 
@@ -340,23 +344,30 @@ final class RealtimeWebRtcSession: NSObject {
     }
 
     fileprivate func iceGatheringStateChanged(to state: RTCIceGatheringState) {
-        LLog.info("webrtc", "iceGatheringState changed", fields: ["state": describe(state)])
+        LLog.debug("webrtc", "ICE gathering state changed", fields: ["state": describe(state)])
         guard state == .complete, let continuation = iceGatheringContinuation else { return }
         iceGatheringContinuation = nil
         continuation.resume()
     }
 
     fileprivate func iceConnectionStateChanged(to state: RTCIceConnectionState) {
-        LLog.info("webrtc", "iceConnectionState changed", fields: ["state": describe(state)])
+        let fields = ["state": describe(state)]
+        switch state {
+        case .failed:
+            LLog.error("webrtc", "ICE connection failed", fields: fields)
+        case .disconnected:
+            LLog.warn("webrtc", "ICE connection disconnected", fields: fields)
+        default:
+            LLog.debug("webrtc", "ICE connection state changed", fields: fields)
+        }
     }
 
     fileprivate func signalingStateChanged(to state: RTCSignalingState) {
-        LLog.info("webrtc", "signalingState changed", fields: ["state": describe(state)])
+        LLog.debug("webrtc", "signaling state changed", fields: ["state": describe(state)])
     }
 
     fileprivate func didGenerateCandidate() {
         candidatesGathered += 1
-        LLog.debug("webrtc", "ice candidate gathered", fields: ["count": candidatesGathered])
     }
 
     private func describe(_ state: RTCIceGatheringState) -> String {

@@ -242,7 +242,7 @@ final class VoiceRuntimeController {
             LLog.warn(
                 "voice",
                 "failed to name realtime session thread",
-                fields: ["error": String(describing: error)]
+                fields: LLog.operationalFailureFields(operation: "thread_rename", error: error)
             )
         }
         SavedThreadsStore.add(.init(threadKey: key))
@@ -261,16 +261,10 @@ final class VoiceRuntimeController {
         for key: ThreadKey,
         model: String? = nil
     ) async throws -> ThreadKey {
-        LLog.info("voice", "prepareAndLaunchRealtimeVoiceSession entry", fields: [
-            "server_id": key.serverId,
-            "thread_id": key.threadId,
-        ])
-
         // Request microphone permission before starting the realtime session.
         // Without permission the audio engine cannot capture input, and the
         // server-side realtime session may hang waiting for audio frames.
         let micGranted = await AVAudioApplication.requestRecordPermission()
-        LLog.info("voice", "mic permission resolved", fields: ["granted": micGranted])
         guard micGranted else {
             throw NSError(
                 domain: "Remora",
@@ -293,20 +287,13 @@ final class VoiceRuntimeController {
         }
 
         guard let thread else {
-            LLog.error("voice", "thread snapshot unresolved", fields: [
-                "server_id": key.serverId,
-                "thread_id": key.threadId,
-            ])
+            LLog.error("voice", "thread snapshot unresolved")
             throw NSError(
                 domain: "Remora",
                 code: 3302,
                 userInfo: [NSLocalizedDescriptionKey: "Voice mode requires an active server thread"]
             )
         }
-        LLog.info("voice", "thread resolved", fields: [
-            "server_id": resolvedKey.serverId,
-            "thread_id": resolvedKey.threadId,
-        ])
 
         let runtimeSessionId = "remora-voice-\(UUID().uuidString.lowercased())"
         let explicitTitle = thread.info.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -317,7 +304,6 @@ final class VoiceRuntimeController {
             threadTitle: threadTitle,
             model: resolvedModel.isEmpty ? (model ?? "Codex") : resolvedModel
         )
-        LLog.info("voice", "activeVoiceSession set to .connecting")
 
         let session = RealtimeWebRtcSession()
         session.onRouteChanged = { [weak self] route in
@@ -349,7 +335,7 @@ final class VoiceRuntimeController {
         // the caller already stopped/replaced things — bail.
         guard activeVoiceSession?.threadKey == resolvedKey,
               realtimeSession === session else {
-            LLog.warn("voice", "runRealtimeVoiceLaunch aborted — session changed before launch")
+            LLog.debug("voice", "realtime launch canceled before WebRTC start")
             session.stop()
             return
         }
@@ -358,11 +344,8 @@ final class VoiceRuntimeController {
 
         let offerSdp: String
         do {
-            LLog.info("voice", "calling RealtimeWebRtcSession.start()")
             offerSdp = try await session.start()
-            LLog.info("voice", "RealtimeWebRtcSession.start() returned", fields: ["sdp_len": offerSdp.count])
         } catch {
-            LLog.error("voice", "RealtimeWebRtcSession.start() failed", error: error)
             session.stop()
             if realtimeSession === session { realtimeSession = nil }
             failVoiceSession(error.localizedDescription)
@@ -372,14 +355,13 @@ final class VoiceRuntimeController {
         // Re-check between awaits; the user may have hung up.
         guard activeVoiceSession?.threadKey == resolvedKey,
               realtimeSession === session else {
-            LLog.warn("voice", "runRealtimeVoiceLaunch aborted — session changed after WebRTC start")
+            LLog.debug("voice", "realtime launch canceled after WebRTC start")
             session.stop()
             return
         }
 
         do {
             let dynamicTools = try CrossServerTools.buildDynamicToolSpecs().map { try $0.rpcSpec() }
-            LLog.info("voice", "calling client.startRealtimeSession (webrtc transport)")
             _ = try await appModel.client.startRealtimeSession(
                 serverId: resolvedKey.serverId,
                 params: AppStartRealtimeSessionRequest(
@@ -391,9 +373,12 @@ final class VoiceRuntimeController {
                     dynamicTools: dynamicTools
                 )
             )
-            LLog.info("voice", "client.startRealtimeSession returned")
         } catch {
-            LLog.error("voice", "client.startRealtimeSession failed", error: error)
+            LLog.error(
+                "voice",
+                "realtime session start failed",
+                fields: LLog.operationalFailureFields(operation: "session_start", error: error)
+            )
             session.stop()
             if realtimeSession === session { realtimeSession = nil }
             _ = try? await appModel.client.stopRealtimeSession(
@@ -471,24 +456,18 @@ final class VoiceRuntimeController {
     }
 
     private func handleRealtimeSdp(key: ThreadKey, notification: AppRealtimeSdpNotification) {
-        LLog.info("voice", "handleRealtimeSdp entry", fields: [
-            "thread_id": key.threadId,
-            "sdp_len": notification.sdp.count,
-        ])
         guard activeVoiceSession?.threadKey == key else {
-            LLog.warn("voice", "RealtimeSdp ignored — thread key mismatch")
+            LLog.debug("voice", "realtime answer ignored for inactive thread")
             return
         }
         guard let session = realtimeSession else {
-            LLog.warn("voice", "received RealtimeSdp without an active WebRTC session")
+            LLog.debug("voice", "realtime answer ignored without active WebRTC session")
             return
         }
         Task { @MainActor [weak self] in
             do {
                 try await session.applyAnswer(notification.sdp)
-                LLog.info("voice", "applyAnswer completed")
             } catch {
-                LLog.error("voice", "applyAnswer failed", error: error)
                 self?.failVoiceSession("Failed to apply realtime answer: \(error.localizedDescription)")
             }
         }

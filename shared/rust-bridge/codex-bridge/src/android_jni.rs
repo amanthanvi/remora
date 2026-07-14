@@ -1,6 +1,5 @@
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
-use jni::sys::jint;
 
 /// Set HOME and CODEX_HOME environment variables from Android.
 /// Android doesn't set HOME by default, and Rust needs it for data storage.
@@ -35,20 +34,4 @@ pub extern "system" fn Java_com_remora_android_core_bridge_UniffiInit_nativeBrid
         "[codex-bridge] Android init: HOME={}, CODEX_HOME={}",
         home, codex_home
     );
-}
-
-/// Legacy stubs — kept so NativeCodexBridge.kt doesn't crash on load.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remora_android_core_bridge_NativeCodexBridge_nativeStartServerPort(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jint {
-    -1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remora_android_core_bridge_NativeCodexBridge_nativeStopServer(
-    _env: JNIEnv,
-    _class: JClass,
-) {
 }

@@ -175,6 +175,7 @@
 		46FDE614AEE692C5688F7625 /* proof-light.json in Resources */ = {isa = PBXBuildFile; fileRef = A851361747B6E4C53B7CA7A7 /* proof-light.json */; };
 		47276EFE97FDCE97A774890D /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8975B4135A556360DD1ADB95 /* TerminalScreen.swift */; };
 		474F684B0CA36C73AA4B0388 /* nord.json in Resources */ = {isa = PBXBuildFile; fileRef = ACC3CE43C3616397BECC41E8 /* nord.json */; };
+		478B1B9DCFBC9FA0B20EEF79 /* GhosttySurfaceSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBA73AE37F435D6A4E654A3 /* GhosttySurfaceSnapshotTests.swift */; };
 		480E6622A8B822D392F48A6B /* snazzy-light.json in Resources */ = {isa = PBXBuildFile; fileRef = 0E56B229DBA6BFF3D83642AC /* snazzy-light.json */; };
 		481E79982550311886766A6A /* GhosttyBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = 6ED3ACB23F9DABA76E3E3801 /* GhosttyBridge.m */; };
 		48F6601A255EEE6962E8B824 /* RemoraPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABE1871BF3ED1F7F0A0DF96 /* RemoraPalette.swift */; };
@@ -702,6 +703,7 @@
 		89DA72F709685EDF25453E68 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		89EC445752E5A28E9E617650 /* SwiftSshCredentialProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftSshCredentialProvider.swift; sourceTree = "<group>"; };
 		8B975B9573E895A090D0A507 /* AgentLabelFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLabelFormatter.swift; sourceTree = "<group>"; };
+		8CBA73AE37F435D6A4E654A3 /* GhosttySurfaceSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttySurfaceSnapshotTests.swift; sourceTree = "<group>"; };
 		8D46E136BBB4A6EB72DBA108 /* PiPContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiPContentView.swift; sourceTree = "<group>"; };
 		8DE6FA60E3022A166C304F20 /* RollingMetricText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RollingMetricText.swift; sourceTree = "<group>"; };
 		8F0BD0FEEB8698C370F3E98E /* usgc-reticle.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "usgc-reticle.json"; sourceTree = "<group>"; };
@@ -924,6 +926,7 @@
 				15263F712A1EE68368964D61 /* ConversationDisplayPreferenceTests.swift */,
 				086199750E60268356625936 /* ConversationPlanSemanticsTests.swift */,
 				83A933EE152EF35CE7CAC6A6 /* ConversationScreenModelTests.swift */,
+				8CBA73AE37F435D6A4E654A3 /* GhosttySurfaceSnapshotTests.swift */,
 				65E4AADDA22694220E64C8E6 /* HomeDashboardSupportTests.swift */,
 				E6B42ADD3A6E48D5F5434984 /* MessageContentBridgeTests.swift */,
 				D9378B500F7E9AB5BD924CF2 /* NetworkDiscoveryTests.swift */,
@@ -1740,6 +1743,7 @@
 				377A254F6B431B52C8E4C7CE /* ConversationDisplayPreferenceTests.swift in Sources */,
 				58BC0D5845A23EDFA40514D7 /* ConversationPlanSemanticsTests.swift in Sources */,
 				AF7165E1B4E47743033BA9C1 /* ConversationScreenModelTests.swift in Sources */,
+				478B1B9DCFBC9FA0B20EEF79 /* GhosttySurfaceSnapshotTests.swift in Sources */,
 				DFFB0D76900845FD5C97B4CE /* HomeDashboardSupportTests.swift in Sources */,
 				160527A34717EFD5F063EF04 /* MessageContentBridgeTests.swift in Sources */,
 				AD06AF607AC02A657A5AC126 /* NetworkDiscoveryTests.swift in Sources */,

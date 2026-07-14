@@ -4,15 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-MODE="all"
 case "${1:-}" in
-  "")
-    ;;
-  --all|--shared)
-    MODE="${1#--}"
+  ""|--shared)
     ;;
   *)
-    echo "usage: $(basename "$0") [--all|--shared]" >&2
+    echo "usage: $(basename "$0") [--shared]" >&2
     exit 1
     ;;
 esac
@@ -52,8 +48,4 @@ update_shared() {
   done
 }
 
-case "$MODE" in
-  all|shared)
-    update_shared
-    ;;
-esac
+update_shared

@@ -37,6 +37,17 @@ enum LLog {
         emit(level: .error, subsystem: subsystem, message: message, fields: allFields, payloadJson: payloadJson)
     }
 
+    /// Production-safe error metadata for operational failures. Keep raw
+    /// localized descriptions out of public OSLog output.
+    static func operationalFailureFields(operation: String, error: Error) -> [String: Any] {
+        let nsError = error as NSError
+        return [
+            "operation": operation,
+            "error_domain": nsError.domain,
+            "error_code": nsError.code,
+        ]
+    }
+
     private static func emit(level: OSLogType, subsystem: String, message: String, fields: [String: Any], payloadJson: String?) {
         let logger = Logger(subsystem: subsystemRoot, category: subsystem)
         #if DEBUG
