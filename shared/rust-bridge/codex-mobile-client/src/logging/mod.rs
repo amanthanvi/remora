@@ -18,7 +18,7 @@ mod android_logcat {
     const ANDROID_LOG_INFO: i32 = 4;
     const ANDROID_LOG_WARN: i32 = 5;
     const ANDROID_LOG_ERROR: i32 = 6;
-    const LOG_TAG: &str = "LitterRust";
+    const LOG_TAG: &str = "RemoraRust";
 
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct AndroidLogMakeWriter;

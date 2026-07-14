@@ -28,7 +28,7 @@ pub(crate) async fn open(
         .alleycat_endpoint()
         .await
         .map_err(|error| TerminalError::Backend {
-            detail: format!("binding alleycat endpoint: {error}"),
+            detail: format!("binding remote pairing endpoint: {error}"),
         })?;
     let params = crate::alleycat::ParsedPairPayload {
         version: crate::alleycat::ALLEYCAT_PROTOCOL_VERSION,
@@ -60,7 +60,7 @@ pub(crate) async fn open(
         1,
         "initialize",
         json!({
-            "clientInfo": { "name": "Litter", "version": "1.0" },
+            "clientInfo": { "name": "Remora", "version": "1.0" },
             "capabilities": { "experimentalApi": true }
         }),
     )
@@ -98,7 +98,7 @@ fn map_shell_connect_error(error: crate::alleycat::AlleycatError) -> TerminalErr
             if is_shell_agent_unavailable_error(&message) {
                 TerminalError::Backend {
                     detail: format!(
-                        "Remote shell is unavailable on this Alleycat host. Update and restart kittylitter/alleycat on the host, or enable the host [agents.shell] config. Host said: {message}"
+                        "Remote shell is unavailable on this paired host. Update and restart the pairing service on the host, or enable the host [agents.shell] config. Host said: {message}"
                     ),
                 }
             } else {

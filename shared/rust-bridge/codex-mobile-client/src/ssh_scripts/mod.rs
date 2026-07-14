@@ -18,8 +18,8 @@ pub(crate) mod posix {
     pub(crate) const PROFILE_INIT: &str = include_str!("posix/profile_init.sh");
 
     /// Probe `npm` / `pnpm` / `bun` for their global bin directories. Sets
-    /// `$_litter_npm_global_bin`, `$_litter_pnpm_global_bin`,
-    /// `$_litter_bun_global_bin`. Requires `PROFILE_INIT` first.
+    /// `$_remora_npm_global_bin`, `$_remora_pnpm_global_bin`,
+    /// `$_remora_bun_global_bin`. Requires `PROFILE_INIT` first.
     pub(crate) const PACKAGE_MANAGER_PROBE: &str = include_str!("posix/package_manager_probe.sh");
 
     /// Find the newest existing `codex` binary on the remote. Placeholders:

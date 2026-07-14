@@ -4,7 +4,7 @@
 # blocking the bootstrap on a host with no http client.
 {{PROFILE_INIT}}
 port={{PORT}}
-session_dir="$HOME/.litter/sessions/{{SESSION_ID}}"
+session_dir="$HOME/.remora/sessions/{{SESSION_ID}}"
 url="http://127.0.0.1:${port}/global/health"
 has_curl=0
 if command -v curl >/dev/null 2>&1; then

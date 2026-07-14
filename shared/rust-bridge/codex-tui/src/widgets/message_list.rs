@@ -1,10 +1,10 @@
-use codex_mobile_client::conversation::ConversationItem;
+use codex_mobile_client::conversation_uniffi::HydratedConversationItem;
 use ratatui::text::Line;
 
 use crate::widgets::message_item;
 
 /// Render all conversation items into a flat list of styled lines.
-pub fn render_items(items: &[ConversationItem], width: u16) -> Vec<Line<'static>> {
+pub fn render_items(items: &[HydratedConversationItem], width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     for item in items {

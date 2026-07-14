@@ -228,9 +228,9 @@ fn test_posix_resolver_probes_package_manager_bins() {
     assert!(script.contains("/usr/local/bin/codex"));
     assert!(script.contains("/usr/bin/codex"));
     assert!(
-        script.find("_litter_consider_path_candidates codex codex") < script.find("pnpm bin -g")
+        script.find("_remora_consider_path_candidates codex codex") < script.find("pnpm bin -g")
     );
-    assert!(script.contains("_litter_best_path"));
+    assert!(script.contains("_remora_best_path"));
     assert!(!script.contains("codex-app-server"));
 }
 

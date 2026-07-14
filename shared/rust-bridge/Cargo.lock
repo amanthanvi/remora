@@ -313,7 +313,7 @@ dependencies = [
 [[package]]
 name = "alleycat-bridge-core"
 version = "0.1.0"
-source = "git+https://github.com/dnakov/alleycat.git?branch=main#d0eb2cefb25769db2d348e791b789886e6122915"
+source = "git+https://github.com/dnakov/alleycat.git?branch=main#3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f"
 dependencies = [
  "alleycat-codex-proto",
  "anyhow",
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "alleycat-claude-bridge"
 version = "0.1.0"
-source = "git+https://github.com/dnakov/alleycat.git?branch=main#d0eb2cefb25769db2d348e791b789886e6122915"
+source = "git+https://github.com/dnakov/alleycat.git?branch=main#3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f"
 dependencies = [
  "alleycat-bridge-core",
  "alleycat-codex-proto",
@@ -356,7 +356,7 @@ dependencies = [
 [[package]]
 name = "alleycat-codex-proto"
 version = "0.1.0"
-source = "git+https://github.com/dnakov/alleycat.git?branch=main#d0eb2cefb25769db2d348e791b789886e6122915"
+source = "git+https://github.com/dnakov/alleycat.git?branch=main#3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f"
 dependencies = [
  "chrono",
  "serde",
@@ -367,7 +367,7 @@ dependencies = [
 [[package]]
 name = "alleycat-opencode-bridge"
 version = "0.1.0"
-source = "git+https://github.com/dnakov/alleycat.git?branch=main#d0eb2cefb25769db2d348e791b789886e6122915"
+source = "git+https://github.com/dnakov/alleycat.git?branch=main#3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f"
 dependencies = [
  "alleycat-bridge-core",
  "anyhow",
@@ -391,7 +391,7 @@ dependencies = [
 [[package]]
 name = "alleycat-pi-bridge"
 version = "0.1.0"
-source = "git+https://github.com/dnakov/alleycat.git?branch=main#d0eb2cefb25769db2d348e791b789886e6122915"
+source = "git+https://github.com/dnakov/alleycat.git?branch=main#3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f"
 dependencies = [
  "alleycat-bridge-core",
  "alleycat-codex-proto",
@@ -1426,26 +1426,6 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 
 [[package]]
 name = "bindgen"
-version = "0.70.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
-dependencies = [
- "bitflags 2.11.0",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
@@ -2321,21 +2301,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-bridge"
-version = "0.1.0"
-dependencies = [
- "codex-app-server-protocol",
- "codex-apply-patch",
- "codex-core",
- "codex-mobile-client",
- "jni 0.21.1",
- "openssl-sys",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "codex-chatgpt"
 version = "0.132.0"
 dependencies = [
@@ -3037,7 +3002,6 @@ dependencies = [
  "codex-app-server",
  "codex-app-server-client",
  "codex-app-server-protocol",
- "codex-apply-patch",
  "codex-arg0",
  "codex-cloud-requirements",
  "codex-config",
@@ -3050,20 +3014,16 @@ dependencies = [
  "codex-shell-command",
  "codex-slingshot",
  "codex-utils-absolute-path",
- "flate2",
  "futures",
  "hex",
  "iroh",
- "ish-embed-host",
  "jni 0.21.1",
  "linkify",
  "lru 0.12.5",
  "ndk-context",
  "openssl-sys",
- "portable-pty",
  "regex",
  "reqwest 0.12.28",
- "rusqlite",
  "russh",
  "russh-keys",
  "semver",
@@ -3071,7 +3031,6 @@ dependencies = [
  "serde_json",
  "sha1 0.10.6",
  "shlex",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5109,18 +5068,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "faster-hex"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6654,15 +6601,6 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
-dependencies = [
- "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "hashlink"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
@@ -7879,34 +7817,6 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "ish-embed-host"
-version = "0.1.0"
-source = "git+https://github.com/dnakov/litter-ish.git?branch=main#4f783cd957b83de3019d6a843408d5bb3ff902c7"
-dependencies = [
- "async-trait",
- "bindgen 0.70.1",
- "bytes",
- "cc",
- "ish-embed-protocol",
- "libc",
- "parking_lot",
- "postcard",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ish-embed-protocol"
-version = "0.1.0"
-source = "git+https://github.com/dnakov/litter-ish.git?branch=main#4f783cd957b83de3019d6a843408d5bb3ff902c7"
-dependencies = [
- "postcard",
- "serde",
-]
 
 [[package]]
 name = "itertools"
@@ -11305,20 +11215,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
-dependencies = [
- "bitflags 2.11.0",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink 0.9.1",
- "libsqlite3-sys",
- "smallvec",
-]
-
-[[package]]
 name = "russh"
 version = "0.60.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12722,7 +12618,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "hashbrown 0.15.5",
- "hashlink 0.10.0",
+ "hashlink",
  "indexmap 2.13.0",
  "log",
  "memchr",
@@ -13294,7 +13190,6 @@ checksum = "22692a6476a21fa75fdfc11d452fda482af402c008cdbaf3476414e122040973"
 dependencies = [
  "filetime",
  "libc",
- "xattr",
 ]
 
 [[package]]
@@ -14476,7 +14371,7 @@ version = "146.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d97bcac5cdc5a195a4813f1855a6bc658f240452aac36caa12fd6c6f16026ab1"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
  "bitflags 2.11.0",
  "fslock",
  "gzip-header",
@@ -15580,16 +15475,6 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.18",
  "time",
-]
-
-[[package]]
-name = "xattr"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
-dependencies = [
- "libc",
- "rustix 1.1.4",
 ]
 
 [[package]]

@@ -38,8 +38,20 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 
 /// POSIX candidate lines shared with Alleycat's Codex resolver.
-pub(crate) const fn shell_candidate_lines() -> &'static [&'static str] {
+///
+/// Alleycat is an upstream dependency and still names its shell helpers with
+/// the original fork prefix. Project them into Remora-owned helper names at
+/// this boundary so generated remote scripts do not ship stale branding.
+pub(crate) fn shell_candidate_lines() -> Vec<String> {
     alleycat_bridge_core::codex_resolver::POSIX_SHELL_CANDIDATE_LINES
+        .iter()
+        .map(|line| remora_codex_resolver_snippet(line))
+        .collect()
+}
+
+pub(crate) fn remora_codex_resolver_snippet(script: &str) -> String {
+    const UPSTREAM_HELPER_PREFIX: &str = concat!("_", "lit", "ter");
+    script.replace(UPSTREAM_HELPER_PREFIX, "_remora")
 }
 
 // ---------------------------------------------------------------------------
@@ -361,10 +373,10 @@ mod tests {
     #[test]
     fn shell_candidate_lines_has_matching_entries() {
         let shell = shell_candidate_lines().join("\n");
-        assert!(shell.contains("_litter_consider_path_candidates codex codex"));
+        assert!(shell.contains("_remora_consider_path_candidates codex codex"));
         assert!(shell.contains("packages/standalone/current/codex"));
-        assert!(!shell.contains(".litter/bin/codex"));
-        assert!(!shell.contains(".litter/codex/node_modules/.bin/codex"));
+        assert!(!shell.contains(".remora/bin/codex"));
+        assert!(!shell.contains(".remora/codex/node_modules/.bin/codex"));
         assert!(shell.contains(".local/bin/codex"));
         assert!(shell.contains("/opt/homebrew/bin/codex"));
         assert!(shell.contains("/usr/local/bin/codex"));

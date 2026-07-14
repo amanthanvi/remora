@@ -2,22 +2,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "Litter",
+    name: "Remora",
     platforms: [
         .iOS(.v26)
     ],
     products: [
-        .library(name: "Litter", targets: ["Litter"])
+        .library(name: "Remora", targets: ["Remora"])
     ],
     targets: [
         .binaryTarget(
-            name: "codex_bridge",
-            path: "apps/ios/Frameworks/codex_bridge.xcframework"
+            name: "codex_mobile_client",
+            path: "apps/ios/Frameworks/codex_mobile_client.xcframework"
         ),
         .target(
-            name: "Litter",
-            dependencies: ["codex_bridge"],
-            path: "apps/ios/Sources/Litter",
+            name: "Remora",
+            dependencies: ["codex_mobile_client"],
+            path: "apps/ios/Sources/Remora",
             publicHeadersPath: "Bridge"
         )
     ]

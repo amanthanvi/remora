@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
-APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Litter-*/Build/Products/Debug-iphoneos/Litter.app 2>/dev/null | head -1 || true)"
-BUNDLE_ID="com.sigkitten.litter"
+APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Remora-*/Build/Products/Debug-iphoneos/Remora.app 2>/dev/null | head -1 || true)"
+BUNDLE_ID="com.remora.app"
 APP_EXECUTABLE_NAME="$(basename "${APP_PATH}" .app)"
 
 PROFILE_ENABLED="${IOS_DEVICE_PROFILE:-0}"
@@ -41,7 +41,7 @@ TAILSCALE_BIN="${TAILSCALE_BIN:-}"
 mkdir -p "${RUN_DIR}"
 
 if [[ -z "${APP_PATH}" ]]; then
-  echo "ERROR: Litter.app not found in DerivedData" >&2
+  echo "ERROR: Remora.app not found in DerivedData" >&2
   exit 1
 fi
 
@@ -204,7 +204,7 @@ PY
 start_tailscale_tunnel() {
   local log="${RUN_DIR}/tunnel.log"
   echo "==> Starting pymobiledevice3 WiFi tunnel for ${DEVICE_NAME} (${DEVICE_UDID})..."
-  sudo -n /usr/local/bin/litter-ios-remote start-tunnel --connection-type wifi --udid "${DEVICE_UDID}" \
+  sudo -n /usr/local/bin/remora-ios-remote start-tunnel --connection-type wifi --udid "${DEVICE_UDID}" \
     > "${log}" 2>&1 &
   TUNNEL_PID=$!
   # wait for the tunnel to come up (devicectl should see the device)
@@ -495,16 +495,6 @@ cleanup() {
   exit "${exit_code}"
 }
 trap cleanup EXIT INT TERM
-
-# Forward LITTER_* env vars from the calling shell into the on-device
-# process so flags like LITTER_FORCE_BETA_SUNSET=1 work the same as the
-# SIMCTL_CHILD_* path on simulator. devicectl picks up any env var
-# prefixed with DEVICECTL_CHILD_ and strips the prefix on launch.
-while IFS= read -r litter_env_line; do
-  [[ "${litter_env_line}" == LITTER_*=* ]] || continue
-  export "DEVICECTL_CHILD_${litter_env_line%%=*}=${litter_env_line#*=}"
-done < <(env)
-unset litter_env_line
 
 echo "==> Installing on device ${DEVICE_ID}..."
 xcrun devicectl device install app --device "${DEVICE_ID}" "${APP_PATH}"

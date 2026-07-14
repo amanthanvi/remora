@@ -1,0 +1,68 @@
+{
+  "name": "Remora",
+  "type": "dark",
+  "colors": {
+    "activityBar.activeBorder": "#00FF9C",
+    "activityBar.background": "#0A0A0A",
+    "activityBar.foreground": "#E0E0E0",
+    "activityBarBadge.background": "#00FF9C",
+    "activityBarBadge.foreground": "#000000",
+    "button.background": "#00FF9C",
+    "button.foreground": "#000000",
+    "button.hoverBackground": "#66FFC0",
+    "editor.background": "#000000",
+    "editor.foreground": "#E0E0E0",
+    "editor.lineHighlightBackground": "#0A0A0A",
+    "editor.selectionBackground": "#00FF9C33",
+    "editorCursor.foreground": "#00FF9C",
+    "editorGroup.border": "#242424",
+    "editorGroupHeader.tabsBackground": "#0A0A0A",
+    "editorLineNumber.foreground": "#555555",
+    "editorLineNumber.activeForeground": "#00FF9C",
+    "panel.background": "#0A0A0A",
+    "panel.border": "#242424",
+    "sideBar.background": "#0A0A0A",
+    "sideBar.foreground": "#E0E0E0",
+    "sideBar.border": "#242424",
+    "sideBarTitle.foreground": "#FFFFFF",
+    "statusBar.background": "#000000",
+    "statusBar.foreground": "#00FF9C",
+    "textLink.foreground": "#00FF9C",
+    "gitDecoration.addedResourceForeground": "#6EA676",
+    "gitDecoration.deletedResourceForeground": "#FF5555"
+  },
+  "tokenColors": [
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#666666" }
+    },
+    {
+      "scope": ["string", "constant.other.symbol"],
+      "settings": { "foreground": "#B5FFD9" }
+    },
+    {
+      "scope": ["constant.numeric", "constant.language.boolean"],
+      "settings": { "foreground": "#66FFC0" }
+    },
+    {
+      "scope": ["keyword", "keyword.control", "storage", "storage.type", "storage.modifier"],
+      "settings": { "foreground": "#00FF9C" }
+    },
+    {
+      "scope": ["entity.name.type", "entity.other.inherited-class", "support.class", "support.type"],
+      "settings": { "foreground": "#85E6BB" }
+    },
+    {
+      "scope": ["entity.name.function", "support.function", "variable.function", "meta.function-call"],
+      "settings": { "foreground": "#FFFFFF" }
+    },
+    {
+      "scope": ["variable", "variable.parameter"],
+      "settings": { "foreground": "#E0E0E0" }
+    },
+    {
+      "scope": ["punctuation", "meta.brace"],
+      "settings": { "foreground": "#8F8F8F" }
+    }
+  ]
+}

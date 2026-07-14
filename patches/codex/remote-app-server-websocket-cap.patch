@@ -34,9 +34,9 @@ index dd9c083e49..e35e15af60 100644
      command_tx: mpsc::Sender<RemoteClientCommand>,
  }
  
-+/// Litter extension: trait abstraction over the wire that the remote app-server worker drives.
++/// Remora extension: trait abstraction over the wire that the remote app-server worker drives.
 +///
-+/// Upstream's `connect()` only knows how to talk WebSocket frames (over TCP or UDS). Litter needs
++/// Upstream's `connect()` only knows how to talk WebSocket frames (over TCP or UDS). Remora needs
 +/// to drive the same JSON-RPC handshake/dispatcher loop over (a) WebSocket-over-SSH-tunneled-stream
 +/// and (b) raw JSON-line streams to non-Codex servers (Pi/alleycat).
 +///
@@ -165,7 +165,7 @@ index dd9c083e49..e35e15af60 100644
 -        endpoint: String,
 -        stream: WebSocketStream<S>,
 -        initialize_params: InitializeParams,
-+    /// Litter extension: open a websocket over an arbitrary `AsyncRead + AsyncWrite` stream and
++    /// Remora extension: open a websocket over an arbitrary `AsyncRead + AsyncWrite` stream and
 +    /// drive a remote app-server session on top of it. Used by SSH-tunneled WebSocket transports.
 +    pub async fn connect_websocket_stream<S>(
 +        stream: S,
@@ -218,8 +218,8 @@ index dd9c083e49..e35e15af60 100644
 +        .await
 +    }
 +
-+    /// Litter extension: drive a remote app-server session over any caller-provided
-+    /// [`JsonRpcWire`]. Litter uses this with its own `JsonLineWire` for raw-stream
++    /// Remora extension: drive a remote app-server session over any caller-provided
++    /// [`JsonRpcWire`]. Remora uses this with its own `JsonLineWire` for raw-stream
 +    /// JSON-RPC transports (alleycat jsonl, SSH-bridge bootstrap).
 +    pub async fn connect_with_wire<W>(
 +        args: RemoteAppServerConnectArgs,

@@ -1,0 +1,145 @@
+#if targetEnvironment(macCatalyst)
+import Foundation
+import Observation
+import SwiftUI
+
+@MainActor
+@Observable
+final class AppRuntimeController {
+    static let shared = AppRuntimeController()
+
+    @ObservationIgnored private weak var appModel: AppModel?
+    @ObservationIgnored private let reachability = NetworkReachabilityObserver()
+
+    func bind(appModel: AppModel, voiceRuntime: VoiceRuntimeController) {
+        self.appModel = appModel
+        reachability.bind(appModel: appModel)
+        reachability.start()
+        do {
+            if let bytes = try AlleycatCredentialStore.shared.loadDeviceSecretKey() {
+                appModel.client.setAlleycatSecretKey(secretKeyBytes: bytes)
+            }
+        } catch {
+            NSLog("[PAIRING_DEVICE_KEY] load failed: %@", error.localizedDescription)
+        }
+    }
+
+    /// Catalyst-side mirror of the iOS persist hook. Called from the
+    /// lifecycle stub after reconnect cycles so freshly-generated
+    /// device secret keys land in the keychain.
+    func persistAlleycatSecretKeyIfNeeded() {
+        guard let appModel else { return }
+        guard let data = appModel.client.alleycatSecretKey() else { return }
+        do {
+            let existing = try AlleycatCredentialStore.shared.loadDeviceSecretKey()
+            if existing == data { return }
+            try AlleycatCredentialStore.shared.saveDeviceSecretKey(data)
+        } catch {
+            NSLog("[PAIRING_DEVICE_KEY] save failed: %@", error.localizedDescription)
+        }
+    }
+
+    /// Best-effort graceful shutdown of the iroh endpoint. Wired from
+    /// `applicationWillTerminate` on Catalyst (NSApplicationDelegate
+    /// fires this reliably; iOS proper does not on swipe-up-to-kill).
+    func shutdownAlleycatEndpoint() async {
+        guard let appModel else { return }
+        await appModel.client.shutdownAlleycatEndpoint()
+    }
+
+    func reconnectSavedServers() async {
+        guard let appModel else { return }
+        let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
+        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
+        appModel.reconnectController.syncSavedServers(servers: servers)
+        await appModel.reconnectController.notifyNetworkChange()
+        _ = await appModel.reconnectController.reconnectSavedServers()
+        await appModel.refreshSnapshot()
+        persistAlleycatSecretKeyIfNeeded()
+    }
+
+    func reconnectServer(serverId: String) async {
+        guard let appModel else { return }
+        let servers = SavedServerStore.reconnectRecords()
+        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
+        appModel.reconnectController.syncSavedServers(servers: servers)
+        _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
+        await appModel.refreshSnapshot()
+    }
+    func appDidEnterBackground() {
+        lastBackgroundedAt = Date()
+    }
+    func appDidBecomeInactive() {}
+
+    func appDidBecomeActive() {
+        guard !hasRecoveredOnForeground else { return }
+        hasRecoveredOnForeground = true
+        let backgroundDuration = lastBackgroundedAt.map { Date().timeIntervalSince($0) }
+        lastBackgroundedAt = nil
+        Task { [weak self, backgroundDuration] in
+            guard let self else { return }
+            // Same long-resume short-circuit as iOS: if we were
+            // suspended longer than iroh's per-path idle, kill the
+            // existing paired-host connection so the worker rebuilds
+            // before any user request lands.
+            if let appModel = self.appModel,
+               let duration = backgroundDuration,
+               duration > Self.longResumeThreshold
+            {
+                await appModel.reconnectController.onLongResume()
+            }
+            await self.reconnectSavedServers()
+        }
+    }
+
+    @ObservationIgnored private var hasRecoveredOnForeground = false
+    @ObservationIgnored private var lastBackgroundedAt: Date?
+    private static let longResumeThreshold: TimeInterval = 15
+}
+
+@MainActor
+@Observable
+final class VoiceRuntimeController {
+    static let shared = VoiceRuntimeController()
+    static let persistedVoiceServerIDKey = "remora.voice.pinned.server_id"
+    static let persistedVoiceThreadIDKey = "remora.voice.pinned.thread_id"
+
+    private(set) var activeVoiceSession: VoiceSessionState?
+    var handoffModel: String?
+    var handoffEffort: String?
+    var handoffFastMode = false
+
+    func bind(appModel: AppModel) {}
+    @discardableResult
+    func startPinnedVoiceCall(
+        serverId: String,
+        cwd: String,
+        model: String?,
+        approvalPolicy: AppAskForApproval?,
+        sandboxMode: AppSandboxMode?
+    ) async throws -> ThreadKey {
+        throw NSError(
+            domain: "Remora",
+            code: 9999,
+            userInfo: [NSLocalizedDescriptionKey: "Voice not available on Catalyst"]
+        )
+    }
+    func stopActiveVoiceSession() async {}
+    func toggleActiveVoiceSessionSpeaker() async throws {}
+}
+
+struct VoiceSessionState: Identifiable, Equatable {
+    let id: String
+    let threadKey: ThreadKey
+}
+
+@MainActor
+@Observable
+final class StableSafeAreaInsets {
+    var bottomInset: CGFloat = 0
+    func start(fallback: CGFloat) {
+        bottomInset = fallback
+    }
+}
+
+#endif

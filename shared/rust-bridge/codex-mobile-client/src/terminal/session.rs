@@ -18,12 +18,6 @@ pub struct TerminalSize {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum TerminalBackendKind {
-    LocalIsh {
-        cwd: Option<String>,
-    },
-    LocalProot {
-        cwd: Option<String>,
-    },
     RemoteAlleycat {
         node_id: String,
         token: String,
@@ -149,7 +143,7 @@ impl TerminalSession {
     }
 
     /// Same as [`Self::open`] but consults `trust_store` for the SSH backend
-    /// host-key pin policy. Local backends ignore `trust_store`.
+    /// host-key pin policy. Non-SSH backends ignore `trust_store`.
     #[uniffi::constructor]
     pub async fn open_with_trust_store(
         backend: TerminalBackendKind,
@@ -396,12 +390,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a live alleycat daemon; set LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR"]
+    #[ignore = "requires a live alleycat daemon; set REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR"]
     async fn live_remote_alleycat_terminal_round_trips_shell_io() {
-        let pair_json = match std::env::var("LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR") {
+        let pair_json = match std::env::var("REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR") {
             Ok(value) if !value.trim().is_empty() => value,
             _ => {
-                eprintln!("skipping: LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR is not set");
+                eprintln!("skipping: REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR is not set");
                 return;
             }
         };

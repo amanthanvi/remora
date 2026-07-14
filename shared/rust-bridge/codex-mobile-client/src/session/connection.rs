@@ -144,7 +144,7 @@ impl Default for InProcessConfig {
 }
 
 #[cfg(any(all(target_os = "ios", not(target_abi = "macabi")), test))]
-static IOS_CACERT_PEM: &[u8] = include_bytes!("../../../codex-bridge/src/cacert.pem");
+static IOS_CACERT_PEM: &[u8] = include_bytes!("../cacert.pem");
 
 #[allow(unused_mut)]
 fn prepare_in_process_config(
@@ -167,7 +167,7 @@ fn prepare_in_process_config(
 fn prepare_android_in_process_config(
     mut config: InProcessConfig,
 ) -> Result<InProcessConfig, TransportError> {
-    // On Android, HOME and CODEX_HOME should already be set by UniffiInit.nativeBridgeInit().
+    // On Android, HOME and CODEX_HOME are set by UniffiInit.nativeMobileClientInit().
     // If codex_home is not set in the config, resolve from CODEX_HOME env var.
     if config.codex_home.is_none() {
         if let Ok(codex_home) = std::env::var("CODEX_HOME") {
@@ -696,7 +696,7 @@ impl ServerSession {
             enable_codex_api_key_env: true,
             initialize: InitializeParams {
                 client_info: ClientInfo {
-                    name: "Litter".to_string(),
+                    name: "Remora".to_string(),
                     version: "1.0".to_string(),
                     title: None,
                 },
@@ -1175,7 +1175,7 @@ pub(crate) fn remote_connect_args(config: &ServerConfig) -> (String, RemoteAppSe
             websocket_url: url.clone(),
             auth_token: None,
         },
-        client_name: "Litter".to_string(),
+        client_name: "Remora".to_string(),
         client_version: "1.0".to_string(),
         experimental_api: true,
         opt_out_notification_methods: Vec::new(),
@@ -1950,7 +1950,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("litter-{label}-{nanos}"))
+        std::env::temp_dir().join(format!("remora-{label}-{nanos}"))
     }
 
     fn test_remote_args(label: &str) -> RemoteAppServerConnectArgs {
@@ -1959,7 +1959,7 @@ mod tests {
                 websocket_url: format!("test://{label}"),
                 auth_token: None,
             },
-            client_name: "LitterTest".to_string(),
+            client_name: "RemoraTest".to_string(),
             client_version: "0".to_string(),
             experimental_api: true,
             opt_out_notification_methods: Vec::new(),

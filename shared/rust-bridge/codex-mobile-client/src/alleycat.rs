@@ -43,7 +43,7 @@ pub struct AgentInfo {
     /// client falls back to generic rendering.
     pub presentation: Option<AgentPresentation>,
     /// Behavioral capability flags that gate UI logic (Amp reasoning lock,
-    /// SSH-bridge eligibility, direct-Codex-port routing) without litter
+    /// SSH-bridge eligibility, direct-Codex-port routing) without remora
     /// branching on the agent name.
     pub capabilities: Option<AgentCapabilities>,
 }
@@ -68,12 +68,12 @@ pub struct AgentCapabilities {
 }
 
 /// Map an alleycat-advertised agent (`name` + `display_name`) to the
-/// canonical runtime-kind id litter uses internally. Known agents get
+/// canonical runtime-kind id remora uses internally. Known agents get
 /// their well-known alias normalized (e.g. `pi.dev` → `pi`,
 /// `factory-droid` → `droid`) so the rest of the code can match against
 /// stable ids. Anything else falls through to the agent's own
 /// lowercased name (or display name if name is empty), so new agents
-/// advertised by alleycat work without a litter release.
+/// advertised by alleycat work without a remora release.
 pub fn agent_runtime_kind(name: &str, display_name: &str) -> Option<AgentRuntimeKind> {
     let name = name.trim().to_ascii_lowercase();
     let display_name = display_name.trim().to_ascii_lowercase();
@@ -418,7 +418,7 @@ impl From<AgentCapabilitiesWire> for AgentCapabilities {
             visible_modes: value.visible_modes,
             supports_ssh_bridge: value.supports_ssh_bridge,
             uses_direct_codex_port: value.uses_direct_codex_port,
-            // Legacy alleycat/kittylitter daemons did not advertise these fields.
+            // Legacy alleycat/alleycat daemons did not advertise these fields.
             // Preserve the old client behaviour unless a daemon explicitly says
             // permission overrides/effective-permission reporting are unsupported.
             supports_thread_permission_overrides: value
@@ -549,7 +549,7 @@ pub async fn connect_app_server_client(
             websocket_url: format!("ws://alleycat/{agent}"),
             auth_token: None,
         },
-        client_name: "Litter".to_string(),
+        client_name: "Remora".to_string(),
         client_version: "1.0".to_string(),
         experimental_api: true,
         opt_out_notification_methods: Vec::new(),

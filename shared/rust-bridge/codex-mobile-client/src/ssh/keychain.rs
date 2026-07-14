@@ -23,15 +23,15 @@ use super::{SshClient, SshError, append_bridge_info_log, remote_shell_name, type
 /// exec channel's stdin → `cat` → `$(…)` so it never appears in the shell
 /// command string we send across the wire (or in our own logging).
 const MACOS_KEYCHAIN_UNLOCK_FROM_STDIN: &str = r#"if command -v security >/dev/null 2>&1 && [ -e "$HOME/Library/Keychains/login.keychain-db" ]; then
-  _litter_kc_path="$HOME/Library/Keychains/login.keychain-db"
-  printf 'litter_keychain_unlock start path=%s\n' "$_litter_kc_path" >&2
-  _litter_kc_output="$(security unlock-keychain -p "$(cat)" "$_litter_kc_path" 2>&1 >/dev/null)"
-  _litter_kc_status=$?
-  _litter_kc_output="$(printf '%s' "$_litter_kc_output" | tr '\n' ' ')"
-  printf 'litter_keychain_unlock result status=%s stderr=%s\n' "$_litter_kc_status" "$_litter_kc_output" >&2
+  _remora_kc_path="$HOME/Library/Keychains/login.keychain-db"
+  printf 'remora_keychain_unlock start path=%s\n' "$_remora_kc_path" >&2
+  _remora_kc_output="$(security unlock-keychain -p "$(cat)" "$_remora_kc_path" 2>&1 >/dev/null)"
+  _remora_kc_status=$?
+  _remora_kc_output="$(printf '%s' "$_remora_kc_output" | tr '\n' ' ')"
+  printf 'remora_keychain_unlock result status=%s stderr=%s\n' "$_remora_kc_status" "$_remora_kc_output" >&2
   exit 0
 else
-  printf 'litter_keychain_unlock skipped reason=security_or_login_keychain_missing\n' >&2
+  printf 'remora_keychain_unlock skipped reason=security_or_login_keychain_missing\n' >&2
   exit 0
 fi"#;
 

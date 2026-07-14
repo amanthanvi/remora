@@ -10,10 +10,10 @@ if [ -z "$pids" ] && command -v fuser >/dev/null 2>&1; then
   pids="$(fuser {{PORT}}/tcp 2>/dev/null | tr ' ' '\n' | sort -u)"
 fi
 if [ -z "$pids" ]; then
-  printf 'litter_restart_app_server no_listener port={{PORT}}\n'
+  printf 'remora_restart_app_server no_listener port={{PORT}}\n'
   exit 0
 fi
-printf 'litter_restart_app_server killing port={{PORT}} pids=%s\n' "$pids"
+printf 'remora_restart_app_server killing port={{PORT}} pids=%s\n' "$pids"
 kill $pids 2>/dev/null || true
 sleep 1
 alive=""
@@ -24,7 +24,7 @@ for pid in $pids; do
 done
 if [ -n "$alive" ]; then
   kill -9 $alive 2>/dev/null || true
-  printf 'litter_restart_app_server force_killed port={{PORT}} pids=%s\n' "$alive"
+  printf 'remora_restart_app_server force_killed port={{PORT}} pids=%s\n' "$alive"
 else
-  printf 'litter_restart_app_server stopped port={{PORT}}\n'
+  printf 'remora_restart_app_server stopped port={{PORT}}\n'
 fi

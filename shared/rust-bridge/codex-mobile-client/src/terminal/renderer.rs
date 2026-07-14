@@ -85,14 +85,14 @@ pub trait TerminalRendererBackend: Send + Sync {
     /// Ghostty's key encoder so the bracketed wrapper survives intact.
     fn dispatch_paste(&self, bytes: Vec<u8>);
 
-    /// Read the currently-selected text from Ghostty's selection buffer.
-    /// Returns `None` if no selection is active. Maps to
-    /// `ghostty_surface_read_selection`.
+    /// Legacy synchronous query retained for UniFFI source compatibility.
+    /// `TerminalRenderer` no longer invokes it: platforms push selection
+    /// snapshots through [`TerminalRenderer::update_selection_snapshot`].
     fn read_selection(&self) -> Option<String>;
 
-    /// Read a viewport-relative cell range as plain text. Maps to
-    /// `ghostty_surface_read_text` with a `GHOSTTY_POINT_VIEWPORT` selection.
-    /// `start_row`/`end_row` are clamped by the platform to the viewport.
+    /// Legacy synchronous query retained for UniFFI source compatibility.
+    /// `TerminalRenderer` no longer invokes it: platforms push viewport rows
+    /// through [`TerminalRenderer::update_surface_snapshot`].
     fn read_text(
         &self,
         start_row: u32,
@@ -101,8 +101,10 @@ pub trait TerminalRendererBackend: Send + Sync {
         end_col: u32,
     ) -> Option<String>;
 
-    /// Current surface cell metrics (cell_w/h in px, cols/rows). Platform
-    /// reads from the live Ghostty grid each call.
+    /// Legacy synchronous query retained for UniFFI source compatibility.
+    /// `TerminalRenderer` no longer invokes it: platforms push metrics through
+    /// [`TerminalRenderer::update_surface_metrics`] or
+    /// [`TerminalRenderer::update_surface_snapshot`].
     fn cell_metrics(&self) -> super::selection::TerminalCellMetrics;
 
     /// Update or clear the painted selection overlay. The platform owns
@@ -141,6 +143,18 @@ struct RendererInner {
     /// Listeners notified whenever `feed_output` observes one or more
     /// BEL bytes in `Ground` state.
     bell_listeners: Arc<Mutex<Vec<Arc<dyn TerminalBellListener>>>>,
+    /// Latest platform-owned Ghostty surface snapshot. UI-thread platform
+    /// code refreshes this after writes/resizes and before gesture queries;
+    /// Rust queries never synchronously call back into the UI thread.
+    surface: Mutex<RendererSurfaceSnapshot>,
+}
+
+#[derive(Default)]
+struct RendererSurfaceSnapshot {
+    metrics: Option<TerminalCellMetrics>,
+    start_row: u32,
+    rows: Vec<String>,
+    selection_text: Option<String>,
 }
 
 #[uniffi::export]
@@ -166,14 +180,15 @@ impl TerminalRenderer {
             semantic_listeners,
             links: Mutex::new(LinksCache::new()),
             bell_listeners: Arc::new(Mutex::new(Vec::new())),
+            surface: Mutex::new(RendererSurfaceSnapshot::default()),
         });
         spawn_tick_task(&inner);
         Self { inner }
     }
 
     /// Set the directory where `apply_config` writes the generated ghostty
-    /// config file. iOS passes `<Caches>/litter/terminal`; Android passes
-    /// `<cacheDir>/litter/terminal`. The directory is created on demand.
+    /// config file. iOS passes `<Caches>/remora/terminal`; Android passes
+    /// `<cacheDir>/remora/terminal`. The directory is created on demand.
     pub fn set_config_dir(&self, path: String) {
         let mut guard = self.inner.config_dir.lock().unwrap();
         *guard = Some(PathBuf::from(path));
@@ -349,6 +364,40 @@ impl TerminalRenderer {
             .update(start_row, &rows, &semantic.hyperlinks);
     }
 
+    /// Replace the platform-owned surface snapshot used by all synchronous
+    /// renderer queries. Call this on the platform UI/graphics thread after a
+    /// write, resize, or config change and immediately before gesture/edit-menu
+    /// queries that require the freshest grid. The snapshot is cloned into
+    /// Rust, so callback threads never need to wait for the UI thread.
+    pub fn update_surface_snapshot(
+        &self,
+        metrics: TerminalCellMetrics,
+        start_row: u32,
+        rows: Vec<String>,
+    ) {
+        {
+            let mut surface = self.inner.surface.lock().unwrap();
+            surface.metrics = Some(metrics);
+            surface.start_row = start_row;
+            surface.rows = rows.clone();
+        }
+        self.set_viewport_text(start_row, rows);
+    }
+
+    /// Update live grid metrics without replacing cached viewport rows.
+    /// Layout and resize paths use this cheap update so they do not need to
+    /// pull every physical row from the platform terminal surface.
+    pub fn update_surface_metrics(&self, metrics: TerminalCellMetrics) {
+        self.inner.surface.lock().unwrap().metrics = Some(metrics);
+    }
+
+    /// Replace the cached text for the currently painted selection. Passing
+    /// `None` clears it. Platforms refresh this only for explicit Copy or
+    /// Send-to-AI actions; reads are then lock-only and nonblocking.
+    pub fn update_selection_snapshot(&self, text: Option<String>) {
+        self.inner.surface.lock().unwrap().selection_text = text;
+    }
+
     /// Return the currently cached URL set (plain-text + OSC 8 merged).
     /// Cheap clone — safe to call on every UI frame.
     pub fn links(&self) -> Vec<TerminalLink> {
@@ -373,14 +422,18 @@ impl TerminalRenderer {
     /// backend is attached, the surface has zero-sized cells, or no link
     /// covers the cell under the touch point.
     pub fn link_at_point(&self, x_px: f32, y_px: f32) -> Option<TerminalLink> {
-        let backend = self.inner.current_backend()?;
-        let metrics = backend.cell_metrics();
+        self.inner.current_backend()?;
+        let metrics = self.inner.surface.lock().unwrap().metrics?;
         let viewport_pos = super::selection::hit_test_cell(metrics, x_px, y_px)?;
         let abs_row = metrics.viewport_top.saturating_add(viewport_pos.row);
-        self.inner.links.lock().unwrap().link_at(TerminalCellPosition {
-            row: abs_row,
-            col: viewport_pos.col,
-        })
+        self.inner
+            .links
+            .lock()
+            .unwrap()
+            .link_at(TerminalCellPosition {
+                row: abs_row,
+                col: viewport_pos.col,
+            })
     }
 
     /// Current surface cell metrics (cell width/height in pixels, grid
@@ -389,13 +442,15 @@ impl TerminalRenderer {
     /// instead of guessing from font size — keeps the PTY grid in lockstep
     /// with what Ghostty actually paints.
     pub fn cell_metrics(&self) -> Option<TerminalCellMetrics> {
-        Some(self.inner.current_backend()?.cell_metrics())
+        self.inner.current_backend()?;
+        self.inner.surface.lock().unwrap().metrics
     }
 
     /// Set the active selection range. Pushes the highlight overlay to
     /// the backend and remembers the range so [`Self::read_selection`]
     /// can pull the corresponding text.
     pub fn selection_set(&self, range: super::selection::TerminalCellRange) {
+        self.inner.surface.lock().unwrap().selection_text = None;
         if let Some(backend) = self.inner.current_backend() {
             backend.set_selection_overlay(Some(range));
         }
@@ -403,6 +458,7 @@ impl TerminalRenderer {
 
     /// Clear the active selection.
     pub fn selection_clear(&self) {
+        self.inner.surface.lock().unwrap().selection_text = None;
         if let Some(backend) = self.inner.current_backend() {
             backend.set_selection_overlay(None);
         }
@@ -414,7 +470,7 @@ impl TerminalRenderer {
     /// zero rows/cols.
     pub fn selection_all(&self) -> Option<TerminalCellRange> {
         let backend = self.inner.current_backend()?;
-        let metrics = backend.cell_metrics();
+        let metrics = self.inner.surface.lock().unwrap().metrics?;
         if metrics.cols == 0 || metrics.rows == 0 {
             return None;
         }
@@ -426,6 +482,7 @@ impl TerminalRenderer {
             },
             rectangle: false,
         };
+        self.inner.surface.lock().unwrap().selection_text = None;
         backend.set_selection_overlay(Some(range));
         Some(range)
     }
@@ -433,15 +490,16 @@ impl TerminalRenderer {
     /// Read the active selection text (whatever Ghostty's read-only
     /// selection API reports).
     pub fn read_selection(&self) -> Option<String> {
-        self.inner.current_backend()?.read_selection()
+        self.inner.current_backend()?;
+        self.inner.surface.lock().unwrap().selection_text.clone()
     }
 
     /// Pixel-coord → cell-coord hit test using the backend's current
     /// `cell_metrics()`. Returns `None` if the backend reports zero-sized
     /// cells (surface not yet measured).
     pub fn hit_test(&self, x_px: f32, y_px: f32) -> Option<super::osc::TerminalCellPosition> {
-        let backend = self.inner.current_backend()?;
-        let metrics = backend.cell_metrics();
+        self.inner.current_backend()?;
+        let metrics = self.inner.surface.lock().unwrap().metrics?;
         super::selection::hit_test_cell(metrics, x_px, y_px)
     }
 
@@ -453,10 +511,14 @@ impl TerminalRenderer {
         &self,
         pos: super::osc::TerminalCellPosition,
     ) -> Option<super::selection::TerminalCellRange> {
-        let backend = self.inner.current_backend()?;
-        let metrics = backend.cell_metrics();
-        let last_col = metrics.cols.saturating_sub(1);
-        let line = backend.read_text(pos.row, 0, pos.row, last_col)?;
+        self.inner.current_backend()?;
+        let surface = self.inner.surface.lock().unwrap();
+        surface.metrics?;
+        // Gesture positions are viewport-relative even when `start_row` is
+        // an absolute scrollback offset used by the link cache.
+        let row_index = pos.row as usize;
+        let line = surface.rows.get(row_index)?.clone();
+        drop(surface);
         let (start_col, end_col) = super::selection::word_columns_at(&line, pos.col);
         Some(super::selection::TerminalCellRange {
             start: super::osc::TerminalCellPosition {
@@ -476,8 +538,8 @@ impl TerminalRenderer {
         &self,
         pos: super::osc::TerminalCellPosition,
     ) -> Option<super::selection::TerminalCellRange> {
-        let backend = self.inner.current_backend()?;
-        let metrics = backend.cell_metrics();
+        self.inner.current_backend()?;
+        let metrics = self.inner.surface.lock().unwrap().metrics?;
         let (start_col, end_col) = super::selection::line_columns(metrics);
         Some(super::selection::TerminalCellRange {
             start: super::osc::TerminalCellPosition {
@@ -684,6 +746,16 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
+    fn test_metrics() -> TerminalCellMetrics {
+        TerminalCellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            cols: 80,
+            rows: 24,
+            viewport_top: 0,
+        }
+    }
+
     struct CountingBackend {
         focus_calls: AtomicUsize,
         occlusion_calls: AtomicUsize,
@@ -850,12 +922,12 @@ mod tests {
         let backend = CountingBackend::new();
         let renderer = TerminalRenderer::new(Box::new(BackendAdapter(backend.clone())));
 
-        let dir = std::env::temp_dir().join(format!("litter-renderer-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("remora-renderer-test-{}", std::process::id()));
         renderer.set_config_dir(dir.to_string_lossy().into_owned());
 
         renderer
             .apply_config(TerminalConfig {
-                theme: TerminalThemePreset::LitterDark,
+                theme: TerminalThemePreset::RemoraDark,
                 font_family: "SFMono-Regular".into(),
                 font_size_pt: 14.0,
                 cursor_style: TerminalCursorStyle::Block,
@@ -886,7 +958,7 @@ mod tests {
         let renderer = TerminalRenderer::new(Box::new(BackendAdapter(backend.clone())));
         let err = renderer
             .apply_config(TerminalConfig {
-                theme: TerminalThemePreset::LitterDark,
+                theme: TerminalThemePreset::RemoraDark,
                 font_family: "x".into(),
                 font_size_pt: 13.0,
                 cursor_style: TerminalCursorStyle::Bar,
@@ -980,6 +1052,8 @@ mod tests {
     async fn cell_metrics_passes_through_backend() {
         let backend = CountingBackend::new();
         let renderer = TerminalRenderer::new(Box::new(BackendAdapter(backend.clone())));
+        assert!(renderer.cell_metrics().is_none());
+        renderer.update_surface_snapshot(test_metrics(), 0, vec!["hello world".into()]);
         let metrics = renderer.cell_metrics().expect("metrics");
         assert_eq!(metrics.cell_width_px, 10.0);
         assert_eq!(metrics.cell_height_px, 20.0);
@@ -1059,15 +1133,15 @@ mod tests {
             fn cell_metrics(&self) -> super::super::selection::TerminalCellMetrics {
                 self.0.cell_metrics()
             }
-            fn set_selection_overlay(
-                &self,
-                r: Option<super::super::selection::TerminalCellRange>,
-            ) {
+            fn set_selection_overlay(&self, r: Option<super::super::selection::TerminalCellRange>) {
                 self.0.set_selection_overlay(r);
             }
         }
         let renderer = TerminalRenderer::new(Box::new(Adapter(backend.clone())));
+        renderer.update_surface_snapshot(test_metrics(), 0, vec![String::new(); 24]);
+        renderer.update_selection_snapshot(Some("stale selection".into()));
         let range = renderer.selection_all().expect("range");
+        assert!(renderer.read_selection().is_none());
         use super::super::osc::TerminalCellPosition;
         assert_eq!(range.start, TerminalCellPosition { row: 0, col: 0 });
         assert_eq!(range.end, TerminalCellPosition { row: 23, col: 79 });
@@ -1146,15 +1220,15 @@ mod tests {
                     viewport_top: 100,
                 }
             }
-            fn set_selection_overlay(
-                &self,
-                _: Option<super::super::selection::TerminalCellRange>,
-            ) {
+            fn set_selection_overlay(&self, _: Option<super::super::selection::TerminalCellRange>) {
             }
         }
         let renderer = TerminalRenderer::new(Box::new(WithViewport));
-        // Seed link cache: a URL at absolute row 102, cols 4..23.
-        renderer.set_viewport_text(
+        renderer.update_surface_snapshot(
+            TerminalCellMetrics {
+                viewport_top: 100,
+                ..test_metrics()
+            },
             100,
             vec![
                 "row 100".to_string(),
@@ -1162,6 +1236,7 @@ mod tests {
                 "see https://example.com here".to_string(),
             ],
         );
+        // Seed link cache: a URL at absolute row 102, cols 4..23.
         // Pixel (60, 50) → cell (col 6, row 2 viewport-relative) →
         // absolute row 102, col 6 — inside the URL.
         let link = renderer.link_at_point(60.0, 50.0).expect("link");
@@ -1169,6 +1244,57 @@ mod tests {
 
         // Pixel outside the URL columns returns None.
         assert!(renderer.link_at_point(0.0, 50.0).is_none());
+        renderer.detach();
+    }
+
+    #[test]
+    fn surface_snapshot_drives_queries_without_legacy_backend_getters() {
+        struct NoSynchronousQueries;
+        impl TerminalRendererBackend for NoSynchronousQueries {
+            fn set_focus(&self, _: bool) {}
+            fn set_occlusion(&self, _: bool) {}
+            fn request_redraw(&self) {}
+            fn apply_config_file(&self, _: String) {}
+            fn dispatch_key(&self, _: TerminalKeyEvent) {}
+            fn dispatch_text(&self, _: String, _: bool) {}
+            fn dispatch_paste(&self, _: Vec<u8>) {}
+            fn read_selection(&self) -> Option<String> {
+                panic!("legacy selection getter must not be called")
+            }
+            fn read_text(&self, _: u32, _: u32, _: u32, _: u32) -> Option<String> {
+                panic!("legacy text getter must not be called")
+            }
+            fn cell_metrics(&self) -> TerminalCellMetrics {
+                panic!("legacy metrics getter must not be called")
+            }
+            fn set_selection_overlay(&self, _: Option<TerminalCellRange>) {}
+        }
+
+        let renderer = TerminalRenderer::new(Box::new(NoSynchronousQueries));
+        renderer.update_surface_snapshot(
+            test_metrics(),
+            0,
+            vec!["zero".into(), "pick cached-word here".into()],
+        );
+        renderer.update_selection_snapshot(Some("cached selection".into()));
+
+        assert_eq!(renderer.cell_metrics(), Some(test_metrics()));
+        assert_eq!(
+            renderer.hit_test(55.0, 25.0),
+            Some(TerminalCellPosition { row: 1, col: 5 })
+        );
+        let word = renderer
+            .word_range_at(TerminalCellPosition { row: 1, col: 8 })
+            .expect("cached word range");
+        assert_eq!(word.start.col, 5);
+        assert_eq!(word.end.col, 15);
+        assert_eq!(
+            renderer.read_selection().as_deref(),
+            Some("cached selection")
+        );
+
+        renderer.selection_clear();
+        assert!(renderer.read_selection().is_none());
         renderer.detach();
     }
 }

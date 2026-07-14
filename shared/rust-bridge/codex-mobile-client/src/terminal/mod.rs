@@ -8,8 +8,6 @@ mod backend;
 mod config;
 mod input;
 mod links;
-mod local_ish;
-mod local_proot;
 mod osc;
 mod remote_alleycat;
 mod renderer;

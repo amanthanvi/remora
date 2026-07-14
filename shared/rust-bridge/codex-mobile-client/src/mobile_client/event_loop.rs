@@ -620,12 +620,12 @@ fn normalize_default_service_tier(value: &mut serde_json::Value) {
 /// Servers running older codex versions (e.g., rust-v0.128.0) don't emit
 /// these fields, so the typed deserializer would fail with `missing field
 /// 'sessionId'` etc. We mirror legacy server behavior here rather than
-/// patching the upstream protocol crate so the litter-side build can stay
+/// patching the upstream protocol crate so the remora-side build can stay
 /// upstream-faithful.
 ///
 /// The `Thread.sessionId` fallback follows upstream's own convention for
 /// stored/unloaded threads (see PR #21336): when no live session id is
-/// known, treat `sessionId == id`. Litter's sub-agent grouping uses
+/// known, treat `sessionId == id`. Remora's sub-agent grouping uses
 /// `Thread.source` + `parent_thread_id` rather than `session_id`, so the
 /// fallback is harmless there; for any future upstream-style consumer this
 /// matches what app-server itself returns for stored threads.
@@ -1321,7 +1321,7 @@ mod tests {
                 "createdAt": 1_777_345_792,
                 "updatedAt": 1_777_345_792,
                 "status": { "type": "notLoaded" },
-                "path": "/Users/sigkitten/.claude/projects/-tmp/thread-1.jsonl",
+                "path": "/Users/remora/.claude/projects/-tmp/thread-1.jsonl",
                 "cwd": "",
                 "cliVersion": "alleycat-claude-bridge/0.1.0",
                 "source": "appServer",
@@ -1354,7 +1354,7 @@ mod tests {
                 "updatedAt": 1_777_345_792,
                 "status": "notLoaded",
                 "path": null,
-                "cwd": "/Users/sigkitten/dev/health",
+                "cwd": "/Users/remora/dev/health",
                 "cliVersion": "alleycat-opencode-bridge/0.1.0",
                 "source": "appServer",
                 "gitInfo": null,

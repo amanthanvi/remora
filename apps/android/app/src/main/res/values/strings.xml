@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">Remora</string>
     <string name="connect_to_server">Connect to Server</string>
     <string name="directory_picker_title">Choose Directory</string>
     <string name="directory_picker_select_server">Select server</string>

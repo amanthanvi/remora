@@ -24,11 +24,10 @@ if ! command -v fswatch >/dev/null 2>&1; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LOCK="/tmp/litter-loop-ios.lock"
+LOCK="/tmp/remora-loop-ios.lock"
 
 WATCH_DIRS=(
   "$ROOT/shared/rust-bridge/codex-mobile-client"
-  "$ROOT/shared/rust-bridge/codex-bridge"
   "$ROOT/shared/rust-bridge/codex-ipc"
   "$ROOT/apps/ios/Sources"
   "$ROOT/apps/ios/Resources"

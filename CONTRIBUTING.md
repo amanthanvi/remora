@@ -2,7 +2,7 @@
 
 ## Project status
 
-Litter is under active development and a lot of features are in flight at any given time. Direction shifts often, internal APIs are unstable, and large parts of the codebase are mid-refactor.
+Remora is under active development and a lot of features are in flight at any given time. Direction shifts often, internal APIs are unstable, and large parts of the codebase are mid-refactor.
 
 **Your PR will probably not be merged unless it is small and targets a specific problem.** That's not a rule against contributors — it's just the reality of a fast-moving codebase. A focused fix or a self-contained improvement has a real chance of landing. A sweeping refactor, a new feature, or a pile of stylistic changes almost certainly won't, because it'll collide with work that's already underway.
 

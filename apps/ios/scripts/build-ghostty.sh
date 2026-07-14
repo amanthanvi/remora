@@ -9,6 +9,8 @@ GENERATED_DIR="$IOS_DIR/GeneratedRust"
 STAGING_DIR="${GHOSTTY_BUILD_DIR:-$GENERATED_DIR/ghostty-build}"
 XCODE_DEVELOPER_DIR="${GHOSTTY_XCODE_DEVELOPER_DIR:-$(xcode-select -p)}"
 CLT_DEVELOPER_DIR="${GHOSTTY_CLT_DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+METAL_TOOLCHAIN_DIR="${GHOSTTY_METAL_TOOLCHAIN_DIR:-}"
+METAL_TOOLCHAINS="${GHOSTTY_METAL_TOOLCHAINS:-${TOOLCHAINS:-Metal}}"
 
 if [ ! -f "$GHOSTTY_DIR/build.zig" ]; then
     echo "error: Ghostty submodule is missing; run git submodule update --init --recursive shared/third_party/ghostty" >&2
@@ -20,7 +22,22 @@ if ! command -v zig >/dev/null 2>&1; then
     exit 1
 fi
 
-# Apply Litter's mobile-embed patches if not already applied. Idempotent;
+if [ -n "$METAL_TOOLCHAIN_DIR" ]; then
+    for tool in metal metallib; do
+        if [ ! -x "$METAL_TOOLCHAIN_DIR/usr/bin/$tool" ]; then
+            echo "error: GHOSTTY_METAL_TOOLCHAIN_DIR does not contain usr/bin/$tool: $METAL_TOOLCHAIN_DIR" >&2
+            exit 1
+        fi
+    done
+fi
+
+if ! env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" TOOLCHAINS="$METAL_TOOLCHAINS" \
+    /usr/bin/xcrun --sdk iphoneos --find metal >/dev/null 2>&1; then
+    echo "error: Xcode Metal Toolchain is unavailable; run: xcodebuild -downloadComponent MetalToolchain" >&2
+    exit 1
+fi
+
+# Apply Remora's mobile-embed patches if not already applied. Idempotent;
 # safe to call on every build. Required when this script is invoked
 # directly (CI, build-rust.sh fallback) without going through the
 # Makefile's STAMP_SYNC_GHOSTTY dep chain.
@@ -38,6 +55,12 @@ fi
 
 if ! grep -q 'GHOSTTY_PLATFORM_IOS' "$GHOSTTY_DIR/include/ghostty.h"; then
     echo "error: vendored Ghostty does not expose the iOS platform surface" >&2
+    exit 1
+fi
+
+IOS_STATIC_OPTION="$(grep -Eo '[[:alnum:]_-]+-ios-static' "$GHOSTTY_DIR/build.zig" | head -n 1 || true)"
+if [ -z "$IOS_STATIC_OPTION" ]; then
+    echo "error: Ghostty build file does not expose the iOS static build option" >&2
     exit 1
 fi
 
@@ -184,7 +207,7 @@ build_slice() {
     (
         cd "$GHOSTTY_DIR"
         zig_args=(zig build \
-            -Dlitter-ios-static=true \
+            "-D${IOS_STATIC_OPTION}=true" \
             -Dapp-runtime=none \
             -Drenderer=metal \
             -Dfont-backend=coretext \
@@ -209,6 +232,7 @@ build_slice() {
         env \
             PATH="$STAGING_DIR/bin:$PATH" \
             DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" \
+            TOOLCHAINS="$METAL_TOOLCHAINS" \
             ZIG_GLOBAL_CACHE_DIR="$ZIG_CACHE_DIR/global" \
             ZIG_LOCAL_CACHE_DIR="$ZIG_CACHE_DIR/local" \
             "${zig_args[@]}"

@@ -1,5 +1,8 @@
 # Development Guide
 
+See [CONTEXT.md](../CONTEXT.md) for the supported product boundary, architecture
+ownership, and interop terminology.
+
 ## Prerequisites
 
 - **Xcode.app** (full install, not only Command Line Tools):
@@ -21,13 +24,19 @@
   brew install meson
   ```
 
-- **xcodegen** (for regenerating `Litter.xcodeproj`):
+- **xcodegen** (for regenerating `Remora.xcodeproj`):
 
   ```bash
   brew install xcodegen
   ```
 
-## Connect Your Mac to Litter Over SSH
+- **Zig** (required to build the Ghostty renderer; CI pins 0.15.2):
+
+  ```bash
+  brew install zig
+  ```
+
+## Connect Your Mac to Remora Over SSH
 
 Use this flow to make Codex sessions from your Mac visible in the iOS/Android app.
 
@@ -49,7 +58,7 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
 
    If the second command prints nothing, install Codex and/or fix shell PATH startup files.
 
-3. Connect from the Litter app.
+3. Connect from the Remora app.
 
    - Keep phone and Mac on the same LAN (or same Tailnet).
    - In Discovery: tap a host showing `codex running` to connect directly, or tap an `SSH` host and enter credentials.
@@ -62,24 +71,19 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
    codex app-server --listen ws://127.0.0.1:8390
    ```
 
-   Then connect the phone via the `SSH` flow in Discovery — Litter opens the SSH connection, port-forwards `127.0.0.1:8390`, and connects through the tunnel. Do not bind `0.0.0.0` unless you fully understand the exposure; the SSH flow is the supported path.
+   Then connect the phone via the `SSH` flow in Discovery — Remora opens the SSH connection, port-forwards `127.0.0.1:8390`, and connects through the tunnel. Do not bind `0.0.0.0` unless you fully understand the exposure; the SSH flow is the supported path.
 
 5. Thread/session listing is `cwd`-scoped. If expected sessions are missing, choose the same working directory used when those sessions were created.
 
+Terminal views are remote-only. The in-process Rust app-server remains a
+supported Codex runtime and must not be confused with the removed on-device
+shell/rootfs.
+
 ## Codex Submodule + Patches
 
-Upstream Codex is vendored as a submodule at `shared/third_party/codex`.
-
-Current local patch set (applied by `sync-codex.sh`):
-
-- `patches/codex/ios-exec-hook.patch`
-- `patches/codex/client-controlled-handoff.patch`
-- `patches/codex/mobile-code-mode-stub.patch`
-
-Additional patches (not auto-applied):
-
-- `patches/codex/android-vendored-openssl.patch`
-- `patches/codex/realtime-transcript-deltas.patch`
+Upstream Codex is vendored as a submodule at `shared/third_party/codex`. The
+applied patch set and the downstream reason for each patch are documented in
+[`patches/codex/README.md`](../patches/codex/README.md).
 
 Sync/apply (idempotent):
 
@@ -107,69 +111,35 @@ make xcgen
 Open in Xcode:
 
 ```bash
-open apps/ios/Litter.xcodeproj
+open apps/ios/Remora.xcodeproj
 ```
 
 CLI build:
 
 ```bash
-xcodebuild -project apps/ios/Litter.xcodeproj -scheme Litter -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+xcodebuild -project apps/ios/Remora.xcodeproj -scheme Remora -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
 ## Build and Run Android
 
-Prerequisites: Java 17, Android SDK + build tools for API 35, Gradle 8.x.
+Prerequisites: Java 17 or newer, Android SDK + build tools for API 35, the
+Android NDK, `cargo-ndk`, Rust via rustup, and Zig.
 
 ```bash
-open -a "Android Studio" apps/android                                  # open in Android Studio
-cd apps/android && ./gradlew :app:testDebugUnitTest                    # run tests
-gradle -p apps/android :app:assembleOnDeviceDebug :app:assembleRemoteOnlyDebug  # build flavors
+make android-emulator-fast                              # Rust JNI + debug APK
+cd apps/android && ./gradlew :app:testDebugUnitTest    # unit tests
+cd apps/android && ./gradlew :app:assembleDebug        # Gradle-only debug assemble
 ```
 
-## TestFlight (iOS)
+## Verification
 
-1. Authenticate with App Store Connect:
-
-   ```bash
-   asc auth login \
-     --name "Litter ASC" \
-     --key-id "<KEY_ID>" \
-     --issuer-id "<ISSUER_ID>" \
-     --private-key "$HOME/AppStore.p8" \
-     --network
-   ```
-
-2. Bootstrap TestFlight defaults:
-
-   ```bash
-   APP_BUNDLE_ID=<BUNDLE_ID> ./apps/ios/scripts/testflight-setup.sh
-   ```
-
-3. Build and upload:
-
-   ```bash
-   APP_BUNDLE_ID=<BUNDLE_ID> \
-   APP_STORE_APP_ID=<APP_STORE_CONNECT_APP_ID> \
-   TEAM_ID=<APPLE_TEAM_ID> \
-   ASC_KEY_ID=<KEY_ID> \
-   ASC_ISSUER_ID=<ISSUER_ID> \
-   ASC_PRIVATE_KEY_PATH="$HOME/AppStore.p8" \
-   ./apps/ios/scripts/testflight-upload.sh
-   ```
-
-   - Reads `MARKETING_VERSION` from `apps/ios/project.yml`; auto-bumps patch if the version is already live.
-   - Auto-increments build number from the latest App Store Connect build.
-
-## App Store Release (iOS)
+Run the same core checks used for mobile changes:
 
 ```bash
-APP_BUNDLE_ID=<BUNDLE_ID> \
-APP_STORE_APP_ID=<APP_STORE_CONNECT_APP_ID> \
-TEAM_ID=<APPLE_TEAM_ID> \
-ASC_KEY_ID=<KEY_ID> \
-ASC_ISSUER_ID=<ISSUER_ID> \
-ASC_PRIVATE_KEY_PATH="$HOME/AppStore.p8" \
-./apps/ios/scripts/app-store-release.sh
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make rebuild-bindings
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make rust-test
+REMORA_SKIP_ALLEYCAT_UPDATE=1 make ios-sim-fast
+cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-Metadata is sourced from `apps/ios/fastlane/metadata/en-US/`.
+The branch CI definition is [`.github/workflows/mobile-ci.yml`](../.github/workflows/mobile-ci.yml).

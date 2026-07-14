@@ -7,24 +7,25 @@ Android runtime is now on the same Rust-first architecture as iOS:
 
 ## Runtime Architecture
 
-- Canonical runtime state lives in Rust `AppStore` and is observed from `app/src/main/java/com/litter/android/state/AppModel.kt`.
+- Canonical runtime state lives in Rust `AppStore` and is observed from `app/src/main/java/com/remora/android/state/AppModel.kt`.
 - Direct server operations come from the shared Rust `AppClient` surface.
 - Discovery uses Android NSD only for mDNS seeds; merge/dedupe/probing live in Rust `DiscoveryBridge`.
 - SSH uses Rust `SshBridge`.
-- Voice runtime uses Rust store/RPC for realtime state and Android-only code for audio capture/playback, AEC, and services.
+- Voice runtime uses Rust store/RPC for signaling and state, plus Android `RealtimeWebRtcSession`; libwebrtc owns native audio, AEC, and noise suppression.
 
 ## Local Runtime
 
 - Android local runtime uses the same in-process Rust app-server model as iOS.
 - `MainActivity` connects the default local server through `ServerBridge.connectLocalServer(...)`.
 - There is no separate bundled Android Codex process in the active app path.
-- `codex-bridge` is only the Android bootstrap/JNI shim; `codex-mobile-client` is the runtime surface.
+- `codex-mobile-client` owns both the runtime surface and Android JNI bootstrap.
+- The embedded app-server is not a local terminal; Android does not bundle an Alpine rootfs or proot.
 
 Examples:
 
 ```bash
-./gradlew :app:assembleOnDeviceDebug
-./gradlew :app:assembleRemoteOnlyDebug
+./gradlew :app:assembleDebug
+./gradlew :app:testDebugUnitTest
 ```
 
 Open in Android Studio (macOS):
@@ -39,20 +40,19 @@ Rebuild + reopen workflow:
 ./apps/android/scripts/rebuild-and-reopen.sh
 ```
 
-Optional variants:
+Optional Rust rebuild or non-interactive use:
 
 ```bash
-./apps/android/scripts/rebuild-and-reopen.sh --on-device
-./apps/android/scripts/rebuild-and-reopen.sh --remote-only
-./apps/android/scripts/rebuild-and-reopen.sh --both --with-rust
+./apps/android/scripts/rebuild-and-reopen.sh --with-rust
 ./apps/android/scripts/rebuild-and-reopen.sh --no-open
 ```
 
 QA matrix and regression command list: `apps/android/docs/qa-matrix.md`.
+Product boundary and glossary: [`CONTEXT.md`](../../CONTEXT.md).
 
 ## Rust Bridge (Android)
 
-Android loads the Rust shared library `libcodex_bridge.so` through UniFFI init in `core:bridge`.
+Android loads the Rust shared library `libcodex_mobile_client.so` through UniFFI init in `core:bridge`.
 The generated Kotlin bindings live under `shared/rust-bridge/generated/kotlin/` and are consumed directly by `apps/android/core/bridge`.
 
 Build and copy JNI artifacts into `core:bridge`:

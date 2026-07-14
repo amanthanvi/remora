@@ -911,7 +911,7 @@ mod tests {
         SlingshotConfig {
             base_url: Url::parse("https://chatgpt.com/backend-api").unwrap(),
             auth_token: "token".to_string(),
-            user_agent: "Litter test".to_string(),
+            user_agent: "Remora test".to_string(),
             account_id: Some("account".to_string()),
             originator: Some("Codex Desktop".to_string()),
             client_id: Some("cli_test".to_string()),

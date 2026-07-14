@@ -2,9 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
-APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Litter-*/Build/Products/Debug-iphonesimulator/Litter.app 2>/dev/null | head -1 || true)"
-BUNDLE_ID="com.sigkitten.litter"
+CONFIGURATION="${XCODE_CONFIG:-Debug}"
+if [[ -n "${XCODE_DERIVED_DATA_PATH:-}" ]]; then
+  APP_PATH="${XCODE_DERIVED_DATA_PATH}/Build/Products/${CONFIGURATION}-iphonesimulator/Remora.app"
+else
+  DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
+  APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Remora-*/Build/Products/"${CONFIGURATION}"-iphonesimulator/Remora.app 2>/dev/null | head -1 || true)"
+fi
+BUNDLE_ID="com.remora.app"
 
 PROFILE_ENABLED="${IOS_SIM_PROFILE:-0}"
 PROFILE_TEMPLATE="${IOS_SIM_PROFILE_TEMPLATE:-Time Profiler}"
@@ -21,7 +26,11 @@ PROFILE_PID=""
 mkdir -p "${RUN_DIR}"
 
 if [[ -z "${APP_PATH}" ]]; then
-  echo "ERROR: Litter.app not found in DerivedData (Debug-iphonesimulator)" >&2
+  echo "ERROR: Remora.app not found in DerivedData (${CONFIGURATION}-iphonesimulator)" >&2
+  exit 1
+fi
+if [[ ! -d "${APP_PATH}" ]]; then
+  echo "ERROR: Remora.app not found at ${APP_PATH}" >&2
   exit 1
 fi
 
@@ -114,7 +123,7 @@ if [[ "${PROFILE_ENABLED}" == "1" ]]; then
   APP_PID=""
   for _ in $(seq 1 20); do
     sleep 0.5
-    APP_PID="$(pgrep -f 'Litter\.app/Litter$' 2>/dev/null | while read pid; do
+    APP_PID="$(pgrep -f 'Remora\.app/Remora$' 2>/dev/null | while read pid; do
       if ! ps -p "$pid" -o args= 2>/dev/null | grep -q PlugIns; then
         echo "$pid"
         break
@@ -164,7 +173,7 @@ if [[ "${PROFILE_ENABLED}" == "1" ]]; then
       echo "WARN: failed to attach profiler; see ${PROFILE_LOG_PATH}" >&2
     fi
   else
-    echo "WARN: could not resolve Litter pid on simulator; skipping profiler" >&2
+    echo "WARN: could not resolve Remora pid on simulator; skipping profiler" >&2
   fi
 else
   echo "==> Profiler disabled (IOS_SIM_PROFILE=${PROFILE_ENABLED})."

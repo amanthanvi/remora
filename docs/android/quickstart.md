@@ -1,24 +1,31 @@
 # Android Quickstart
 
+See [CONTEXT.md](../../CONTEXT.md) for the supported product boundary and shared
+runtime glossary.
+
 ## Prerequisites
-- Java 17
+
+- Java 17 or newer
 - Android SDK (API 35 + build-tools 35.0.0)
 - Gradle 8.x
-- Optional Rust bridge prerequisites:
-  - Rust toolchain
-  - Android NDK (`ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`)
-  - `cargo-ndk` (`cargo install cargo-ndk`)
+- Rust toolchain (`rustup`)
+- Android NDK (`ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`)
+- `cargo-ndk` (`cargo install cargo-ndk`)
+- Zig (`brew install zig`; CI pins 0.15.2)
 
 ## Build Steps
-1. Build Android app:
-   - `gradle -p apps/android :app:assembleDebug`
-2. Build Rust JNI bridge libs (optional, for on-device bridge runtime):
-   - `./tools/scripts/build-android-rust.sh`
+
+1. Build the Rust JNI bridge and debug APK:
+   - `make android-emulator-fast`
+2. Run unit tests:
+   - `cd apps/android && ./gradlew :app:testDebugUnitTest`
+3. Build only the Kotlin/Compose app against existing JNI artifacts:
+   - `cd apps/android && ./gradlew :app:assembleDebug`
+
+Android packages `codex-mobile-client` and Ghostty, not Alpine/proot. Terminal
+sessions are remote-only.
 
 ## Modules
+
 - `:app`
-- `:core:network`
 - `:core:bridge`
-- `:feature:discovery`
-- `:feature:sessions`
-- `:feature:conversation`

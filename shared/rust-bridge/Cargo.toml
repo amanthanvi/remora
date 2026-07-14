@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "codex-bridge",
     "codex-debug-cli",
     "codex-ipc",
     "codex-slingshot",
@@ -20,7 +19,6 @@ codex-core = { path = "../third_party/codex/codex-rs/core" }
 codex-exec-server = { path = "../third_party/codex/codex-rs/exec-server" }
 codex-login = { path = "../third_party/codex/codex-rs/login" }
 codex-shell-command = { path = "../third_party/codex/codex-rs/shell-command" }
-codex-apply-patch = { path = "../third_party/codex/codex-rs/apply-patch" }
 codex-arg0 = { path = "../third_party/codex/codex-rs/arg0" }
 codex-feedback = { path = "../third_party/codex/codex-rs/feedback" }
 codex-cloud-requirements = { path = "../third_party/codex/codex-rs/cloud-requirements" }

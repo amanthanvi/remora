@@ -23,7 +23,7 @@ pub struct TerminalConfig {
 
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum TerminalThemePreset {
-    LitterDark,
+    RemoraDark,
     CatppuccinFrappe,
     CatppuccinFrappeLight,
     Solarized { dark: bool },
@@ -61,7 +61,7 @@ pub fn render_ghostty_conf(config: TerminalConfig) -> String {
     let scrollback = config.scrollback_lines.clamp(100, 100_000);
 
     let mut out = String::with_capacity(1024);
-    let _ = writeln!(out, "# litter-mobile generated ghostty config");
+    let _ = writeln!(out, "# remora-mobile generated ghostty config");
     let _ = writeln!(out);
 
     if !config.font_family.trim().is_empty() {
@@ -117,20 +117,20 @@ fn format_font_size(value: f32) -> String {
 }
 
 /// Look up the 16 ANSI colours + fg/bg/cursor for a preset. Custom presets
-/// fall back to [`TerminalThemePreset::LitterDark`] for the base palette
+/// fall back to [`TerminalThemePreset::RemoraDark`] for the base palette
 /// (the `Custom.ghostty_conf` text is appended verbatim and may override).
 #[uniffi::export]
 pub fn theme_palette(preset: TerminalThemePreset) -> TerminalPalette {
     match preset {
-        TerminalThemePreset::LitterDark => litter_dark_palette(),
+        TerminalThemePreset::RemoraDark => remora_dark_palette(),
         TerminalThemePreset::CatppuccinFrappe => catppuccin_frappe_palette(false),
         TerminalThemePreset::CatppuccinFrappeLight => catppuccin_frappe_palette(true),
         TerminalThemePreset::Solarized { dark } => solarized_palette(dark),
-        TerminalThemePreset::Custom { .. } => litter_dark_palette(),
+        TerminalThemePreset::Custom { .. } => remora_dark_palette(),
     }
 }
 
-fn litter_dark_palette() -> TerminalPalette {
+fn remora_dark_palette() -> TerminalPalette {
     TerminalPalette {
         background: "#000000".into(),
         foreground: "#00FF9C".into(),
@@ -230,7 +230,7 @@ mod tests {
 
     fn cfg() -> TerminalConfig {
         TerminalConfig {
-            theme: TerminalThemePreset::LitterDark,
+            theme: TerminalThemePreset::RemoraDark,
             font_family: "SFMono-Regular".into(),
             font_size_pt: 13.0,
             cursor_style: TerminalCursorStyle::Bar,
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_litter_dark_with_palette_lines() {
+    fn renders_remora_dark_with_palette_lines() {
         let out = render_ghostty_conf(cfg());
         assert!(out.contains("font-family = SFMono-Regular"));
         assert!(out.contains("font-size = 13"));
@@ -286,7 +286,7 @@ mod tests {
             ghostty_conf: "background = #112233\nfont-feature = +liga".into(),
         };
         let out = render_ghostty_conf(c);
-        // Base palette still rendered (from LitterDark fallback).
+        // Base palette still rendered (from RemoraDark fallback).
         assert!(out.contains("foreground = #00FF9C"));
         // Custom block follows.
         let base = out.find("# --- custom ghostty.conf overrides ---").unwrap();

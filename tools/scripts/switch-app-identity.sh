@@ -6,7 +6,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 IOS_PROJECT_YML="$REPO_DIR/apps/ios/project.yml"
 THIS_SCRIPT_RELATIVE="tools/scripts/switch-app-identity.sh"
-IOS_XCODEPROJ_DIR_RELATIVE="apps/ios/Litter.xcodeproj/"
+IOS_XCODEPROJ_DIR_RELATIVE="apps/ios/Remora.xcodeproj/"
 
 TARGET=""
 IDENTIFIER=""
@@ -16,20 +16,20 @@ RUN_XCODEGEN=1
 
 usage() {
   cat <<'EOF'
-Usage: ./tools/scripts/switch-app-identity.sh --to <sigkitten|your-identifier> [options]
+Usage: ./tools/scripts/switch-app-identity.sh --to <remora|your-identifier> [options]
 
 Switches local app identifiers across Android and iOS between:
-  - com.sigkitten.litter(.android|.remote)
-  - com.<your-identifier>.litter(.android|.remote)
+  - com.remora.app / com.remora.android
+  - com.<your-identifier>.remora.app / com.<your-identifier>.remora.android
 
 Options:
-  --to <sigkitten|your-identifier>
+  --to <remora|your-identifier>
                             Target app identity prefix.
   --identifier <name>       Required with --to your-identifier.
-                            Example: --identifier sigkitten
+                            Example: --identifier remora
   --team-id <id|none>       Set iOS DEVELOPMENT_TEAM in apps/ios/project.yml.
                             Pass "none" to remove DEVELOPMENT_TEAM lines.
-  --no-xcodegen             Skip regenerating apps/ios/Litter.xcodeproj (only when no ID changes).
+  --no-xcodegen             Skip regenerating apps/ios/Remora.xcodeproj (only when no ID changes).
   -h, --help                Show this help.
 EOF
 }
@@ -80,8 +80,8 @@ if [ -z "$TARGET" ]; then
 fi
 
 case "$TARGET" in
-  sigkitten)
-    TARGET_IDENTIFIER="sigkitten"
+  remora)
+    TARGET_IDENTIFIER="remora"
     ;;
   your-identifier)
     if [ -z "$IDENTIFIER" ]; then
@@ -91,13 +91,13 @@ case "$TARGET" in
     TARGET_IDENTIFIER="$IDENTIFIER"
     ;;
   *)
-    echo "error: --to must be one of: sigkitten, your-identifier" >&2
+    echo "error: --to must be one of: remora, your-identifier" >&2
     exit 1
     ;;
 esac
 
 if ! [[ "$TARGET_IDENTIFIER" =~ ^[a-z][a-z0-9_]*$ ]]; then
-  echo "error: identifier must match ^[a-z][a-z0-9_]*$ (example: sigkitten)" >&2
+  echo "error: identifier must match ^[a-z][a-z0-9_]*$ (example: remora)" >&2
   exit 1
 fi
 
@@ -105,11 +105,19 @@ detect_current_identifier() {
   local current=""
 
   if [ -f "$IOS_PROJECT_YML" ]; then
-    current="$(sed -nE 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.([a-z0-9_]+)\.litter(\.remote)?[[:space:]]*$/\1/p' "$IOS_PROJECT_YML" | head -n1)"
+    if grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.remora\.app[[:space:]]*$' "$IOS_PROJECT_YML"; then
+      current="remora"
+    else
+      current="$(sed -nE 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.([a-z0-9_]+)\.remora\.app[[:space:]]*$/\1/p' "$IOS_PROJECT_YML" | head -n1)"
+    fi
   fi
 
   if [ -z "$current" ] && [ -f "$REPO_DIR/apps/android/app/build.gradle.kts" ]; then
-    current="$(sed -nE 's/^[[:space:]]*namespace[[:space:]]*=[[:space:]]*"com\.([a-z0-9_]+)\.litter\.android"[[:space:]]*$/\1/p' "$REPO_DIR/apps/android/app/build.gradle.kts" | head -n1)"
+    if grep -Eq '^[[:space:]]*namespace[[:space:]]*=[[:space:]]*"com\.remora\.android"[[:space:]]*$' "$REPO_DIR/apps/android/app/build.gradle.kts"; then
+      current="remora"
+    else
+      current="$(sed -nE 's/^[[:space:]]*namespace[[:space:]]*=[[:space:]]*"com\.([a-z0-9_]+)\.remora\.android"[[:space:]]*$/\1/p' "$REPO_DIR/apps/android/app/build.gradle.kts" | head -n1)"
+    fi
   fi
 
   if [ -z "$current" ]; then
@@ -145,8 +153,16 @@ replace_in_tracked_files() {
 }
 
 CURRENT_IDENTIFIER="$(detect_current_identifier)"
-FROM_PREFIX="com.${CURRENT_IDENTIFIER}.litter"
-TO_PREFIX="com.${TARGET_IDENTIFIER}.litter"
+if [ "$CURRENT_IDENTIFIER" = "remora" ]; then
+  FROM_PREFIX="com.remora"
+else
+  FROM_PREFIX="com.${CURRENT_IDENTIFIER}.remora"
+fi
+if [ "$TARGET_IDENTIFIER" = "remora" ]; then
+  TO_PREFIX="com.remora"
+else
+  TO_PREFIX="com.${TARGET_IDENTIFIER}.remora"
+fi
 PREFIX_CHANGED=0
 NEEDS_XCODEGEN=0
 
@@ -171,7 +187,7 @@ preflight_xcodegen_requirements() {
   fi
 
   if ! command -v xcodegen >/dev/null 2>&1; then
-    echo "error: xcodegen not found; install xcodegen to regenerate apps/ios/Litter.xcodeproj" >&2
+    echo "error: xcodegen not found; install xcodegen to regenerate apps/ios/Remora.xcodeproj" >&2
     exit 1
   fi
 }
@@ -210,7 +226,7 @@ regenerate_xcode_project() {
     cd "$REPO_DIR"
     apps/ios/scripts/regenerate-project.sh >/dev/null
   )
-  echo "Regenerated apps/ios/Litter.xcodeproj from apps/ios/project.yml"
+  echo "Regenerated apps/ios/Remora.xcodeproj from apps/ios/project.yml"
 }
 
 verify_old_prefix_removed() {
@@ -246,4 +262,4 @@ fi
 echo "Done."
 echo "Review changes with:"
 echo "  git -C \"$REPO_DIR\" status --short"
-echo "  git -C \"$REPO_DIR\" diff -- apps/android/app/build.gradle.kts apps/ios/project.yml apps/ios/Litter.xcodeproj/project.pbxproj tools/scripts/switch-app-identity.sh"
+echo "  git -C \"$REPO_DIR\" diff -- apps/android/app/build.gradle.kts apps/ios/project.yml apps/ios/Remora.xcodeproj/project.pbxproj tools/scripts/switch-app-identity.sh"

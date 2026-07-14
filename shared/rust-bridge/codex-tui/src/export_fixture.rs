@@ -90,11 +90,13 @@ async fn main() -> anyhow::Result<()> {
             limit: None,
             cursor: None,
             sort_key: None,
+            sort_direction: None,
             model_providers: None,
             source_kinds: None,
             archived: None,
             cwd: None,
             search_term: None,
+            use_state_db_only: false,
         },
     };
 
