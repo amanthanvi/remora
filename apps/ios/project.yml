@@ -19,7 +19,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "1.5.0"
     CURRENT_PROJECT_VERSION: "1"
-    SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
+    SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/RemoraBridgingHeader.h
     OTHER_LDFLAGS: "$(inherited) -lc++ -lz -lresolv -lcodex_mobile_client"
     HEADER_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/GeneratedRust/Headers"
     SWIFT_INCLUDE_PATHS: "$(inherited) $(PROJECT_DIR)/GeneratedRust/Headers"
@@ -94,7 +94,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.remora.app
         INFOPLIST_FILE: Sources/Remora/Info.plist
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/RemoraBridgingHeader.h
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIBackgroundModes: "audio picture-in-picture"
       configs:
@@ -174,7 +174,7 @@ targets:
         DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
         INFOPLIST_FILE: Sources/Remora/Info-Catalyst.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIconMac
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/RemoraBridgingHeader.h
         SUPPORTS_MACCATALYST: YES
         SUPPORTS_MACCATALYST_OPTIMIZED_FOR_MAC: YES
         MACOSX_DEPLOYMENT_TARGET: "14.0"
