@@ -233,6 +233,7 @@
 		619CABBD9EAEDAF287923421 /* AppServerHealth+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 412462C0BC23F1F58C471D8D /* AppServerHealth+UI.swift */; };
 		61CC8700BD01924A4D37129E /* VoiceRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9E8B8001C497A3C26A9E0A /* VoiceRuntimeController.swift */; };
 		61DBCA243DB5F323F4D9F25B /* PathDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CCCE6F1872680BBC36C221E /* PathDisplay.swift */; };
+		6246B2C6F1E14A70E4BE7C93 /* ConversationTimelineCommandRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */; };
 		630781052F285C12F247EAD9 /* min-dark-.json in Resources */ = {isa = PBXBuildFile; fileRef = 3A6505020028B54D7D1C0391 /* min-dark-.json */; };
 		63887277DBCF0ADC2BE0A8D0 /* AnimatedSplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */; };
 		63A3E2F93FE53D868E632F6F /* RemoraPlatform.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD9CAC70D8BAA99A5EB42B58 /* RemoraPlatform.swift */; };
@@ -395,6 +396,7 @@
 		B64C3A2A0B1AE8DACA28996C /* SwipeableRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD22EB8F012089E1C0FB383D /* SwipeableRow.swift */; };
 		B760B44AACFD70C457BD02AB /* ChatWallpaperBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5EFEB40C08121B6F50B231 /* ChatWallpaperBackground.swift */; };
 		B87F0A2C1CD98BE5C6A534D6 /* BerkeleyMono-Bold.otf in Resources */ = {isa = PBXBuildFile; fileRef = A9010332FE72D1CA72B8C2D7 /* BerkeleyMono-Bold.otf */; };
+		B89D64398C978773C97E6D93 /* ConversationTimelineCommandRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */; };
 		B8BD461633208482A5DF392E /* ThemeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AAC710EB03C53592B0C6E73 /* ThemeDefinition.swift */; };
 		B8CD82530AFD50FA3B1194A5 /* ToolCallMessageParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C30903899FF9253E8A0A3A /* ToolCallMessageParserTests.swift */; };
 		B91FB23222DE41F966523473 /* github-light-high-contrast.json in Resources */ = {isa = PBXBuildFile; fileRef = 50E23B21A5D94BEF151DA5F8 /* github-light-high-contrast.json */; };
@@ -822,6 +824,7 @@
 		E9ADC2E292EBD285710E6672 /* StreamingAssistantRenderCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAssistantRenderCacheTests.swift; sourceTree = "<group>"; };
 		EB89DEC132EB48E0230739F8 /* HomeBottomBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeBottomBar.swift; sourceTree = "<group>"; };
 		EBE50C377DC2C55E179EFB79 /* ServerPillRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPillRow.swift; sourceTree = "<group>"; };
+		EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTimelineCommandRows.swift; sourceTree = "<group>"; };
 		EC4A9A11F4EFDD1462BD9DA8 /* gruvbox-light-hard.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "gruvbox-light-hard.json"; sourceTree = "<group>"; };
 		EE2ADDF7DE421AFF93B7AF4A /* ConversationComposerContextBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerContextBarView.swift; sourceTree = "<group>"; };
 		EF181598EE6D6F0D251503EF /* HomeVoiceOrbButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeVoiceOrbButton.swift; sourceTree = "<group>"; };
@@ -1130,6 +1133,7 @@
 				B5D00081043C0583D4A7FD2F /* ConversationInfoView.swift */,
 				A69C895FCA3EB35C443834D8 /* ConversationOptionsSheet.swift */,
 				1FEB27716FDEC3062A93C6CD /* ConversationScreenModel.swift */,
+				EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */,
 				CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */,
 				F02770F7A68121156258AAFD /* ConversationTimelineView.swift */,
 				BD64F146D9F8F34C3CAD1D72 /* ConversationView.swift */,
@@ -1624,6 +1628,7 @@
 				CF23C01257D0F2C9C5F8B549 /* ConversationItem.swift in Sources */,
 				75D0293A53E7EFA833D17391 /* ConversationOptionsSheet.swift in Sources */,
 				750E44A857658DA09CAB8F9B /* ConversationScreenModel.swift in Sources */,
+				6246B2C6F1E14A70E4BE7C93 /* ConversationTimelineCommandRows.swift in Sources */,
 				4371DDF84CF9D63E380E3BAD /* ConversationTimelineDiffPresentation.swift in Sources */,
 				11963E5F0A1DF39D480C42AF /* ConversationTimelineView.swift in Sources */,
 				D5C41E51A42E5C3F72365A96 /* ConversationView.swift in Sources */,
@@ -1813,6 +1818,7 @@
 				B9D3B94BE745FBED61FAB6AD /* ConversationItem.swift in Sources */,
 				F5BF6084C5B199CC3DAA02C0 /* ConversationOptionsSheet.swift in Sources */,
 				9E5A0726919FCCD84EB226E1 /* ConversationScreenModel.swift in Sources */,
+				B89D64398C978773C97E6D93 /* ConversationTimelineCommandRows.swift in Sources */,
 				D99CD801B09EBDA749180795 /* ConversationTimelineDiffPresentation.swift in Sources */,
 				9D8CDEA63D74EB68ADC02939 /* ConversationTimelineView.swift in Sources */,
 				18AEE3E309FEE6F6A8CA6FFB /* ConversationView.swift in Sources */,
