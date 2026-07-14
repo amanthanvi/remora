@@ -3,11 +3,12 @@ use jni::objects::{GlobalRef, JClass, JObject, JString};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jstring};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static ANDROID_CONTEXT_REF: OnceLock<GlobalRef> = OnceLock::new();
 static ANDROID_CONTEXT_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static ANDROID_CONTEXT_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_remora_android_core_bridge_UniffiInit_nativeMobileClientInit(
@@ -17,6 +18,17 @@ pub extern "system" fn Java_com_remora_android_core_bridge_UniffiInit_nativeMobi
     home_dir: JString,
     codex_home_dir: JString,
 ) -> jboolean {
+    if ANDROID_CONTEXT_INITIALIZED.load(Ordering::Acquire) {
+        return JNI_TRUE;
+    }
+
+    let _init_guard = match ANDROID_CONTEXT_INIT_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("[remora] Android init lock is poisoned: {error}");
+            return JNI_FALSE;
+        }
+    };
     if ANDROID_CONTEXT_INITIALIZED.load(Ordering::Acquire) {
         return JNI_TRUE;
     }
@@ -59,13 +71,15 @@ pub extern "system" fn Java_com_remora_android_core_bridge_UniffiInit_nativeMobi
     let java_vm_ptr = java_vm.get_java_vm_pointer().cast::<c_void>();
     let context_ptr = context_ref.as_obj().as_raw().cast::<c_void>();
 
-    let _ = ANDROID_CONTEXT_REF.set(context_ref);
-
-    if !ANDROID_CONTEXT_INITIALIZED.swap(true, Ordering::AcqRel) {
-        unsafe {
-            ndk_context::initialize_android_context(java_vm_ptr, context_ptr);
-        }
+    if ANDROID_CONTEXT_REF.set(context_ref).is_err() {
+        eprintln!("[remora] Android application context was already retained");
+        return JNI_FALSE;
     }
+
+    unsafe {
+        ndk_context::initialize_android_context(java_vm_ptr, context_ptr);
+    }
+    ANDROID_CONTEXT_INITIALIZED.store(true, Ordering::Release);
     JNI_TRUE
 }
 
