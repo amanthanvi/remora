@@ -1,9 +1,9 @@
-# Spawn opencode in $HOME/.litter/sessions/SESSION_ID/, redirect its
+# Spawn opencode in $HOME/.remora/sessions/SESSION_ID/, redirect its
 # stdout/stderr to per-session log files, and stash its pid for later. Exits
 # non-zero if the process dies before the script returns; in that case the
 # tail of out.log + err.log is dumped to stderr so the caller sees why.
 {{PROFILE_INIT}}
-session_dir="$HOME/.litter/sessions/{{SESSION_ID}}"
+session_dir="$HOME/.remora/sessions/{{SESSION_ID}}"
 mkdir -p "$session_dir"
 : >"$session_dir/out.log"
 : >"$session_dir/err.log"

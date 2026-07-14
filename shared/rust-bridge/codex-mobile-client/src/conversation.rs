@@ -1993,7 +1993,7 @@ mod tests {
                             "confidence_score": 0.97,
                             "priority": 1,
                             "code_location": {
-                                "absolute_file_path": "/Users/sigkitten/dev/litter/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs",
+                                "absolute_file_path": "/Users/remora/dev/remora/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs",
                                 "line_range": { "start": 799, "end": 815 }
                             }
                         }
@@ -2482,7 +2482,7 @@ diff --git a/parser.rs b/parser.rs\n\
                 ThreadItem::ImageGeneration {
                     id: "ig-1".into(),
                     status: "completed".into(),
-                    revised_prompt: Some("a grumpy pirate kitty".into()),
+                    revised_prompt: Some("a grumpy pirate remora".into()),
                     result: png_base64.into(),
                     saved_path: Some(test_abs_path("/tmp/ig-1.png")),
                 },
@@ -2516,7 +2516,7 @@ diff --git a/parser.rs b/parser.rs\n\
         assert_eq!(done.status, AppOperationStatus::Completed);
         assert_eq!(
             done.revised_prompt.as_deref(),
-            Some("a grumpy pirate kitty")
+            Some("a grumpy pirate remora")
         );
         assert_eq!(done.saved_path.as_deref(), Some("/tmp/ig-1.png"));
         let png = done.image_png.as_ref().expect("decoded png bytes");

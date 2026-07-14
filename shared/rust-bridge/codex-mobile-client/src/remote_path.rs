@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn parse_windows_normalizes_forward_slashes() {
         assert_eq!(
-            RemotePath::parse("D:/Projects/kitty").as_str(),
-            r"D:\Projects\kitty"
+            RemotePath::parse("D:/Projects/remora").as_str(),
+            r"D:\Projects\remora"
         );
     }
 
@@ -311,8 +311,8 @@ mod tests {
     #[test]
     fn normalize_thread_cwd_collapses_duplicated_windows_home_with_suffix() {
         assert_eq!(
-            normalize_thread_cwd(r"C:\Users\npace\Users\npace\dev\litter").as_deref(),
-            Some(r"C:\Users\npace\dev\litter")
+            normalize_thread_cwd(r"C:\Users\npace\Users\npace\dev\remora").as_deref(),
+            Some(r"C:\Users\npace\dev\remora")
         );
     }
 
@@ -327,8 +327,8 @@ mod tests {
     #[test]
     fn normalize_thread_cwd_normalizes_windows_forward_slashes() {
         assert_eq!(
-            normalize_thread_cwd("C:/Users/npace/dev/litter").as_deref(),
-            Some(r"C:\Users\npace\dev\litter")
+            normalize_thread_cwd("C:/Users/npace/dev/remora").as_deref(),
+            Some(r"C:\Users\npace\dev\remora")
         );
     }
 
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn parent_windows_forward_slashes() {
         assert_eq!(
-            RemotePath::parse("D:/Projects/kitty").parent().as_str(),
+            RemotePath::parse("D:/Projects/remora").parent().as_str(),
             r"D:\Projects"
         );
     }
@@ -470,13 +470,13 @@ mod tests {
 
     #[test]
     fn segments_windows_forward_slashes() {
-        let segs = RemotePath::parse("D:/Projects/kitty").segments();
+        let segs = RemotePath::parse("D:/Projects/remora").segments();
         assert_eq!(
             segs,
             vec![
                 (r"D:\".to_string(), r"D:\".to_string()),
                 ("Projects".to_string(), r"D:\Projects".to_string()),
-                ("kitty".to_string(), r"D:\Projects\kitty".to_string()),
+                ("remora".to_string(), r"D:\Projects\remora".to_string()),
             ]
         );
     }

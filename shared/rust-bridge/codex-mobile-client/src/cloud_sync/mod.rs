@@ -56,8 +56,8 @@ const PLATFORM_KEYS: &[&str] = &[
     "selectedDarkTheme",
     "conversationTextSizeStep",
     "collapseTurns",
-    "litter.debugSettings",
-    "litter.experimentalFeatures",
+    "remora.debugSettings",
+    "remora.experimentalFeatures",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +402,14 @@ mod tests {
     use crate::preferences::preferences_save;
     use tempfile::tempdir;
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serialized_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn pin(server: &str, thread: &str) -> PinnedThreadKey {
         PinnedThreadKey {
             server_id: server.into(),
@@ -411,6 +419,7 @@ mod tests {
 
     #[test]
     fn export_includes_rust_prefs() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -436,6 +445,7 @@ mod tests {
 
     #[test]
     fn apply_writes_back_rust_prefs_when_remote_is_newer() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -473,6 +483,7 @@ mod tests {
 
     #[test]
     fn apply_platform_key_returns_writeback() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -498,6 +509,7 @@ mod tests {
 
     #[test]
     fn apply_ignores_unknown_platform_keys() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -521,6 +533,7 @@ mod tests {
 
     #[test]
     fn local_platform_change_wins_when_newer() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -551,6 +564,7 @@ mod tests {
 
     #[test]
     fn export_includes_platform_table_entries() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -563,6 +577,7 @@ mod tests {
 
     #[test]
     fn mismatched_version_is_ignored() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();
@@ -578,6 +593,7 @@ mod tests {
 
     #[test]
     fn corrupt_bytes_return_error() {
+        let _guard = serialized_test();
         reset_platform_table();
         let dir = tempdir().unwrap();
         let directory: String = dir.path().to_string_lossy().into();

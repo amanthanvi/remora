@@ -8,17 +8,17 @@ MODE="all"
 case "${1:-}" in
   "")
     ;;
-  --all|--shared|--kittylitter)
+  --all|--shared)
     MODE="${1#--}"
     ;;
   *)
-    echo "usage: $(basename "$0") [--all|--shared|--kittylitter]" >&2
+    echo "usage: $(basename "$0") [--all|--shared]" >&2
     exit 1
     ;;
 esac
 
-if [ "${LITTER_SKIP_ALLEYCAT_UPDATE:-0}" = "1" ]; then
-  echo "==> Skipping Alleycat main refresh (LITTER_SKIP_ALLEYCAT_UPDATE=1)"
+if [ "${REMORA_SKIP_ALLEYCAT_UPDATE:-0}" = "1" ]; then
+  echo "==> Skipping Alleycat main refresh (REMORA_SKIP_ALLEYCAT_UPDATE=1)"
   exit 0
 fi
 
@@ -52,24 +52,8 @@ update_shared() {
   done
 }
 
-update_kittylitter() {
-  echo "==> Resolving kittylitter Alleycat dep to dnakov/alleycat main ($ALLEYCAT_MAIN_SHA)..."
-  cargo update \
-    --quiet \
-    --manifest-path "$REPO_DIR/services/kittylitter/Cargo.toml" \
-    -p alleycat \
-    --precise "$ALLEYCAT_MAIN_SHA"
-}
-
 case "$MODE" in
-  all)
+  all|shared)
     update_shared
-    update_kittylitter
-    ;;
-  shared)
-    update_shared
-    ;;
-  kittylitter)
-    update_kittylitter
     ;;
 esac

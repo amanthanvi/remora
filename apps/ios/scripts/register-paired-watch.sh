@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Register a paired Apple Watch with Apple's Developer Portal so the
-# CLI-driven build flow can install LitterWatch on the watch without
+# CLI-driven build flow can install RemoraWatch on the watch without
 # Xcode's GUI involvement.
 #
 # When a fresh watch is paired with the Mac, Apple's developer profile
@@ -23,8 +23,8 @@
 #   ./apps/ios/scripts/register-paired-watch.sh --print-udid
 #
 # Outputs the discovered UDID to stdout and (unless --dry-run) runs:
-#   xcodebuild -project apps/ios/Litter.xcodeproj \
-#     -scheme LitterWatch \
+#   xcodebuild -project apps/ios/Remora.xcodeproj \
+#     -scheme RemoraWatch \
 #     -destination "platform=watchOS,id=$WATCH_UDID" \
 #     -allowProvisioningUpdates \
 #     -allowProvisioningDeviceRegistration \
@@ -34,8 +34,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROJECT_PATH="$IOS_DIR/Litter.xcodeproj"
-WATCH_SCHEME="${WATCH_SCHEME:-LitterWatch}"
+PROJECT_PATH="$IOS_DIR/Remora.xcodeproj"
+WATCH_SCHEME="${WATCH_SCHEME:-RemoraWatch}"
 XCODE_CONFIG="${XCODE_CONFIG:-Debug}"
 
 DRY_RUN=0
@@ -173,5 +173,5 @@ xcodebuild \
     -allowProvisioningDeviceRegistration \
     build
 
-echo "==> Registered. The watch UDID should now appear in the LitterWatch provisioning profile."
+echo "==> Registered. The watch UDID should now appear in the RemoraWatch provisioning profile."
 printf '%s\n' "$WATCH_UDID_RESOLVED"

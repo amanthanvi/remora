@@ -1,4 +1,4 @@
-//! Bootstrap a remote `codex app-server` and connect Litter to it.
+//! Bootstrap a remote `codex app-server` and connect Remora to it.
 //!
 //! The flow:
 //!   1. Resolve a user-installed `codex` binary on the remote.

@@ -30,8 +30,11 @@ pub(super) fn resolve_codex_binary_script_posix() -> String {
     // Candidate list is shared with the Rust-native local resolver in
     // `crate::local_server` so the two resolvers cannot drift.
     let shared_lines = crate::local_server::shell_candidate_lines().join("\n");
-    crate::ssh_scripts::render(
+    let template = crate::local_server::remora_codex_resolver_snippet(
         crate::ssh_scripts::posix::RESOLVE_CODEX_BINARY,
+    );
+    crate::ssh_scripts::render(
+        &template,
         &[
             ("PROFILE_INIT", PROFILE_INIT),
             ("PACKAGE_MANAGER_PROBE", PACKAGE_MANAGER_PROBE),

@@ -105,7 +105,7 @@ struct RemoteDetachedDirs {
 
 impl RemoteDetachedDirs {
     fn new(session_id: String) -> Self {
-        let root = format!("$HOME/.litter/sessions/{session_id}");
+        let root = format!("$HOME/.remora/sessions/{session_id}");
         Self {
             input: format!("{root}/in"),
             out_log: format!("{root}/out.log"),

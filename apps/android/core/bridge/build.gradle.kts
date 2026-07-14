@@ -15,12 +15,12 @@ val androidAbis = System.getenv("ANDROID_ABIS")
 val ghosttyHeader = file("src/main/cpp/include/ghostty.h")
 val ghosttyLibrariesAvailable = ghosttyHeader.isFile &&
     androidAbis.all { abi -> file("src/main/jniLibs/$abi/libghostty.so").isFile }
-val enableGhosttyJni = System.getenv("LITTER_ENABLE_GHOSTTY_ANDROID")?.asBuildFlag()
-    ?: (findProperty("litter.enableGhosttyAndroid") as? String)?.asBuildFlag()
+val enableGhosttyJni = System.getenv("REMORA_ENABLE_GHOSTTY_ANDROID")?.asBuildFlag()
+    ?: (findProperty("remora.enableGhosttyAndroid") as? String)?.asBuildFlag()
     ?: ghosttyLibrariesAvailable
 
 android {
-    namespace = "com.litter.android.core.bridge"
+    namespace = "com.remora.android.core.bridge"
     compileSdk = 35
     ndkVersion = System.getenv("ANDROID_NDK_VERSION")?.takeIf { it.isNotBlank() } ?: "30.0.14904198"
 

@@ -73,7 +73,7 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: "26.3"
 
       - name: Setup Zig (libghostty build)
         uses: mlugg/setup-zig@v2
@@ -219,17 +219,17 @@ jobs:
             echo "Missing secret ANDROID_UPLOAD_KEYSTORE_B64"
             exit 1
           fi
-          store_file="$RUNNER_TEMP/litter-upload.jks"
+          store_file="$RUNNER_TEMP/remora-upload.jks"
           echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > "$store_file"
-          echo "LITTER_UPLOAD_STORE_FILE=$store_file" >> "$GITHUB_ENV"
+          echo "REMORA_UPLOAD_STORE_FILE=$store_file" >> "$GITHUB_ENV"
           ls -lh "$store_file"
 
       - name: Build signed release APK
         env:
-          LITTER_UPLOAD_STORE_FILE: ${{ env.LITTER_UPLOAD_STORE_FILE }}
-          LITTER_UPLOAD_STORE_PASSWORD: ${{ secrets.LITTER_UPLOAD_STORE_PASSWORD }}
-          LITTER_UPLOAD_KEY_ALIAS: ${{ secrets.LITTER_UPLOAD_KEY_ALIAS }}
-          LITTER_UPLOAD_KEY_PASSWORD: ${{ secrets.LITTER_UPLOAD_KEY_PASSWORD }}
+          REMORA_UPLOAD_STORE_FILE: ${{ env.REMORA_UPLOAD_STORE_FILE }}
+          REMORA_UPLOAD_STORE_PASSWORD: ${{ secrets.REMORA_UPLOAD_STORE_PASSWORD }}
+          REMORA_UPLOAD_KEY_ALIAS: ${{ secrets.REMORA_UPLOAD_KEY_ALIAS }}
+          REMORA_UPLOAD_KEY_PASSWORD: ${{ secrets.REMORA_UPLOAD_KEY_PASSWORD }}
         run: apps/android/gradlew -p apps/android :app:assembleRelease
 
       - name: Generate checksums

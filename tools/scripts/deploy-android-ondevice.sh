@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-APP_ID="com.sigkitten.litter.android"
-MAIN_ACTIVITY="com.litter.android.MainActivity"
+APP_ID="com.remora.android"
+MAIN_ACTIVITY="com.remora.android.MainActivity"
 APK_PATH="$REPO_DIR/apps/android/app/build/outputs/apk/debug/app-debug.apk"
 
 SERIAL="${ANDROID_SERIAL:-}"

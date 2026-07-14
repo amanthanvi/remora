@@ -37,10 +37,10 @@ from typing import Any
 
 UTC = dt.timezone.utc
 
-DEFAULT_IOS_BUNDLE_ID = "com.sigkitten.litter"
-DEFAULT_ANDROID_PACKAGE = "com.sigkitten.litter.android"
+DEFAULT_IOS_BUNDLE_ID = "com.remora.app"
+DEFAULT_ANDROID_PACKAGE = "com.remora.android"
 DEFAULT_OUTPUT_BASE = pathlib.Path("/tmp/mobile-store-artifacts")
-DEFAULT_PLAY_ENV_FILE = pathlib.Path.home() / ".config/litter/play-upload.env"
+DEFAULT_PLAY_ENV_FILE = pathlib.Path.home() / ".config/remora/play-upload.env"
 
 PLAY_REPORTING_SCOPE = "https://www.googleapis.com/auth/playdeveloperreporting"
 PLAY_PUBLISHER_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
@@ -345,20 +345,20 @@ def load_service_account_path(explicit: str | None, env_file: pathlib.Path) -> p
         if not path.exists():
             raise ScriptError(f"Google Play service account JSON not found: {path}")
         return path
-    env_value = os.environ.get("LITTER_PLAY_SERVICE_ACCOUNT_JSON")
+    env_value = os.environ.get("REMORA_PLAY_SERVICE_ACCOUNT_JSON")
     if env_value:
         path = pathlib.Path(env_value).expanduser()
         if path.exists():
             return path
     file_env = load_export_file(env_file)
-    candidate = file_env.get("LITTER_PLAY_SERVICE_ACCOUNT_JSON")
+    candidate = file_env.get("REMORA_PLAY_SERVICE_ACCOUNT_JSON")
     if candidate:
         path = pathlib.Path(candidate).expanduser()
         if path.exists():
             return path
     raise ScriptError(
         "Google Play service account JSON not found. Set --play-service-account-json, "
-        "LITTER_PLAY_SERVICE_ACCOUNT_JSON, or ~/.config/litter/play-upload.env."
+        "REMORA_PLAY_SERVICE_ACCOUNT_JSON, or ~/.config/remora/play-upload.env."
     )
 
 
@@ -418,7 +418,7 @@ def api_get_json(url: str, bearer_token: str) -> dict[str, Any]:
         headers={
             "Authorization": f"Bearer {bearer_token}",
             "Accept": "application/json",
-            "User-Agent": "litter-store-fetch/1.0",
+            "User-Agent": "remora-store-fetch/1.0",
         },
     )
     try:

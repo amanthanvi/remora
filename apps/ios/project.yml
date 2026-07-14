@@ -1,6 +1,6 @@
-name: Litter
+name: Remora
 options:
-  bundleIdPrefix: com.litter
+  bundleIdPrefix: com.remora.app
   deploymentTarget:
     iOS: "18.0"
     watchOS: "11.0"
@@ -11,7 +11,7 @@ options:
       file: true
 
 # DeveloperID is a release-style configuration used by the Mac Catalyst
-# direct-distribution lane (notarized .dmg). It points the LitterMac target
+# direct-distribution lane (notarized .dmg). It points the RemoraMac target
 # at a separate, unsandboxed entitlements file so the app can spawn a local
 # `codex app-server`. The Mac App Store lane stays on Release with sandbox.
 configs:
@@ -25,7 +25,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "1.5.0"
     CURRENT_PROJECT_VERSION: "1"
-    SWIFT_OBJC_BRIDGING_HEADER: Sources/Litter/Bridge/codex_bridge_objc.h
+    SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
     OTHER_LDFLAGS: "$(inherited) -lc++ -lz -lresolv -lcodex_mobile_client"
     HEADER_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/GeneratedRust/Headers"
     SWIFT_INCLUDE_PATHS: "$(inherited) $(PROJECT_DIR)/GeneratedRust/Headers"
@@ -50,56 +50,56 @@ packages:
     url: https://github.com/kean/Nuke.git
     from: "12.8.0"
 targets:
-  Litter:
+  Remora:
     type: application
     platform: iOS
     deploymentTarget: "18.0"
     entitlements:
-      path: Sources/Litter/Litter.entitlements
+      path: Sources/Remora/Remora.entitlements
       properties:
         aps-environment: production
         com.apple.developer.carplay-voice-based-conversation: true
         # iCloud KVS sync (Feature C). Re-add when the iCloud container
-        # `iCloud.com.sigkitten.litter` exists in the Apple Developer Portal
+        # `iCloud.com.remora.app` exists in the Apple Developer Portal
         # AND is enabled on the iOS app's provisioning profile. Without
         # both, archive fails: "Provisioning profile doesn't include the
         # iCloud capability."
-        # com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)iCloud.com.sigkitten.litter
+        # com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)iCloud.com.remora.app
         com.apple.security.application-groups:
-          - group.com.sigkitten.litter
+          - group.com.remora.app
     attributes:
       SystemCapabilities:
         com.apple.BackgroundModes:
           enabled: true
     sources:
-      - path: Sources/Litter
+      - path: Sources/Remora
         excludes:
           - "**/*.h"
-      - path: Sources/Litter/Bridge/UniFFICodexClient.generated.swift
+      - path: Sources/Remora/Bridge/UniFFICodexClient.generated.swift
       - path: Resources/fs
         type: folder
         buildPhase: resources
-      - path: Sources/LitterLiveActivity/CodexTurnLiveActivity.swift
-      - path: Sources/LitterWatch/Models/WatchModels.swift
-      - path: Sources/LitterWatch/Models/WatchSize.swift
-      - path: Sources/LitterWatch/Models/WatchHapticDetector.swift
-      - path: Sources/LitterWatch/Models/WatchSnapshotStore.swift
-      - path: Sources/LitterWatch/Models/WatchDeepLinkRouter.swift
-      - path: Sources/LitterWatchComplications/LitterServerListPayload.swift
-      - path: Sources/LitterWatchComplications/LitterComplicationEntry.swift
-      - path: Sources/LitterWatchComplications/LitterRunningTurnPayload.swift
+      - path: Sources/RemoraLiveActivity/CodexTurnLiveActivity.swift
+      - path: Sources/RemoraWatch/Models/WatchModels.swift
+      - path: Sources/RemoraWatch/Models/WatchSize.swift
+      - path: Sources/RemoraWatch/Models/WatchHapticDetector.swift
+      - path: Sources/RemoraWatch/Models/WatchSnapshotStore.swift
+      - path: Sources/RemoraWatch/Models/WatchDeepLinkRouter.swift
+      - path: Sources/RemoraWatchComplications/RemoraServerListPayload.swift
+      - path: Sources/RemoraWatchComplications/RemoraComplicationEntry.swift
+      - path: Sources/RemoraWatchComplications/RemoraRunningTurnPayload.swift
     resources:
-      - path: Sources/Litter/Resources/Fonts
-      - path: Sources/Litter/Resources/Themes
-      - path: Sources/Litter/Resources/TipJarProducts.storekit
-      - path: Sources/Litter/Resources/home_cat.png
-      - path: Sources/Litter/Resources/home_cat_entrance.png
-      - path: Sources/Litter/Resources/cat_transmission_01.png
-      - path: Sources/Litter/Resources/cat_transmission_02.png
-      - path: Sources/Litter/Resources/cat_transmission_03.png
-      - path: Sources/Litter/Resources/cat_transmission_04.png
-      - path: Sources/Litter/Resources/cat_transmission_05.png
-      - path: Sources/Litter/Resources/cat_transmission_06.png
+      - path: Sources/Remora/Resources/Fonts
+      - path: Sources/Remora/Resources/Themes
+      - path: Sources/Remora/Resources/TipJarProducts.storekit
+      - path: Sources/Remora/Resources/remora_home.png
+      - path: Sources/Remora/Resources/remora_home_entrance.png
+      - path: Sources/Remora/Resources/remora_transmission_01.png
+      - path: Sources/Remora/Resources/remora_transmission_02.png
+      - path: Sources/Remora/Resources/remora_transmission_03.png
+      - path: Sources/Remora/Resources/remora_transmission_04.png
+      - path: Sources/Remora/Resources/remora_transmission_05.png
+      - path: Sources/Remora/Resources/remora_transmission_06.png
     dependencies:
       - sdk: CarPlay.framework
       - sdk: CoreGraphics.framework
@@ -119,15 +119,15 @@ targets:
         product: Nuke
       - package: Nuke
         product: NukeUI
-      - target: LitterLiveActivity
+      - target: RemoraLiveActivity
         embed: true
-      - target: LitterWatch
+      - target: RemoraWatch
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.sigkitten.litter
-        INFOPLIST_FILE: Sources/Litter/Info.plist
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Litter/Bridge/codex_bridge_objc.h
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app
+        INFOPLIST_FILE: Sources/Remora/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIBackgroundModes: "audio fetch remote-notification picture-in-picture"
       configs:
@@ -145,36 +145,36 @@ targets:
           PROVISIONING_PROFILE_SPECIFIER: "$(APP_PROVISIONING_PROFILE_SPECIFIER)"
           APP_PROVISIONING_PROFILE_SPECIFIER: ""
           OTHER_LDFLAGS: "$(inherited) -lc++ -lz -lresolv -lcodex_mobile_client -lghostty"
-  LitterMac:
+  RemoraMac:
     type: application
     platform: auto
     supportedDestinations:
       - macCatalyst
     entitlements:
-      path: Sources/Litter/Litter-Catalyst.entitlements
+      path: Sources/Remora/Remora-Catalyst.entitlements
       properties:
         aps-environment: production
         # iCloud KVS sync (Feature C). Re-add when the iCloud container
-        # `iCloud.com.sigkitten.litter` exists in the Apple Developer Portal
+        # `iCloud.com.remora.app` exists in the Apple Developer Portal
         # AND the Mac App Store profile is regenerated to include the iCloud
         # capability. Direct-dist (DeveloperID entitlements) keeps the key
         # because Developer ID apps validate iCloud at runtime, not via profile.
-        # com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)iCloud.com.sigkitten.litter
+        # com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)iCloud.com.remora.app
         com.apple.security.application-groups:
-          - group.com.sigkitten.litter
+          - group.com.remora.app
         com.apple.security.app-sandbox: true
         com.apple.security.device.bluetooth: true
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.network.client: true
         com.apple.security.network.server: true
     sources:
-      - path: Sources/Litter
+      - path: Sources/Remora
         excludes:
           - CarPlay/**
           - Info.plist
-          - Litter.entitlements
-          - Litter-Catalyst.entitlements
-          - Litter-Catalyst-DeveloperID.entitlements
+          - Remora.entitlements
+          - Remora-Catalyst.entitlements
+          - Remora-Catalyst-DeveloperID.entitlements
           - Models/AppLifecycleController.swift
           - Models/AppRuntimeController.swift
           - Models/CodexTurnAttributes.swift
@@ -196,19 +196,19 @@ targets:
           - Views/RealtimeVoiceScreen.swift
           - Views/VoiceCallView.swift
           - "**/*.h"
-      - path: Sources/Litter/Bridge/UniFFICodexClient.generated.swift
+      - path: Sources/Remora/Bridge/UniFFICodexClient.generated.swift
     resources:
-      - path: Sources/Litter/Resources/Fonts
-      - path: Sources/Litter/Resources/Themes
-      - path: Sources/Litter/Resources/TipJarProducts.storekit
-      - path: Sources/Litter/Resources/home_cat.png
-      - path: Sources/Litter/Resources/home_cat_entrance.png
-      - path: Sources/Litter/Resources/cat_transmission_01.png
-      - path: Sources/Litter/Resources/cat_transmission_02.png
-      - path: Sources/Litter/Resources/cat_transmission_03.png
-      - path: Sources/Litter/Resources/cat_transmission_04.png
-      - path: Sources/Litter/Resources/cat_transmission_05.png
-      - path: Sources/Litter/Resources/cat_transmission_06.png
+      - path: Sources/Remora/Resources/Fonts
+      - path: Sources/Remora/Resources/Themes
+      - path: Sources/Remora/Resources/TipJarProducts.storekit
+      - path: Sources/Remora/Resources/remora_home.png
+      - path: Sources/Remora/Resources/remora_home_entrance.png
+      - path: Sources/Remora/Resources/remora_transmission_01.png
+      - path: Sources/Remora/Resources/remora_transmission_02.png
+      - path: Sources/Remora/Resources/remora_transmission_03.png
+      - path: Sources/Remora/Resources/remora_transmission_04.png
+      - path: Sources/Remora/Resources/remora_transmission_05.png
+      - path: Sources/Remora/Resources/remora_transmission_06.png
     dependencies:
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
@@ -221,12 +221,12 @@ targets:
         product: NukeUI
     settings:
       base:
-        PRODUCT_NAME: Litter
-        PRODUCT_BUNDLE_IDENTIFIER: com.sigkitten.litter
+        PRODUCT_NAME: Remora
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app
         DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
-        INFOPLIST_FILE: Sources/Litter/Info-Catalyst.plist
+        INFOPLIST_FILE: Sources/Remora/Info-Catalyst.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIconMac
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Litter/Bridge/codex_bridge_objc.h
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/codex_bridge_objc.h
         SUPPORTS_MACCATALYST: YES
         SUPPORTS_MACCATALYST_OPTIMIZED_FOR_MAC: YES
         MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -260,29 +260,29 @@ targets:
           APP_PROVISIONING_PROFILE_SPECIFIER: ""
           OTHER_LDFLAGS: "$(inherited) -lc++ -lz -lresolv -lcodex_mobile_client -lghostty"
           ENABLE_HARDENED_RUNTIME: YES
-          CODE_SIGN_ENTITLEMENTS: Sources/Litter/Litter-Catalyst-DeveloperID.entitlements
-  LitterLiveActivity:
+          CODE_SIGN_ENTITLEMENTS: Sources/Remora/Remora-Catalyst-DeveloperID.entitlements
+  RemoraLiveActivity:
     type: app-extension
     platform: iOS
     deploymentTarget: "18.0"
     entitlements:
-      path: Sources/LitterLiveActivity/LitterLiveActivity.entitlements
+      path: Sources/RemoraLiveActivity/RemoraLiveActivity.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.sigkitten.litter
+          - group.com.remora.app
     sources:
-      - path: Sources/LitterLiveActivity
-      - path: Sources/Litter/Models/CodexTurnAttributes.swift
-      - path: Sources/Litter/Models/CodexVoiceCallAttributes.swift
-      - path: Sources/Litter/Models/LitterPalette.swift
-      - path: Sources/Litter/Models/VoiceSessionControl.swift
-      - path: Sources/Litter/Views/LockScreenCardView.swift
+      - path: Sources/RemoraLiveActivity
+      - path: Sources/Remora/Models/CodexTurnAttributes.swift
+      - path: Sources/Remora/Models/CodexVoiceCallAttributes.swift
+      - path: Sources/Remora/Models/RemoraPalette.swift
+      - path: Sources/Remora/Models/VoiceSessionControl.swift
+      - path: Sources/Remora/Views/LockScreenCardView.swift
     resources:
-      - path: Sources/LitterLiveActivity/Assets.xcassets
+      - path: Sources/RemoraLiveActivity/Assets.xcassets
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.sigkitten.litter.liveactivity
-        INFOPLIST_FILE: Sources/LitterLiveActivity/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app.liveactivity
+        INFOPLIST_FILE: Sources/RemoraLiveActivity/Info.plist
       configs:
         Debug:
           CODE_SIGN_STYLE: "$(LIVE_ACTIVITY_CODE_SIGN_STYLE)"
@@ -297,31 +297,31 @@ targets:
           LIVE_ACTIVITY_CODE_SIGN_IDENTITY: ""
           PROVISIONING_PROFILE_SPECIFIER: "$(LIVE_ACTIVITY_PROVISIONING_PROFILE_SPECIFIER)"
           LIVE_ACTIVITY_PROVISIONING_PROFILE_SPECIFIER: ""
-  LitterWatch:
+  RemoraWatch:
     type: application
     platform: watchOS
     deploymentTarget: "11.0"
     entitlements:
-      path: Sources/LitterWatch/LitterWatch.entitlements
+      path: Sources/RemoraWatch/RemoraWatch.entitlements
       properties:
         aps-environment: production
         com.apple.security.application-groups:
-          - group.com.sigkitten.litter
+          - group.com.remora.app
     sources:
-      - path: Sources/LitterWatch
+      - path: Sources/RemoraWatch
         excludes:
           - "Assets.xcassets"
-      - path: Sources/Litter/AppIcon.icon
+      - path: Sources/Remora/AppIcon.icon
     resources:
-      - path: Sources/Litter/Resources/Fonts
-      - path: Sources/LitterWatch/Assets.xcassets
+      - path: Sources/Remora/Resources/Fonts
+      - path: Sources/RemoraWatch/Assets.xcassets
     dependencies:
-      - target: LitterWatchComplications
+      - target: RemoraWatchComplications
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.sigkitten.litter.watchkitapp
-        INFOPLIST_FILE: Sources/LitterWatch/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app.watchkitapp
+        INFOPLIST_FILE: Sources/RemoraWatch/Info.plist
         TARGETED_DEVICE_FAMILY: "4"
         WATCHOS_DEPLOYMENT_TARGET: "11.0"
         GENERATE_INFOPLIST_FILE: NO
@@ -346,25 +346,25 @@ targets:
           PROVISIONING_PROFILE_SPECIFIER: "$(WATCH_PROVISIONING_PROFILE_SPECIFIER)"
           WATCH_PROVISIONING_PROFILE_SPECIFIER: ""
 
-  LitterWatchComplications:
+  RemoraWatchComplications:
     type: app-extension
     platform: watchOS
     deploymentTarget: "11.0"
     entitlements:
-      path: Sources/LitterWatchComplications/LitterWatchComplications.entitlements
+      path: Sources/RemoraWatchComplications/RemoraWatchComplications.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.sigkitten.litter
+          - group.com.remora.app
     sources:
-      - path: Sources/LitterWatchComplications
+      - path: Sources/RemoraWatchComplications
         excludes:
           - "Assets.xcassets"
     resources:
-      - path: Sources/LitterWatchComplications/Assets.xcassets
+      - path: Sources/RemoraWatchComplications/Assets.xcassets
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.sigkitten.litter.watchkitapp.complications
-        INFOPLIST_FILE: Sources/LitterWatchComplications/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app.watchkitapp.complications
+        INFOPLIST_FILE: Sources/RemoraWatchComplications/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "4"
         WATCHOS_DEPLOYMENT_TARGET: "11.0"
@@ -387,41 +387,43 @@ targets:
           PROVISIONING_PROFILE_SPECIFIER: "$(WATCH_COMP_PROVISIONING_PROFILE_SPECIFIER)"
           WATCH_COMP_PROVISIONING_PROFILE_SPECIFIER: ""
 
-  LitterTests:
+  RemoraTests:
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "18.0"
     sources:
-      - path: Tests/LitterTests
+      - path: Tests/RemoraTests
     dependencies:
-      - target: Litter
+      - target: Remora
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app.tests
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGNING_ALLOWED: false
         CODE_SIGNING_REQUIRED: false
-  LitterUITests:
+  RemoraUITests:
     type: bundle.ui-testing
     platform: iOS
     deploymentTarget: "18.0"
     sources:
-      - path: Tests/LitterUITests
+      - path: Tests/RemoraUITests
       - path: SnapshotHelper.swift
     dependencies:
-      - target: Litter
+      - target: Remora
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.remora.app.uitests
         GENERATE_INFOPLIST_FILE: true
-        TEST_TARGET_NAME: Litter
+        TEST_TARGET_NAME: Remora
         CODE_SIGNING_ALLOWED: false
         CODE_SIGNING_REQUIRED: false
 
 schemes:
-  LitterWatch:
+  RemoraWatch:
     build:
       targets:
-        LitterWatch: all
-        LitterWatchComplications: all
+        RemoraWatch: all
+        RemoraWatchComplications: all
     run:
       config: Debug
     profile:
@@ -433,18 +435,18 @@ schemes:
     management:
       isShown: true
       orderHint: 2
-  Litter:
+  Remora:
     build:
       targets:
-        Litter: all
+        Remora: all
     run:
       config: Debug
       customLLDBInit: $(SRCROOT)/.lldbinit
     test:
       config: Debug
       targets:
-        - LitterTests
-        - LitterUITests
+        - RemoraTests
+        - RemoraUITests
     profile:
       config: Release
     analyze:
@@ -454,10 +456,10 @@ schemes:
     management:
       isShown: true
       orderHint: 1
-  LitterMac:
+  RemoraMac:
     build:
       targets:
-        LitterMac: all
+        RemoraMac: all
     run:
       config: Debug
     profile:

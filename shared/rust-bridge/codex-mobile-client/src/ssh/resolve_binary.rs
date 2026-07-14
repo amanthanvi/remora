@@ -95,10 +95,10 @@ printf 'shell=%s\n' "${{SHELL:-}}"
 printf 'path=%s\n' "${{PATH:-}}"
 printf 'pnpm_home=%s\n' "${{PNPM_HOME:-}}"
 printf 'nvm_bin=%s\n' "${{NVM_BIN:-}}"
-printf 'npm_prefix=%s\n' "$_litter_npm_prefix"
-printf 'bun_global_bin=%s\n' "$_litter_bun_global_bin"
-printf 'pnpm_global_bin=%s\n' "$_litter_pnpm_global_bin"
-printf 'npm_global_bin=%s\n' "$_litter_npm_global_bin"
+printf 'npm_prefix=%s\n' "$_remora_npm_prefix"
+printf 'bun_global_bin=%s\n' "$_remora_bun_global_bin"
+printf 'pnpm_global_bin=%s\n' "$_remora_pnpm_global_bin"
+printf 'npm_global_bin=%s\n' "$_remora_npm_global_bin"
 printf 'whoami='; whoami 2>/dev/null || true
 printf 'pwd='; pwd 2>/dev/null || true
 printf 'command -v codex='
@@ -115,9 +115,9 @@ command -v codex 2>/dev/null || printf '<missing>'
   "${{CARGO_HOME:-$HOME/.cargo}}/bin/codex" \
   "$HOME/Applications/Codex.app/Contents/Resources/codex" \
   "/Applications/Codex.app/Contents/Resources/codex" \
-  "${{_litter_bun_global_bin:-}}/codex" \
-  "${{_litter_npm_global_bin:-}}/codex" \
-  "${{_litter_pnpm_global_bin:-}}/codex" \
+  "${{_remora_bun_global_bin:-}}/codex" \
+  "${{_remora_npm_global_bin:-}}/codex" \
+  "${{_remora_pnpm_global_bin:-}}/codex" \
   "/opt/homebrew/bin/codex" \
   "/usr/local/bin/codex" \
   "/usr/bin/codex"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Apply Litter's local patches to the vendored Ghostty submodule.
+# Apply Remora's local patches to the vendored Ghostty submodule.
 #
 # Pattern mirrors apps/ios/scripts/sync-codex.sh. Patches live under
 # patches/ghostty/*.patch and add mobile-embed capability that upstream
@@ -18,9 +18,18 @@ REPO_DIR="$(cd "$IOS_DIR/../.." && pwd)"
 SUBMODULE_DIR="$REPO_DIR/shared/third_party/ghostty"
 PATCH_DIR="$REPO_DIR/patches/ghostty"
 
-PATCH_FILES=(
-    "$PATCH_DIR/litter-mobile-embed.patch"
-)
+PATCH_FILES=()
+for patch in "$PATCH_DIR"/*-mobile-embed.patch; do
+    [ -f "$patch" ] && PATCH_FILES+=("$patch")
+done
+if [ "${#PATCH_FILES[@]}" -eq 0 ]; then
+    echo "error: no Ghostty mobile-embed patches found in $PATCH_DIR" >&2
+    exit 1
+fi
+if [ ! -f "$PATCH_DIR/metal-toolchain-mobile-embed.patch" ]; then
+    echo "error: missing required Ghostty Metal toolchain patch: $PATCH_DIR/metal-toolchain-mobile-embed.patch" >&2
+    exit 1
+fi
 
 SYNC_MODE="${1:---preserve-current}"
 case "$SYNC_MODE" in

@@ -19,7 +19,7 @@ apps/android/.gradle/
 apps/ios/Frameworks/
 apps/ios/GeneratedRust/
 apps/ios/Resources/fs/
-apps/ios/Litter.xcodeproj/Litter.xcodeproj/
+apps/ios/Remora.xcodeproj/Remora.xcodeproj/
 apps/ios/fastlane/report.xml
 apps/ios/fastlane/screenshots/
 
@@ -79,6 +79,11 @@ node_modules/
 # Local env (credentials)
 .env
 .envrc
+.local/
+
+# Local agent/orchestration state (never committed)
+.intent/
+.orchestration/
 
 # Factory/Droid
 .factory/

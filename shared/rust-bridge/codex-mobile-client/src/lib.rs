@@ -22,7 +22,7 @@ pub use proot_types::ProotBootstrapError;
 /// One-time iSH bootstrap. Swift passes the bundle's `fs/` resource dir, the
 /// app's Application Support dir, and the Documents dir; Rust does the
 /// rootfs extraction, boot, and exec-hook registration. Replaces the old
-/// `codex_ish_init` + `litter_install_ish_hook` C entry points.
+/// `codex_ish_init` + `remora_install_ish_hook` C entry points.
 ///
 /// Non-iOS targets (Catalyst, Android, host bindgen) return
 /// `IshBootstrapError::Unsupported` — the kernel is iOS-only and not linked

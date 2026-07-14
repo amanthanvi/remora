@@ -1,93 +1,64 @@
-# litter
+# Remora
 
-<p align="center">
-  <img src="apps/ios/Sources/Litter/Resources/brand_logo.png" alt="litter logo" width="180" />
-</p>
+Remora is a native iOS and Android client for
+[Codex](https://github.com/openai/codex). It connects to local or remote Codex
+servers, manages sessions, and shares mobile runtime logic through a Rust core.
 
-<p align="center">
-  Native iOS + Android client for <a href="https://github.com/openai/codex">Codex</a>. Connect to local or remote servers, manage sessions, and run agentic coding workflows from your phone.
-</p>
-
-<p align="center">
-  <a href="https://kittylitter.app"><img src="docs/badges/website.svg" alt="kittylitter.app" /></a>
-  &nbsp;
-  <a href="https://apps.apple.com/us/app/kittylitter/id6759521788"><img src="docs/badges/app-store.svg" alt="App Store" /></a>
-  &nbsp;
-  <a href="https://kittylitter.app/android-beta"><img src="docs/badges/android-beta.svg" alt="Android Beta" /></a>
-</p>
-
-## Screenshots (iOS)
-
-<p align="center">
-  <img src="docs/screenshots/01-hero-iphone-1320x2868.png" alt="Home" width="200" />
-  <img src="docs/screenshots/02-remote-iphone-1320x2868.png" alt="Remote servers" width="200" />
-  <img src="docs/screenshots/07-generative-ui-iphone-1320x2868.png" alt="Generative UI" width="200" />
-  <img src="docs/screenshots/05-realtime-voice-iphone-1320x2868.png" alt="Realtime voice" width="200" />
-</p>
+This repository keeps the app build surfaces. Branded distribution wrappers,
+marketing site assets, and signup funnels are intentionally not part of this
+fork.
 
 ## Quick Start
 
 ```bash
-make ios-device-fast   # fast device build
-make ios-sim-fast      # fast simulator build
-make android-emulator-fast  # fast Android emulator build
+make ios-device-fast       # fast iOS device build
+make ios-sim-fast          # fast iOS simulator build
+make android-emulator-fast # fast Android emulator build
 ```
 
-### Fresh Checkout Prerequisites
-
-After pairing a **new Apple Watch** with Xcode (Window → Devices and Simulators),
-run this once so CLI builds can install LitterWatch on it:
-
-```bash
-make watch-register
-```
-
-This registers the watch UDID with Apple's developer portal and refreshes the
-provisioning profile. Without it, `xcodebuild` succeeds but `devicectl ...
-install app` fails with "App could not be installed at this time". The target
-is idempotent (stamped per-UDID under `.build-stamps/`), so re-runs are no-ops
-until a new watch is paired. Override discovery with `WATCH_UDID=<udid>` if
-auto-detection fails.
-
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for prerequisites, full build options, TestFlight/App Store release, and SSH setup.
+For machine prerequisites and the full build matrix, see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Repository Layout
 
-```
-apps/ios/                  iOS app (Litter scheme, project.yml is source of truth)
-apps/android/              Android app (Compose UI, Gradle build)
-shared/rust-bridge/
-  codex-mobile-client/     Shared Rust client crate + UniFFI surface (iOS & Android)
-  codex-ios-audio/         iOS-only audio/AEC crate
+```text
+apps/ios/                  iOS app; current scheme/path names use Remora
+apps/android/              Android app; Compose UI and Gradle build
+shared/rust-bridge/        Shared Rust client crate and UniFFI bindings
 shared/third_party/codex/  Upstream Codex submodule
-patches/codex/             Local patch set applied during builds
-tools/scripts/             Cross-platform helper scripts
+patches/codex/             Local Codex patch set applied during builds
+tools/scripts/             Build and maintenance helper scripts
+services/push-proxy/       Runtime push infrastructure retained for now
 ```
+
+## Common Targets
+
+| Target                       | Description                                              |
+| ---------------------------- | -------------------------------------------------------- |
+| `make ios-device-fast`       | Fast iOS device build using raw staticlib outputs        |
+| `make ios-sim-fast`          | Fast iOS simulator build                                 |
+| `make ios`                   | Full iOS package lane                                    |
+| `make android-emulator-fast` | Fast Android emulator build                              |
+| `make android`               | Full Android pipeline                                    |
+| `make rust-check`            | Host `cargo check` for shared Rust crates                |
+| `make rust-test`             | Host `cargo test` for shared Rust crates                 |
+| `make bindings`              | Regenerate UniFFI Swift and Kotlin bindings              |
+| `make xcgen`                 | Regenerate the Xcode project from `apps/ios/project.yml` |
+| `make clean`                 | Remove build artifacts                                   |
 
 ## Architecture
 
-Both platforms share a single Rust core (`codex-mobile-client`) via UniFFI-generated bindings. Platform code (Swift/Kotlin) stays thin: UI, permissions, notifications, and platform APIs only. Session state, streaming, hydration, discovery, and auth logic live in Rust.
+Both platforms share `codex-mobile-client` through UniFFI-generated bindings.
+Swift and Kotlin stay thin: UI, permissions, notifications, and platform APIs.
+Session state, streaming, hydration, discovery, and auth logic belong in Rust.
 
-## Contributing
+Remote pairing should use upstream Alleycat, for example:
 
-Litter is under active development and a lot of features are in flight. PRs are welcome but will likely only be merged if they're small and target a specific problem — sweeping refactors and new features tend to collide with work already underway. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening one.
+```bash
+npx kittylitter
+```
 
 ## License
 
-Litter is licensed under the GNU General Public License version 3 with an additional permission under GPLv3 section 7 for Apple App Store and Google Play distribution. See [LICENSE](LICENSE).
-
-## Make Targets
-
-| Target | Description |
-|---|---|
-| `make ios-device-fast` | Fast device build (raw staticlib) |
-| `make ios-sim-fast` | Fast simulator build |
-| `make ios` | Full package lane (device + sim + xcframework) |
-| `make android-emulator-fast` | Fast Android emulator build |
-| `make android` | Full Android pipeline |
-| `make rust-check` | Host `cargo check` for shared Rust crates |
-| `make rust-test` | Host `cargo test` for shared Rust crates |
-| `make bindings` | Regenerate UniFFI Swift + Kotlin bindings |
-| `make xcgen` | Regenerate Xcode project from `project.yml` |
-| `make watch-register` | Register a newly paired Apple Watch with the developer portal (idempotent) |
-| `make clean` | Remove all build artifacts |
+GPLv3 with the repository's additional distribution permission; see
+[LICENSE](LICENSE).

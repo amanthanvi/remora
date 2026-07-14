@@ -21,13 +21,13 @@
   brew install meson
   ```
 
-- **xcodegen** (for regenerating `Litter.xcodeproj`):
+- **xcodegen** (for regenerating `Remora.xcodeproj`):
 
   ```bash
   brew install xcodegen
   ```
 
-## Connect Your Mac to Litter Over SSH
+## Connect Your Mac to Remora Over SSH
 
 Use this flow to make Codex sessions from your Mac visible in the iOS/Android app.
 
@@ -49,7 +49,7 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
 
    If the second command prints nothing, install Codex and/or fix shell PATH startup files.
 
-3. Connect from the Litter app.
+3. Connect from the Remora app.
 
    - Keep phone and Mac on the same LAN (or same Tailnet).
    - In Discovery: tap a host showing `codex running` to connect directly, or tap an `SSH` host and enter credentials.
@@ -62,7 +62,7 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
    codex app-server --listen ws://127.0.0.1:8390
    ```
 
-   Then connect the phone via the `SSH` flow in Discovery — Litter opens the SSH connection, port-forwards `127.0.0.1:8390`, and connects through the tunnel. Do not bind `0.0.0.0` unless you fully understand the exposure; the SSH flow is the supported path.
+   Then connect the phone via the `SSH` flow in Discovery — Remora opens the SSH connection, port-forwards `127.0.0.1:8390`, and connects through the tunnel. Do not bind `0.0.0.0` unless you fully understand the exposure; the SSH flow is the supported path.
 
 5. Thread/session listing is `cwd`-scoped. If expected sessions are missing, choose the same working directory used when those sessions were created.
 
@@ -107,13 +107,13 @@ make xcgen
 Open in Xcode:
 
 ```bash
-open apps/ios/Litter.xcodeproj
+open apps/ios/Remora.xcodeproj
 ```
 
 CLI build:
 
 ```bash
-xcodebuild -project apps/ios/Litter.xcodeproj -scheme Litter -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+xcodebuild -project apps/ios/Remora.xcodeproj -scheme Remora -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
 ## Build and Run Android
@@ -132,7 +132,7 @@ gradle -p apps/android :app:assembleOnDeviceDebug :app:assembleRemoteOnlyDebug  
 
    ```bash
    asc auth login \
-     --name "Litter ASC" \
+     --name "Remora ASC" \
      --key-id "<KEY_ID>" \
      --issuer-id "<ISSUER_ID>" \
      --private-key "$HOME/AppStore.p8" \

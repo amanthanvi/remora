@@ -3,31 +3,31 @@ name: Mobile CI
 on:
   pull_request:
     paths:
-      - 'Makefile'
-      - '.gitmodules'
-      - 'apps/android/**'
-      - 'apps/ios/**'
-      - 'patches/codex/**'
-      - 'patches/ghostty/**'
-      - 'shared/rust-bridge/**'
-      - 'shared/third_party/codex/**'
-      - 'shared/third_party/ghostty'
-      - 'tools/scripts/**'
-      - '.github/workflows/mobile-ci.yml'
+      - "Makefile"
+      - ".gitmodules"
+      - "apps/android/**"
+      - "apps/ios/**"
+      - "patches/codex/**"
+      - "patches/ghostty/**"
+      - "shared/rust-bridge/**"
+      - "shared/third_party/codex/**"
+      - "shared/third_party/ghostty"
+      - "tools/scripts/**"
+      - ".github/workflows/mobile-ci.yml"
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - 'Makefile'
-      - '.gitmodules'
-      - 'apps/android/**'
-      - 'apps/ios/**'
-      - 'patches/codex/**'
-      - 'patches/ghostty/**'
-      - 'shared/rust-bridge/**'
-      - 'shared/third_party/codex/**'
-      - 'shared/third_party/ghostty'
-      - 'tools/scripts/**'
-      - '.github/workflows/mobile-ci.yml'
+      - "Makefile"
+      - ".gitmodules"
+      - "apps/android/**"
+      - "apps/ios/**"
+      - "patches/codex/**"
+      - "patches/ghostty/**"
+      - "shared/rust-bridge/**"
+      - "shared/third_party/codex/**"
+      - "shared/third_party/ghostty"
+      - "tools/scripts/**"
+      - ".github/workflows/mobile-ci.yml"
 
 concurrency:
   group: mobile-ci-${{ github.ref }}
@@ -57,7 +57,7 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: "26.3"
 
       - name: Setup Zig (libghostty build)
         uses: mlugg/setup-zig@v2
@@ -107,7 +107,7 @@ jobs:
           mkdir -p apps/ios/GeneratedRust/Headers .ci-prep/shared
 
           cp shared/rust-bridge/generated/swift/codex_mobile_client.swift \
-            apps/ios/Sources/Litter/Bridge/UniFFICodexClient.generated.swift
+            apps/ios/Sources/Remora/Bridge/UniFFICodexClient.generated.swift
           cp shared/rust-bridge/generated/swift/codex_mobile_clientFFI.h \
             apps/ios/GeneratedRust/Headers/codex_mobile_clientFFI.h
           cp shared/rust-bridge/generated/swift/codex_mobile_clientFFI.modulemap \
@@ -117,7 +117,7 @@ jobs:
 
           tar -czf .ci-prep/shared/generated-mobile-sources.tgz -C . \
             shared/rust-bridge/generated \
-            apps/ios/Sources/Litter/Bridge/UniFFICodexClient.generated.swift \
+            apps/ios/Sources/Remora/Bridge/UniFFICodexClient.generated.swift \
             apps/ios/GeneratedRust/Headers
 
       - name: Upload shared prep artifact
@@ -151,7 +151,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -247,7 +247,7 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: "26.3"
 
       - name: Install build dependencies
         run: brew install xcodegen meson ninja llvm lld
@@ -328,11 +328,11 @@ jobs:
           fi
           echo "IOS_SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
 
-      - name: Build (Litter)
+      - name: Build (Remora)
         run: |
           xcodebuild \
-            -project apps/ios/Litter.xcodeproj \
-            -scheme Litter \
+            -project apps/ios/Remora.xcodeproj \
+            -scheme Remora \
             -configuration Debug \
             -destination "id=$IOS_SIMULATOR_UDID" \
             ARCHS=arm64 \

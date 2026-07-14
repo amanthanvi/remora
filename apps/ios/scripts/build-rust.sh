@@ -9,7 +9,7 @@ RUST_BRIDGE_DIR="$REPO_DIR/shared/rust-bridge"
 CARGO_TARGET_DIR_EFFECTIVE="${CARGO_TARGET_DIR:-$RUST_BRIDGE_DIR/target}"
 FRAMEWORKS_DIR="$IOS_DIR/Frameworks"
 GENERATED_SWIFT_DIR="$RUST_BRIDGE_DIR/generated/swift"
-UNIFFI_OUT="$IOS_DIR/Sources/Litter/Bridge/UniFFICodexClient.generated.swift"
+UNIFFI_OUT="$IOS_DIR/Sources/Remora/Bridge/UniFFICodexClient.generated.swift"
 GENERATED_RUST_DIR="$IOS_DIR/GeneratedRust"
 GENERATED_HEADERS_DIR="$GENERATED_RUST_DIR/Headers"
 GENERATED_DEVICE_DIR="$GENERATED_RUST_DIR/ios-device"
@@ -75,7 +75,7 @@ for arg in "$@"; do
       ;;
     --macabi-only)
       # Build only the Mac Catalyst (macabi) arches. Skips xcframework
-      # packaging — the LitterMac target links the raw macabi staticlib
+      # packaging — the RemoraMac target links the raw macabi staticlib
       # directly via LIBRARY_SEARCH_PATHS[sdk=macosx*].
       MACABI_ONLY=1
       ;;
@@ -442,7 +442,7 @@ if [ "$FAST_SIM" -eq 1 ]; then
 fi
 
 if [ "$MACABI_ONLY" -eq 1 ]; then
-  # LitterMac links the raw macabi staticlib via
+  # RemoraMac links the raw macabi staticlib via
   # LIBRARY_SEARCH_PATHS[sdk=macosx*] — no xcframework needed.
   if [ "$FAST_MACABI" -eq 1 ]; then
     echo "==> Fast Mac Catalyst build complete ($MACABI_HOST_TARGET, $PROFILE)"

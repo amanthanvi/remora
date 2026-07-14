@@ -42,7 +42,7 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: "26.3"
 
       - name: Install build dependencies
         run: brew install xcodegen meson ninja llvm lld
@@ -77,7 +77,7 @@ jobs:
           tar -czf .ci-prep/mac/mac-release-prep.tgz -C . \
             apps/ios/Resources/fs \
             apps/ios/GeneratedRust \
-            apps/ios/Sources/Litter/Bridge/UniFFICodexClient.generated.swift
+            apps/ios/Sources/Remora/Bridge/UniFFICodexClient.generated.swift
 
       - name: Upload Mac release prep artifact
         uses: actions/upload-artifact@v4
@@ -104,7 +104,7 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: "26.3"
 
       - name: Validate required secrets
         env:
@@ -205,8 +205,8 @@ jobs:
 
       - name: Build, sign, and notarize DMG
         env:
-          SCHEME: LitterMac
-          APP_BUNDLE_ID: com.sigkitten.litter
+          SCHEME: RemoraMac
+          APP_BUNDLE_ID: com.remora.app
           TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           APP_PROVISIONING_PROFILE_SPECIFIER: ${{ env.APP_PROVISIONING_PROFILE_SPECIFIER }}
           EXPORT_SIGNING_STYLE: ${{ env.EXPORT_SIGNING_STYLE }}

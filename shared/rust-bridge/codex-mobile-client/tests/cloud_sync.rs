@@ -114,8 +114,8 @@ fn platform_keys_lists_all_seven_swift_keys() {
         "selectedDarkTheme",
         "conversationTextSizeStep",
         "collapseTurns",
-        "litter.debugSettings",
-        "litter.experimentalFeatures",
+        "remora.debugSettings",
+        "remora.experimentalFeatures",
     ];
     for key in expected {
         assert!(keys.iter().any(|k| k == key), "missing key: {key}");

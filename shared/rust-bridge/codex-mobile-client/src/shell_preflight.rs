@@ -7,7 +7,7 @@
 //! tokens to its real app temp dir.
 //!
 //! - Well-behaved tools pick up `$TMPDIR`, which each platform sets at boot
-//!   (Android: `filesDir/litter-tmp`; iOS iSH commands get `TMPDIR=/tmp`).
+//!   (Android: `filesDir/remora-tmp`; iOS iSH commands get `TMPDIR=/tmp`).
 //! - Literal `/tmp` and `/tmp/*` Android path tokens in argv, including
 //!   inside recognized shell-wrapper scripts, are rewritten here to the
 //!   `$TMPDIR` target so `cat /tmp/foo` ends up reading the real temp.

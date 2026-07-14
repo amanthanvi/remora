@@ -213,9 +213,9 @@ build_proot() {
             OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy" \
             OBJDUMP="$TOOLCHAIN/bin/llvm-objdump" \
             CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -DARG_MAX=131072 -I. -I$prefix/include" \
-            CFLAGS="-Wall -Wextra -O2 -fPIE -DPROOT_UNBUNDLE_LOADER=\\\"/__litter_proot_loader\\\"" \
+            CFLAGS="-Wall -Wextra -O2 -fPIE -DPROOT_UNBUNDLE_LOADER=\\\"/__remora_proot_loader\\\"" \
             LDFLAGS="$prefix/lib/libtalloc.a -pie -Wl,-z,noexecstack" \
-            PROOT_UNBUNDLE_LOADER="/__litter_proot_loader" \
+            PROOT_UNBUNDLE_LOADER="/__remora_proot_loader" \
             proot
         "$TOOLCHAIN/bin/llvm-strip" --strip-unneeded proot
         "$TOOLCHAIN/bin/llvm-strip" --strip-unneeded loader/loader

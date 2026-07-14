@@ -1,5 +1,5 @@
-project "Litter.xcodeproj"
-scheme "Litter"
+project "Remora.xcodeproj"
+scheme "Remora"
 
 devices [
   "iPhone 16 Pro Max",
@@ -12,5 +12,5 @@ output_directory "./fastlane/screenshots"
 clear_previous_screenshots true
 override_status_bar true
 
-only_testing ["LitterUITests/LitterUITests/testCaptureAppStoreScreenshots"]
-skip_testing ["LitterTests"]
+only_testing ["RemoraUITests/RemoraUITests/testCaptureAppStoreScreenshots"]
+skip_testing ["RemoraTests"]

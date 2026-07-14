@@ -560,7 +560,7 @@ async fn connect_bridge_stream(
             websocket_url: label.clone(),
             auth_token: None,
         },
-        client_name: "Litter".to_string(),
+        client_name: "Remora".to_string(),
         client_version: "1.0".to_string(),
         experimental_api: true,
         opt_out_notification_methods: Vec::new(),
@@ -589,7 +589,7 @@ async fn connect_codex_via_ssh(
             websocket_url: websocket_url.clone(),
             auth_token: None,
         },
-        client_name: "Litter".to_string(),
+        client_name: "Remora".to_string(),
         client_version: "1.0".to_string(),
         experimental_api: true,
         opt_out_notification_methods: Vec::new(),
@@ -1231,7 +1231,7 @@ fn now_millis() -> u128 {
 
 pub fn runtime_label(kind: &str) -> &str {
     // The stable name *is* the wire label now — alleycat advertises
-    // each agent by its id (`"codex"`, `"claude"`, …) and litter just
+    // each agent by its id (`"codex"`, `"claude"`, …) and remora just
     // passes the same string through to logging / SSH state paths.
     kind
 }

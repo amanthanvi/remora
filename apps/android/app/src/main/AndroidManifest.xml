@@ -16,18 +16,18 @@
         android:allowBackup="true"
         android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="Litter"
+        android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.App.Starting">
         <meta-data
-            android:name="com.litter.android.runtime.STARTUP_MODE"
+            android:name="com.remora.android.runtime.STARTUP_MODE"
             android:value="${runtimeStartupMode}" />
         <meta-data
-            android:name="com.litter.android.runtime.ENABLE_ON_DEVICE_BRIDGE"
+            android:name="com.remora.android.runtime.ENABLE_ON_DEVICE_BRIDGE"
             android:value="${enableOnDeviceBridge}" />
         <activity
-            android:name="com.litter.android.MainActivity"
+            android:name="com.remora.android.MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -36,12 +36,12 @@
             </intent-filter>
         </activity>
         <activity
-            android:name="com.litter.android.auth.ChatGPTOAuthActivity"
+            android:name="com.remora.android.auth.ChatGPTOAuthActivity"
             android:exported="false"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize" />
         <activity
-            android:name="com.litter.android.auth.ChatGPTOAuthRedirectActivity"
+            android:name="com.remora.android.auth.ChatGPTOAuthRedirectActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true"
@@ -51,23 +51,23 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
-                    android:scheme="litterauth"
+                    android:scheme="remoraauth"
                     android:host="chatgpt-auth-complete" />
             </intent-filter>
         </activity>
 
         <service
-            android:name="com.litter.android.state.PetOverlayService"
+            android:name="com.remora.android.state.PetOverlayService"
             android:exported="false" />
         <service
-            android:name="com.litter.android.push.LitterFirebaseMessagingService"
+            android:name="com.remora.android.push.RemoraFirebaseMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
         <receiver
-            android:name="com.litter.android.ui.widget.ActiveTurnWidgetReceiver"
+            android:name="com.remora.android.ui.widget.ActiveTurnWidgetReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />

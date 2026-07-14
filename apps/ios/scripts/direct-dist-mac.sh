@@ -2,7 +2,7 @@
 # Mac Catalyst direct distribution (Developer ID + notarization).
 #
 # Pipeline:
-#   1. Archive `LitterMac` for Mac Catalyst.
+#   1. Archive `RemoraMac` for Mac Catalyst.
 #   2. Export with method=developer-id → produces a Developer ID-signed .app.
 #   3. Wrap the .app + /Applications shortcut in a styled .dmg via hdiutil.
 #   4. Sign the .dmg with the Developer ID Application cert so Gatekeeper
@@ -12,29 +12,29 @@
 #   6. Staple the notarization ticket to the .dmg so it passes Gatekeeper
 #      offline after the first run.
 #
-# Output: `$BUILD_DIR/Litter-<version>-mac.dmg`, ready to host anywhere.
+# Output: `$BUILD_DIR/Remora-<version>-mac.dmg`, ready to host anywhere.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=release-common.sh
 source "$SCRIPT_DIR/release-common.sh"
 
-SCHEME="${SCHEME:-LitterMac}"
+SCHEME="${SCHEME:-RemoraMac}"
 # `DeveloperID` is the unsandboxed Mac Catalyst configuration defined in
-# project.yml; it picks up Litter-Catalyst-DeveloperID.entitlements so the
+# project.yml; it picks up Remora-Catalyst-DeveloperID.entitlements so the
 # notarized .dmg can spawn a local `codex app-server`. The Mac App Store
 # (TestFlight) lane uses Release, which keeps the sandbox.
 CONFIGURATION="${CONFIGURATION:-DeveloperID}"
 PROJECT_DIR="${PROJECT_DIR:-$IOS_DIR}"
-PROJECT_PATH="${PROJECT_PATH:-$PROJECT_DIR/Litter.xcodeproj}"
-APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.sigkitten.litter}"
-APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-Litter}"
+PROJECT_PATH="${PROJECT_PATH:-$PROJECT_DIR/Remora.xcodeproj}"
+APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.remora.app}"
+APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-Remora}"
 TEAM_ID="${TEAM_ID:-}"
 # Developer ID provisioning profile name (NOT the Mac App Store one).
 # Required because our entitlements include APS + App Groups (and iCloud
 # KVS when Feature C activates) — all three are silently stripped from
 # the signed .app unless a matching profile authorizes them.
-PROVISIONING_PROFILE_SPECIFIER="${PROVISIONING_PROFILE_SPECIFIER:-Litter Developer ID}"
+PROVISIONING_PROFILE_SPECIFIER="${PROVISIONING_PROFILE_SPECIFIER:-Remora Developer ID}"
 APP_PROVISIONING_PROFILE_SPECIFIER="${APP_PROVISIONING_PROFILE_SPECIFIER:-$PROVISIONING_PROFILE_SPECIFIER}"
 # Code sign identity for the .app bundle. `Developer ID Application` is the
 # exact CN prefix Apple uses; `security find-identity` will confirm it.
@@ -59,7 +59,7 @@ EXPORT_OPTIONS_PLIST="$BUILD_DIR/ExportOptions.plist"
 EXPORT_DIR="$BUILD_DIR/export"
 DMG_STAGING_DIR="$BUILD_DIR/dmg-stage"
 DMG_MOUNT_DIR="$BUILD_DIR/dmg-mount"
-DMG_BACKGROUND_SOURCE="${DMG_BACKGROUND_SOURCE:-$ROOT_DIR/services/website/public/brand_logo.png}"
+DMG_BACKGROUND_SOURCE="${DMG_BACKGROUND_SOURCE:-$ROOT_DIR/services/website/public/remora_logo.png}"
 DMG_SKIP_FINDER_LAYOUT="${DMG_SKIP_FINDER_LAYOUT:-0}"
 
 require_cmd jq
@@ -119,7 +119,7 @@ let titleAttributes: [NSAttributedString.Key: Any] = [
     .foregroundColor: NSColor.white,
     .paragraphStyle: titleStyle
 ]
-"Install Litter".draw(
+"Install Remora".draw(
     in: NSRect(x: 0, y: 42, width: size.width, height: 28),
     withAttributes: titleAttributes
 )
@@ -129,7 +129,7 @@ let subtitleAttributes: [NSAttributedString.Key: Any] = [
     .foregroundColor: NSColor(calibratedRed: 0.78, green: 0.82, blue: 0.78, alpha: 1),
     .paragraphStyle: titleStyle
 ]
-"Drag Litter.app into Applications".draw(
+"Drag Remora.app into Applications".draw(
     in: NSRect(x: 0, y: 72, width: size.width, height: 22),
     withAttributes: subtitleAttributes
 )

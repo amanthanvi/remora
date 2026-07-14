@@ -1,7 +1,7 @@
 # iOS TestFlight Checklist
 
 1. Confirm `apps/ios/project.yml` bundle ID/version/build settings are correct.
-2. Build/archive in Xcode from `apps/ios/Litter.xcodeproj`.
+2. Build/archive in Xcode from `apps/ios/Remora.xcodeproj`.
 3. Update `docs/releases/testflight-whats-new.md` with changelog bullets for this build.
 4. Upload via `./apps/ios/scripts/testflight-upload.sh` (script auto-applies What to Test notes, assigns internal and external beta groups, submits Beta App Review by default, and auto-bumps to the next patch version if the committed repo version has already shipped live).
 5. Validate processing in App Store Connect.

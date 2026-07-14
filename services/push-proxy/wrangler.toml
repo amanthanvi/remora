@@ -1,8 +1,8 @@
-name = "litter-push-proxy"
+name = "remora-push-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 workers_dev = true
-routes = [{ pattern = "push.sigkitten.com", custom_domain = true }]
+routes = [{ pattern = "push.remora.app", custom_domain = true }]
 
 [durable_objects]
 bindings = [

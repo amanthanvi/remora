@@ -8,16 +8,16 @@ GRADLEW="$ANDROID_DIR/gradlew"
 
 VARIANT="${VARIANT:-Release}"
 UPLOAD="${UPLOAD:-1}"
-TRACK="${LITTER_PLAY_TRACK:-internal}"
+TRACK="${REMORA_PLAY_TRACK:-internal}"
 # Comma-separated list of tracks to promote the uploaded artifact to.
 # Each listed track gets its own `promoteReleaseArtifact` invocation with
 # the source `TRACK` as the origin. Empty = upload only, no promotion.
-PROMOTE_TRACK="${LITTER_PLAY_PROMOTE_TRACK:-}"
+PROMOTE_TRACK="${REMORA_PLAY_PROMOTE_TRACK:-}"
 # Release status applied to the *final* landing track (promote dest when
 # promoting, else the upload track). The initial upload to the source track
 # always goes out at 100% COMPLETED so internal testers see it immediately.
-RELEASE_STATUS="${LITTER_PLAY_RELEASE_STATUS:-}"
-USER_FRACTION="${LITTER_PLAY_USER_FRACTION:-}"
+RELEASE_STATUS="${REMORA_PLAY_RELEASE_STATUS:-}"
+USER_FRACTION="${REMORA_PLAY_USER_FRACTION:-}"
 GRADLE_MAX_WORKERS="${GRADLE_MAX_WORKERS:-}"
 EXTRA_GRADLE_TASKS="${EXTRA_GRADLE_TASKS:-}"
 GRADLE_EXCLUDED_TASKS="${GRADLE_EXCLUDED_TASKS:-}"
@@ -35,7 +35,7 @@ if [[ -n "$GRADLE_EXCLUDED_TASKS" ]]; then
     done
 fi
 
-ENV_FILE="${HOME}/.config/litter/play-upload.env"
+ENV_FILE="${HOME}/.config/remora/play-upload.env"
 if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$ENV_FILE"
@@ -51,15 +51,15 @@ require_env() {
 }
 
 # Shared signing + service-account props used by every Gradle invocation.
-# Note: -PLITTER_PLAY_PROMOTE_TRACK is NOT set here; it's added per-promote
+# Note: -PREMORA_PLAY_PROMOTE_TRACK is NOT set here; it's added per-promote
 # below because we may fan out to multiple destination tracks.
 declare -a BASE_PROPS=(
-    -PLITTER_PLAY_SERVICE_ACCOUNT_JSON="${LITTER_PLAY_SERVICE_ACCOUNT_JSON:-}"
-    -PLITTER_PLAY_TRACK="$TRACK"
-    -PLITTER_UPLOAD_STORE_FILE="${LITTER_UPLOAD_STORE_FILE:-}"
-    -PLITTER_UPLOAD_STORE_PASSWORD="${LITTER_UPLOAD_STORE_PASSWORD:-}"
-    -PLITTER_UPLOAD_KEY_ALIAS="${LITTER_UPLOAD_KEY_ALIAS:-}"
-    -PLITTER_UPLOAD_KEY_PASSWORD="${LITTER_UPLOAD_KEY_PASSWORD:-}"
+    -PREMORA_PLAY_SERVICE_ACCOUNT_JSON="${REMORA_PLAY_SERVICE_ACCOUNT_JSON:-}"
+    -PREMORA_PLAY_TRACK="$TRACK"
+    -PREMORA_UPLOAD_STORE_FILE="${REMORA_UPLOAD_STORE_FILE:-}"
+    -PREMORA_UPLOAD_STORE_PASSWORD="${REMORA_UPLOAD_STORE_PASSWORD:-}"
+    -PREMORA_UPLOAD_KEY_ALIAS="${REMORA_UPLOAD_KEY_ALIAS:-}"
+    -PREMORA_UPLOAD_KEY_PASSWORD="${REMORA_UPLOAD_KEY_PASSWORD:-}"
 )
 
 # ── Local build only ───────────────────────────────────────────────────────
@@ -78,18 +78,18 @@ if [[ "$UPLOAD" != "1" ]]; then
     exit 0
 fi
 
-require_env "LITTER_PLAY_SERVICE_ACCOUNT_JSON"
-require_env "LITTER_UPLOAD_STORE_FILE"
-require_env "LITTER_UPLOAD_STORE_PASSWORD"
-require_env "LITTER_UPLOAD_KEY_ALIAS"
-require_env "LITTER_UPLOAD_KEY_PASSWORD"
+require_env "REMORA_PLAY_SERVICE_ACCOUNT_JSON"
+require_env "REMORA_UPLOAD_STORE_FILE"
+require_env "REMORA_UPLOAD_STORE_PASSWORD"
+require_env "REMORA_UPLOAD_KEY_ALIAS"
+require_env "REMORA_UPLOAD_KEY_PASSWORD"
 
-if [[ ! -f "$LITTER_PLAY_SERVICE_ACCOUNT_JSON" ]]; then
-    echo "Service account JSON not found: $LITTER_PLAY_SERVICE_ACCOUNT_JSON" >&2
+if [[ ! -f "$REMORA_PLAY_SERVICE_ACCOUNT_JSON" ]]; then
+    echo "Service account JSON not found: $REMORA_PLAY_SERVICE_ACCOUNT_JSON" >&2
     exit 1
 fi
-if [[ ! -f "$LITTER_UPLOAD_STORE_FILE" ]]; then
-    echo "Upload keystore not found: $LITTER_UPLOAD_STORE_FILE" >&2
+if [[ ! -f "$REMORA_UPLOAD_STORE_FILE" ]]; then
+    echo "Upload keystore not found: $REMORA_UPLOAD_STORE_FILE" >&2
     exit 1
 fi
 
@@ -108,7 +108,7 @@ fi
 PUBLISH_TASKS+=("$PUBLISH_TASK")
 
 "$GRADLEW" -p "$ANDROID_DIR" "${GRADLE_ARGS[@]}" "${PUBLISH_TASKS[@]}" "${BASE_PROPS[@]}" \
-    -PLITTER_PLAY_RELEASE_STATUS=completed
+    -PREMORA_PLAY_RELEASE_STATUS=completed
 
 # ── Step 2: optionally promote to one or more tracks ───────────────────────
 # Each destination is an independent Play release, so fan out.
@@ -125,11 +125,11 @@ if [[ -n "$PROMOTE_TRACK" ]]; then
         dest_trimmed="${dest// /}"
         [[ -n "$dest_trimmed" ]] || continue
         declare -a PROMOTE_PROPS=(
-            -PLITTER_PLAY_PROMOTE_TRACK="$dest_trimmed"
-            -PLITTER_PLAY_RELEASE_STATUS="$status_for_promote"
+            -PREMORA_PLAY_PROMOTE_TRACK="$dest_trimmed"
+            -PREMORA_PLAY_RELEASE_STATUS="$status_for_promote"
         )
         if [[ -n "$USER_FRACTION" ]]; then
-            PROMOTE_PROPS+=(-PLITTER_PLAY_USER_FRACTION="$USER_FRACTION")
+            PROMOTE_PROPS+=(-PREMORA_PLAY_USER_FRACTION="$USER_FRACTION")
         fi
         echo "==> Promoting '$TRACK' → '$dest_trimmed' [status=$status_for_promote]${rollout_info}"
         "$GRADLEW" -p "$ANDROID_DIR" "${GRADLE_ARGS[@]}" "$PROMOTE_TASK" "${BASE_PROPS[@]}" "${PROMOTE_PROPS[@]}"

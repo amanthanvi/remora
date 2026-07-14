@@ -1706,7 +1706,7 @@ impl AppClient {
     /// Start the Mac-side pair host: bind a TCP listener, accept inbound
     /// pair WebSocket connections, and stage NI discovery tokens. Returns
     /// the bound port + Bonjour TXT entries so Swift can publish a
-    /// `_litter-pair._tcp.` NetService alongside the Feature A local
+    /// `_remora-pair._tcp.` NetService alongside the Feature A local
     /// codex.
     ///
     /// `device_name` is the Mac's user-facing name (used as Bonjour

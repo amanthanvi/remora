@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Opaque agent identifier — the stable lowercase name that alleycat
 /// advertises for an agent (`"codex"`, `"claude"`, `"hermes"`, …). All
 /// UI labels, icons, and capability flags come from
-/// [`crate::store::AgentMetadataStore`] keyed off this id. Litter does
+/// [`crate::store::AgentMetadataStore`] keyed off this id. Remora does
 /// not maintain a typed enum so the only place anyone adds a new agent
 /// is the alleycat manifest.
 pub type AgentRuntimeKind = String;

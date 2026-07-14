@@ -1,7 +1,7 @@
 //! iPhone ↔ Mac proximity pairing protocol.
 //!
 //! On the unsandboxed (direct-dist) Mac the app advertises a Bonjour
-//! service `_litter-pair._tcp.` whose port hosts a tiny WebSocket server.
+//! service `_remora-pair._tcp.` whose port hosts a tiny WebSocket server.
 //! The iPhone discovers it, opens a WebSocket, and the two sides exchange
 //! NearbyInteraction (NI) discovery tokens. When the iPhone reports it is
 //! physically close, the Mac shows a native confirm dialog; on accept, it
@@ -73,7 +73,7 @@ pub(crate) enum PairWireMessage {
 // ── UniFFI surface ───────────────────────────────────────────────────────
 
 /// Service info returned by `start_pair_host`. Swift uses these fields to
-/// publish a NetService (`_litter-pair._tcp.`) on the Mac side.
+/// publish a NetService (`_remora-pair._tcp.`) on the Mac side.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PairServiceInfo {
     /// Suggested Bonjour service instance name. Swift may override.
@@ -331,7 +331,7 @@ pub async fn start_pair_host(
     Ok((
         handle,
         PairServiceInfo {
-            service_name: format!("Litter on {device_name}"),
+            service_name: format!("Remora on {device_name}"),
             port,
             txt_entries: vec![
                 "v=1".to_string(),

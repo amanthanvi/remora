@@ -1989,7 +1989,7 @@ mod tests {
                     "confidence_score": 0.97,
                     "priority": 1,
                     "code_location": {
-                        "absolute_file_path": "/Users/sigkitten/dev/litter/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs",
+                        "absolute_file_path": "/Users/remora/dev/remora/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs",
                         "line_range": { "start": 799, "end": 815 }
                     }
                 }
@@ -2027,7 +2027,7 @@ mod tests {
                 .as_ref()
                 .map(|location| location.absolute_file_path.as_str()),
             Some(
-                "/Users/sigkitten/dev/litter/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs"
+                "/Users/remora/dev/remora/shared/rust-bridge/codex-mobile-client/src/mobile_client_impl.rs"
             )
         );
         assert_eq!(parsed.overall_correctness.as_deref(), Some("incorrect"));
@@ -2081,8 +2081,8 @@ mod tests {
             "/home/sig/project/src/lib.rs"
         );
         assert_eq!(
-            normalize_review_path("/Users/sigkitten/dev/litter/src/main.rs"),
-            "/Users/sigkitten/dev/litter/src/main.rs"
+            normalize_review_path("/Users/remora/dev/remora/src/main.rs"),
+            "/Users/remora/dev/remora/src/main.rs"
         );
     }
 

@@ -2,9 +2,9 @@
 # Mac Catalyst TestFlight upload — companion to testflight-upload.sh.
 #
 # Differences from the iOS flow:
-#   * Archives the `LitterMac` scheme with destination
+#   * Archives the `RemoraMac` scheme with destination
 #     `generic/platform=macOS,variant=Mac Catalyst` → produces a `.pkg`.
-#   * No Live Activity widget to sign (stripped from LitterMac target).
+#   * No Live Activity widget to sign (stripped from RemoraMac target).
 #   * Uploads via `asc builds upload --pkg`; asc auto-sets platform=MAC_OS.
 #
 # Shares the same MARKETING_VERSION + What-to-Test file as the iOS build so
@@ -15,19 +15,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=release-common.sh
 source "$SCRIPT_DIR/release-common.sh"
 
-SCHEME="${SCHEME:-LitterMac}"
+SCHEME="${SCHEME:-RemoraMac}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 PROJECT_DIR="${PROJECT_DIR:-$IOS_DIR}"
-PROJECT_PATH="${PROJECT_PATH:-$PROJECT_DIR/Litter.xcodeproj}"
-APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.sigkitten.litter}"
+PROJECT_PATH="${PROJECT_PATH:-$PROJECT_DIR/Remora.xcodeproj}"
+APP_BUNDLE_ID="${APP_BUNDLE_ID:-com.remora.app}"
 APP_STORE_APP_ID="${APP_STORE_APP_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
-PROVISIONING_PROFILE_SPECIFIER="${PROVISIONING_PROFILE_SPECIFIER:-Litter Mac App Store}"
+PROVISIONING_PROFILE_SPECIFIER="${PROVISIONING_PROFILE_SPECIFIER:-Remora Mac App Store}"
 APP_PROVISIONING_PROFILE_SPECIFIER="${APP_PROVISIONING_PROFILE_SPECIFIER:-$PROVISIONING_PROFILE_SPECIFIER}"
 APP_CODE_SIGN_IDENTITY="${APP_CODE_SIGN_IDENTITY:-Apple Distribution}"
 INSTALLER_CODE_SIGN_IDENTITY="${INSTALLER_CODE_SIGN_IDENTITY:-3rd Party Mac Developer Installer}"
 # Manual signing is required here so xcodebuild doesn't auto-pick the iOS
-# `Litter` distribution profile (same bundle ID, no sandbox entitlement) and
+# `Remora` distribution profile (same bundle ID, no sandbox entitlement) and
 # strip `com.apple.security.app-sandbox` from the Mac binary at export time —
 # which is what caused ITMS-90296 on v1.0.4/build 20260226153278.
 EXPORT_SIGNING_STYLE="${EXPORT_SIGNING_STYLE:-manual}"
@@ -230,7 +230,7 @@ if [[ "$TESTFLIGHT_SKIP_BUILD" != "1" ]]; then
 
     # Sandbox-entitlement gate — catches ITMS-90296 before we waste a build
     # slot on App Store Connect.
-    archived_app="$ARCHIVE_PATH/Products/Applications/Litter.app"
+    archived_app="$ARCHIVE_PATH/Products/Applications/Remora.app"
     if [[ ! -d "$archived_app" ]]; then
         echo "No archived app found at $archived_app — cannot verify entitlements." >&2
         exit 1
@@ -239,7 +239,7 @@ if [[ "$TESTFLIGHT_SKIP_BUILD" != "1" ]]; then
     if ! grep -q "com\.apple\.security\.app-sandbox" <<<"$entitlements_xml"; then
         echo "ERROR: signed $archived_app is missing com.apple.security.app-sandbox" >&2
         echo "       ASC will reject this with ITMS-90296. Check that APP_PROVISIONING_PROFILE_SPECIFIER" >&2
-        echo "       points at the Mac App Store profile (not the iOS Litter distribution profile)." >&2
+        echo "       points at the Mac App Store profile (not the iOS Remora distribution profile)." >&2
         exit 1
     fi
     if ! grep -A1 "com\.apple\.security\.app-sandbox" <<<"$entitlements_xml" | grep -q "<true/>"; then

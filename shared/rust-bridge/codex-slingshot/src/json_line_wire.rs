@@ -1,4 +1,4 @@
-//! Litter-side JSON-line wire for the upstream `RemoteAppServerClient`.
+//! Remora-side JSON-line wire for the upstream `RemoteAppServerClient`.
 //!
 //! Upstream's `RemoteAppServerClient` only ships WebSocket transports (`connect`,
 //! `connect_websocket_stream`). Pi/non-Codex servers and the SSH-bridge bootstrap path

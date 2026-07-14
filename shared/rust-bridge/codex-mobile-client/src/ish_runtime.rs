@@ -1,5 +1,5 @@
 //! iOS-only iSH bootstrap + run surface. Port of the former Obj-C
-//! `apps/ios/Sources/Litter/Bridge/IshBridge.{h,m}` into Rust.
+//! `apps/ios/Sources/Remora/Bridge/IshBridge.{h,m}` into Rust.
 //!
 //! Responsibilities, mirroring the Obj-C original 1:1:
 //! 1. Extract the bundled `fs` rootfs into `<app_support>/fs/` on first launch.
@@ -39,7 +39,7 @@ pub const ISH_E_TIMEOUT: i32 = -8;
 pub const ISH_E_NOMEM: i32 = -9;
 pub const ISH_E_ARGS: i32 = -10;
 const BOOTSTRAP_COMMAND_TIMEOUT_MS: u64 = 10_000;
-const ROOTFS_STAMP_FILE: &str = ".litter-rootfs-id";
+const ROOTFS_STAMP_FILE: &str = ".remora-rootfs-id";
 const ROOTFS_ARCH_FILE: &str = "data/etc/apk/arch";
 const ROOTFS_ALPINE_RELEASE_FILE: &str = "data/etc/alpine-release";
 const ROOTFS_ROOT_HOME_DIR: &str = "data/root";
@@ -203,7 +203,7 @@ pub(crate) fn runtime_env() -> HashMap<String, String> {
         // commands like `git log` do not block waiting for interaction.
         ("PAGER".to_string(), "cat".to_string()),
         ("EDITOR".to_string(), "vi".to_string()),
-        ("HOSTNAME".to_string(), "litter".to_string()),
+        ("HOSTNAME".to_string(), "remora".to_string()),
         // Symmetric with the native CODEX_HOME used by the Rust process.
         // Tools inside iSH need a fakefs-local config path.
         ("CODEX_HOME".to_string(), "/root/.codex".to_string()),

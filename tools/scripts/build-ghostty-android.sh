@@ -17,7 +17,7 @@ if [ ! -f "$GHOSTTY_DIR/build.zig" ]; then
     exit 1
 fi
 
-# Apply Litter's mobile-embed patches if not already applied. Idempotent;
+# Apply Remora's mobile-embed patches if not already applied. Idempotent;
 # safe to call on every build. Required when this script is invoked
 # directly (CI, build-android-rust.sh fallback) without going through the
 # Makefile's STAMP_SYNC_GHOSTTY dep chain.

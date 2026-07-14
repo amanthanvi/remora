@@ -14,19 +14,19 @@ fun projectPropOrEnv(name: String): String? =
     (findProperty(name) as? String)?.takeIf { it.isNotBlank() }
         ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
-val uploadStoreFile = projectPropOrEnv("LITTER_UPLOAD_STORE_FILE")
-val uploadStorePassword = projectPropOrEnv("LITTER_UPLOAD_STORE_PASSWORD")
-val uploadKeyAlias = projectPropOrEnv("LITTER_UPLOAD_KEY_ALIAS")
-val uploadKeyPassword = projectPropOrEnv("LITTER_UPLOAD_KEY_PASSWORD")
+val uploadStoreFile = projectPropOrEnv("REMORA_UPLOAD_STORE_FILE")
+val uploadStorePassword = projectPropOrEnv("REMORA_UPLOAD_STORE_PASSWORD")
+val uploadKeyAlias = projectPropOrEnv("REMORA_UPLOAD_KEY_ALIAS")
+val uploadKeyPassword = projectPropOrEnv("REMORA_UPLOAD_KEY_PASSWORD")
 val hasUploadSigning = listOf(uploadStoreFile, uploadStorePassword, uploadKeyAlias, uploadKeyPassword).all { !it.isNullOrBlank() }
 
 android {
-    namespace = "com.sigkitten.litter.android"
+    namespace = "com.remora.android"
     compileSdk = 35
     ndkVersion = projectPropOrEnv("ANDROID_NDK_VERSION") ?: "30.0.14904198"
 
     defaultConfig {
-        applicationId = "com.sigkitten.litter.android"
+        applicationId = "com.remora.android"
         minSdk = 26
         targetSdk = 35
         versionCode = 11
@@ -89,7 +89,7 @@ android {
     sourceSets {
         getByName("main") {
             java.srcDir("../../../shared/rust-bridge/generated/kotlin")
-            assets.srcDir("../../ios/Sources/Litter/Resources/Themes")
+            assets.srcDir("../../ios/Sources/Remora/Resources/Themes")
         }
     }
 
@@ -108,15 +108,15 @@ android {
 
 play {
     defaultToAppBundles.set(true)
-    track.set(projectPropOrEnv("LITTER_PLAY_TRACK") ?: "internal")
-    projectPropOrEnv("LITTER_PLAY_PROMOTE_TRACK")?.let { promoteTrack.set(it) }
+    track.set(projectPropOrEnv("REMORA_PLAY_TRACK") ?: "internal")
+    projectPropOrEnv("REMORA_PLAY_PROMOTE_TRACK")?.let { promoteTrack.set(it) }
 
     // Release status:
     //   completed   → 100% rollout (default, matches historical behavior)
     //   inProgress  → staged rollout, requires userFraction
     //   draft       → upload only, no release
     //   halted      → pause current rollout
-    val statusName = (projectPropOrEnv("LITTER_PLAY_RELEASE_STATUS") ?: "completed").lowercase()
+    val statusName = (projectPropOrEnv("REMORA_PLAY_RELEASE_STATUS") ?: "completed").lowercase()
     releaseStatus.set(
         when (statusName) {
             "inprogress", "in_progress" -> com.github.triplet.gradle.androidpublisher.ReleaseStatus.IN_PROGRESS
@@ -129,11 +129,11 @@ play {
     // Staged rollout percentage (0.0–1.0). Only honored when releaseStatus is
     // IN_PROGRESS or HALTED. Ignored otherwise so we never accidentally stage
     // a COMPLETED release.
-    projectPropOrEnv("LITTER_PLAY_USER_FRACTION")?.toDoubleOrNull()?.let { fraction ->
+    projectPropOrEnv("REMORA_PLAY_USER_FRACTION")?.toDoubleOrNull()?.let { fraction ->
         userFraction.set(fraction.coerceIn(0.0, 1.0))
     }
 
-    val serviceAccountPath = projectPropOrEnv("LITTER_PLAY_SERVICE_ACCOUNT_JSON")
+    val serviceAccountPath = projectPropOrEnv("REMORA_PLAY_SERVICE_ACCOUNT_JSON")
     if (!serviceAccountPath.isNullOrBlank()) {
         serviceAccountCredentials.set(file(serviceAccountPath))
     }

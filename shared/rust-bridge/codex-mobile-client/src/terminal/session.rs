@@ -396,12 +396,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a live alleycat daemon; set LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR"]
+    #[ignore = "requires a live alleycat daemon; set REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR"]
     async fn live_remote_alleycat_terminal_round_trips_shell_io() {
-        let pair_json = match std::env::var("LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR") {
+        let pair_json = match std::env::var("REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR") {
             Ok(value) if !value.trim().is_empty() => value,
             _ => {
-                eprintln!("skipping: LITTER_TERMINAL_LIVE_ALLEYCAT_PAIR is not set");
+                eprintln!("skipping: REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR is not set");
                 return;
             }
         };

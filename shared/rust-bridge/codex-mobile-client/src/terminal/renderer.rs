@@ -172,8 +172,8 @@ impl TerminalRenderer {
     }
 
     /// Set the directory where `apply_config` writes the generated ghostty
-    /// config file. iOS passes `<Caches>/litter/terminal`; Android passes
-    /// `<cacheDir>/litter/terminal`. The directory is created on demand.
+    /// config file. iOS passes `<Caches>/remora/terminal`; Android passes
+    /// `<cacheDir>/remora/terminal`. The directory is created on demand.
     pub fn set_config_dir(&self, path: String) {
         let mut guard = self.inner.config_dir.lock().unwrap();
         *guard = Some(PathBuf::from(path));
@@ -850,12 +850,12 @@ mod tests {
         let backend = CountingBackend::new();
         let renderer = TerminalRenderer::new(Box::new(BackendAdapter(backend.clone())));
 
-        let dir = std::env::temp_dir().join(format!("litter-renderer-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("remora-renderer-test-{}", std::process::id()));
         renderer.set_config_dir(dir.to_string_lossy().into_owned());
 
         renderer
             .apply_config(TerminalConfig {
-                theme: TerminalThemePreset::LitterDark,
+                theme: TerminalThemePreset::RemoraDark,
                 font_family: "SFMono-Regular".into(),
                 font_size_pt: 14.0,
                 cursor_style: TerminalCursorStyle::Block,
@@ -886,7 +886,7 @@ mod tests {
         let renderer = TerminalRenderer::new(Box::new(BackendAdapter(backend.clone())));
         let err = renderer
             .apply_config(TerminalConfig {
-                theme: TerminalThemePreset::LitterDark,
+                theme: TerminalThemePreset::RemoraDark,
                 font_family: "x".into(),
                 font_size_pt: 13.0,
                 cursor_style: TerminalCursorStyle::Bar,

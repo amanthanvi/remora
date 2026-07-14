@@ -7,7 +7,7 @@ Android runtime is now on the same Rust-first architecture as iOS:
 
 ## Runtime Architecture
 
-- Canonical runtime state lives in Rust `AppStore` and is observed from `app/src/main/java/com/litter/android/state/AppModel.kt`.
+- Canonical runtime state lives in Rust `AppStore` and is observed from `app/src/main/java/com/remora/android/state/AppModel.kt`.
 - Direct server operations come from the shared Rust `AppClient` surface.
 - Discovery uses Android NSD only for mDNS seeds; merge/dedupe/probing live in Rust `DiscoveryBridge`.
 - SSH uses Rust `SshBridge`.

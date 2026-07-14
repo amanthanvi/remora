@@ -289,7 +289,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     fn parse_live_target() -> Option<(String, u16, String, TerminalSshAuth)> {
-        let raw = match std::env::var("LITTER_TERMINAL_LIVE_SSH") {
+        let raw = match std::env::var("REMORA_TERMINAL_LIVE_SSH") {
             Ok(value) if !value.trim().is_empty() => value,
             _ => return None,
         };
@@ -333,10 +333,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a live SSH host; set LITTER_TERMINAL_LIVE_SSH=user:password@host:port"]
+    #[ignore = "requires a live SSH host; set REMORA_TERMINAL_LIVE_SSH=user:password@host:port"]
     async fn live_remote_ssh_terminal_round_trips_shell_io() {
         let Some((host, port, username, auth)) = parse_live_target() else {
-            eprintln!("skipping: LITTER_TERMINAL_LIVE_SSH is not set");
+            eprintln!("skipping: REMORA_TERMINAL_LIVE_SSH is not set");
             return;
         };
 

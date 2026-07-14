@@ -224,7 +224,7 @@ def parse_link_next(header: str | None) -> str | None:
 def github_get_json(url: str, token: str | None) -> tuple[list[dict[str, Any]], str | None]:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "litter-mobile-triage/1.0",
+        "User-Agent": "remora-mobile-triage/1.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     if token:
@@ -686,7 +686,7 @@ def render_board(state_dir: pathlib.Path, state: dict[str, Any], latest_run: dic
         "## Marking",
         "",
         "```bash",
-        "./tools/scripts/triage-mobile-feedback.py mark '<item-id>' --status triaging --owner sigkitten",
+        "./tools/scripts/triage-mobile-feedback.py mark '<item-id>' --status triaging --owner remora",
         "./tools/scripts/triage-mobile-feedback.py mark '<item-id>' --status done --note 'Fixed in <commit-or-version>'",
         "./tools/scripts/triage-mobile-feedback.py mark '<item-id>' --status pr-open --note 'Fix PR #<number>'",
         "./tools/scripts/triage-mobile-feedback.py list --status active",

@@ -1,4 +1,4 @@
-# LLDB init for the Litter iOS/Mac project.
+# LLDB init for the Remora iOS/Mac project.
 #
 # iSH (the Alpine Linux user-mode emulator we link in via litter-ish) uses
 # SIGUSR1/SIGUSR2 internally to emulate Linux signals on iOS pthreads. Tokio

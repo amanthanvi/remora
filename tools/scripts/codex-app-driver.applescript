@@ -4,12 +4,12 @@
 --
 -- Examples:
 --   osascript tools/scripts/codex-app-driver.applescript \
---     --project /Users/sigkitten/dev/codex-test \
+--     --project /Users/remora/dev/codex-test \
 --     --new-thread \
 --     --message "hello from osascript"
 --
 --   osascript tools/scripts/codex-app-driver.applescript \
---     --project /Users/sigkitten/dev/codex-test \
+--     --project /Users/remora/dev/codex-test \
 --     --message-file /tmp/prompt.txt \
 --     --send-mode command-shift-enter
 
@@ -96,8 +96,8 @@ Options:
   --help                     Print this help.
 
 Examples:
-  osascript tools/scripts/codex-app-driver.applescript --project /Users/sigkitten/dev/codex-test --new-thread --message hello
-  osascript tools/scripts/codex-app-driver.applescript --project /Users/sigkitten/dev/codex-test --message-file /tmp/prompt.txt --send-mode command-shift-enter"
+  osascript tools/scripts/codex-app-driver.applescript --project /Users/remora/dev/codex-test --new-thread --message hello
+  osascript tools/scripts/codex-app-driver.applescript --project /Users/remora/dev/codex-test --message-file /tmp/prompt.txt --send-mode command-shift-enter"
 end usageText
 
 on requiredValue(argv, indexValue, flagName)

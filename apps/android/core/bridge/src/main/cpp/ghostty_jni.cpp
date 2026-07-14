@@ -13,7 +13,7 @@
 
 namespace {
 
-constexpr const char* kLogTag = "LitterGhostty";
+constexpr const char* kLogTag = "RemoraGhostty";
 
 static JavaVM* g_jvm = nullptr;
 
@@ -50,7 +50,7 @@ int ensureGhosttyInitialized() {
     static std::once_flag once;
     static int result = 1;
     std::call_once(once, [] {
-        char arg0[] = "litter";
+        char arg0[] = "remora";
         char* argv[] = { arg0 };
         result = ghostty_init(1, argv);
     });
@@ -423,7 +423,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /* reserved */) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeGhosttyVersion(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeGhosttyVersion(
     JNIEnv* env,
     jobject /* thiz */
 ) {
@@ -437,7 +437,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeGhosttyVersion(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeCanCreateAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeCanCreateAndroidSurface(
     JNIEnv* /* env */,
     jobject /* thiz */
 ) {
@@ -447,7 +447,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeCanCreateAndroid
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeCreateAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeCreateAndroidSurface(
     JNIEnv* env,
     jobject /* thiz */,
     jobject surface,
@@ -531,7 +531,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeCreateAndroidSur
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeDestroyAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeDestroyAndroidSurface(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle
@@ -541,7 +541,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeDestroyAndroidSu
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeResizeAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeResizeAndroidSurface(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -569,7 +569,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeResizeAndroidSur
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeDrawAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeDrawAndroidSurface(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle
@@ -582,7 +582,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeDrawAndroidSurfa
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeTickAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeTickAndroidSurface(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle
@@ -592,7 +592,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeTickAndroidSurfa
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeWriteAndroidSurface(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeWriteAndroidSurface(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -618,7 +618,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeWriteAndroidSurf
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetInputCallback(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSetInputCallback(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -663,7 +663,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetInputCallback
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetWakeupListener(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSetWakeupListener(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -708,7 +708,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetWakeupListene
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetOcclusion(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSetOcclusion(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -722,7 +722,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetOcclusion(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetFocus(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSetFocus(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -740,11 +740,11 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSetFocus(
     }
 }
 
-// Mirrors LitterGhosttyKey on iOS. Both surfaces map their platform key
+// Mirrors RemoraGhosttyKey on iOS. Both surfaces map their platform key
 // codes to this stable bridge enum, and the JNI / Obj-C bridges do the
 // final translation to ghostty_input_key_e so a Ghostty header bump
 // doesn't ripple into platform code.
-enum class LitterBridgeKey : int {
+enum class RemoraBridgeKey : int {
     Unidentified = 0,
     Enter,
     Tab,
@@ -763,30 +763,30 @@ enum class LitterBridgeKey : int {
     Insert,
 };
 
-static ghostty_input_key_e bridgeKeyToGhosttyKey(LitterBridgeKey key) {
+static ghostty_input_key_e bridgeKeyToGhosttyKey(RemoraBridgeKey key) {
     switch (key) {
-        case LitterBridgeKey::Enter:      return GHOSTTY_KEY_ENTER;
-        case LitterBridgeKey::Tab:        return GHOSTTY_KEY_TAB;
-        case LitterBridgeKey::Backspace:  return GHOSTTY_KEY_BACKSPACE;
-        case LitterBridgeKey::Escape:     return GHOSTTY_KEY_ESCAPE;
-        case LitterBridgeKey::Space:      return GHOSTTY_KEY_SPACE;
-        case LitterBridgeKey::ArrowUp:    return GHOSTTY_KEY_ARROW_UP;
-        case LitterBridgeKey::ArrowDown:  return GHOSTTY_KEY_ARROW_DOWN;
-        case LitterBridgeKey::ArrowLeft:  return GHOSTTY_KEY_ARROW_LEFT;
-        case LitterBridgeKey::ArrowRight: return GHOSTTY_KEY_ARROW_RIGHT;
-        case LitterBridgeKey::PageUp:     return GHOSTTY_KEY_PAGE_UP;
-        case LitterBridgeKey::PageDown:   return GHOSTTY_KEY_PAGE_DOWN;
-        case LitterBridgeKey::Home:       return GHOSTTY_KEY_HOME;
-        case LitterBridgeKey::End:        return GHOSTTY_KEY_END;
-        case LitterBridgeKey::Delete:     return GHOSTTY_KEY_DELETE;
-        case LitterBridgeKey::Insert:     return GHOSTTY_KEY_INSERT;
-        case LitterBridgeKey::Unidentified:
+        case RemoraBridgeKey::Enter:      return GHOSTTY_KEY_ENTER;
+        case RemoraBridgeKey::Tab:        return GHOSTTY_KEY_TAB;
+        case RemoraBridgeKey::Backspace:  return GHOSTTY_KEY_BACKSPACE;
+        case RemoraBridgeKey::Escape:     return GHOSTTY_KEY_ESCAPE;
+        case RemoraBridgeKey::Space:      return GHOSTTY_KEY_SPACE;
+        case RemoraBridgeKey::ArrowUp:    return GHOSTTY_KEY_ARROW_UP;
+        case RemoraBridgeKey::ArrowDown:  return GHOSTTY_KEY_ARROW_DOWN;
+        case RemoraBridgeKey::ArrowLeft:  return GHOSTTY_KEY_ARROW_LEFT;
+        case RemoraBridgeKey::ArrowRight: return GHOSTTY_KEY_ARROW_RIGHT;
+        case RemoraBridgeKey::PageUp:     return GHOSTTY_KEY_PAGE_UP;
+        case RemoraBridgeKey::PageDown:   return GHOSTTY_KEY_PAGE_DOWN;
+        case RemoraBridgeKey::Home:       return GHOSTTY_KEY_HOME;
+        case RemoraBridgeKey::End:        return GHOSTTY_KEY_END;
+        case RemoraBridgeKey::Delete:     return GHOSTTY_KEY_DELETE;
+        case RemoraBridgeKey::Insert:     return GHOSTTY_KEY_INSERT;
+        case RemoraBridgeKey::Unidentified:
         default:                          return GHOSTTY_KEY_UNIDENTIFIED;
     }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendKey(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSendKey(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -805,7 +805,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendKey(
     event.mods = static_cast<ghostty_input_mods_e>(mods);
     event.consumed_mods = static_cast<ghostty_input_mods_e>(0);
     event.keycode = static_cast<uint32_t>(
-        bridgeKeyToGhosttyKey(static_cast<LitterBridgeKey>(key))
+        bridgeKeyToGhosttyKey(static_cast<RemoraBridgeKey>(key))
     );
     const char* text_cstr = nullptr;
     if (text != nullptr) {
@@ -822,7 +822,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendKey(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendText(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSendText(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -841,7 +841,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendText(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendPreedit(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSendPreedit(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -864,7 +864,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSendPreedit(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeKeyboardChanged(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeKeyboardChanged(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle
@@ -877,7 +877,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeKeyboardChanged(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseMove(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeMouseMove(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -893,7 +893,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseMove(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseButton(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeMouseButton(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -915,7 +915,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseButton(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseCaptured(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeMouseCaptured(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle
@@ -928,7 +928,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseCaptured(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseScroll(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeMouseScroll(
     JNIEnv* /* env */,
     jobject /* thiz */,
     jlong handle,
@@ -950,7 +950,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeMouseScroll(
 /// as `{ columns, rows, width_px, height_px, cell_width_px, cell_height_px }`.
 /// Returns an all-zero array when the surface isn't ready.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSurfaceSize(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeSurfaceSize(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle
@@ -981,7 +981,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeSurfaceSize(
 /// Read text from a viewport-relative cell range. Returns `nil` if the
 /// surface isn't ready, the range is empty, or the Ghostty call fails.
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeReadText(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeReadText(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
@@ -1022,7 +1022,7 @@ Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeReadText(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_litter_android_core_bridge_GhosttyRendererBridge_nativeApplyConfig(
+Java_com_remora_android_core_bridge_GhosttyRendererBridge_nativeApplyConfig(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,

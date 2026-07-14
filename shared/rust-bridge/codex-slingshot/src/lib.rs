@@ -3,7 +3,7 @@
 //! The relay wraps app-server JSON-RPC frames in `RemoteControlEnvelope`
 //! records. This crate exposes the typed REST surface plus an `AsyncRead` /
 //! `AsyncWrite` adapter that drives upstream's `RemoteAppServerClient` over
-//! Slingshot via the litter-owned [`json_line_wire::connect_json_line_stream`]
+//! Slingshot via the remora-owned [`json_line_wire::connect_json_line_stream`]
 //! helper.
 
 pub mod api;

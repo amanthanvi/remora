@@ -93,7 +93,7 @@ mod imp {
         output_tx: mpsc::Sender<TerminalBackendEvent>,
     ) {
         std::thread::Builder::new()
-            .name("litter-proot-terminal-reader".to_string())
+            .name("remora-proot-terminal-reader".to_string())
             .spawn(move || {
                 let mut buf = vec![0u8; OUTPUT_CHUNK];
                 loop {
@@ -125,7 +125,7 @@ mod imp {
         output_tx: mpsc::Sender<TerminalBackendEvent>,
     ) {
         std::thread::Builder::new()
-            .name("litter-proot-terminal-waiter".to_string())
+            .name("remora-proot-terminal-waiter".to_string())
             .spawn(move || {
                 let code = match child.wait() {
                     Ok(status) => status.exit_code() as i32,

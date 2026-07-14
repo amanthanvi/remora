@@ -2,12 +2,12 @@
 
 The repo ships Mac Catalyst builds through two independent channels:
 
-| Channel | Cert | Artifact | Destination | Run via |
-|---|---|---|---|---|
-| **Mac App Store** (TestFlight + ASC review) | Apple Distribution + 3rd Party Mac Developer Installer | `.pkg` | App Store Connect → Mac App Store | `make mac-testflight` / `mac-testflight.yml` / `mobile-release.yml` |
-| **Direct distribution** (notarized) | Developer ID Application | `.dmg` (signed + notarized + stapled) | Anywhere (your site, GitHub Releases, etc.) | `make mac-direct-dist` / `mac-direct-dist.yml` |
+| Channel                                     | Cert                                                   | Artifact                              | Destination                                 | Run via                                                             |
+| ------------------------------------------- | ------------------------------------------------------ | ------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------- |
+| **Mac App Store** (TestFlight + ASC review) | Apple Distribution + 3rd Party Mac Developer Installer | `.pkg`                                | App Store Connect → Mac App Store           | `make mac-testflight` / `mac-testflight.yml` / `mobile-release.yml` |
+| **Direct distribution** (notarized)         | Developer ID Application                               | `.dmg` (signed + notarized + stapled) | Anywhere (your site, GitHub Releases, etc.) | `make mac-direct-dist` / `mac-direct-dist.yml`                      |
 
-Both archive from the same `LitterMac` scheme — same code, same Mac Catalyst
+Both archive from the same `RemoraMac` scheme — same code, same Mac Catalyst
 binary. The difference is purely signing + packaging + distribution.
 
 You can ship via one channel, the other, or both. They don't share artifacts
@@ -39,7 +39,7 @@ platform build list.
    iPad-on-Mac fallback while your Catalyst build is in review, then
    auto-disables it the moment your first Catalyst version is approved.
    No manual cutover needed; no double listing. Only uncheck if you
-   specifically want Mac users to have *no* install path during review.
+   specifically want Mac users to have _no_ install path during review.
 3. **Create TestFlight beta groups** with the macOS platform enabled. If
    the existing groups are iOS-only, testers won't see the Mac build. Either
    toggle macOS on each group or create platform-specific ones and update
@@ -51,7 +51,7 @@ platform build list.
 ### One-time signing setup
 
 1. In the Developer Portal, create a **Mac App Store** provisioning profile
-   for `com.sigkitten.litter`.
+   for `com.remora.app`.
 2. Make sure your team has both certs locally:
    - **Apple Distribution** (can be the same cert as iOS)
    - **3rd Party Mac Developer Installer** (Mac-only — required to sign
@@ -61,11 +61,11 @@ platform build list.
 
 ### GitHub secrets (release environment)
 
-| Secret | Notes |
-|---|---|
-| `MAC_DIST_CERT_P12_B64` | base64 of the combined app+installer .p12 |
-| `MAC_DIST_CERT_PASSWORD` | password set when exporting the .p12 |
-| `MAC_APP_STORE_PROFILE_B64` | base64 of the `.provisionprofile` |
+| Secret                      | Notes                                     |
+| --------------------------- | ----------------------------------------- |
+| `MAC_DIST_CERT_P12_B64`     | base64 of the combined app+installer .p12 |
+| `MAC_DIST_CERT_PASSWORD`    | password set when exporting the .p12      |
+| `MAC_APP_STORE_PROFILE_B64` | base64 of the `.provisionprofile`         |
 
 Reuses existing `ASC_*`, `IOS_APP_STORE_APP_ID`, `IOS_TEAM_ID`. Encode with
 `base64 -i cert.p12 | pbcopy` on macOS.
@@ -79,12 +79,13 @@ Make: `make mac-direct-dist`
 Manual CI: `.github/workflows/mac-direct-dist.yml`
 
 Pipeline:
-1. Archive `LitterMac` for Mac Catalyst.
+
+1. Archive `RemoraMac` for Mac Catalyst.
 2. Export with `method=developer-id` → produces a Developer ID-signed `.app`.
-3. Verify the signature with `codesign` + `spctl` *before* spending minutes
+3. Verify the signature with `codesign` + `spctl` _before_ spending minutes
    on notarization (catches missing-cert errors fast).
 4. Wrap the `.app` in a drag-to-install `.dmg` via `hdiutil`, with
-   `Litter.app`, an `Applications` shortcut, and Finder icon layout metadata.
+   `Remora.app`, an `Applications` shortcut, and Finder icon layout metadata.
 5. Sign the `.dmg` itself with the Developer ID Application cert.
 6. Submit the `.dmg` to Apple's notary service via `xcrun notarytool` (uses
    the same ASC API key as TestFlight — no separate Apple ID password needed).
@@ -92,14 +93,14 @@ Pipeline:
 8. Final Gatekeeper assessment via `spctl` to confirm the artifact will
    actually launch offline.
 
-Output: `apps/ios/build/direct-dist-mac/Litter-<version>-mac.dmg`.
+Output: `apps/ios/build/direct-dist-mac/Remora-<version>-mac.dmg`.
 
 ### One-time signing setup
 
 1. In the Developer Portal, create a **Developer ID Application** certificate.
-   This is a *different* cert from anything used for App Store distribution.
-2. *(Optional)* Create a **Developer ID provisioning profile** for
-   `com.sigkitten.litter` if your entitlements include capabilities that
+   This is a _different_ cert from anything used for App Store distribution.
+2. _(Optional)_ Create a **Developer ID provisioning profile** for
+   `com.remora.app` if your entitlements include capabilities that
    demand a profile (APNs / iCloud / Push). Without a profile, those
    capabilities silently strip during signing and won't work in the
    notarized build. With a profile, EXPORT_SIGNING_STYLE flips to manual.
@@ -108,11 +109,11 @@ Output: `apps/ios/build/direct-dist-mac/Litter-<version>-mac.dmg`.
 
 ### GitHub secrets (release environment)
 
-| Secret | Notes |
-|---|---|
-| `MAC_DEVELOPER_ID_CERT_P12_B64` | base64 of the Developer ID Application .p12 |
-| `MAC_DEVELOPER_ID_CERT_PASSWORD` | password for that .p12 |
-| `MAC_DEVELOPER_ID_PROFILE_B64` | (optional) base64 of the Developer ID `.provisionprofile` — only needed if you have caps that require it |
+| Secret                           | Notes                                                                                                    |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `MAC_DEVELOPER_ID_CERT_P12_B64`  | base64 of the Developer ID Application .p12                                                              |
+| `MAC_DEVELOPER_ID_CERT_PASSWORD` | password for that .p12                                                                                   |
+| `MAC_DEVELOPER_ID_PROFILE_B64`   | (optional) base64 of the Developer ID `.provisionprofile` — only needed if you have caps that require it |
 
 Reuses existing `ASC_*`, `IOS_TEAM_ID`. Notarization uses the ASC API key
 (`ASC_PRIVATE_KEY_PATH` + `ASC_KEY_ID` + `ASC_ISSUER_ID`) — no separate
@@ -195,5 +196,5 @@ DMG_SKIP_FINDER_LAYOUT=1 SKIP_NOTARIZATION=1 make mac-direct-dist
   signing with the profile embedded.
 - **Gatekeeper still complains after notarization** = the ticket wasn't
   stapled, OR you notarized the .app but distributed a different .dmg
-  containing it. Always notarize and staple the *exact artifact you
-  distribute*. The script does this for you on the .dmg.
+  containing it. Always notarize and staple the _exact artifact you
+  distribute_. The script does this for you on the .dmg.

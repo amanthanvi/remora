@@ -16,11 +16,6 @@ endif
 ROOT := $(shell pwd)
 STAMPS := $(ROOT)/.build-stamps
 RUST_DIR := $(ROOT)/shared/rust-bridge
-KITTYLITTER_DIR := $(ROOT)/services/kittylitter
-ALLEYCAT_DEV_DIR ?= $(HOME)/dev/alleycat
-KITTYLITTER_DEV_DIR := $(STAMPS)/kittylitter-dev
-KITTYLITTER_DEV_MANIFEST := $(KITTYLITTER_DEV_DIR)/Cargo.toml
-KITTYLITTER_VERSION := $(shell awk -F'"' '/^version = / { print $$2; exit }' $(KITTYLITTER_DIR)/Cargo.toml)
 SUBMODULE_DIR := $(ROOT)/shared/third_party/codex
 IOS_DIR := $(ROOT)/apps/ios
 IOS_SCRIPTS := $(IOS_DIR)/scripts
@@ -45,8 +40,14 @@ PATCHES_DIR := $(ROOT)/patches/codex
 
 IOS_DEPLOYMENT_TARGET ?= 18.0
 IOS_SIM_DEVICE ?= iPhone 17 Pro
-IOS_SCHEME ?= Litter
+IOS_SIM_DESTINATION ?= platform=iOS Simulator,name=$(IOS_SIM_DEVICE)
+IOS_SCHEME ?= Remora
 XCODE_CONFIG ?= Debug
+XCODE_DERIVED_DATA_PATH ?=
+XCODE_SOURCE_PACKAGES_PATH ?=
+XCODE_PACKAGE_CACHE_PATH ?=
+XCODE_EXTRA_ARGS ?=
+XCODE_CACHE_ARGS = $(if $(strip $(XCODE_DERIVED_DATA_PATH)),-derivedDataPath '$(XCODE_DERIVED_DATA_PATH)') $(if $(strip $(XCODE_SOURCE_PACKAGES_PATH)),-clonedSourcePackagesDirPath '$(XCODE_SOURCE_PACKAGES_PATH)') $(if $(strip $(XCODE_PACKAGE_CACHE_PATH)),-packageCachePath '$(XCODE_PACKAGE_CACHE_PATH)')
 CARGO_FEATURES ?=
 ANDROID_ABIS ?= arm64-v8a
 ANDROID_RUST_PROFILE ?= android-dev
@@ -58,10 +59,10 @@ ANDROID_EMULATOR_ABIS ?= $(if $(filter arm64 aarch64,$(HOST_ARCH)),arm64-v8a,x86
 # This must precede cache setup and path auto-detection.
 -include .env
 
-LITTER_SHARED_CACHE_ROOT ?= $(HOME)/Library/Caches/litter-build
-LITTER_SHARED_RUST_TARGET ?= 0
-ifeq ($(LITTER_SHARED_RUST_TARGET),1)
-  export CARGO_TARGET_DIR ?= $(LITTER_SHARED_CACHE_ROOT)/cargo-target
+REMORA_SHARED_CACHE_ROOT ?= $(HOME)/Library/Caches/remora-build
+REMORA_SHARED_RUST_TARGET ?= 0
+ifeq ($(REMORA_SHARED_RUST_TARGET),1)
+  export CARGO_TARGET_DIR ?= $(REMORA_SHARED_CACHE_ROOT)/cargo-target
 endif
 RUST_TARGET := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),$(RUST_DIR)/target)
 
@@ -88,8 +89,8 @@ ANDROID_ENV := JAVA_HOME='$(JAVA_HOME)' ANDROID_SDK_ROOT='$(ANDROID_SDK_ROOT)' A
 
 # Android app metadata
 ANDROID_APK := $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
-ANDROID_PACKAGE := com.sigkitten.litter.android
-ANDROID_ACTIVITY := com.litter.android.MainActivity
+ANDROID_PACKAGE := com.remora.android
+ANDROID_ACTIVITY := com.remora.android.MainActivity
 ANDROID_DEVICE_SERIAL ?=
 ANDROID_REINSTALL_ON_SIGNATURE_MISMATCH ?= 1
 
@@ -142,21 +143,22 @@ PACKAGE_CARGO_ENV := CARGO_INCREMENTAL=0
 # CARGO_INCREMENTAL=1. Incremental wins for small-change rebuilds. CI calls
 # build-rust.sh directly with its own env, so it bypasses this var.
 DEV_CARGO_ENV := env -u RUSTC_WRAPPER CARGO_INCREMENTAL=1
-KITTYLITTER_CARGO_ENV := $(DEV_CARGO_ENV)
-ifeq ($(firstword $(MAKECMDGOALS)),kittylitter)
-  KITTYLITTER_GOAL_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
-  .PHONY: $(KITTYLITTER_GOAL_ARGS)
-  $(KITTYLITTER_GOAL_ARGS):
-	@:
-endif
-KITTYLITTER_ARGS := $(strip $(KITTYLITTER_GOAL_ARGS) $(ARGS))
 UPDATE_ALLEYCAT_MAIN := $(ROOT)/tools/scripts/update-alleycat-main.sh
 
 PATCH_FILES := \
 	$(PATCHES_DIR)/ios-exec-hook.patch \
-	$(PATCHES_DIR)/client-controlled-handoff.patch \
 	$(PATCHES_DIR)/mobile-code-mode-stub.patch \
-	$(PATCHES_DIR)/thread-read-permissions.patch
+	$(PATCHES_DIR)/thread-read-permissions.patch \
+	$(PATCHES_DIR)/mobile-shell-snapshot-timeout.patch \
+	$(PATCHES_DIR)/remote-app-server-websocket-cap.patch \
+	$(PATCHES_DIR)/absolute-path-cross-platform.patch \
+	$(PATCHES_DIR)/android-installation-id-lock.patch \
+	$(PATCHES_DIR)/dynamic-tool-call-arguments-delta.patch \
+	$(PATCHES_DIR)/approval-timestamps-serde-default.patch \
+	$(PATCHES_DIR)/realtime-webrtc-env-apikey.patch \
+	$(PATCHES_DIR)/realtime-handoff-server-hint.patch \
+	$(PATCHES_DIR)/realtime-dynamic-tools.patch \
+	$(PATCHES_DIR)/realtime-client-controlled-handoff.patch
 
 BOUNDARY_SOURCES := \
 	$(RUST_DIR)/codex-mobile-client/Cargo.toml \
@@ -184,8 +186,9 @@ GHOSTTY_DIR := $(ROOT)/shared/third_party/ghostty
 GHOSTTY_COMMIT := $(shell git -C $(GHOSTTY_DIR) rev-parse --short=12 HEAD 2>/dev/null || echo missing)
 GHOSTTY_PATCH_FILES := $(wildcard $(ROOT)/patches/ghostty/*.patch)
 GHOSTTY_PATCH_FINGERPRINT := $(shell cat $(GHOSTTY_PATCH_FILES) 2>/dev/null | shasum -a 256 | cut -c1-12)
+GHOSTTY_METAL_TOOLCHAIN_FINGERPRINT := $(shell printf '%s' '$(GHOSTTY_METAL_TOOLCHAIN_DIR)' | shasum -a 256 | cut -c1-12)
 STAMP_SYNC_GHOSTTY := $(STAMPS)/sync-ghostty-$(GHOSTTY_COMMIT)-$(GHOSTTY_PATCH_FINGERPRINT)
-STAMP_GHOSTTY_IOS := $(STAMPS)/ghostty-ios-$(GHOSTTY_COMMIT)-$(GHOSTTY_PATCH_FINGERPRINT)
+STAMP_GHOSTTY_IOS := $(STAMPS)/ghostty-ios-$(GHOSTTY_COMMIT)-$(GHOSTTY_PATCH_FINGERPRINT)-$(GHOSTTY_METAL_TOOLCHAIN_FINGERPRINT)
 
 empty :=
 space := $(empty) $(empty)
@@ -213,7 +216,7 @@ $(shell mkdir -p $(STAMPS))
 	test test-rust test-ios test-android \
 	ios-release-prep mac-release-prep testflight mac-testflight mac-direct-dist appstore-release play-upload play-release \
 	clean clean-rust clean-ios clean-android \
-	rebuild-bindings kittylitter kittylitter-restart tui tui-run help
+	rebuild-bindings tui tui-run help
 
 all: ios android
 
@@ -233,15 +236,15 @@ ios-device: ios-build-device
 ios-device-fast: ios-build-device-fast
 
 # Mac Catalyst build. Uses the same rust-ios-package (macabi arches)
-# + xcgen chain, but targets the `LitterMac` scheme and writes into a
+# + xcgen chain, but targets the `RemoraMac` scheme and writes into a
 # separate DerivedData path so it doesn't collide with the iOS sim build
 # cache.
 CATALYST_DERIVED_DATA := $(IOS_DIR)/build/catalyst
 catalyst: rust-ios-package alpine-fs xcgen
-	@echo "==> Building LitterMac for Mac Catalyst..."
+	@echo "==> Building RemoraMac for Mac Catalyst..."
 	@cd $(IOS_DIR) && xcodebuild \
-		-project Litter.xcodeproj \
-		-scheme LitterMac \
+		-project Remora.xcodeproj \
+		-scheme RemoraMac \
 		-configuration $(XCODE_CONFIG) \
 		-destination 'platform=macOS,variant=Mac Catalyst' \
 		-derivedDataPath $(CATALYST_DERIVED_DATA) \
@@ -251,8 +254,8 @@ catalyst: rust-ios-package alpine-fs xcgen
 # Build + (kill any running copy) + launch the freshly-built Catalyst app.
 catalyst-run: catalyst
 	@echo "==> Launching Catalyst app..."
-	@pkill -9 -f "Debug-maccatalyst/Litter.app" 2>/dev/null; true
-	@open $(CATALYST_DERIVED_DATA)/Build/Products/Debug-maccatalyst/Litter.app
+	@pkill -9 -f "Debug-maccatalyst/Remora.app" 2>/dev/null; true
+	@open $(CATALYST_DERIVED_DATA)/Build/Products/Debug-maccatalyst/Remora.app
 
 # Fast Mac Catalyst dev lane. Mirrors `ios-sim-fast` for Catalyst:
 # host-arch-only macabi staticlib via the `ios-dev` Cargo profile (no
@@ -261,10 +264,10 @@ catalyst-run: catalyst
 # from minutes to seconds. Cold first build is still slow because cargo
 # has to compile the codex workspace once for macabi.
 catalyst-fast: rust-ios-macabi-fast alpine-fs xcgen
-	@echo "==> Building LitterMac for Mac Catalyst (fast)..."
+	@echo "==> Building RemoraMac for Mac Catalyst (fast)..."
 	@cd $(IOS_DIR) && xcodebuild \
-		-project Litter.xcodeproj \
-		-scheme LitterMac \
+		-project Remora.xcodeproj \
+		-scheme RemoraMac \
 		-configuration $(XCODE_CONFIG) \
 		-destination 'platform=macOS,variant=Mac Catalyst' \
 		-derivedDataPath $(CATALYST_DERIVED_DATA) \
@@ -273,8 +276,8 @@ catalyst-fast: rust-ios-macabi-fast alpine-fs xcgen
 
 catalyst-fast-run: catalyst-fast
 	@echo "==> Launching Catalyst app..."
-	@pkill -9 -f "Debug-maccatalyst/Litter.app" 2>/dev/null; true
-	@open $(CATALYST_DERIVED_DATA)/Build/Products/Debug-maccatalyst/Litter.app
+	@pkill -9 -f "Debug-maccatalyst/Remora.app" 2>/dev/null; true
+	@open $(CATALYST_DERIVED_DATA)/Build/Products/Debug-maccatalyst/Remora.app
 
 # Direct (unsandboxed) Mac Catalyst build — same binary the DMG
 # distribution lane ships, but built with `DeveloperID` configuration
@@ -283,10 +286,10 @@ catalyst-fast-run: catalyst-fast
 # for the signed + notarized DMG.
 MAC_DIRECT_DERIVED := $(IOS_DIR)/build/mac-direct
 mac-direct: rust-ios-package alpine-fs xcgen
-	@echo "==> Building LitterMac (DeveloperID — unsandboxed)..."
+	@echo "==> Building RemoraMac (DeveloperID — unsandboxed)..."
 	@cd $(IOS_DIR) && xcodebuild \
-		-project Litter.xcodeproj \
-		-scheme LitterMac \
+		-project Remora.xcodeproj \
+		-scheme RemoraMac \
 		-configuration DeveloperID \
 		-destination 'platform=macOS,variant=Mac Catalyst' \
 		-derivedDataPath $(MAC_DIRECT_DERIVED) \
@@ -295,8 +298,8 @@ mac-direct: rust-ios-package alpine-fs xcgen
 
 mac-direct-run: mac-direct
 	@echo "==> Launching unsandboxed Mac Catalyst app..."
-	@pkill -9 -f "DeveloperID-maccatalyst/Litter.app" 2>/dev/null; true
-	@open $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Litter.app
+	@pkill -9 -f "DeveloperID-maccatalyst/Remora.app" 2>/dev/null; true
+	@open $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Remora.app
 
 # Fast unsandboxed Catalyst lane. Same DeveloperID config as `mac-direct`
 # (so MacPairingHost / local Codex / BLE advertiser are all live), but uses
@@ -304,10 +307,10 @@ mac-direct-run: mac-direct
 # code signing (`CODE_SIGN_IDENTITY=-`) to bypass the Developer ID cert
 # requirement during local iteration.
 mac-direct-fast: rust-ios-macabi-fast alpine-fs xcgen
-	@echo "==> Building LitterMac (DeveloperID — unsandboxed, fast)..."
+	@echo "==> Building RemoraMac (DeveloperID — unsandboxed, fast)..."
 	@cd $(IOS_DIR) && xcodebuild \
-		-project Litter.xcodeproj \
-		-scheme LitterMac \
+		-project Remora.xcodeproj \
+		-scheme RemoraMac \
 		-configuration DeveloperID \
 		-destination 'platform=macOS,variant=Mac Catalyst' \
 		-derivedDataPath $(MAC_DIRECT_DERIVED) \
@@ -321,9 +324,9 @@ mac-direct-fast: rust-ios-macabi-fast alpine-fs xcgen
 
 mac-direct-fast-run: mac-direct-fast
 	@echo "==> Launching unsandboxed Mac Catalyst app..."
-	@pkill -9 -f "DeveloperID-maccatalyst/Litter.app" 2>/dev/null; true
-	@/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Litter.app
-	@open $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Litter.app
+	@pkill -9 -f "DeveloperID-maccatalyst/Remora.app" 2>/dev/null; true
+	@/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Remora.app
+	@open $(MAC_DIRECT_DERIVED)/Build/Products/DeveloperID-maccatalyst/Remora.app
 loop-sim:
 	@$(ROOT)/tools/scripts/loop-ios.sh sim
 
@@ -378,7 +381,7 @@ ios-device-stop:
 	echo "==> Finalized: $$run_dir/profile.trace"
 
 ios-run: ios
-	@open $(IOS_DIR)/Litter.xcodeproj
+	@open $(IOS_DIR)/Remora.xcodeproj
 
 android: android-fast
 android-fast: rust-android android-tools android-alpine-fs proot-android android-debug
@@ -443,11 +446,11 @@ rust-ios-macabi-fast: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Building Rust for fast Mac Catalyst iteration (raw macabi staticlib + headers, host arch only)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current --fast-macabi $(CARGO_FEATURES)
 
-rust-check: alleycat-main
+rust-check: patch alleycat-main
 	@echo "==> cargo check (host, shared crates)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo check --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client
 
-rust-test: alleycat-main rust-shellcheck
+rust-test: patch alleycat-main rust-shellcheck
 	@echo "==> cargo test (host, shared crates)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
 
@@ -455,10 +458,11 @@ rust-test: alleycat-main rust-shellcheck
 # best-effort: missing tools warn but don't fail the build (matches the
 # fresh-checkout reality where contributors may not have either installed).
 SSH_SCRIPT_DIR := $(RUST_DIR)/codex-mobile-client/src/ssh_scripts
+SHELLCHECK_TEMPLATE_EXCLUDES := SC1054,SC1056,SC1072,SC1073,SC1083,SC1090,SC2088
 rust-shellcheck:
 	@if command -v shellcheck >/dev/null 2>&1; then \
 	  echo "==> shellcheck $(SSH_SCRIPT_DIR)/posix/*.sh"; \
-	  shellcheck --shell=sh --severity=warning $(SSH_SCRIPT_DIR)/posix/*.sh || exit 1; \
+	  shellcheck --shell=sh --severity=warning --exclude=$(SHELLCHECK_TEMPLATE_EXCLUDES) $(SSH_SCRIPT_DIR)/posix/*.sh || exit 1; \
 	else \
 	  echo "==> shellcheck not installed, skipping (brew install shellcheck)"; \
 	fi
@@ -483,7 +487,7 @@ $(STAMP_RUST_ANDROID): $(STAMP_SYNC) $(STAMP_BINDINGS_K) $(STAMP_GHOSTTY_ANDROID
 
 sync-ghostty: $(STAMP_SYNC_GHOSTTY)
 $(STAMP_SYNC_GHOSTTY): $(GHOSTTY_PATCH_FILES) apps/ios/scripts/sync-ghostty.sh Makefile
-	@echo "==> Syncing ghostty submodule + applying Litter patches..."
+	@echo "==> Syncing ghostty submodule + applying Remora patches..."
 	@$(IOS_SCRIPTS)/sync-ghostty.sh --preserve-current
 	@touch $@
 
@@ -576,7 +580,7 @@ $(STAMP_BINDINGS_S): $(STAMP_SYNC) $(BOUNDARY_SOURCES) | alleycat-main
 	@echo "==> Generating Swift bindings..."
 	@cd $(RUST_DIR) && ./generate-bindings.sh --swift-only
 	@mkdir -p $(IOS_GENERATED)/Headers
-	@cp $(GENERATED_DIR)/swift/codex_mobile_client.swift $(IOS_SOURCES)/Litter/Bridge/UniFFICodexClient.generated.swift
+	@cp $(GENERATED_DIR)/swift/codex_mobile_client.swift $(IOS_SOURCES)/Remora/Bridge/UniFFICodexClient.generated.swift
 	@cp $(GENERATED_DIR)/swift/codex_mobile_clientFFI.h $(IOS_GENERATED)/Headers/codex_mobile_clientFFI.h
 	@cp $(GENERATED_DIR)/swift/codex_mobile_clientFFI.modulemap $(IOS_GENERATED)/Headers/codex_mobile_clientFFI.modulemap
 	@cp $(GENERATED_DIR)/swift/module.modulemap $(IOS_GENERATED)/Headers/module.modulemap
@@ -609,26 +613,30 @@ verify-ios-project:
 
 ios-build-sim: verify-ios-project
 	@echo "==> Building iOS ($(XCODE_CONFIG), simulator)..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
+		$(XCODE_CACHE_ARGS) \
+		$(XCODE_EXTRA_ARGS) \
 		-scheme $(IOS_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
-		-destination 'platform=iOS Simulator,name=$(IOS_SIM_DEVICE)' \
+		-destination '$(IOS_SIM_DESTINATION)' \
 		COMPILER_INDEX_STORE_ENABLE=NO \
 		build
 
 ios-build-sim-fast: verify-ios-project
 	@echo "==> Building iOS ($(XCODE_CONFIG), fast simulator)..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
+		$(XCODE_CACHE_ARGS) \
+		$(XCODE_EXTRA_ARGS) \
 		-scheme $(IOS_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
-		-destination 'platform=iOS Simulator,name=$(IOS_SIM_DEVICE)' \
+		-destination '$(IOS_SIM_DESTINATION)' \
 		COMPILER_INDEX_STORE_ENABLE=NO \
 		ONLY_ACTIVE_ARCH=YES \
 		build
 
 ios-build-device: verify-ios-project
 	@echo "==> Building iOS ($(XCODE_CONFIG), device)..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
 		-scheme $(IOS_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
 		-destination 'generic/platform=iOS' \
@@ -638,7 +646,7 @@ ios-build-device: verify-ios-project
 
 ios-build-device-fast: verify-ios-project
 	@echo "==> Building iOS ($(XCODE_CONFIG), fast device)..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
 		-scheme $(IOS_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
 		-destination 'generic/platform=iOS' \
@@ -651,7 +659,7 @@ ios-build: ios-build-sim
 
 # ─────────────────────────────────────────────────────────────────────────────
 # watchOS build lanes
-# The watch app (LitterWatch) and its complications (LitterWatchComplications)
+# The watch app (RemoraWatch) and its complications (RemoraWatchComplications)
 # are pure Swift/SwiftUI — they don't link the shared Rust library, so there
 # is no rust-watch step. The watch app is also embedded into the main iOS
 # app, so `make ios-sim-fast` will build it transitively when that ships.
@@ -660,13 +668,13 @@ ios-build: ios-build-sim
 #   WATCH_SIM_DEVICE       simulator name for watch-sim-run (default: Apple Watch Series 11 (46mm))
 #   WATCH_SIM_UDID         concrete watch simulator UDID for watch-sim-run
 #   WATCH_BUILD_DESTINATION xcodebuild watchOS simulator destination (default: generic/platform=watchOS Simulator)
-#   WATCH_SCHEME           Xcode scheme (default: LitterWatch)
+#   WATCH_SCHEME           Xcode scheme (default: RemoraWatch)
 # ─────────────────────────────────────────────────────────────────────────────
 
 WATCH_SIM_DEVICE ?= Apple Watch Series 11 (46mm)
 WATCH_SIM_UDID ?=
 WATCH_BUILD_DESTINATION ?= generic/platform=watchOS Simulator
-WATCH_SCHEME ?= LitterWatch
+WATCH_SCHEME ?= RemoraWatch
 
 watch: watch-sim
 
@@ -674,11 +682,11 @@ watch-typecheck:
 	@echo "==> Type-checking watchOS sources..."
 	@cd $(IOS_DIR) && xcrun -sdk watchsimulator swiftc -typecheck \
 		-target arm64-apple-watchos11.0-simulator \
-		$$(find Sources/LitterWatch Sources/LitterWatchComplications -name '*.swift')
+		$$(find Sources/RemoraWatch Sources/RemoraWatchComplications -name '*.swift')
 
 watch-sim: verify-ios-project
 	@echo "==> Building watchOS ($(XCODE_CONFIG), simulator: $(WATCH_SIM_DEVICE))..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
 		-scheme $(WATCH_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
 		-destination '$(WATCH_BUILD_DESTINATION)' \
@@ -688,7 +696,7 @@ watch-sim: verify-ios-project
 
 watch-device: verify-ios-project
 	@echo "==> Building watchOS ($(XCODE_CONFIG), device)..."
-	@xcodebuild -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild -project $(IOS_DIR)/Remora.xcodeproj \
 		-scheme $(WATCH_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
 		-destination 'generic/platform=watchOS' \
@@ -723,7 +731,7 @@ watch-register: xcgen
 
 # Boot a matching watch simulator, build, install the .app and launch.
 watch-sim-run: watch-sim
-	@echo "==> Booting $(WATCH_SIM_DEVICE) and installing LitterWatch..."
+	@echo "==> Booting $(WATCH_SIM_DEVICE) and installing RemoraWatch..."
 	@WATCH_UDID="$(WATCH_SIM_UDID)" ; \
 	if [ -z "$$WATCH_UDID" ]; then \
 		WATCH_UDID=$$(xcrun simctl list devices available | awk 'index($$0, "$(WATCH_SIM_DEVICE)") { \
@@ -734,12 +742,12 @@ watch-sim-run: watch-sim
 		echo "ERROR: no simulator matching '$(WATCH_SIM_DEVICE)'. Run 'xcrun simctl list devices' to see what's installed."; exit 1; \
 	fi ; \
 	xcrun simctl boot $$WATCH_UDID 2>/dev/null || true ; \
-	APP_PATH=$$(xcodebuild -project $(IOS_DIR)/Litter.xcodeproj -scheme $(WATCH_SCHEME) \
+	APP_PATH=$$(xcodebuild -project $(IOS_DIR)/Remora.xcodeproj -scheme $(WATCH_SCHEME) \
 		-configuration $(XCODE_CONFIG) -destination "$(WATCH_BUILD_DESTINATION)" \
 		-showBuildSettings 2>/dev/null | awk -F' = ' '/ CODESIGNING_FOLDER_PATH /{print $$2; exit}') ; \
 	echo "==> Installing $$APP_PATH"; \
 	xcrun simctl install $$WATCH_UDID "$$APP_PATH" ; \
-	xcrun simctl launch $$WATCH_UDID com.sigkitten.litter.watchkitapp
+	xcrun simctl launch $$WATCH_UDID com.remora.app.watchkitapp
 
 android-debug:
 	@echo "==> Building Android debug..."
@@ -780,13 +788,13 @@ android-emulator-install: android-emulator-fast
 
 test: test-rust test-ios test-android
 
-test-rust: alleycat-main
+test-rust: patch alleycat-main rust-shellcheck
 	@echo "==> Running Rust tests..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
 
 test-ios: xcgen
 	@echo "==> Running iOS tests..."
-	@xcodebuild test -project $(IOS_DIR)/Litter.xcodeproj \
+	@xcodebuild test -project $(IOS_DIR)/Remora.xcodeproj \
 		-scheme $(IOS_SCHEME) \
 		-configuration Debug \
 		-destination 'platform=iOS Simulator,name=$(IOS_SIM_DEVICE)'
@@ -820,8 +828,8 @@ play-upload: android-release
 	@$(ANDROID_DIR)/scripts/play-upload.sh
 
 play-release:
-	@if [ -n "$$LITTER_VERSION_CODE_OVERRIDE" ]; then \
-		echo "==> Using overridden Android versionCode $$LITTER_VERSION_CODE_OVERRIDE"; \
+	@if [ -n "$$REMORA_VERSION_CODE_OVERRIDE" ]; then \
+		echo "==> Using overridden Android versionCode $$REMORA_VERSION_CODE_OVERRIDE"; \
 	else \
 		$(ANDROID_DIR)/scripts/bump-version.sh; \
 	fi
@@ -833,7 +841,7 @@ clean: clean-rust clean-ios clean-android
 
 clean-rust:
 	@echo "==> Cleaning Rust build artifacts..."
-	@if [ "$(LITTER_SHARED_RUST_TARGET)" = "1" ] && [ "$(RUST_TARGET)" != "$(RUST_DIR)/target" ]; then \
+	@if [ "$(REMORA_SHARED_RUST_TARGET)" = "1" ] && [ "$(RUST_TARGET)" != "$(RUST_DIR)/target" ]; then \
 		echo "==> Shared Rust target is enabled; leaving $(RUST_TARGET) intact."; \
 		echo "==> Remove it manually if you really want to clear the shared cache."; \
 	else \
@@ -868,61 +876,6 @@ screenshots-ios:
 screenshots-android:
 	@echo "── Capturing Android screenshots ──"
 	cd $(ANDROID_DIR) && bundle exec fastlane screenshots
-
-$(KITTYLITTER_DEV_MANIFEST): $(KITTYLITTER_DIR)/Cargo.toml $(KITTYLITTER_DIR)/src/main.rs
-	@if [ ! -f "$(ALLEYCAT_DEV_DIR)/crates/alleycat/Cargo.toml" ]; then \
-		echo "error: ALLEYCAT_DEV_DIR=$(ALLEYCAT_DEV_DIR) does not look like an alleycat checkout"; \
-		echo "override with: make kittylitter ALLEYCAT_DEV_DIR=/path/to/alleycat"; \
-		exit 1; \
-	fi
-	@mkdir -p "$(KITTYLITTER_DEV_DIR)/src"
-	@printf '%s\n' \
-		'[workspace]' \
-		'' \
-		'[package]' \
-		'name = "kittylitter-dev"' \
-		'version = "$(KITTYLITTER_VERSION)"' \
-		'edition = "2024"' \
-		'publish = false' \
-		'' \
-		'[[bin]]' \
-		'name = "kittylitter"' \
-		'path = "src/main.rs"' \
-		'' \
-		'[dependencies]' \
-		'alleycat = { path = "$(ALLEYCAT_DEV_DIR)/crates/alleycat" }' \
-		'anyhow = "1"' \
-		> "$(KITTYLITTER_DEV_MANIFEST)"
-	@printf '%s\n' \
-		'fn main() -> anyhow::Result<()> {' \
-		'    alleycat::App {' \
-		'        binary_name: "kittylitter",' \
-		'        qualifier: "com",' \
-		'        organization: "sigkitten",' \
-		'        application: "kittylitter",' \
-		'        label: "com.sigkitten.kittylitter",' \
-		'        version: env!("CARGO_PKG_VERSION"),' \
-		'    }' \
-		'    .run()' \
-		'}' \
-		> "$(KITTYLITTER_DEV_DIR)/src/main.rs"
-
-kittylitter: $(KITTYLITTER_DEV_MANIFEST)
-	@echo "── Running kittylitter $(KITTYLITTER_ARGS) via $(ALLEYCAT_DEV_DIR) ──"
-	@cd $(ROOT) && $(KITTYLITTER_CARGO_ENV) cargo run --manifest-path "$(KITTYLITTER_DEV_MANIFEST)" --bin kittylitter -- $(KITTYLITTER_ARGS)
-
-kittylitter-restart: $(KITTYLITTER_DEV_MANIFEST)
-	@echo "── Building kittylitter via $(ALLEYCAT_DEV_DIR) ──"
-	@cd $(ROOT) && $(KITTYLITTER_CARGO_ENV) cargo build --manifest-path "$(KITTYLITTER_DEV_MANIFEST)" --bin kittylitter
-	@echo "── Restarting installed kittylitter daemon ──"
-	@cd $(ROOT) && $(KITTYLITTER_CARGO_ENV) cargo run --manifest-path "$(KITTYLITTER_DEV_MANIFEST)" --bin kittylitter -- stop >/dev/null 2>&1 || true
-	@if launchctl print "gui/$$(id -u)/com.sigkitten.kittylitter" >/dev/null 2>&1; then \
-		launchctl kickstart -k "gui/$$(id -u)/com.sigkitten.kittylitter"; \
-		sleep 3; \
-		cd "$(ROOT)" && $(KITTYLITTER_CARGO_ENV) cargo run --manifest-path "$(KITTYLITTER_DEV_MANIFEST)" --bin kittylitter -- agents list; \
-	else \
-		echo "kittylitter autostart is not installed; start it with: make kittylitter serve"; \
-	fi
 
 tui:
 	@echo "── Building codex-tui ──"
