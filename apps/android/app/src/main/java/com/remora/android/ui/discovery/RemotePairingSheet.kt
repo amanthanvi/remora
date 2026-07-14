@@ -81,7 +81,7 @@ import uniffi.codex_mobile_client.AppAlleycatAgentWire
 import uniffi.codex_mobile_client.AppAlleycatPairPayload
 import uniffi.codex_mobile_client.AlleycatBridge
 
-data class AlleycatConnectedTarget(
+data class RemotePairingTarget(
     val serverId: String,
     val nodeId: String,
     val displayName: String,
@@ -90,12 +90,12 @@ data class AlleycatConnectedTarget(
     val agentWire: AppAlleycatAgentWire,
 )
 
-private const val LOG_TAG = "AlleycatSheet"
+private const val LOG_TAG = "RemotePairingSheet"
 
 @Composable
-fun AlleycatAddServerSheet(
+fun RemotePairingSheet(
     onDismiss: () -> Unit,
-    onConnected: (AlleycatConnectedTarget) -> Unit,
+    onConnected: (RemotePairingTarget) -> Unit,
     startScanningOnAppear: Boolean = false,
 ) {
     val appModel = LocalAppModel.current
@@ -105,7 +105,7 @@ fun AlleycatAddServerSheet(
     val credentialStore = remember(context) {
         AlleycatCredentialStore(context.applicationContext)
     }
-    val alleycatBridge = remember { AlleycatBridge() }
+    val pairingBridge = remember { AlleycatBridge() }
 
     var displayName by remember { mutableStateOf("") }
     var parsedParams by remember { mutableStateOf<AppAlleycatPairPayload?>(null) }
@@ -139,7 +139,7 @@ fun AlleycatAddServerSheet(
                     isLoadingAgents = false
                 }
             } catch (e: Exception) {
-                Log.w(LOG_TAG, "listAlleycatAgents failed", e)
+                Log.w(LOG_TAG, "Remote agent discovery failed", e)
                 if (parsedParams?.nodeId == params.nodeId) {
                     agents = emptyList()
                     selectedAgentNames = emptySet()
@@ -154,7 +154,7 @@ fun AlleycatAddServerSheet(
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return
         try {
-            val params = alleycatBridge.parsePairPayload(trimmed)
+            val params = pairingBridge.parsePairPayload(trimmed)
             parsedParams = params
             displayName = suggestedDisplayName(params)
             agents = emptyList()
@@ -228,11 +228,11 @@ fun AlleycatAddServerSheet(
                 runCatching {
                     credentialStore.saveToken(params.nodeId, params.token)
                 }.onFailure {
-                    Log.w(LOG_TAG, "Alleycat token save failed", it)
+                    Log.w(LOG_TAG, "Remote pairing token save failed", it)
                 }
                 isConnecting = false
                 onConnected(
-                    AlleycatConnectedTarget(
+                    RemotePairingTarget(
                         serverId = result.serverId,
                         nodeId = result.nodeId,
                         displayName = resolvedName,
@@ -242,7 +242,7 @@ fun AlleycatAddServerSheet(
                     )
                 )
             } catch (e: Exception) {
-                Log.w(LOG_TAG, "connectRemoteOverAlleycat failed", e)
+                Log.w(LOG_TAG, "Remote pairing failed", e)
                 isConnecting = false
                 connectError = e.message ?: "Unable to connect"
             }
@@ -601,14 +601,14 @@ private fun shortNodeId(raw: String): String =
 
 private fun suggestedDisplayName(params: AppAlleycatPairPayload): String =
     params.hostName?.trim()?.takeIf { it.isNotEmpty() }
-        ?: "Alleycat ${shortNodeId(params.nodeId)}"
+        ?: "Remora ${shortNodeId(params.nodeId)}"
 
 private fun wireLabel(wire: AppAlleycatAgentWire): String = when (wire) {
     AppAlleycatAgentWire.WEBSOCKET -> "websocket"
     AppAlleycatAgentWire.JSONL -> "jsonl"
 }
 
-fun alleycatWireStorageValue(wire: AppAlleycatAgentWire): String = when (wire) {
+fun remotePairingWireStorageValue(wire: AppAlleycatAgentWire): String = when (wire) {
     AppAlleycatAgentWire.WEBSOCKET -> "websocket"
     AppAlleycatAgentWire.JSONL -> "jsonl"
 }
@@ -732,7 +732,7 @@ private fun InstructionsCard() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            text = "Pair with alleycat",
+            text = "Pair with Remora",
             color = androidx.compose.ui.graphics.Color.White,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
@@ -801,7 +801,7 @@ private fun CommandRow() {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
                     as? android.content.ClipboardManager
                 clipboard?.setPrimaryClip(
-                    android.content.ClipData.newPlainText("alleycat", PAIR_COMMAND),
+                    android.content.ClipData.newPlainText("Remora pairing command", PAIR_COMMAND),
                 )
                 copied = true
                 scope.launch {

@@ -121,6 +121,8 @@ private data class SshBridgeAgentContext(
 )
 
 private const val SLINGSHOT_BASE_URL = "https://chatgpt.com/backend-api"
+private const val REMOTE_BRIDGE_STATE_DIRECTORY = "remora-bridges"
+private const val LEGACY_REMOTE_BRIDGE_STATE_DIRECTORY = "alleycat-bridges"
 
 /**
  * Server discovery and connection screen.
@@ -143,7 +145,7 @@ fun DiscoveryScreen(
     val sshCredentialStore = remember(context) { SshCredentialStore(context.applicationContext) }
 
     var showManualEntry by remember { mutableStateOf(false) }
-    var showAlleycatSheet by remember { mutableStateOf(false) }
+    var showRemotePairingSheet by remember { mutableStateOf(false) }
     var showSlingshotComputers by remember { mutableStateOf(false) }
     var slingshotEnvironments by remember { mutableStateOf<List<AppSlingshotEnvironment>>(emptyList()) }
     var slingshotIsLoading by remember { mutableStateOf(false) }
@@ -564,13 +566,13 @@ fun DiscoveryScreen(
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ChooserCard(
-                title = "Pair with alleycat",
+                title = "Pair with Remora",
                 subtitle = "Run npx kittylitter on the host, then scan the QR code it prints.",
                 badge = "RECOMMENDED",
                 icon = Icons.Default.QrCodeScanner,
-                supportedAgents = AlleycatAgents,
+                supportedAgents = RemotePairingAgents,
                 isRecommended = true,
-                onClick = { showAlleycatSheet = true },
+                onClick = { showRemotePairingSheet = true },
             )
 
             ChooserCard(
@@ -887,18 +889,18 @@ fun DiscoveryScreen(
         )
     }
 
-    if (showAlleycatSheet) {
+    if (showRemotePairingSheet) {
         @OptIn(ExperimentalMaterial3Api::class)
         ModalBottomSheet(
-            onDismissRequest = { showAlleycatSheet = false },
+            onDismissRequest = { showRemotePairingSheet = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = RemoraTheme.background,
         ) {
-            AlleycatAddServerSheet(
-                onDismiss = { showAlleycatSheet = false },
+            RemotePairingSheet(
+                onDismiss = { showRemotePairingSheet = false },
                 startScanningOnAppear = true,
                 onConnected = { result ->
-                    showAlleycatSheet = false
+                    showRemotePairingSheet = false
                     scope.launch {
                         SavedServerStore.rememberAlleycat(
                             context = context,
@@ -907,7 +909,7 @@ fun DiscoveryScreen(
                             nodeId = result.nodeId,
                             relay = result.params.relay,
                             agentName = result.agentName,
-                            agentWire = alleycatWireStorageValue(result.agentWire),
+                            agentWire = remotePairingWireStorageValue(result.agentWire),
                         )
                         reloadSavedServers()
                         appModel.refreshSnapshot()
@@ -920,13 +922,13 @@ fun DiscoveryScreen(
 }
 
 /**
- * Canonical agent list shown on the alleycat chooser card. Mirrors
- * the splash carousel order so cold-start branding stays consistent.
- * New agents added in the alleycat manifest still surface on connected
+ * Canonical agent list shown on the remote pairing chooser card. Mirrors
+ * the splash carousel order so cold-start presentation stays consistent.
+ * New agents added in the remote host manifest still surface on connected
  * hosts via the real metadata store; this list only seeds the
  * pre-pair preview.
  */
-private val AlleycatAgents: List<AgentRuntimeKind> = listOf(
+private val RemotePairingAgents: List<AgentRuntimeKind> = listOf(
     "codex",
     "pi",
     "amp",
@@ -1888,9 +1890,28 @@ private fun sshAgentStatusLabel(agent: RemoteAgentAvailability): String = when (
 
 private fun sshBridgeStateRoot(context: Context, host: String): String {
     val safeHost = host.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    val dir = File(File(context.filesDir, "alleycat-bridges"), safeHost)
-    dir.mkdirs()
-    return dir.absolutePath
+    val stateRoot = File(context.filesDir, REMOTE_BRIDGE_STATE_DIRECTORY)
+    val legacyStateRoot = File(context.filesDir, LEGACY_REMOTE_BRIDGE_STATE_DIRECTORY)
+
+    // Preserve existing SSH bridge state while moving new installs to the
+    // neutral directory name. The root rename is atomic on app storage; the
+    // per-host retry handles installs where the new root already exists.
+    if (!stateRoot.exists() && legacyStateRoot.isDirectory) {
+        legacyStateRoot.renameTo(stateRoot)
+    }
+    stateRoot.mkdirs()
+
+    val stateDirectory = File(stateRoot, safeHost)
+    val legacyStateDirectory = File(legacyStateRoot, safeHost)
+    if (!stateDirectory.exists() && legacyStateDirectory.isDirectory) {
+        legacyStateDirectory.renameTo(stateDirectory)
+    }
+    if (!stateDirectory.exists() && legacyStateDirectory.isDirectory) {
+        return legacyStateDirectory.absolutePath
+    }
+
+    stateDirectory.mkdirs()
+    return stateDirectory.absolutePath
 }
 
 private fun serverIconForEntry(entry: SavedServer): androidx.compose.ui.graphics.vector.ImageVector {
