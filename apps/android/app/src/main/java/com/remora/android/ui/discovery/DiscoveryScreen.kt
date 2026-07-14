@@ -85,7 +85,6 @@ private data class SshBridgeAgentContext(
 
 private const val SLINGSHOT_BASE_URL = "https://chatgpt.com/backend-api"
 private const val REMOTE_BRIDGE_STATE_DIRECTORY = "remora-bridges"
-private const val LEGACY_REMOTE_BRIDGE_STATE_DIRECTORY = "alleycat-bridges"
 
 /**
  * Server discovery and connection screen.
@@ -995,29 +994,26 @@ private fun sshAgentStatusLabel(agent: RemoteAgentAvailability): String = when (
 }
 
 private fun sshBridgeStateRoot(context: Context, host: String): String {
-    val safeHost = host.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    val stateRoot = File(context.filesDir, REMOTE_BRIDGE_STATE_DIRECTORY)
-    val legacyStateRoot = File(context.filesDir, LEGACY_REMOTE_BRIDGE_STATE_DIRECTORY)
-
-    // Preserve existing SSH bridge state while moving new installs to the
-    // neutral directory name. The root rename is atomic on app storage; the
-    // per-host retry handles installs where the new root already exists.
-    if (!stateRoot.exists() && legacyStateRoot.isDirectory) {
-        legacyStateRoot.renameTo(stateRoot)
-    }
-    stateRoot.mkdirs()
-
-    val stateDirectory = File(stateRoot, safeHost)
-    val legacyStateDirectory = File(legacyStateRoot, safeHost)
-    if (!stateDirectory.exists() && legacyStateDirectory.isDirectory) {
-        legacyStateDirectory.renameTo(stateDirectory)
-    }
-    if (!stateDirectory.exists() && legacyStateDirectory.isDirectory) {
-        return legacyStateDirectory.absolutePath
-    }
-
+    val stateDirectory = sshBridgeStateDirectory(context.filesDir, host)
     stateDirectory.mkdirs()
     return stateDirectory.absolutePath
+}
+
+internal fun sshBridgeStateDirectory(filesDir: File, host: String): File {
+    val stateRoot = File(filesDir, REMOTE_BRIDGE_STATE_DIRECTORY)
+    return File(stateRoot, encodeBridgeStateHost(host))
+}
+
+internal fun encodeBridgeStateHost(host: String): String = buildString {
+    host.toByteArray(Charsets.UTF_8).forEach { rawByte ->
+        val byte = rawByte.toInt() and 0xFF
+        if (byte in '0'.code..'9'.code || byte in 'A'.code..'Z'.code || byte in 'a'.code..'z'.code) {
+            append(byte.toChar())
+        } else {
+            append('%')
+            append(byte.toString(16).uppercase().padStart(2, '0'))
+        }
+    }
 }
 
 private fun connectedSnapshot(

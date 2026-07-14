@@ -861,16 +861,25 @@ async fn resolve_ssh_bridge_runtime_kinds(
 }
 
 fn ssh_bridge_state_root(host: &str) -> Result<String, String> {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library").join("Application Support"))
-        .unwrap_or_else(std::env::temp_dir);
-    let path = base
-        .join("alleycat-bridges")
-        .join(percent_encode_alphanumeric(host));
+    let path = ssh_bridge_state_path(
+        std::env::var_os("HOME").map(PathBuf::from),
+        host,
+        cfg!(target_os = "android"),
+    );
     std::fs::create_dir_all(&path)
         .map_err(|error| format!("failed to create SSH bridge state dir {:?}: {error}", path))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+fn ssh_bridge_state_path(home: Option<PathBuf>, host: &str, is_android: bool) -> PathBuf {
+    let home = home.unwrap_or_else(std::env::temp_dir);
+    let base = if is_android {
+        home
+    } else {
+        home.join("Library").join("Application Support")
+    };
+    base.join("remora-bridges")
+        .join(percent_encode_alphanumeric(host))
 }
 
 fn percent_encode_alphanumeric(value: &str) -> String {
@@ -924,6 +933,36 @@ mod tests {
             alleycat_agent_name: None,
             alleycat_agent_wire: None,
         }
+    }
+
+    #[test]
+    fn ssh_bridge_state_path_matches_platform_storage_roots() {
+        let android_home = PathBuf::from("/data/user/0/com.remora.android/files");
+        assert_eq!(
+            ssh_bridge_state_path(Some(android_home.clone()), "host.local:22", true),
+            android_home
+                .join("remora-bridges")
+                .join("host%2Elocal%3A22")
+        );
+
+        let apple_home = PathBuf::from("/Users/remora");
+        assert_eq!(
+            ssh_bridge_state_path(Some(apple_home.clone()), "host.local:22", false),
+            apple_home
+                .join("Library")
+                .join("Application Support")
+                .join("remora-bridges")
+                .join("host%2Elocal%3A22")
+        );
+    }
+
+    #[test]
+    fn ssh_bridge_state_host_encoding_uses_utf8_bytes() {
+        assert_eq!(
+            percent_encode_alphanumeric("host_name-1"),
+            "host%5Fname%2D1"
+        );
+        assert_eq!(percent_encode_alphanumeric("café"), "caf%C3%A9");
     }
 
     fn ssh_credential() -> SshCredentialRecord {
