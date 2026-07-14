@@ -99,6 +99,10 @@ rustup target add "${RUST_TARGETS[@]}"
 
 mkdir -p "$OUT_DIR"
 
+# Remove stale output from the retired legacy JNI shim so Gradle cannot
+# continue packaging it after the single-library cutover.
+rm -f "$OUT_DIR"/*/libcodex_*bridge.so
+
 for abi_dir in arm64-v8a x86_64; do
   if [[ " $SELECTED_ABIS " != *" $abi_dir "* ]]; then
     rm -rf "$OUT_DIR/$abi_dir"
@@ -108,8 +112,5 @@ done
 echo "==> Building codex_mobile_client Android shared libs..."
 cd "$WORKSPACE_DIR"
 cargo ndk "${ABI_ARGS[@]}" -o "$OUT_DIR" build --profile "$RUST_PROFILE" -p codex-mobile-client
-
-echo "==> Building codex_bridge Android shared libs..."
-cargo ndk "${ABI_ARGS[@]}" -o "$OUT_DIR" build --profile "$RUST_PROFILE" -p codex-bridge
 
 echo "==> Done. Android JNI libs are in: $OUT_DIR"

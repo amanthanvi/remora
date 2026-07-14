@@ -167,7 +167,7 @@ fn prepare_in_process_config(
 fn prepare_android_in_process_config(
     mut config: InProcessConfig,
 ) -> Result<InProcessConfig, TransportError> {
-    // On Android, HOME and CODEX_HOME should already be set by UniffiInit.nativeBridgeInit().
+    // On Android, HOME and CODEX_HOME are set by UniffiInit.nativeMobileClientInit().
     // If codex_home is not set in the config, resolve from CODEX_HOME env var.
     if config.codex_home.is_none() {
         if let Ok(codex_home) = std::env::var("CODEX_HOME") {

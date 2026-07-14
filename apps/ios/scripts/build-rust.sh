@@ -459,7 +459,7 @@ if [ "$MACABI_ONLY" -eq 1 ]; then
 fi
 
 echo "==> Creating xcframework..."
-rm -rf "$FRAMEWORKS_DIR/codex_bridge.xcframework" "$FRAMEWORKS_DIR/codex_mobile_client.xcframework"
+rm -rf "$FRAMEWORKS_DIR/codex_mobile_client.xcframework"
 if [ "$DEVICE_ONLY" -eq 1 ]; then
   xcodebuild -create-xcframework \
     -library "$GENERATED_DEVICE_DIR/libcodex_mobile_client.a" \

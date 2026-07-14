@@ -11,12 +11,12 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(
-            name: "codex_bridge",
-            path: "apps/ios/Frameworks/codex_bridge.xcframework"
+            name: "codex_mobile_client",
+            path: "apps/ios/Frameworks/codex_mobile_client.xcframework"
         ),
         .target(
             name: "Remora",
-            dependencies: ["codex_bridge"],
+            dependencies: ["codex_mobile_client"],
             path: "apps/ios/Sources/Remora",
             publicHeadersPath: "Bridge"
         )
