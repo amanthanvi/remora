@@ -4,9 +4,9 @@ Remora is a native iOS and Android client for
 [Codex](https://github.com/openai/codex). It connects to local or remote Codex
 servers, manages sessions, and shares mobile runtime logic through a Rust core.
 
-This repository keeps the app build surfaces. Branded distribution wrappers,
-marketing site assets, and signup funnels are intentionally not part of this
-fork.
+This repository contains the app sources, shared runtime, and developer build
+tooling. Store distribution automation and hosted push infrastructure are
+intentionally not included.
 
 ## Quick Start
 
@@ -28,7 +28,6 @@ shared/rust-bridge/        Shared Rust client crate and UniFFI bindings
 shared/third_party/codex/  Upstream Codex submodule
 patches/codex/             Local Codex patch set applied during builds
 tools/scripts/             Build and maintenance helper scripts
-services/push-proxy/       Runtime push infrastructure retained for now
 ```
 
 ## Common Targets
@@ -49,7 +48,7 @@ services/push-proxy/       Runtime push infrastructure retained for now
 ## Architecture
 
 Both platforms share `codex-mobile-client` through UniFFI-generated bindings.
-Swift and Kotlin stay thin: UI, permissions, notifications, and platform APIs.
+Swift and Kotlin stay thin: UI, permissions, native audio, and platform APIs.
 Session state, streaming, hydration, discovery, and auth logic belong in Rust.
 
 Remote pairing should use upstream Alleycat, for example:

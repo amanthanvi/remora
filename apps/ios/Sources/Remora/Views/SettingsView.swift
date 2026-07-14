@@ -13,11 +13,15 @@ struct SettingsView: View {
     @State private var activeServerSheet: SettingsServerSheet?
     @State private var serverEditError: String?
 
-    private var localServer: AppServerSnapshot? {
-        // Account management (ChatGPT login / API key) is local-only, always.
-        // If the local Codex bridge hasn't spun up there's no login target, and
-        // the caller falls through to `SettingsDisconnectedAccountSection`.
-        appModel.snapshot?.servers.first(where: \.isLocal)
+    private var accountServer: AppServerSnapshot? {
+        guard let snapshot = appModel.snapshot else { return nil }
+        if let activeServerId = snapshot.activeThread?.serverId,
+           let activeServer = snapshot.serverSnapshot(for: activeServerId),
+           activeServer.isConnected,
+           !activeServer.isLocal {
+            return activeServer
+        }
+        return snapshot.servers.first(where: { $0.isConnected && !$0.isLocal })
     }
 
     private var connectedServers: [HomeDashboardServer] {
@@ -311,8 +315,8 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         Group {
-            if let localServer {
-                SettingsConnectionAccountSection(server: localServer)
+            if let accountServer {
+                SettingsConnectionAccountSection(server: accountServer)
             } else {
                 SettingsDisconnectedAccountSection()
             }
@@ -400,9 +404,7 @@ struct SettingsView: View {
         SavedServerStore.save(saved)
         appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
-            servers: SavedServerStore.reconnectRecords(
-                localDisplayName: appModel.resolvedLocalServerDisplayName()
-            )
+            servers: SavedServerStore.reconnectRecords()
         )
         appModel.store.renameServer(
             serverId: configuration.savedServer.id,
@@ -430,8 +432,6 @@ struct SettingsView: View {
 
             do {
                 switch configuration.connectionMode {
-                case .local:
-                    try await appModel.restartLocalServer()
                 case .directCodex:
                     guard let port = server.resolvedDirectCodexPort else {
                         throw SettingsServerConnectionError.missingCodexPort
@@ -570,7 +570,6 @@ private enum SettingsServerSheet: Identifiable {
 }
 
 private enum SettingsServerConnectionMode: String, CaseIterable, Identifiable {
-    case local
     case ssh
     case directCodex
     case websocket
@@ -579,8 +578,6 @@ private enum SettingsServerConnectionMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .local:
-            return "Local"
         case .ssh:
             return "SSH"
         case .directCodex:
@@ -592,8 +589,6 @@ private enum SettingsServerConnectionMode: String, CaseIterable, Identifiable {
 
     var formHeader: String {
         switch self {
-        case .local:
-            return "Local Runtime"
         case .ssh:
             return "SSH Host"
         case .directCodex:
@@ -668,9 +663,7 @@ private struct SettingsServerConnectionEditor: View {
         self.originalSavedServer = saved
 
         let resolvedMode: SettingsServerConnectionMode
-        if server.isLocal {
-            resolvedMode = .local
-        } else if saved?.websocketURL != nil {
+        if saved?.websocketURL != nil {
             resolvedMode = .websocket
         } else if saved?.preferredConnectionMode == .ssh || saved?.sshPort != nil && saved?.hasCodexServer == false {
             resolvedMode = .ssh
@@ -693,7 +686,7 @@ private struct SettingsServerConnectionEditor: View {
     }
 
     private var availableModes: [SettingsServerConnectionMode] {
-        server.isLocal ? [.local] : [.ssh, .directCodex, .websocket]
+        [.ssh, .directCodex, .websocket]
     }
 
     private var isSpecialPairedServer: Bool {
@@ -748,10 +741,6 @@ private struct SettingsServerConnectionEditor: View {
                 Text("This paired server uses saved pairing metadata. Edit its display name here, or remove and add it again to change the pairing.")
                     .remoraFont(.caption)
                     .foregroundColor(RemoraTheme.textSecondary)
-            } else if connectionMode == .local {
-                Text("This device's local runtime is managed automatically.")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.textSecondary)
             } else {
                 Picker("Connection Type", selection: $connectionMode) {
                     ForEach(availableModes) { mode in
@@ -761,8 +750,6 @@ private struct SettingsServerConnectionEditor: View {
                 .pickerStyle(.segmented)
 
                 switch connectionMode {
-                case .local:
-                    EmptyView()
                 case .ssh:
                     hostField
                     TextField("ssh port", text: $sshPort)
@@ -819,7 +806,7 @@ private struct SettingsServerConnectionEditor: View {
             .remoraFont(.subheadline)
 
             if !isSpecialPairedServer {
-                Button(connectionMode == .local ? "Save & Restart" : "Save & Reconnect") {
+                Button("Save & Reconnect") {
                     submit(reconnect: true)
                 }
                 .foregroundColor(RemoraTheme.accent)
@@ -856,28 +843,6 @@ private struct SettingsServerConnectionEditor: View {
         }
 
         switch connectionMode {
-        case .local:
-            let saved = SavedServer(
-                id: server.id,
-                name: name,
-                hostname: "127.0.0.1",
-                port: 0,
-                codexPorts: [],
-                sshPort: nil,
-                source: .local,
-                hasCodexServer: true,
-                wakeMAC: nil,
-                preferredConnectionMode: nil,
-                preferredCodexPort: nil,
-                sshPortForwardingEnabled: nil,
-                websocketURL: nil,
-                rememberedByUser: true
-            )
-            return SettingsServerConnectionConfiguration(
-                savedServer: saved,
-                discoveredServer: saved.toDiscoveredServer(),
-                connectionMode: .local
-            )
         case .ssh:
             let resolvedHost = try validatedHost()
             let resolvedWakeMAC = try validatedWakeMAC()
@@ -984,13 +949,8 @@ private struct SettingsServerConnectionEditor: View {
 private struct SettingsConnectionAccountSection: View {
     @Environment(AppModel.self) private var appModel
     let server: AppServerSnapshot
-    @State private var apiKey = ""
-    @State private var openAIBaseURL = ""
     @State private var isAuthWorking = false
     @State private var authError: String?
-    @State private var hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-    @State private var hasStoredBaseURL = OpenAIApiKeyStore.shared.hasStoredBaseURL
-    @State private var hasStoredChatGPTTokens = false
 
     var body: some View {
         Section {
@@ -1007,9 +967,12 @@ private struct SettingsConnectionAccountSection: View {
                             .remoraFont(.caption)
                             .foregroundColor(RemoraTheme.textSecondary)
                     }
+                    Text(server.displayName)
+                        .remoraFont(.caption)
+                        .foregroundColor(RemoraTheme.textMuted)
                 }
                 Spacer()
-                if server.isLocal, server.account != nil {
+                if server.account != nil {
                     Button("Logout") {
                         Task { await logout() }
                     }
@@ -1019,21 +982,7 @@ private struct SettingsConnectionAccountSection: View {
             }
             .listRowBackground(RemoraTheme.surface.opacity(0.6))
 
-            if server.isLocal, hasStoredApiKey {
-                Text("Local OpenAI API key is saved.")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.accent)
-                    .listRowBackground(RemoraTheme.surface.opacity(0.6))
-            }
-
-            if server.isLocal, hasStoredBaseURL {
-                Text("OpenAI-compatible base URL is saved.")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.accent)
-                    .listRowBackground(RemoraTheme.surface.opacity(0.6))
-            }
-
-            if server.isLocal, !isChatGPTAccount {
+            if !isChatGPTAccount {
                 Button {
                     Task {
                         isAuthWorking = true
@@ -1055,88 +1004,6 @@ private struct SettingsConnectionAccountSection: View {
                 .listRowBackground(RemoraTheme.surface.opacity(0.6))
             }
 
-            if server.isLocal, allowsLocalEnvApiKey {
-                HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if hasStoredApiKey {
-                            Text("OpenAI API key saved in the local environment.")
-                                .remoraFont(.caption)
-                                .foregroundColor(RemoraTheme.textSecondary)
-                        } else if isChatGPTAccount {
-                            Text("Save an API key in the local Codex environment.")
-                                .remoraFont(.caption)
-                                .foregroundColor(RemoraTheme.textSecondary)
-                        }
-                        SecureField("sk-...", text: $apiKey)
-                            .remoraFont(.footnote)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    Button {
-                        let key = apiKey.trimmingCharacters(in: .whitespaces)
-                        guard !key.isEmpty else { return }
-                        Task {
-                            isAuthWorking = true
-                            await saveApiKey(key)
-                            isAuthWorking = false
-                        }
-                    } label: {
-                        Text(hasStoredApiKey ? "Update API Key" : "Save API Key")
-                    }
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.accent)
-                    .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || isAuthWorking)
-                }
-                .listRowBackground(RemoraTheme.surface.opacity(0.6))
-
-                VStack(alignment: .leading, spacing: 8) {
-                    if hasStoredBaseURL {
-                        Text("Custom OpenAI-compatible endpoint saved for the local Codex server.")
-                            .remoraFont(.caption)
-                            .foregroundColor(RemoraTheme.textSecondary)
-                    } else {
-                        Text("Optional OpenAI-compatible endpoint for local models.")
-                            .remoraFont(.caption)
-                            .foregroundColor(RemoraTheme.textSecondary)
-                    }
-                    HStack(spacing: 8) {
-                        TextField("http://host:port/v1", text: $openAIBaseURL)
-                            .remoraFont(.footnote)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                        Button {
-                            let baseURL = openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                            Task {
-                                isAuthWorking = true
-                                await saveBaseURL(baseURL)
-                                isAuthWorking = false
-                            }
-                        } label: {
-                            Text(hasStoredBaseURL ? "Update Base URL" : "Save Base URL")
-                        }
-                        .remoraFont(.caption)
-                        .foregroundColor(RemoraTheme.accent)
-                        .disabled(openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isAuthWorking)
-                    }
-                    if hasStoredBaseURL {
-                        Button("Clear Base URL") {
-                            Task {
-                                isAuthWorking = true
-                                await clearBaseURL()
-                                isAuthWorking = false
-                            }
-                        }
-                        .remoraFont(.caption)
-                        .foregroundColor(RemoraTheme.danger)
-                        .disabled(isAuthWorking)
-                    }
-                }
-                .listRowBackground(RemoraTheme.surface.opacity(0.6))
-            }
-
             if let authError {
                 Text(authError)
                     .remoraFont(.caption)
@@ -1148,13 +1015,8 @@ private struct SettingsConnectionAccountSection: View {
                 .foregroundColor(RemoraTheme.textSecondary)
         }
         .task(id: server.serverId) {
-            refreshStoredCredentialFlags()
-            await refreshAuthStatusIfNeeded()
+            await refreshAccount()
         }
-    }
-
-    private var allowsLocalEnvApiKey: Bool {
-        server.isLocal
     }
 
     private var isChatGPTAccount: Bool {
@@ -1164,20 +1026,12 @@ private struct SettingsConnectionAccountSection: View {
         return false
     }
 
-    private var hasStoredLocalCredentials: Bool {
-        hasStoredApiKey || hasStoredChatGPTTokens
-    }
-
     private var authColor: Color {
         switch server.account {
         case .chatgpt?:
             return RemoraTheme.accent
         case .apiKey?:
             return Color(hex: "#00AAFF")
-        case nil where server.isLocal && hasStoredChatGPTTokens:
-            return RemoraTheme.accent.opacity(0.7)
-        case nil where server.isLocal && hasStoredApiKey:
-            return Color(hex: "#00AAFF").opacity(0.7)
         case nil:
             return RemoraTheme.textMuted
         }
@@ -1188,10 +1042,6 @@ private struct SettingsConnectionAccountSection: View {
         case .chatgpt(let email, _)?:
             return email.isEmpty ? "ChatGPT" : email
         case .apiKey?:
-            return "API Key"
-        case nil where server.isLocal && hasStoredChatGPTTokens:
-            return "ChatGPT"
-        case nil where server.isLocal && hasStoredApiKey:
             return "API Key"
         case nil:
             return "Not logged in"
@@ -1204,47 +1054,20 @@ private struct SettingsConnectionAccountSection: View {
             return "ChatGPT account"
         case .apiKey?:
             return "OpenAI API key"
-        case nil where server.isLocal && hasStoredChatGPTTokens:
-            return "Stored locally; restoring session"
-        case nil where server.isLocal && hasStoredApiKey:
-            return "Saved locally; refreshing local account"
         case nil:
             return nil
         }
     }
 
     private func loginWithChatGPT() async {
-        guard server.isLocal else {
-            authError = "Settings login is only available for the local server."
-            return
-        }
         do {
             authError = nil
-            try await appModel.loginLocalChatGPTAccount(serverId: server.serverId)
+            try await appModel.loginChatGPTAccount(serverId: server.serverId)
         } catch ChatGPTOAuthError.cancelled {
             return
         } catch {
             authError = error.localizedDescription
         }
-    }
-
-    private func refreshStoredCredentialFlags() {
-        hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-        hasStoredBaseURL = OpenAIApiKeyStore.shared.hasStoredBaseURL
-        do {
-            hasStoredChatGPTTokens = try ChatGPTOAuthTokenStore.shared.load() != nil
-        } catch let error as ChatGPTOAuthError where error.isTransientKeychainAvailabilityFailure {
-            hasStoredChatGPTTokens = false
-        } catch {
-            hasStoredChatGPTTokens = false
-        }
-    }
-
-    private func refreshAuthStatusIfNeeded() async {
-        guard server.isLocal, server.account == nil else { return }
-        guard hasStoredLocalCredentials else { return }
-        await appModel.restoreStoredLocalAuthState(serverId: server.serverId)
-        await refreshAccount()
     }
 
     private func refreshAccount() async {
@@ -1254,97 +1077,16 @@ private struct SettingsConnectionAccountSection: View {
                 params: AppRefreshAccountRequest(refreshToken: false)
             )
             await appModel.refreshSnapshot()
-            refreshStoredCredentialFlags()
             authError = nil
         } catch {
             authError = error.localizedDescription
         }
-    }
-
-    private func saveApiKey(_ key: String) async {
-        guard server.isLocal else {
-            authError = "API keys can only be saved for the local server."
-            return
-        }
-        do {
-            authError = nil
-            try OpenAIApiKeyStore.shared.save(key)
-            if case .apiKey? = server.account {
-                _ = try await appModel.client.logoutAccount(serverId: server.serverId)
-            }
-            try await appModel.restartLocalServer()
-            refreshStoredCredentialFlags()
-            guard hasStoredApiKey else {
-                authError = "API key did not persist locally."
-                return
-            }
-        } catch {
-            authError = error.localizedDescription
-        }
-    }
-
-    private func saveBaseURL(_ rawBaseURL: String) async {
-        guard server.isLocal else {
-            authError = "Base URL can only be saved for the local server."
-            return
-        }
-        guard let baseURL = normalizedOpenAIBaseURL(rawBaseURL) else {
-            authError = "Enter a valid http or https base URL."
-            return
-        }
-        do {
-            authError = nil
-            try OpenAIApiKeyStore.shared.saveBaseURL(baseURL)
-            try await appModel.restartLocalServer()
-            refreshStoredCredentialFlags()
-            guard hasStoredBaseURL else {
-                authError = "Base URL did not persist locally."
-                return
-            }
-            openAIBaseURL = ""
-        } catch {
-            authError = error.localizedDescription
-        }
-    }
-
-    private func clearBaseURL() async {
-        guard server.isLocal else {
-            authError = "Base URL can only be cleared for the local server."
-            return
-        }
-        do {
-            authError = nil
-            try OpenAIApiKeyStore.shared.clearBaseURL()
-            try await appModel.restartLocalServer()
-            refreshStoredCredentialFlags()
-            openAIBaseURL = ""
-        } catch {
-            authError = error.localizedDescription
-        }
-    }
-
-    private func normalizedOpenAIBaseURL(_ rawValue: String) -> String? {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              url.host != nil else {
-            return nil
-        }
-        return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func logout() async {
-        guard server.isLocal else {
-            authError = "Settings logout is only available for the local server."
-            return
-        }
         do {
-            try? ChatGPTOAuthTokenStore.shared.clear()
-            try? OpenAIApiKeyStore.shared.clear()
             _ = try await appModel.client.logoutAccount(serverId: server.serverId)
-            try await appModel.restartLocalServer()
-            refreshStoredCredentialFlags()
+            await appModel.refreshSnapshot()
             authError = nil
         } catch {
             authError = error.localizedDescription
@@ -1355,7 +1097,7 @@ private struct SettingsConnectionAccountSection: View {
 private struct SettingsDisconnectedAccountSection: View {
     var body: some View {
         Section {
-            Text("Local Codex isn't running. ChatGPT login and API key entry require the local bridge.")
+            Text("Connect a remote server to manage its ChatGPT account.")
                 .remoraFont(.caption)
                 .foregroundColor(RemoraTheme.textMuted)
                 .listRowBackground(RemoraTheme.surface.opacity(0.6))

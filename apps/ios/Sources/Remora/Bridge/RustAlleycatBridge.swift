@@ -1,6 +1,6 @@
 import Foundation
 
-// Thin Swift wrapper around the Rust `AlleycatBridge` via UniFFI. The bridge only
+// Thin Swift wrapper around the Rust pairing bridge via UniFFI. The bridge only
 // validates/scans the QR payload; connection and agent discovery live on
 // `ServerBridge`.
 final class RustAlleycatBridge: @unchecked Sendable {

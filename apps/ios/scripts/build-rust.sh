@@ -22,9 +22,18 @@ SUBMODULE_DIR="$REPO_DIR/shared/third_party/codex"
 IOS_CLANGXX_WRAPPER="$SCRIPT_DIR/ios-clangxx-wrapper.sh"
 PATCH_FILES=(
   "$REPO_DIR/patches/codex/ios-exec-hook.patch"
-  "$REPO_DIR/patches/codex/client-controlled-handoff.patch"
   "$REPO_DIR/patches/codex/mobile-code-mode-stub.patch"
   "$REPO_DIR/patches/codex/thread-read-permissions.patch"
+  "$REPO_DIR/patches/codex/mobile-shell-snapshot-timeout.patch"
+  "$REPO_DIR/patches/codex/remote-app-server-websocket-cap.patch"
+  "$REPO_DIR/patches/codex/absolute-path-cross-platform.patch"
+  "$REPO_DIR/patches/codex/android-installation-id-lock.patch"
+  "$REPO_DIR/patches/codex/dynamic-tool-call-arguments-delta.patch"
+  "$REPO_DIR/patches/codex/approval-timestamps-serde-default.patch"
+  "$REPO_DIR/patches/codex/realtime-webrtc-env-apikey.patch"
+  "$REPO_DIR/patches/codex/realtime-handoff-server-hint.patch"
+  "$REPO_DIR/patches/codex/realtime-dynamic-tools.patch"
+  "$REPO_DIR/patches/codex/realtime-client-controlled-handoff.patch"
 )
 
 SYNC_MODE="--preserve-current"
@@ -213,8 +222,8 @@ export MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
 # bindgen 0.70 maps `aarch64-apple-ios-sim` -> `arm64-apple-ios-sim`, which
 # clang rejects ("version 'sim' in target triple ... is invalid"). The correct
 # clang triple uses the `-simulator` environment suffix. Override per-target so
-# bindgen-driven build scripts (e.g. ish-embed-host) point at the iPhoneSimulator
-# SDK when cross-compiling for the simulator.
+# bindgen-driven build scripts point at the iPhoneSimulator SDK when
+# cross-compiling for the simulator.
 IPHONESIM_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null || true)"
 if [ -n "$IPHONESIM_SDK" ]; then
   export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim="--target=arm64-apple-ios${IOS_DEPLOYMENT_TARGET}-simulator -isysroot ${IPHONESIM_SDK}"
@@ -324,11 +333,6 @@ elif [ "$MACABI_ONLY" -eq 1 ]; then
 else
   rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-ios-macabi x86_64-apple-ios-macabi
 fi
-# litter-ish builds a small Linux supervisor into the embedded rootfs. Older
-# releases used i686, current releases use AArch64; keep both targets available
-# so the git-tracked dependency can move without breaking iOS/Catalyst builds.
-rustup target add i686-unknown-linux-musl aarch64-unknown-linux-musl
-
 if [ "$DEVICE_ONLY" -eq 1 ]; then
   echo "==> Building codex-mobile-client for aarch64-apple-ios ($PROFILE)..."
   cargo rustc --manifest-path "$RUST_BRIDGE_DIR/Cargo.toml" -p codex-mobile-client $CARGO_PROFILE_FLAG --target aarch64-apple-ios --crate-type staticlib $CARGO_FEATURES

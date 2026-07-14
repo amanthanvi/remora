@@ -7,20 +7,16 @@ enum VoiceSessionControl {
 
     /// Build a voice prompt that includes awareness of available servers.
     static func buildPrompt(remoteServers: [(name: String, hostname: String)]) -> String {
-        var serverLines = ["- \"local\" (this device)"]
-        serverLines.append(contentsOf: remoteServers.map { "- \"\($0.name)\" (\($0.hostname))" })
-        let serverList = serverLines.joined(separator: "\n")
+        let serverList = remoteServers.isEmpty
+            ? "- No additional connected servers"
+            : remoteServers.map { "- \"\($0.name)\" (\($0.hostname))" }.joined(separator: "\n")
         return """
         \(defaultPrompt)
 
-        Available servers:
+        Additional connected servers available for handoff:
         \(serverList)
-        When using the codex tool, you MUST specify the "server" parameter. \
-        IMPORTANT: Use the local discovery tools for server and session lookup. \
-        The "local" server has special tools that can see sessions across ALL connected servers in one call. \
-        After calling `list_servers` or `list_sessions`, always give the user a short spoken summary of what you found. Do not stop after the tool result alone. \
-        Remote servers do NOT have these tools — never ask a remote server to list sessions. \
-        Use a remote server name ONLY to run coding tasks, shell commands, or file operations on that machine.
+        When using the codex tool for a handoff, specify one of those server names. \
+        After a tool result, always give the user a short spoken summary of what you found.
         """
     }
 

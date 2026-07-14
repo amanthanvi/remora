@@ -18,12 +18,6 @@ pub struct TerminalSize {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum TerminalBackendKind {
-    LocalIsh {
-        cwd: Option<String>,
-    },
-    LocalProot {
-        cwd: Option<String>,
-    },
     RemoteAlleycat {
         node_id: String,
         token: String,
@@ -149,7 +143,7 @@ impl TerminalSession {
     }
 
     /// Same as [`Self::open`] but consults `trust_store` for the SSH backend
-    /// host-key pin policy. Local backends ignore `trust_store`.
+    /// host-key pin policy. Non-SSH backends ignore `trust_store`.
     #[uniffi::constructor]
     pub async fn open_with_trust_store(
         backend: TerminalBackendKind,

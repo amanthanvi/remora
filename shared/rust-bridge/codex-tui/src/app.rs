@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -11,8 +12,12 @@ use tokio::sync::{broadcast, mpsc};
 
 use codex_app_server_protocol as upstream;
 use codex_mobile_client::MobileClient;
-use codex_mobile_client::store::{AppSnapshot, AppUpdate};
-use codex_mobile_client::types::{ApprovalDecisionValue, ThreadKey};
+use codex_mobile_client::store::{AppSnapshot, AppStoreUpdateRecord};
+use codex_mobile_client::types::{
+    AppArchiveThreadRequest, AppInterruptTurnRequest, AppListThreadsRequest,
+    AppRenameThreadRequest, AppResumeThreadRequest, AppStartThreadRequest, AppStartTurnRequest,
+    AppUserInput, ApprovalDecisionValue, ThreadKey,
+};
 
 use crate::input::InputMode;
 use crate::router::{ConfirmAction, Overlay, Router, Screen};
@@ -27,10 +32,20 @@ enum BgMessage {
     StatusMessage(String),
 }
 
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_request_id() -> upstream::RequestId {
+    upstream::RequestId::String(format!(
+        "codex-tui-{}-{}",
+        std::process::id(),
+        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 pub struct App {
     pub client: Arc<MobileClient>,
     pub snapshot: AppSnapshot,
-    pub update_rx: broadcast::Receiver<AppUpdate>,
+    pub update_rx: broadcast::Receiver<AppStoreUpdateRecord>,
     pub router: Router,
     pub mode: InputMode,
     pub status_message: Option<(String, Instant)>,
@@ -505,26 +520,34 @@ impl App {
                     self.set_status("Starting new session...".into());
                     let tx = self.bg_tx.clone();
                     tokio::spawn(async move {
-                        let params = upstream::ThreadStartParams {
-                            model: None,
-                            model_provider: None,
-                            service_tier: None,
-                            cwd: None,
-                            approval_policy: None,
-                            approvals_reviewer: None,
-                            sandbox: None,
-                            config: None,
-                            service_name: None,
-                            base_instructions: None,
-                            developer_instructions: None,
-                            personality: None,
-                            ephemeral: None,
-                            dynamic_tools: None,
-                            mock_experimental_field: None,
-                            experimental_raw_events: false,
-                            persist_extended_history: true,
+                        let params_result: Result<upstream::ThreadStartParams, _> =
+                            AppStartThreadRequest {
+                                agent_runtime_kind: None,
+                                model: None,
+                                cwd: None,
+                                approval_policy: None,
+                                sandbox: None,
+                                developer_instructions: None,
+                                persist_extended_history: true,
+                                dynamic_tools: None,
+                                ephemeral: None,
+                            }
+                            .try_into();
+                        let Ok(params) = params_result else {
+                            let _ = tx.send(BgMessage::StatusMessage(
+                                "Could not create thread request".into(),
+                            ));
+                            return;
                         };
-                        if let Ok(response) = client.server_thread_start(&sid, params.clone()).await
+                        let request = upstream::ClientRequest::ThreadStart {
+                            request_id: next_request_id(),
+                            params: params.clone(),
+                        };
+                        if let Ok(response) = client
+                            .request_typed_for_server::<upstream::ThreadStartResponse>(
+                                &sid, request,
+                            )
+                            .await
                         {
                             let _ = client
                                 .reconcile_public_rpc(
@@ -575,12 +598,21 @@ impl App {
                             // For now, set a placeholder name; a proper rename would need a text input popup
                             let client = Arc::clone(&self.client);
                             tokio::spawn(async move {
-                                let params = upstream::ThreadSetNameParams {
-                                    thread_id: key.thread_id.clone(),
-                                    name: "Renamed Session".into(),
+                                let params: upstream::ThreadSetNameParams =
+                                    AppRenameThreadRequest {
+                                        thread_id: key.thread_id.clone(),
+                                        name: "Renamed Session".into(),
+                                    }
+                                    .into();
+                                let request = upstream::ClientRequest::ThreadSetName {
+                                    request_id: next_request_id(),
+                                    params: params.clone(),
                                 };
                                 if let Ok(response) = client
-                                    .server_thread_set_name(&key.server_id, params.clone())
+                                    .request_typed_for_server::<upstream::ThreadSetNameResponse>(
+                                        &key.server_id,
+                                        request,
+                                    )
                                     .await
                                 {
                                     let _ = client
@@ -826,26 +858,32 @@ impl App {
 
         let client = Arc::clone(&self.client);
         tokio::spawn(async move {
-            let params = upstream::TurnStartParams {
+            let params_result: Result<upstream::TurnStartParams, _> = AppStartTurnRequest {
                 thread_id: thread_key.thread_id.clone(),
-                input: vec![upstream::UserInput::Text {
+                input: vec![AppUserInput::Text {
                     text,
                     text_elements: vec![],
                 }],
-                cwd: None,
                 approval_policy: None,
-                approvals_reviewer: None,
                 sandbox_policy: None,
                 model: None,
                 service_tier: None,
                 effort: None,
-                summary: None,
-                personality: None,
                 output_schema: None,
-                collaboration_mode: None,
+            }
+            .try_into();
+            let Ok(params) = params_result else {
+                return;
+            };
+            let request = upstream::ClientRequest::TurnStart {
+                request_id: next_request_id(),
+                params: params.clone(),
             };
             if let Ok(response) = client
-                .server_turn_start(&thread_key.server_id, params.clone())
+                .request_typed_for_server::<upstream::TurnStartResponse>(
+                    &thread_key.server_id,
+                    request,
+                )
                 .await
             {
                 let _ = client
@@ -979,17 +1017,28 @@ impl App {
             let client = Arc::clone(&self.client);
             let sid = server_id.clone();
             tokio::spawn(async move {
-                let params = upstream::ThreadListParams {
-                    limit: None,
+                let params: upstream::ThreadListParams = AppListThreadsRequest {
                     cursor: None,
+                    limit: None,
                     sort_key: None,
+                    sort_direction: None,
                     model_providers: None,
                     source_kinds: None,
                     archived: None,
                     cwd: None,
                     search_term: None,
+                    use_state_db_only: false,
+                    runtime_kinds: None,
+                }
+                .into();
+                let request = upstream::ClientRequest::ThreadList {
+                    request_id: next_request_id(),
+                    params: params.clone(),
                 };
-                if let Ok(response) = client.server_thread_list(&sid, params.clone()).await {
+                if let Ok(response) = client
+                    .request_typed_for_server::<upstream::ThreadListResponse>(&sid, request)
+                    .await
+                {
                     // Reconcile into the store so snapshot picks up the threads
                     let _ = client
                         .reconcile_public_rpc("thread/list", &sid, Some(&params), &response)
@@ -1011,11 +1060,16 @@ impl App {
             } => {
                 let client = Arc::clone(&self.client);
                 tokio::spawn(async move {
-                    let params = upstream::ThreadArchiveParams {
-                        thread_id: thread_id.clone(),
+                    let params: upstream::ThreadArchiveParams =
+                        AppArchiveThreadRequest { thread_id }.into();
+                    let request = upstream::ClientRequest::ThreadArchive {
+                        request_id: next_request_id(),
+                        params: params.clone(),
                     };
                     if let Ok(response) = client
-                        .server_thread_archive(&server_id, params.clone())
+                        .request_typed_for_server::<upstream::ThreadArchiveResponse>(
+                            &server_id, request,
+                        )
                         .await
                     {
                         let _ = client
@@ -1039,12 +1093,20 @@ impl App {
                 if let Some(turn_id) = thread.active_turn_id.clone() {
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
-                        let params = upstream::TurnInterruptParams {
+                        let params: upstream::TurnInterruptParams = AppInterruptTurnRequest {
                             thread_id: thread_key.thread_id.clone(),
                             turn_id,
+                        }
+                        .into();
+                        let request = upstream::ClientRequest::TurnInterrupt {
+                            request_id: next_request_id(),
+                            params: params.clone(),
                         };
                         if let Ok(response) = client
-                            .server_turn_interrupt(&thread_key.server_id, params.clone())
+                            .request_typed_for_server::<upstream::TurnInterruptResponse>(
+                                &thread_key.server_id,
+                                request,
+                            )
                             .await
                         {
                             let _ = client
@@ -1108,25 +1170,26 @@ impl App {
         // Resume the thread in the background to load full conversation history.
         let client = Arc::clone(&self.client);
         tokio::spawn(async move {
-            let params = upstream::ThreadResumeParams {
+            let params_result: Result<upstream::ThreadResumeParams, _> = AppResumeThreadRequest {
                 thread_id: key.thread_id.clone(),
-                history: None,
-                path: None,
                 model: None,
-                model_provider: None,
-                service_tier: None,
                 cwd: None,
                 approval_policy: None,
-                approvals_reviewer: None,
                 sandbox: None,
-                config: None,
-                base_instructions: None,
                 developer_instructions: None,
-                personality: None,
                 persist_extended_history: true,
+                exclude_turns: false,
+            }
+            .try_into();
+            let Ok(params) = params_result else {
+                return;
+            };
+            let request = upstream::ClientRequest::ThreadResume {
+                request_id: next_request_id(),
+                params: params.clone(),
             };
             if let Ok(response) = client
-                .server_thread_resume(&key.server_id, params.clone())
+                .request_typed_for_server::<upstream::ThreadResumeResponse>(&key.server_id, request)
                 .await
             {
                 let _ = client

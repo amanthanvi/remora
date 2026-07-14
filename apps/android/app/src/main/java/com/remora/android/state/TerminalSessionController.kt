@@ -59,10 +59,6 @@ class TerminalSessionController(
     val canSendInput: Boolean
         get() = phase == Phase.RUNNING
 
-    fun openLocalProot(cwd: String? = null) {
-        open(TerminalBackendKind.LocalProot(normalized(cwd)))
-    }
-
     fun open(backend: TerminalBackendKind) {
         if (sessionId != null || phase == Phase.CONNECTING) return
         eventGeneration += 1
@@ -238,11 +234,6 @@ class TerminalSessionController(
         if (sink != null) return
         output += data.toString(Charsets.UTF_8)
         trimOutputIfNeeded()
-    }
-
-    private fun normalized(value: String?): String? {
-        val trimmed = value?.trim().orEmpty()
-        return trimmed.ifEmpty { null }
     }
 
     private fun trimOutputIfNeeded() {

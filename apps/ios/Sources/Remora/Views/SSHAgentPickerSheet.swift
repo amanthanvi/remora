@@ -247,7 +247,7 @@ struct SSHAgentPickerSheet: View {
 }
 
 private func isBridgeKind(_ kind: AgentRuntimeKind) -> Bool {
-    // Prefer the capability flag from alleycat metadata; fall back to
+    // Prefer the capability flag from paired-host metadata; fall back to
     // the legacy SSH-bridge-supported allowlist when metadata isn't
     // cached yet (cold start).
     if let supports = kind.metadata?.capabilities?.supportsSshBridge {
@@ -299,7 +299,7 @@ private func sshBridgeStateRoot(host: String) throws -> String {
     let safeHost = host
         .addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "host"
     let dir = base
-        .appendingPathComponent("alleycat-bridges", isDirectory: true)
+        .appendingPathComponent("remora-bridges", isDirectory: true)
         .appendingPathComponent(safeHost, isDirectory: true)
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir.path

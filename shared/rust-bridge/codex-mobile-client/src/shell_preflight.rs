@@ -1,21 +1,15 @@
-//! Normalize local mobile shell argv before the local codex shell tool
-//! forks/execs.
+//! Normalize Android shell argv before the local codex shell tool forks/execs.
 //!
 //! Android app sandboxes have no real `/tmp` — attempts to `cat /tmp/foo`
 //! or `echo x > /tmp/foo` hit `ENOENT/EACCES`. But model-emitted shell
 //! commands routinely hardcode `/tmp/...` paths, so Android rewrites those
 //! tokens to its real app temp dir.
 //!
-//! - Well-behaved tools pick up `$TMPDIR`, which each platform sets at boot
-//!   (Android: `filesDir/remora-tmp`; iOS iSH commands get `TMPDIR=/tmp`).
+//! - Well-behaved tools pick up `$TMPDIR`, which Android sets to
+//!   `filesDir/remora-tmp` at boot.
 //! - Literal `/tmp` and `/tmp/*` Android path tokens in argv, including
 //!   inside recognized shell-wrapper scripts, are rewritten here to the
 //!   `$TMPDIR` target so `cat /tmp/foo` ends up reading the real temp.
-//!
-//! iOS is intentionally excluded from `/tmp` rewriting. Its local shell runs
-//! inside iSH's Alpine fakefs, where `/tmp` is a real writable fakefs path.
-//! Rewriting it to the native iOS container TMPDIR produces paths that iSH
-//! cannot traverse.
 //!
 //! Only mutates exact `/tmp` and `/tmp/...` absolute path boundaries. Other
 //! absolute paths pass through unchanged. Only fires for **local** codex shell
@@ -52,8 +46,7 @@ fn normalize_shell_invocation(argv: &mut Vec<String>) {
         return;
     };
     // Reuse the same shell-wrapper parser used for command display, then run
-    // the extracted script through the bundled mobile `sh -c`. iSH's
-    // /bin/sh supports `-c` like any POSIX shell.
+    // the extracted script through the bundled mobile `sh -c`.
     *argv = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
 }
 
@@ -124,10 +117,7 @@ fn is_path_component_continuation(byte: u8) -> bool {
 
 /// Install the mobile exec preflight. Safe to call multiple times; the
 /// underlying `OnceLock` accepts only the first registration.
-#[cfg(any(
-    all(target_os = "ios", not(target_abi = "macabi")),
-    target_os = "android"
-))]
+#[cfg(target_os = "android")]
 pub fn install() {
     codex_core::exec::set_mobile_exec_preflight(prepare_mobile_exec_argv);
 }
@@ -251,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_can_leave_slash_tmp_for_ish_fakefs() {
+    fn prepare_can_leave_slash_tmp_when_rewrite_is_disabled() {
         with_tmpdir("/real/tmp", || {
             let mut argv = vec![
                 "sh".into(),

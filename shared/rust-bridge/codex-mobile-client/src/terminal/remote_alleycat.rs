@@ -98,7 +98,7 @@ fn map_shell_connect_error(error: crate::alleycat::AlleycatError) -> TerminalErr
             if is_shell_agent_unavailable_error(&message) {
                 TerminalError::Backend {
                     detail: format!(
-                        "Remote shell is unavailable on this Alleycat host. Update and restart alleycat/alleycat on the host, or enable the host [agents.shell] config. Host said: {message}"
+                        "Remote shell is unavailable on this Alleycat host. Update and restart Alleycat on the host, or enable the host [agents.shell] config. Host said: {message}"
                     ),
                 }
             } else {

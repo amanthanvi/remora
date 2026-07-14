@@ -1,4 +1,19 @@
-use codex_mobile_client::conversation::*;
+use codex_mobile_client::conversation_uniffi::{
+    HydratedAssistantMessageData as AssistantMessageData, HydratedCodeReviewData as CodeReviewData,
+    HydratedCommandExecutionData as CommandExecutionData,
+    HydratedConversationItem as ConversationItem,
+    HydratedConversationItemContent as ConversationItemContent, HydratedDividerData as DividerData,
+    HydratedDynamicToolCallData as DynamicToolCallData, HydratedErrorData as ErrorData,
+    HydratedFileChangeData as FileChangeData, HydratedImageGenerationData as ImageGenerationData,
+    HydratedImageViewData as ImageViewData, HydratedMcpToolCallData as McpToolCallData,
+    HydratedMultiAgentActionData as MultiAgentActionData, HydratedNoteData as NoteData,
+    HydratedPlanStepStatus, HydratedProposedPlanData as ProposedPlanData,
+    HydratedReasoningData as ReasoningData, HydratedTodoListData as TodoListData,
+    HydratedTurnDiffData as TurnDiffData, HydratedUserInputResponseData as UserInputResponseData,
+    HydratedUserMessageData as UserMessageData, HydratedWebSearchData as WebSearchData,
+    HydratedWidgetData as WidgetData,
+};
+use codex_mobile_client::types::AppOperationStatus;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -11,6 +26,7 @@ pub fn render(item: &ConversationItem, width: u16) -> Vec<Line<'static>> {
     match &item.content {
         ConversationItemContent::User(data) => render_user(data),
         ConversationItemContent::Assistant(data) => render_assistant(data, width),
+        ConversationItemContent::CodeReview(data) => render_code_review(data),
         ConversationItemContent::Reasoning(data) => render_reasoning(data),
         ConversationItemContent::CommandExecution(data) => render_command(data),
         ConversationItemContent::FileChange(data) => render_file_change(data),
@@ -19,6 +35,7 @@ pub fn render(item: &ConversationItem, width: u16) -> Vec<Line<'static>> {
         ConversationItemContent::DynamicToolCall(data) => render_dynamic_tool_call(data),
         ConversationItemContent::MultiAgentAction(data) => render_multi_agent(data),
         ConversationItemContent::WebSearch(data) => render_web_search(data),
+        ConversationItemContent::ImageView(data) => render_image_view(data),
         ConversationItemContent::TodoList(data) => render_todo_list(data),
         ConversationItemContent::ProposedPlan(data) => render_proposed_plan(data),
         ConversationItemContent::Widget(data) => render_widget(data),
@@ -26,6 +43,7 @@ pub fn render(item: &ConversationItem, width: u16) -> Vec<Line<'static>> {
         ConversationItemContent::Divider(data) => render_divider(data),
         ConversationItemContent::Error(data) => render_error(data),
         ConversationItemContent::Note(data) => render_note(data),
+        ConversationItemContent::ImageGeneration(data) => render_image_generation(data),
     }
 }
 
@@ -59,6 +77,24 @@ fn render_assistant(data: &AssistantMessageData, width: u16) -> Vec<Line<'static
 
     let md_lines = markdown::render(&data.text, width.saturating_sub(2));
     lines.extend(md_lines);
+    lines
+}
+
+fn render_code_review(data: &CodeReviewData) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(" Code review:", theme::bold()))];
+    for finding in &data.findings {
+        lines.push(Line::from(vec![
+            Span::styled("   • ", theme::accent()),
+            Span::styled(finding.title.clone(), theme::secondary()),
+        ]));
+    }
+    if let Some(explanation) = &data.overall_explanation {
+        lines.extend(
+            explanation
+                .lines()
+                .map(|line| Line::from(Span::styled(format!("   {line}"), theme::dim()))),
+        );
+    }
     lines
 }
 
@@ -125,7 +161,10 @@ fn render_file_change(data: &FileChangeData) -> Vec<Line<'static>> {
 
     lines.push(Line::from(vec![
         Span::styled(" ┌─ files ", Style::default().fg(theme::BORDER)),
-        Span::styled(format!("({}) ", data.status), theme::secondary()),
+        Span::styled(
+            format!("({}) ", operation_status_label(data.status)),
+            theme::secondary(),
+        ),
         Span::styled("─".repeat(25), Style::default().fg(theme::BORDER)),
     ]));
 
@@ -165,9 +204,11 @@ fn render_file_change(data: &FileChangeData) -> Vec<Line<'static>> {
 }
 
 fn render_mcp_tool_call(data: &McpToolCallData) -> Vec<Line<'static>> {
-    let status_style = match data.status.as_str() {
-        "completed" => Style::default().fg(theme::SUCCESS),
-        "failed" | "error" => Style::default().fg(theme::ERROR),
+    let status_style = match data.status {
+        AppOperationStatus::Completed => Style::default().fg(theme::SUCCESS),
+        AppOperationStatus::Failed | AppOperationStatus::Declined => {
+            Style::default().fg(theme::ERROR)
+        }
         _ => theme::secondary(),
     };
 
@@ -178,7 +219,7 @@ fn render_mcp_tool_call(data: &McpToolCallData) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled(" │ status: ", theme::dim()),
-            Span::styled(data.status.clone(), status_style),
+            Span::styled(operation_status_label(data.status), status_style),
         ]),
         Line::from(Span::styled(
             format!(" └{}", "─".repeat(40)),
@@ -206,7 +247,7 @@ fn render_dynamic_tool_call(data: &DynamicToolCallData) -> Vec<Line<'static>> {
     vec![Line::from(vec![
         Span::styled(" ⚙ ", theme::dim()),
         Span::styled(data.tool.clone(), theme::accent()),
-        Span::raw(format!(" [{}]", data.status)),
+        Span::raw(format!(" [{}]", operation_status_label(data.status))),
     ])]
 }
 
@@ -220,7 +261,7 @@ fn render_multi_agent(data: &MultiAgentActionData) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled(" │ ", theme::dim()),
             Span::styled(state.target_id.clone(), Style::default().fg(Color::Magenta)),
-            Span::raw(format!(" [{}]", state.status)),
+            Span::raw(format!(" [{:?}]", state.status)),
         ]));
     }
 
@@ -237,6 +278,13 @@ fn render_web_search(data: &WebSearchData) -> Vec<Line<'static>> {
         Span::styled(" 🔍 ", theme::dim()),
         Span::styled(data.query.clone(), theme::accent()),
         Span::raw(indicator),
+    ])]
+}
+
+fn render_image_view(data: &ImageViewData) -> Vec<Line<'static>> {
+    vec![Line::from(vec![
+        Span::styled(" Image: ", theme::bold()),
+        Span::styled(data.path.clone(), theme::accent()),
     ])]
 }
 
@@ -273,13 +321,13 @@ fn render_user_input_response(data: &UserInputResponseData) -> Vec<Line<'static>
 fn render_todo_list(data: &TodoListData) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(" Plan:", theme::bold()))];
     for step in &data.steps {
-        let check = match step.status.as_str() {
-            "completed" => "✓",
-            "in_progress" => "⟳",
+        let check = match step.status {
+            HydratedPlanStepStatus::Completed => "✓",
+            HydratedPlanStepStatus::InProgress => "⟳",
             _ => "○",
         };
-        let style = match step.status.as_str() {
-            "completed" => theme::dim(),
+        let style = match step.status {
+            HydratedPlanStepStatus::Completed => theme::dim(),
             _ => theme::accent(),
         };
         lines.push(Line::from(vec![
@@ -352,4 +400,27 @@ fn render_note(data: &NoteData) -> Vec<Line<'static>> {
         )));
     }
     lines
+}
+
+fn render_image_generation(data: &ImageGenerationData) -> Vec<Line<'static>> {
+    let mut spans = vec![
+        Span::styled(" Image generation: ", theme::bold()),
+        Span::styled(operation_status_label(data.status), theme::secondary()),
+    ];
+    if let Some(path) = &data.saved_path {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(path.clone(), theme::accent()));
+    }
+    vec![Line::from(spans)]
+}
+
+fn operation_status_label(status: AppOperationStatus) -> &'static str {
+    match status {
+        AppOperationStatus::Unknown => "unknown",
+        AppOperationStatus::Pending => "pending",
+        AppOperationStatus::InProgress => "in progress",
+        AppOperationStatus::Completed => "completed",
+        AppOperationStatus::Failed => "failed",
+        AppOperationStatus::Declined => "declined",
+    }
 }

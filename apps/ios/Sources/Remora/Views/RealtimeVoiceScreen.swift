@@ -8,12 +8,10 @@ struct RealtimeVoiceScreen: View {
     let onEnd: () -> Void
     let onToggleSpeaker: () -> Void
 
-    @State private var apiKey = ""
-    @State private var isSavingApiKey = false
+    @State private var isSigningIn = false
     @State private var hasCheckedAuth = false
-    @State private var hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-    @State private var apiKeyError: String?
-    @State private var isRetryingAfterAuthSave = false
+    @State private var authError: String?
+    @State private var isRetryingAfterSignIn = false
 
     private var glowPalette: GlowPalette {
         .from(colorScheme: colorScheme)
@@ -117,19 +115,14 @@ struct RealtimeVoiceScreen: View {
         return "\(last.id):\(last.text.count)"
     }
 
-    private var shouldShowApiKeyPrompt: Bool {
+    private var shouldShowSignInPrompt: Bool {
         guard hasCheckedAuth,
               let server,
-              server.isLocal,
-              phase == .connecting,
-              !hasStoredApiKey else {
+              server.account == nil,
+              phase == .connecting || phase == .error else {
             return false
         }
         return true
-    }
-
-    private var trimmedApiKey: String {
-        apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -166,8 +159,8 @@ struct RealtimeVoiceScreen: View {
                     .padding(.bottom, 40)
             }
 
-            if shouldShowApiKeyPrompt {
-                realtimeApiKeyPrompt
+            if shouldShowSignInPrompt {
+                realtimeSignInPrompt
                     .padding(.horizontal, 20)
             }
         }
@@ -181,22 +174,20 @@ struct RealtimeVoiceScreen: View {
                 await appModel.refreshSnapshot()
                 await MainActor.run {
                     hasCheckedAuth = true
-                    hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-                    apiKeyError = nil
+                    authError = nil
                 }
             } catch {
                 await MainActor.run {
                     hasCheckedAuth = true
-                    hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-                    apiKeyError = error.localizedDescription
+                    authError = error.localizedDescription
                 }
             }
         }
         .onChange(of: session?.id) { _, next in
-            if next == nil, !isRetryingAfterAuthSave {
+            if next == nil, !isRetryingAfterSignIn {
                 onEnd()
             } else if next != nil {
-                isRetryingAfterAuthSave = false
+                isRetryingAfterSignIn = false
             }
         }
     }
@@ -327,39 +318,25 @@ struct RealtimeVoiceScreen: View {
         }
     }
 
-    private var realtimeApiKeyPrompt: some View {
+    private var realtimeSignInPrompt: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Realtime needs an API key")
+            Text("Sign in for realtime voice")
                 .font(RemoraFont.styled(.headline, weight: .semibold))
                 .foregroundColor(primaryTextColor)
 
-            Text("Enter your OpenAI API key for this device. Remora will store it in the local Codex environment as OPENAI_API_KEY.")
+            Text("Sign in with ChatGPT to authorize the connected server, then Remora will retry this voice session.")
                 .font(RemoraFont.styled(.caption))
                 .foregroundColor(secondaryTextColor)
                 .fixedSize(horizontal: false, vertical: true)
 
-            SecureField("sk-...", text: $apiKey)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(RemoraFont.monospaced(.body))
-                .foregroundColor(primaryTextColor)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(controlFillColor)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(promptStrokeColor.opacity(1.75), lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-
-            if let apiKeyError, !apiKeyError.isEmpty {
-                Text(apiKeyError)
+            if let authError, !authError.isEmpty {
+                Text(authError)
                     .font(RemoraFont.styled(.caption))
                     .foregroundColor(RemoraTheme.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            apiKeySaveButton
+            signInButton
         }
         .padding(18)
         .frame(maxWidth: 420)
@@ -371,77 +348,45 @@ struct RealtimeVoiceScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 24))
     }
 
-    private func saveApiKeyAndRetry() {
-        guard !trimmedApiKey.isEmpty, !isSavingApiKey else { return }
-        guard server?.isLocal == true else {
-            apiKeyError = "API keys are only saved on the local server."
-            return
-        }
-
-        isSavingApiKey = true
-        apiKeyError = nil
+    private func signInAndRetry() {
+        guard !isSigningIn else { return }
+        isSigningIn = true
+        authError = nil
 
         Task {
-            var apiKeySaved = false
-            var authError: String?
             do {
-                try OpenAIApiKeyStore.shared.save(trimmedApiKey)
-                if case .apiKey? = server?.account {
-                    _ = try await appModel.client.logoutAccount(serverId: threadKey.serverId)
-                }
-                await voiceRuntime.stopActiveVoiceSession()
-                try await appModel.restartLocalServer()
-                let persisted = OpenAIApiKeyStore.shared.hasStoredKey
-                guard persisted else {
-                    authError = "API key did not persist locally."
-                    throw CancellationError()
-                }
-                apiKeySaved = true
-                authError = nil
-            } catch {
-                apiKeySaved = false
-                if authError == nil {
-                    authError = error.localizedDescription
-                }
-            }
-
-            if apiKeySaved {
+                try await appModel.loginChatGPTAccount(serverId: threadKey.serverId)
                 await MainActor.run {
-                    isRetryingAfterAuthSave = true
+                    isRetryingAfterSignIn = true
                 }
                 await voiceRuntime.stopActiveVoiceSession()
                 try? await Task.sleep(for: .milliseconds(150))
-                do {
-                    try await voiceRuntime.startVoiceOnThread(threadKey)
-                } catch {
-                    await MainActor.run {
-                        isRetryingAfterAuthSave = false
-                        apiKeyError = error.localizedDescription
-                    }
+                try await voiceRuntime.startVoiceOnThread(threadKey)
+                await MainActor.run {
+                    isSigningIn = false
+                    authError = nil
                 }
-            }
-
-            await MainActor.run {
-                isSavingApiKey = false
-                hasCheckedAuth = true
-                if apiKeySaved {
-                    hasStoredApiKey = true
-                    apiKey = ""
+            } catch ChatGPTOAuthError.cancelled {
+                await MainActor.run {
+                    isSigningIn = false
+                    isRetryingAfterSignIn = false
                 }
-                if !apiKeySaved {
-                    isRetryingAfterAuthSave = false
-                    apiKeyError = authError ?? "Failed to save API key"
+            } catch {
+                await MainActor.run {
+                    isSigningIn = false
+                    isRetryingAfterSignIn = false
+                    authError = error.localizedDescription
                 }
             }
         }
     }
 
     @ViewBuilder
-    private var apiKeySaveButton: some View {
+    private var signInButton: some View {
         Button {
-            saveApiKeyAndRetry()
+            signInAndRetry()
         } label: {
-            apiKeySaveButtonLabel
+            signInButtonLabel
                 .background(
                     RoundedRectangle(cornerRadius: 16)
                         .fill(controlFillColor)
@@ -452,18 +397,18 @@ struct RealtimeVoiceScreen: View {
                 )
         }
         .buttonStyle(.plain)
-        .disabled(trimmedApiKey.isEmpty || isSavingApiKey)
-        .opacity(trimmedApiKey.isEmpty || isSavingApiKey ? 0.55 : 1)
+        .disabled(isSigningIn)
+        .opacity(isSigningIn ? 0.55 : 1)
     }
 
-    private var apiKeySaveButtonLabel: some View {
+    private var signInButtonLabel: some View {
         HStack(spacing: 10) {
-            if isSavingApiKey {
+            if isSigningIn {
                 ProgressView()
                     .tint(primaryTextColor)
                     .scaleEffect(0.85)
             }
-            Text(isSavingApiKey ? "Saving…" : "Save API Key")
+            Text(isSigningIn ? "Signing in…" : "Sign in with ChatGPT")
                 .font(RemoraFont.styled(.subheadline, weight: .semibold))
         }
         .foregroundColor(primaryTextColor)

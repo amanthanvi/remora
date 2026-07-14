@@ -123,9 +123,6 @@ class AppModel private constructor(context: android.content.Context) {
     val appContext: android.content.Context = context
     init {
         UniffiInit.ensure(context)
-        Thread({
-            AndroidProotBootstrap.bootstrap(context)
-        }, "remora-proot-bootstrap").start()
         registerBundledCliTools()
         LLog.bootstrap(context)
         store = AppStore()

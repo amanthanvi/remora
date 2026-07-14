@@ -9,22 +9,18 @@ final class AppRuntimeController {
     @ObservationIgnored private weak var appModel: AppModel?
     @ObservationIgnored private weak var voiceRuntime: VoiceRuntimeController?
     @ObservationIgnored private let lifecycle = AppLifecycleController()
-    @ObservationIgnored private let liveActivities = TurnLiveActivityController()
     @ObservationIgnored private let reachability = NetworkReachabilityObserver()
-    @ObservationIgnored private var pendingLiveActivitySync = false
-    @ObservationIgnored private var lastLiveActivitySyncTime: CFAbsoluteTime = 0
 
     func bind(appModel: AppModel, voiceRuntime: VoiceRuntimeController) {
         self.appModel = appModel
         self.voiceRuntime = voiceRuntime
-        lifecycle.requestNotificationPermissionIfNeeded()
         reachability.bind(appModel: appModel)
         reachability.start()
         loadAndPushAlleycatSecretKey(client: appModel.client)
     }
 
     /// Load the persisted iroh device secret key from the keychain (if
-    /// any) and push it to the Rust client BEFORE any alleycat
+    /// any) and push it to the Rust client BEFORE any host-pairing
     /// operation triggers the endpoint bind. After the first bind, the
     /// Rust side may have generated a fresh key — observe via
     /// `persistAlleycatSecretKeyIfNeeded`. Together these maintain a
@@ -33,14 +29,14 @@ final class AppRuntimeController {
         do {
             if let bytes = try AlleycatCredentialStore.shared.loadDeviceSecretKey() {
                 client.setAlleycatSecretKey(secretKeyBytes: bytes)
-                LLog.info("alleycat", "loaded persisted device secret key from keychain")
+                LLog.info("pairing", "loaded persisted device secret key from keychain")
             }
         } catch {
-            LLog.error("alleycat", "failed to load device secret key", error: error)
+            LLog.error("pairing", "failed to load device secret key", error: error)
         }
     }
 
-    /// After an alleycat operation has triggered the Rust endpoint
+    /// After a host-pairing operation has triggered the Rust endpoint
     /// bind, read back the actually-used bytes and persist them so the
     /// next cold launch reuses the same `EndpointId`. Idempotent — safe
     /// to call any time; if the bind hasn't happened yet, returns
@@ -52,9 +48,9 @@ final class AppRuntimeController {
             let existing = try AlleycatCredentialStore.shared.loadDeviceSecretKey()
             if existing == data { return }
             try AlleycatCredentialStore.shared.saveDeviceSecretKey(data)
-            LLog.info("alleycat", "persisted device secret key to keychain")
+            LLog.info("pairing", "persisted device secret key to keychain")
         } catch {
-            LLog.error("alleycat", "failed to persist device secret key", error: error)
+            LLog.error("pairing", "failed to persist device secret key", error: error)
         }
     }
 
@@ -69,10 +65,6 @@ final class AppRuntimeController {
         await appModel.client.shutdownAlleycatEndpoint()
     }
 
-    func setDevicePushToken(_ token: Data) {
-        lifecycle.setDevicePushToken(token)
-    }
-
     func reconnectSavedServers() async {
         guard let appModel else { return }
         await lifecycle.reconnectSavedServers(appModel: appModel)
@@ -83,65 +75,12 @@ final class AppRuntimeController {
         await lifecycle.reconnectServer(serverId: serverId, appModel: appModel)
     }
 
-    func restoreMissingLocalAuthStateIfNeeded() async {
-        guard let appModel else { return }
-        await appModel.restoreMissingLocalAuthStateIfNeeded()
-    }
-
-    func openThreadFromNotification(key: ThreadKey) async {
-        guard let appModel else { return }
-        LLog.info(
-            "push",
-            "runtime opening thread from notification",
-            fields: ["serverId": key.serverId, "threadId": key.threadId]
-        )
-        lifecycle.markThreadOpenedFromNotification(key)
-        appModel.activateThread(key)
-
-        if let resolvedKey = await appModel.ensureThreadLoaded(key: key) {
-            lifecycle.markThreadOpenedFromNotification(resolvedKey)
-            LLog.info(
-                "push",
-                "notification thread resolved and activated",
-                fields: ["serverId": resolvedKey.serverId, "threadId": resolvedKey.threadId]
-            )
-            appModel.activateThread(resolvedKey)
-            await appModel.refreshThreadSnapshot(key: resolvedKey)
-        } else {
-            LLog.warn(
-                "push",
-                "notification thread could not be resolved",
-                fields: ["serverId": key.serverId, "threadId": key.threadId]
-            )
-        }
-    }
-
-    func handleSnapshot(_ snapshot: AppSnapshotRecord?) {
-        let now = CFAbsoluteTimeGetCurrent()
-        let elapsed = now - lastLiveActivitySyncTime
-        if elapsed >= 3.0 {
-            lastLiveActivitySyncTime = now
-            liveActivities.sync(snapshot)
-        } else if !pendingLiveActivitySync {
-            pendingLiveActivitySync = true
-            let delay = 3.0 - elapsed
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(delay))
-                guard let self else { return }
-                self.pendingLiveActivitySync = false
-                self.lastLiveActivitySyncTime = CFAbsoluteTimeGetCurrent()
-                self.liveActivities.sync(self.appModel?.snapshot)
-            }
-        }
-    }
-
     func appDidEnterBackground() {
         guard let appModel else { return }
         appModel.reconnectController.onAppEnteredBackground()
         lifecycle.appDidEnterBackground(
             snapshot: appModel.snapshot,
-            hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil,
-            liveActivities: liveActivities
+            hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil
         )
     }
 
@@ -157,18 +96,7 @@ final class AppRuntimeController {
         appModel.reconnectController.noteAppBecameActive()
         lifecycle.appDidBecomeActive(
             appModel: appModel,
-            hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil,
-            liveActivities: liveActivities
+            hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil
         )
-    }
-
-    func handleBackgroundPush() async {
-        guard let appModel else { return }
-        LLog.info("push", "runtime handling background push")
-        await lifecycle.handleBackgroundPush(
-            appModel: appModel,
-            liveActivities: liveActivities
-        )
-        LLog.info("push", "runtime finished background push")
     }
 }

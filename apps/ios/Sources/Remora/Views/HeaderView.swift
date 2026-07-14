@@ -209,7 +209,7 @@ struct HeaderView: View {
     private var sessionDirectoryLabel: String {
         let currentDirectory = (thread.info.cwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !currentDirectory.isEmpty {
-            let isLocal = appModel.isLocalServer(serverId: thread.key.serverId)
+            let isLocal = appModel.snapshot?.serverSnapshot(for: thread.key.serverId)?.isLocal == true
             return PathDisplay.display(currentDirectory, isLocal: isLocal)
         }
 
@@ -468,7 +468,7 @@ private func defaultReasoningEffortSelection(for model: ModelInfo) -> String {
 
 /// Allowlist of model "mode" names the runtime advertises (e.g. Amp's
 /// `smart` / `rush` / `deep`). Pulled from `capabilities.visible_modes`
-/// in the alleycat manifest so the rule is per-agent, not Amp-hardcoded.
+/// in the paired-host manifest so the rule is per-agent, not Amp-hardcoded.
 private func visibleModeNames(for kind: AgentRuntimeKind) -> Set<String>? {
     kind.metadata?.capabilities?.visibleModes.map(Set.init)
 }

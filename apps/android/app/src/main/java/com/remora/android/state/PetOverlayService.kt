@@ -257,8 +257,8 @@ class PetOverlayService : LifecycleService() {
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
             if (activeThread != null) {
-                putExtra(MainActivity.EXTRA_NOTIFICATION_SERVER_ID, activeThread.serverId)
-                putExtra(MainActivity.EXTRA_NOTIFICATION_THREAD_ID, activeThread.threadId)
+                putExtra(MainActivity.EXTRA_OPEN_SERVER_ID, activeThread.serverId)
+                putExtra(MainActivity.EXTRA_OPEN_THREAD_ID, activeThread.threadId)
             }
         }
         startActivity(intent)

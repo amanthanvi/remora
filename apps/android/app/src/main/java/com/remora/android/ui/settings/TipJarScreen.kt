@@ -75,25 +75,25 @@ private const val TIP_JAR_TAG = "TipJar"
 private val TIP_PRODUCTS = listOf(
     TipProduct(
         productIds = listOf("tip_10", "com.remora.android.tip.10"),
-        iconRes = com.remora.android.R.drawable.tip_cat_10,
+        iconRes = com.remora.android.R.drawable.supporter_badge,
         displayName = "$9.99 Tip",
         fallbackPrice = "$9.99",
     ),
     TipProduct(
         productIds = listOf("tip_25", "com.remora.android.tip.25"),
-        iconRes = com.remora.android.R.drawable.tip_cat_25,
+        iconRes = com.remora.android.R.drawable.supporter_badge,
         displayName = "$24.99 Tip",
         fallbackPrice = "$24.99",
     ),
     TipProduct(
         productIds = listOf("tip_50", "com.remora.android.tip.50"),
-        iconRes = com.remora.android.R.drawable.tip_cat_50,
+        iconRes = com.remora.android.R.drawable.supporter_badge,
         displayName = "$49.99 Tip",
         fallbackPrice = "$49.99",
     ),
     TipProduct(
         productIds = listOf("tip_100", "com.remora.android.tip.100"),
-        iconRes = com.remora.android.R.drawable.tip_cat_100,
+        iconRes = com.remora.android.R.drawable.supporter_badge,
         displayName = "$99.99 Tip",
         fallbackPrice = "$99.99",
     ),
@@ -488,7 +488,7 @@ fun TipJarScreen(onBack: () -> Unit) {
                         }
                         item {
                             Text(
-                                "Pick which purchased kitties appear around the home logo.",
+                                "Pick which supporter badges appear around the home logo.",
                                 color = RemoraTheme.textMuted,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),

@@ -1,24 +1,16 @@
 package com.remora.android.ui.home
 
 import com.remora.android.BuildConfig
-import android.graphics.ImageDecoder
-import android.graphics.drawable.Animatable
-import android.os.Build
-import android.view.ViewConfiguration
-import android.view.ViewGroup
-import android.widget.ImageView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -27,7 +19,6 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -43,7 +34,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Pets
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Search
@@ -64,7 +54,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -77,12 +66,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -94,9 +81,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import kotlin.math.hypot
 import kotlin.math.roundToInt
 import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.DebugSettings
@@ -119,7 +103,6 @@ import com.remora.android.ui.scaled
 import com.remora.android.R
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import com.remora.android.ui.common.AgentRuntimeKind
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AppServerSnapshot
@@ -157,7 +140,6 @@ fun HomeDashboardScreen(
     var showTipJar by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
-    var catEntranceFinished by remember { mutableStateOf(false) }
     val appVersionLabel = remember { "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})" }
 
     val snap = snapshot
@@ -538,14 +520,6 @@ fun HomeDashboardScreen(
                         )
                     }
                 }
-                if (zoomLevel == 1 && recentSessions.size <= 10) {
-                    item(key = "home-cat-footer") {
-                        HomeCatFooter(
-                            playEntrance = !catEntranceFinished,
-                            onEntranceFinished = { catEntranceFinished = true },
-                        )
-                    }
-                }
             } else {
                 item {
                     Spacer(Modifier.height(1.dp))
@@ -580,8 +554,8 @@ fun HomeDashboardScreen(
             LaunchedEffect(Unit) {
                 com.remora.android.state.TipJarSupporterState.refresh(context)
             }
-            val leftKitties = tierIcons.take(2).filterNotNull()
-            val rightKitties = tierIcons.drop(2).filterNotNull()
+            val leftBadges = tierIcons.take(2).filterNotNull()
+            val rightBadges = tierIcons.drop(2).filterNotNull()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -621,7 +595,7 @@ fun HomeDashboardScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    leftKitties.forEach { iconRes ->
+                    leftBadges.forEach { iconRes ->
                         androidx.compose.foundation.Image(
                             painter = androidx.compose.ui.res.painterResource(iconRes),
                             contentDescription = "Supporter",
@@ -630,10 +604,10 @@ fun HomeDashboardScreen(
                                 .clickable { showTipJar = true },
                         )
                     }
-                    if (leftKitties.isNotEmpty()) Spacer(Modifier.width(4.dp))
+                    if (leftBadges.isNotEmpty()) Spacer(Modifier.width(4.dp))
                     com.remora.android.ui.AnimatedLogo(size = 64.dp)
-                    if (rightKitties.isNotEmpty()) Spacer(Modifier.width(4.dp))
-                    rightKitties.forEach { iconRes ->
+                    if (rightBadges.isNotEmpty()) Spacer(Modifier.width(4.dp))
+                    rightBadges.forEach { iconRes ->
                         androidx.compose.foundation.Image(
                             painter = androidx.compose.ui.res.painterResource(iconRes),
                             contentDescription = "Supporter",
@@ -1009,7 +983,7 @@ fun HomeDashboardScreen(
         }
 
         if (showOnboardingCoachmarks) {
-            EmptyHomeFatCat(modifier = Modifier.matchParentSize())
+            EmptyHomeMark(modifier = Modifier.matchParentSize())
             OnboardingCoachmarks(
                 targets = relativeCoachmarkTargets,
                 modifier = Modifier.matchParentSize(),
@@ -1127,244 +1101,9 @@ fun HomeDashboardScreen(
 }
 
 @Composable
-private fun HomeCatFooter(
-    playEntrance: Boolean,
-    onEntranceFinished: () -> Unit,
-) {
-    val context = LocalContext.current
-    var showingLoop by remember(playEntrance) { mutableStateOf(!playEntrance) }
-    var transmissionActive by remember { mutableStateOf(false) }
-    val transmissionFrameIndex = rememberCatTransmissionFrameIndex(transmissionActive)
-    val normalResourceId = if (showingLoop) R.drawable.home_cat else R.drawable.home_cat_entrance
-    val normalDrawable = remember(context, normalResourceId) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            ImageDecoder.decodeDrawable(
-                ImageDecoder.createSource(context.resources, normalResourceId),
-            )
-        } else {
-            ContextCompat.getDrawable(context, normalResourceId)
-        }
-    }
-    val transmissionDrawables = remember(context) {
-        CatTransmissionFrames.map { ContextCompat.getDrawable(context, it) }
-    }
-    val drawable = if (transmissionActive) {
-        transmissionDrawables.getOrNull(transmissionFrameIndex)
-    } else {
-        normalDrawable
-    }
-
-    LaunchedEffect(showingLoop) {
-        if (!showingLoop) {
-            kotlinx.coroutines.delay(HOME_CAT_ENTRANCE_DURATION_MS)
-            showingLoop = true
-            onEntranceFinished()
-        }
-    }
-
-    DisposableEffect(drawable) {
-        (drawable as? Animatable)?.start()
-        onDispose {
-            (drawable as? Animatable)?.stop()
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 14.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                ImageView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    setImageDrawable(drawable)
-                    (drawable as? Animatable)?.start()
-                }
-            },
-            update = { view ->
-                view.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                view.scaleType = if (transmissionActive) {
-                    ImageView.ScaleType.CENTER_CROP
-                } else {
-                    ImageView.ScaleType.FIT_CENTER
-                }
-                view.setImageDrawable(drawable)
-                (drawable as? Animatable)?.start()
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .catTransmissionPress { transmissionActive = it },
-        )
-    }
-}
-
-private const val HOME_CAT_ENTRANCE_DURATION_MS = 11_100L
-private const val CAT_TRANSMISSION_FRAME_DURATION_MS = 82L
-private val CatTransmissionFrames = intArrayOf(
-    R.drawable.cat_transmission_01,
-    R.drawable.cat_transmission_02,
-    R.drawable.cat_transmission_03,
-    R.drawable.cat_transmission_04,
-    R.drawable.cat_transmission_05,
-    R.drawable.cat_transmission_06,
-)
-
-@Composable
-private fun rememberCatTransmissionFrameIndex(active: Boolean): Int {
-    var frameIndex by remember { mutableIntStateOf(0) }
-    LaunchedEffect(active) {
-        frameIndex = 0
-        if (!active) return@LaunchedEffect
-        while (true) {
-            delay(CAT_TRANSMISSION_FRAME_DURATION_MS)
-            frameIndex = (frameIndex + 1) % CatTransmissionFrames.size
-        }
-    }
-    return frameIndex
-}
-
-private fun Modifier.catTransmissionPress(onActiveChange: (Boolean) -> Unit): Modifier =
-    pointerInput(Unit) {
-        val holdTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong()
-        val touchSlop = viewConfiguration.touchSlop
-        awaitPointerEventScope {
-            while (true) {
-                val down = awaitFirstDown(requireUnconsumed = false)
-                val pointerId = down.id
-                val start = down.position
-                var active = false
-                try {
-                    val cancelledBeforeHold = withTimeoutOrNull(holdTimeoutMs) {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Final)
-                            val change = event.changes.firstOrNull { it.id == pointerId }
-                                ?: return@withTimeoutOrNull true
-                            if (
-                                !change.pressed ||
-                                change.isConsumed ||
-                                distanceFromStart(change.position, start) > touchSlop
-                            ) {
-                                return@withTimeoutOrNull true
-                            }
-                        }
-                    } == true
-                    if (!cancelledBeforeHold) {
-                        active = true
-                        onActiveChange(true)
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Final)
-                            val change = event.changes.firstOrNull { it.id == pointerId }
-                            if (
-                                change == null ||
-                                !change.pressed ||
-                                change.isConsumed ||
-                                distanceFromStart(change.position, start) > touchSlop
-                            ) {
-                                break
-                            }
-                        }
-                    }
-                } finally {
-                    if (active) {
-                        onActiveChange(false)
-                    }
-                }
-            }
-        }
-    }
-
-private fun distanceFromStart(current: Offset, start: Offset): Float {
-    return hypot(current.x - start.x, current.y - start.y)
-}
-
-@Composable
-private fun EmptyHomeFatCat(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    var showingLoop by remember { mutableStateOf(false) }
-    var transmissionActive by remember { mutableStateOf(false) }
-    val transmissionFrameIndex = rememberCatTransmissionFrameIndex(transmissionActive)
-    val normalResourceId = if (showingLoop) R.drawable.home_cat else R.drawable.home_cat_entrance
-    val normalDrawable = remember(context, normalResourceId) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            ImageDecoder.decodeDrawable(
-                ImageDecoder.createSource(context.resources, normalResourceId),
-            )
-        } else {
-            ContextCompat.getDrawable(context, normalResourceId)
-        }
-    }
-    val transmissionDrawables = remember(context) {
-        CatTransmissionFrames.map { ContextCompat.getDrawable(context, it) }
-    }
-    val drawable = if (transmissionActive) {
-        transmissionDrawables.getOrNull(transmissionFrameIndex)
-    } else {
-        normalDrawable
-    }
-
-    LaunchedEffect(showingLoop) {
-        if (!showingLoop) {
-            kotlinx.coroutines.delay(HOME_CAT_ENTRANCE_DURATION_MS)
-            showingLoop = true
-        }
-    }
-
-    DisposableEffect(drawable) {
-        (drawable as? Animatable)?.start()
-        onDispose {
-            (drawable as? Animatable)?.stop()
-        }
-    }
-
-    BoxWithConstraints(modifier = modifier) {
-        val w = maxWidth
-        val h = maxHeight
-        val catWidth = (w * 0.55f).coerceIn(180.dp, 260.dp)
-        val catHeight = catWidth * (202f / 360f)
-        val offsetX = (w - catWidth) / 2f
-        val offsetY = (h * 0.42f) - (catHeight / 2f)
-        Box(
-            modifier = Modifier
-                .offset(x = offsetX, y = offsetY)
-                .size(width = catWidth, height = catHeight)
-                .catTransmissionPress { transmissionActive = it },
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    ImageView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        scaleType = ImageView.ScaleType.FIT_CENTER
-                        isClickable = false
-                        isFocusable = false
-                        setImageDrawable(drawable)
-                        (drawable as? Animatable)?.start()
-                    }
-                },
-                update = { view ->
-                    view.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    view.scaleType = if (transmissionActive) {
-                        ImageView.ScaleType.CENTER_CROP
-                    } else {
-                        ImageView.ScaleType.FIT_CENTER
-                    }
-                    view.setImageDrawable(drawable)
-                    (drawable as? Animatable)?.start()
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
+private fun EmptyHomeMark(modifier: Modifier = Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        com.remora.android.ui.AnimatedLogo(size = 180.dp)
     }
 }
 

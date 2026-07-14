@@ -3,7 +3,6 @@ import Observation
 
 enum RemoraFeature: String, CaseIterable, Identifiable {
     case realtimeVoice = "realtime_voice"
-    case appleWatch = "apple_watch"
     case thinkingMinigame = "thinking_minigame"
     case terminal = "terminal"
 
@@ -12,7 +11,6 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .realtimeVoice: return "Realtime"
-        case .appleWatch: return "Apple Watch"
         case .thinkingMinigame: return "Thinking minigame"
         case .terminal: return "Terminal"
         }
@@ -21,9 +19,8 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .realtimeVoice: return "Show the realtime voice launcher on the home screen."
-        case .appleWatch: return "Push server, task, and approval state to a paired Apple Watch. Requires the Remora watch app to be installed."
         case .thinkingMinigame: return "Tap the Thinking shimmer while the assistant generates to play a tiny generated minigame."
-        case .terminal: return "Show the local and remote terminal launcher on the home screen."
+        case .terminal: return "Show the remote terminal launcher on the home screen."
         }
     }
 
@@ -32,10 +29,6 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
         case .realtimeVoice: return true
         case .thinkingMinigame: return false
         case .terminal: return false
-        case .appleWatch:
-            // Default on now that the watch app is embedded again. The bridge
-            // still no-ops when WatchConnectivity is unavailable.
-            return true
         }
     }
 }

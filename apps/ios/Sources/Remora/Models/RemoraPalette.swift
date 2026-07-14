@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Shared color palette used by both the main app (RemoraTheme) and the
-/// Live Activity widget extension. Reads from the shared App Group
+/// Shared application palette.
 /// UserDefaults (written by ThemeManager) with hardcoded fallbacks.
 enum RemoraPalette {
     // MARK: - Adaptive pairs (light, dark)
@@ -71,4 +71,3 @@ extension RemoraPalette.Pair {
         return Color(red: r, green: g, blue: b)
     }
 }
-

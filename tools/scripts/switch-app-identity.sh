@@ -19,8 +19,8 @@ usage() {
 Usage: ./tools/scripts/switch-app-identity.sh --to <remora|your-identifier> [options]
 
 Switches local app identifiers across Android and iOS between:
-  - com.remora.app(.android|.remote)
-  - com.<your-identifier>.remora(.android|.remote)
+  - com.remora.app / com.remora.android
+  - com.<your-identifier>.remora.app / com.<your-identifier>.remora.android
 
 Options:
   --to <remora|your-identifier>
@@ -105,10 +105,10 @@ detect_current_identifier() {
   local current=""
 
   if [ -f "$IOS_PROJECT_YML" ]; then
-    if grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.remora\.app([.]remote)?[[:space:]]*$' "$IOS_PROJECT_YML"; then
+    if grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.remora\.app[[:space:]]*$' "$IOS_PROJECT_YML"; then
       current="remora"
     else
-      current="$(sed -nE 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.([a-z0-9_]+)\.remora\.app(\.remote)?[[:space:]]*$/\1/p' "$IOS_PROJECT_YML" | head -n1)"
+      current="$(sed -nE 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER:[[:space:]]*com\.([a-z0-9_]+)\.remora\.app[[:space:]]*$/\1/p' "$IOS_PROJECT_YML" | head -n1)"
     fi
   fi
 

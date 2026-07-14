@@ -234,10 +234,7 @@ struct SupporterBadges: View {
             HStack(spacing: 2) {
                 ForEach(purchased, id: \.id) { tier in
                     Button { showTipJar = true } label: {
-                        Image(tier.icon)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 28, height: 28)
+                        SupportBadgeIcon(name: tier.icon, size: 28)
                     }
                     .buttonStyle(.plain)
                 }
@@ -262,9 +259,9 @@ private struct SupportBadgeIcon: View {
     let size: CGFloat
 
     var body: some View {
-        Image(name)
-            .resizable()
-            .aspectRatio(contentMode: .fit)
+        Image(systemName: name)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(RemoraTheme.accent)
             .frame(width: size * 0.9, height: size * 0.9)
             .frame(width: size, height: size)
             .modifier(GlassCircleModifier())

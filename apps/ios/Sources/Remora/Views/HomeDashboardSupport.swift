@@ -261,7 +261,7 @@ enum HomeDashboardSupport {
 
     private static func sourceLabel(for saved: SavedServer) -> String {
         if saved.alleycatAgentWire == "ssh-bridge" { return "ssh" }
-        if saved.alleycatNodeId != nil { return "alleycat" }
+        if saved.alleycatNodeId != nil { return "paired" }
         if saved.websocketURL != nil { return "remote" }
         if saved.preferredConnectionMode == .ssh { return "ssh" }
         switch saved.source {

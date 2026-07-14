@@ -1,68 +1,18 @@
 import SwiftUI
 import UIKit
-import UserNotifications
 import Combine
 import os
 
-class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    private var pendingPushToken: Data?
-    private var pendingNotificationThreadKey: ThreadKey?
+class AppDelegate: NSObject, UIApplicationDelegate {
     private var splashWindow: UIWindow?
     private var minTimeElapsed = false
     private var contentReady = false
     private var splashDismissed = false
 
-    weak var appRuntime: AppRuntimeController? {
-        didSet {
-            if let token = pendingPushToken {
-                LLog.info("push", "delivering pending device token to runtime")
-                appRuntime?.setDevicePushToken(token)
-                pendingPushToken = nil
-            }
-            if let key = pendingNotificationThreadKey {
-                LLog.info(
-                    "push",
-                    "delivering pending notification thread open to runtime",
-                    fields: ["serverId": key.serverId, "threadId": key.threadId]
-                )
-                pendingNotificationThreadKey = nil
-                openThreadFromNotification(key)
-            }
-        }
-    }
+    weak var appRuntime: AppRuntimeController?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        OpenAIApiKeyStore.shared.applyToEnvironment()
-        RemoraPlatform.bootstrapLocalRuntimeIfNeeded()
         LLog.bootstrap()
-
-        #if targetEnvironment(macCatalyst)
-        // On unsandboxed Mac Catalyst, send the spawned codex child a
-        // SIGTERM during termination so it does not outlive the app.
-        // willTerminate runs on the main thread and gives ~5s; the
-        // blocking variant detaches the actual stop off the main actor
-        // so awaiting it does not deadlock.
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.willTerminateNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            LocalCodexBootstrap.shared.stopBlocking(timeout: 2.5)
-        }
-        #endif
-
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.protectedDataDidBecomeAvailableNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            LLog.info("lifecycle", "protected app data became available")
-            OpenAIApiKeyStore.shared.applyToEnvironment()
-            guard let appRuntime = self?.appRuntime else { return }
-            Task { @MainActor in
-                await appRuntime.restoreMissingLocalAuthStateIfNeeded()
-            }
-        }
 
         LLog.info("lifecycle", "application did finish launching")
         // Pre-initialize Rust bridges (tokio runtime) on a background thread
@@ -71,47 +21,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         DispatchQueue.global(qos: .userInitiated).async {
             AppModel.prewarmRustBridges()
         }
-        application.registerForRemoteNotifications()
-        UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().setNotificationCategories([
-            UNNotificationCategory(
-                identifier: "remora.task.complete",
-                actions: [],
-                intentIdentifiers: [],
-                options: [.allowAnnouncement]
-            ),
-            UNNotificationCategory(
-                identifier: WatchApprovalNotification.categoryIdentifier,
-                actions: [
-                    UNNotificationAction(
-                        identifier: WatchApprovalNotification.allowActionIdentifier,
-                        title: "Allow",
-                        options: []
-                    ),
-                    UNNotificationAction(
-                        identifier: WatchApprovalNotification.denyActionIdentifier,
-                        title: "Deny",
-                        options: [.destructive]
-                    ),
-                ],
-                intentIdentifiers: [],
-                options: [.customDismissAction]
-            ),
-        ])
-        OrientationResponder.shared.start()
         DispatchQueue.main.async {
             CloudKVSBridge.shared.start()
         }
         showSplashWindow()
         scheduleKeyboardWarmup()
-        // Start pushing state to the paired Apple Watch, gated behind the
-        // experimental feature flag. Flip the `appleWatch` feature in
-        // Settings → Experimental Features to enable. No-op when disabled.
-        DispatchQueue.main.async {
-            if ExperimentalFeatures.shared.isEnabled(.appleWatch) {
-                WatchCompanionBridge.shared.start()
-            }
-        }
         return true
     }
 
@@ -197,20 +111,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
-        LLog.info("push", "device token received", fields: ["bytes": deviceToken.count, "hex": hex])
-        if let appRuntime {
-            appRuntime.setDevicePushToken(deviceToken)
-        } else {
-            pendingPushToken = deviceToken
-        }
-    }
-
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        LLog.error("push", "registration failed", error: error)
-    }
-
     func applicationWillTerminate(_ application: UIApplication) {
         // Best-effort graceful shutdown of the iroh endpoint. iOS only
         // fires this hook reliably on Catalyst (NSApplicationDelegate)
@@ -219,7 +119,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // cost of skipping is one "Aborting ungracefully" log on iroh's
         // side and the daemon waiting up to its idle timeout to reap
         // the final zombie.
-        LLog.info("lifecycle", "applicationWillTerminate — closing alleycat endpoint")
+        LLog.info("lifecycle", "applicationWillTerminate — closing pairing endpoint")
         let semaphore = DispatchSemaphore(value: 0)
         Task { @MainActor in
             await self.appRuntime?.shutdownAlleycatEndpoint()
@@ -231,103 +131,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ = semaphore.wait(timeout: .now() + 2.5)
     }
 
-    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        LLog.info(
-            "push",
-            "background push received",
-            fields: [
-                "applicationState": application.applicationState.debugName
-            ],
-            payloadJson: notificationPayloadJson(userInfo)
-        )
-        if application.applicationState == .active {
-            LLog.info("push", "skipping background push handler because app is already active")
-            completionHandler(.noData)
-            return
-        }
-        guard let appRuntime else {
-            LLog.warn("push", "background push received before runtime was ready")
-            completionHandler(.noData)
-            return
-        }
-        Task { @MainActor in
-            await appRuntime.handleBackgroundPush()
-            LLog.info("push", "background push handling completed", fields: ["result": "newData"])
-            completionHandler(.newData)
-        }
-    }
-
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
-        LLog.info(
-            "push",
-            "user opened notification",
-            payloadJson: notificationPayloadJson(response.notification.request.content.userInfo)
-        )
-
-        let info = response.notification.request.content.userInfo
-        let actionId = response.actionIdentifier
-        if actionId == WatchApprovalNotification.allowActionIdentifier ||
-            actionId == WatchApprovalNotification.denyActionIdentifier,
-            let requestId = info[WatchApprovalNotification.requestIdKey] as? String {
-            let approve = actionId == WatchApprovalNotification.allowActionIdentifier
-            Task { @MainActor in
-                do {
-                    try await AppModel.shared.store.respondToApproval(
-                        requestId: requestId,
-                        decision: approve ? .accept : .decline
-                    )
-                } catch {
-                    LLog.error(
-                        "push",
-                        "approval action dispatch failed: \(error.localizedDescription)"
-                    )
-                }
-                completionHandler()
-            }
-            return
-        }
-
-        if let key = AppLifecycleController.notificationThreadKey(
-            from: response.notification.request.content.userInfo
-        ) {
-            openThreadFromNotification(key)
-        }
-        completionHandler()
-    }
-
-    private func openThreadFromNotification(_ key: ThreadKey) {
-        LLog.info(
-            "push",
-            "open thread from notification",
-            fields: ["serverId": key.serverId, "threadId": key.threadId]
-        )
-        if appRuntime == nil {
-            pendingNotificationThreadKey = key
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self, let appRuntime = self.appRuntime else { return }
-            await appRuntime.openThreadFromNotification(key: key)
-        }
-    }
-
-    private func notificationPayloadJson(_ userInfo: [AnyHashable: Any]) -> String? {
-        guard !userInfo.isEmpty else { return nil }
-        let payload = Dictionary(uniqueKeysWithValues: userInfo.map { key, value in
-            (String(describing: key), String(describing: value))
-        })
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
-              let json = String(data: data, encoding: .utf8)
-        else {
-            return nil
-        }
-        return json
-    }
 }
 
 @main
@@ -371,17 +174,6 @@ struct RemoraApp: App {
                     appRuntime.bind(appModel: appModel, voiceRuntime: voiceRuntime)
                     appDelegate.appRuntime = appRuntime
                     appRuntime.appDidBecomeActive()
-                    #if targetEnvironment(macCatalyst)
-                    LocalCodexBootstrap.shared.startIfNeeded(appModel: appModel)
-                    #endif
-                    // Pair host (BLE advertiser, ultrasonic emitter,
-                    // Bonjour publish, WS listener) and the iPhone client
-                    // (BLE scanner, ultrasonic reader, NISession) are
-                    // strictly opt-in: they only start when the user
-                    // opens the Pair screen in Settings → Experimental,
-                    // and stop on disappear. The screen itself is gated
-                    // behind `#if DEBUG`, so neither stack is reachable
-                    // in Release builds.
                 }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -541,9 +333,6 @@ struct ContentView: View {
             appState.selectedAgentRuntimeKind = nil
             appState.reasoningEffort = ""
             appState.showModelSelector = false
-        }
-        .onChange(of: appModel.snapshot) { _, nextSnapshot in
-            appRuntime.handleSnapshot(nextSnapshot)
         }
         .sheet(isPresented: $bindableAppState.showServerPicker) {
             NavigationStack {
@@ -723,7 +512,7 @@ private struct HomeNavigationView: View {
         /// Saved-app detail, pushed when the user taps a home-screen thread
         /// that has saved apps (or when routed from the AppsList).
         case savedApp(appId: String)
-        /// Local on-device terminal backed by the shared Rust terminal session.
+        /// Remote terminal backed by the shared Rust terminal session.
         case terminal(preferredAlleycatNodeId: String?)
     }
 
@@ -1097,13 +886,6 @@ private struct HomeNavigationView: View {
 
     private func handleNewSessionTap() {
         if let defaultServerId = defaultNewSessionServerId(preferredServerId: appState.sessionsSelectedServerFilterId) {
-            // For local on-device server, skip directory picker and use /home/codex.
-            if let server = homeDashboardModel.connectedServers.first(where: { $0.id == defaultServerId }),
-               server.isLocal {
-                let cwd = RemoraPlatform.defaultLocalWorkingDirectory()
-                Task { await startNewSession(serverId: defaultServerId, cwd: cwd) }
-                return
-            }
             directoryPickerSheet = SessionLaunchSupport.DirectoryPickerSheetModel(selectedServerId: defaultServerId)
         } else {
             appState.showServerPicker = true
@@ -1113,7 +895,7 @@ private struct HomeNavigationView: View {
     private var homeVoiceLauncher: some View {
         HomeVoiceOrbButton(
             session: voiceRuntime.activeVoiceSession,
-            isAvailable: true,
+            isAvailable: defaultNewSessionServerId(preferredServerId: homeDashboardModel.selectedServerId) != nil,
             isStarting: isStartingVoice,
             action: startHomeVoiceSession
         )
@@ -1131,13 +913,23 @@ private struct HomeNavigationView: View {
 
         Task {
             do {
+                guard let serverId = defaultNewSessionServerId(
+                    preferredServerId: homeDashboardModel.selectedServerId
+                ) else {
+                    throw NSError(
+                        domain: "Remora",
+                        code: 3301,
+                        userInfo: [NSLocalizedDescriptionKey: "Connect a remote server before starting voice."]
+                    )
+                }
                 let selectedModel = normalizedPreferredModel()
                 let selectedEffort = appState.preferredReasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines)
                 voiceRuntime.handoffModel = selectedModel
                 voiceRuntime.handoffEffort = selectedEffort.isEmpty ? nil : selectedEffort
                 voiceRuntime.handoffFastMode = false
-                let voicePermissions = await voicePermissionConfig()
-                let voiceKey = try await voiceRuntime.startPinnedLocalVoiceCall(
+                let voicePermissions = await voicePermissionConfig(serverId: serverId)
+                let voiceKey = try await voiceRuntime.startPinnedVoiceCall(
+                    serverId: serverId,
                     cwd: preferredVoiceWorkingDirectory(),
                     model: selectedModel,
                     approvalPolicy: voicePermissions.approvalPolicy,
@@ -1174,7 +966,7 @@ private struct HomeNavigationView: View {
             return stored
         }
 
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
+        return "/"
     }
 
     private func preferredTerminalWorkingDirectory() -> String? {
@@ -1295,9 +1087,6 @@ private struct HomeNavigationView: View {
         actionErrorMessage = nil
         let startedKey: ThreadKey
         do {
-            guard try await appModel.ensureLocalAuthForThreadStart(serverId: serverId) else {
-                return
-            }
             await conversationWarmup.prewarmIfNeeded()
             workDir = cwd
             appState.currentCwd = cwd
@@ -1305,7 +1094,7 @@ private struct HomeNavigationView: View {
                 serverId: serverId,
                 params: launchConfig().threadStartRequest(
                     cwd: cwd,
-                    dynamicTools: appModel.localGenerativeUiToolSpecs(for: serverId)
+                    dynamicTools: nil
                 )
             )
             startedKey = key
@@ -1359,15 +1148,17 @@ private struct HomeNavigationView: View {
         )
     }
 
-    private func voicePermissionConfig() async -> (
+    private func voicePermissionConfig(serverId: String) async -> (
         approvalPolicy: AppAskForApproval?,
         sandboxMode: AppSandboxMode?
     ) {
-        let storedThreadId = UserDefaults.standard.string(forKey: VoiceRuntimeController.persistedLocalVoiceThreadIDKey)?
+        let storedServerId = UserDefaults.standard.string(forKey: VoiceRuntimeController.persistedVoiceServerIDKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedThreadId = UserDefaults.standard.string(forKey: VoiceRuntimeController.persistedVoiceThreadIDKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let threadKey = storedThreadId.flatMap { threadId -> ThreadKey? in
-            guard !threadId.isEmpty else { return nil }
-            return ThreadKey(serverId: VoiceRuntimeController.localServerID, threadId: threadId)
+            guard !threadId.isEmpty, storedServerId == serverId else { return nil }
+            return ThreadKey(serverId: serverId, threadId: threadId)
         }
         let resolvedThreadKey: ThreadKey?
         if let threadKey {
@@ -1839,12 +1630,8 @@ private struct HomeNavigationView: View {
     private func restartAppServer(_ server: HomeDashboardServer) {
         Task {
             do {
-                if server.isLocal {
-                    try await appModel.restartLocalServer()
-                } else {
-                    try await appModel.serverBridge.restartAppServer(serverId: server.id)
-                    await AppRuntimeController.shared.reconnectServer(serverId: server.id)
-                }
+                try await appModel.serverBridge.restartAppServer(serverId: server.id)
+                await AppRuntimeController.shared.reconnectServer(serverId: server.id)
                 await appModel.refreshSnapshot()
             } catch {
                 actionErrorMessage = error.localizedDescription
@@ -1864,9 +1651,7 @@ private struct HomeNavigationView: View {
         SavedServerStore.rename(serverId: serverId, newName: newName)
         appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
-            servers: SavedServerStore.reconnectRecords(
-                localDisplayName: appModel.resolvedLocalServerDisplayName()
-            )
+            servers: SavedServerStore.reconnectRecords()
         )
         appModel.store.renameServer(serverId: serverId, displayName: newName)
     }

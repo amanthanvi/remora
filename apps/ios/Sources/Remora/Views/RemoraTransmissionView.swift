@@ -1,76 +1,31 @@
 import SwiftUI
-import UIKit
-
-private enum RemoraTransmissionFrames {
-    static let names = [
-        "remora_transmission_01",
-        "remora_transmission_02",
-        "remora_transmission_03",
-        "remora_transmission_04",
-        "remora_transmission_05",
-        "remora_transmission_06",
-    ]
-
-    static let frameDurationMs: UInt64 = 82
-    static let holdDelaySeconds: Double = 0.5
-    static let holdMaxDistance: CGFloat = 12
-}
 
 struct RemoraTransmissionPressView<Content: View>: View {
     @State private var transmissionActive = false
-
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         ZStack {
             if transmissionActive {
-                RemoraTransmissionFramePlayer()
+                TimelineView(.animation) { context in
+                    let phase = context.date.timeIntervalSinceReferenceDate
+                    RemoraLogo(size: 72)
+                        .scaleEffect(0.9 + 0.08 * sin(phase * 5))
+                        .opacity(0.78 + 0.18 * sin(phase * 4))
+                }
             } else {
                 content()
             }
         }
         .contentShape(Rectangle())
         .onLongPressGesture(
-            minimumDuration: RemoraTransmissionFrames.holdDelaySeconds,
-            maximumDistance: RemoraTransmissionFrames.holdMaxDistance,
+            minimumDuration: 0.5,
+            maximumDistance: 12,
             pressing: { isPressing in
-                if !isPressing {
-                    stopHold()
-                }
+                if !isPressing { transmissionActive = false }
             },
-            perform: {
-                transmissionActive = true
-            }
+            perform: { transmissionActive = true }
         )
-        .onDisappear {
-            stopHold()
-        }
-    }
-
-    private func stopHold() {
-        transmissionActive = false
-    }
-}
-
-private struct RemoraTransmissionFramePlayer: View {
-    @State private var frameIndex = 0
-
-    var body: some View {
-        ZStack {
-            if let image = UIImage(named: RemoraTransmissionFrames.names[frameIndex]) {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.none)
-                    .scaledToFill()
-            }
-        }
-        .clipped()
-        .task {
-            frameIndex = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(RemoraTransmissionFrames.frameDurationMs))
-                frameIndex = (frameIndex + 1) % RemoraTransmissionFrames.names.count
-            }
-        }
+        .onDisappear { transmissionActive = false }
     }
 }

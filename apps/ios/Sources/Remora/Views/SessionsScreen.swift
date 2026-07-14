@@ -341,12 +341,7 @@ struct SessionsScreen: View {
     private var newSessionButton: some View {
         Button {
             if let defaultServerId = defaultNewSessionServerId(preferredServerId: appState.sessionsSelectedServerFilterId) {
-                if connectedServers.first(where: { $0.id == defaultServerId })?.isLocal == true {
-                    let cwd = RemoraPlatform.defaultLocalWorkingDirectory()
-                    Task { await startNewSession(serverId: defaultServerId, cwd: cwd) }
-                } else {
-                    directoryPickerSheet = SessionLaunchSupport.DirectoryPickerSheetModel(selectedServerId: defaultServerId)
-                }
+                directoryPickerSheet = SessionLaunchSupport.DirectoryPickerSheetModel(selectedServerId: defaultServerId)
             } else {
                 appState.showServerPicker = true
             }
@@ -547,7 +542,7 @@ struct SessionsScreen: View {
     }
 
     private func runtimeKindIcon(_ kind: AgentRuntimeKind) -> String {
-        // The filter pill renders an SF Symbol; the alleycat manifest
+        // The filter pill renders an SF Symbol; the paired-host manifest
         // ships a PNG, not an SF Symbol name, so we use a generic
         // fallback here. Richer rendering of the actual agent icon
         // happens via `AgentIconView` everywhere else in the app.
@@ -1231,9 +1226,6 @@ struct SessionsScreen: View {
         defer { isStartingNewSession = false }
         sessionActionErrorMessage = nil
         do {
-            guard try await appModel.ensureLocalAuthForThreadStart(serverId: serverId) else {
-                return
-            }
             await conversationWarmup.prewarmIfNeeded()
             workDir = cwd
             appState.currentCwd = cwd
@@ -1241,7 +1233,7 @@ struct SessionsScreen: View {
                 serverId: serverId,
                 params: launchConfig().threadStartRequest(
                     cwd: cwd,
-                    dynamicTools: appModel.localGenerativeUiToolSpecs(for: serverId)
+                    dynamicTools: nil
                 )
             )
             RecentDirectoryStore.shared.record(path: cwd, for: serverId)

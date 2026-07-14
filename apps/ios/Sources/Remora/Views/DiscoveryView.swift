@@ -28,7 +28,6 @@ struct DiscoveryView: View {
     @State private var connectError: String?
     @State private var renameTarget: DiscoveredServer?
     @State private var renameText = ""
-    @Environment(AppState.self) private var appState
     private let autoStartDiscovery: Bool
     private let initialServers: [DiscoveredServer]
     private let slingshotBaseURL = "https://chatgpt.com/backend-api"
@@ -43,10 +42,6 @@ struct DiscoveryView: View {
         _discovery = State(initialValue: discovery ?? NetworkDiscovery())
         self.autoStartDiscovery = autoStartDiscovery
         self.initialServers = initialServers
-    }
-
-    private var localServers: [DiscoveredServer] {
-        discovery.servers.filter { $0.source == .local }
     }
 
     private var networkServers: [DiscoveredServer] {
@@ -300,7 +295,7 @@ struct DiscoveryView: View {
 
     /// Canonical agent list shown on the remora chooser card.
     /// Mirrors the splash carousel order so cold-start branding stays
-    /// consistent. New agents added in the alleycat manifest still
+    /// consistent. New agents added in the paired-host manifest still
     /// surface on connected hosts via the real metadata store; this list
     /// only seeds the pre-pair preview.
     private static let remoraAgents: [AgentRuntimeKind] = [
@@ -419,13 +414,9 @@ struct DiscoveryView: View {
 
     // MARK: - Sections (legacy discovery list, retained for sheet plumbing)
 
-    private var allServers: [DiscoveredServer] {
-        localServers + networkServers
-    }
-
     private var serversSection: some View {
         Section {
-            if allServers.isEmpty {
+            if networkServers.isEmpty {
                 if discovery.isInitialLoad {
                     HStack {
                         ProgressView().tint(RemoraTheme.textMuted).scaleEffect(0.7)
@@ -448,7 +439,7 @@ struct DiscoveryView: View {
                     .listRowBackground(RemoraTheme.surface.opacity(0.6))
                 }
             } else {
-                ForEach(allServers) { server in
+                ForEach(networkServers) { server in
                     serverRow(server)
                 }
             }
@@ -538,13 +529,11 @@ struct DiscoveryView: View {
         .accessibilityIdentifier(rowIdentifier)
         .disabled(connectingServer != nil || wakingServer != nil)
         .contextMenu {
-            if server.source != .local {
-                Button {
-                    renameText = server.name
-                    renameTarget = server
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
+            Button {
+                renameText = server.name
+                renameTarget = server
+            } label: {
+                Label("Rename", systemImage: "pencil")
             }
         }
     }
@@ -560,7 +549,6 @@ struct DiscoveryView: View {
     }
 
     private func serverSubtitle(_ server: DiscoveredServer) -> String {
-        if server.source == .local { return "In-process server" }
         let snapshot = connectedSnapshot(for: server)
         if let progressDetail = snapshot?.connectionProgressDetail,
            !progressDetail.isEmpty {
@@ -605,14 +593,6 @@ struct DiscoveryView: View {
     }
 
     private func navigateAfterConnect(_ server: DiscoveredServer) {
-        guard let snapshot = appModel.snapshot?.servers.first(where: { $0.serverId == server.id }) else {
-            onServerSelected?(server)
-            return
-        }
-        if snapshot.isLocal, snapshot.account == nil {
-            appState.showSettings = true
-            return
-        }
         onServerSelected?(server)
     }
 
@@ -886,16 +866,6 @@ struct DiscoveryView: View {
         let startedAsyncBootstrap: Bool
         do {
             switch target {
-            case .local:
-                startedAsyncBootstrap = false
-                connectedServerId = try await appModel.serverBridge.connectLocalServer(
-                    serverId: server.id,
-                    displayName: server.name,
-                    host: "127.0.0.1",
-                    port: 0
-                )
-                await appModel.restoreStoredLocalAuthState(serverId: server.id)
-                SavedServerStore.remember(server)
             case .remote(let host, let port):
                 startedAsyncBootstrap = false
                 connectedServerId = try await appModel.serverBridge.connectRemoteServer(
@@ -964,7 +934,7 @@ struct DiscoveryView: View {
         }
     }
 
-    /// Called by `AlleycatAddServerSheet` after the sheet has already opened a
+    /// Called by the pairing sheet after it has already opened a
     /// fully connected ServerSession. Persist the stable node/agent metadata
     /// and navigate; the token stays in Keychain.
     private func connectAlleycatTarget(_ result: AlleycatConnectedTarget) async {
@@ -1043,7 +1013,7 @@ struct DiscoveryView: View {
                 // SSH bridge bootstrap can launch claude / pi / opencode
                 // on the remote; everything else (codex, amp, droid,
                 // hermes, anything new) only reaches the host via the
-                // alleycat pairing path.
+                // paired-host connection path.
                 guard $0.status == .available else { return false }
                 if let supports = $0.kind.metadata?.capabilities?.supportsSshBridge {
                     return supports && $0.kind != "codex"

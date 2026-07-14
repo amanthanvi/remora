@@ -20,7 +20,7 @@ final class AppRuntimeController {
                 appModel.client.setAlleycatSecretKey(secretKeyBytes: bytes)
             }
         } catch {
-            NSLog("[ALLEYCAT_DEVICE_KEY] load failed: %@", error.localizedDescription)
+            NSLog("[PAIRING_DEVICE_KEY] load failed: %@", error.localizedDescription)
         }
     }
 
@@ -35,7 +35,7 @@ final class AppRuntimeController {
             if existing == data { return }
             try AlleycatCredentialStore.shared.saveDeviceSecretKey(data)
         } catch {
-            NSLog("[ALLEYCAT_DEVICE_KEY] save failed: %@", error.localizedDescription)
+            NSLog("[PAIRING_DEVICE_KEY] save failed: %@", error.localizedDescription)
         }
     }
 
@@ -47,59 +47,25 @@ final class AppRuntimeController {
         await appModel.client.shutdownAlleycatEndpoint()
     }
 
-    func setDevicePushToken(_ token: Data) {}
-
     func reconnectSavedServers() async {
         guard let appModel else { return }
-        let servers = SavedServerStore.reconnectRecords(
-            localDisplayName: appModel.resolvedLocalServerDisplayName(),
-            rememberedOnly: true
-        )
+        let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
         appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         await appModel.reconnectController.notifyNetworkChange()
-        let results = await appModel.reconnectController.reconnectSavedServers()
-        await appModel.refreshSnapshot()
-        for result in results where result.needsLocalAuthRestore {
-            await appModel.restoreStoredLocalAuthState(serverId: result.serverId)
-        }
-        await appModel.restoreMissingLocalAuthStateIfNeeded()
+        _ = await appModel.reconnectController.reconnectSavedServers()
         await appModel.refreshSnapshot()
         persistAlleycatSecretKeyIfNeeded()
     }
 
     func reconnectServer(serverId: String) async {
         guard let appModel else { return }
-        let servers = SavedServerStore.reconnectRecords(
-            localDisplayName: appModel.resolvedLocalServerDisplayName()
-        )
+        let servers = SavedServerStore.reconnectRecords()
         appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
-        let result = await appModel.reconnectController.reconnectServer(serverId: serverId)
-        await appModel.refreshSnapshot()
-        if result.needsLocalAuthRestore {
-            await appModel.restoreStoredLocalAuthState(serverId: serverId)
-        }
-        await appModel.restoreMissingLocalAuthStateIfNeeded()
+        _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
         await appModel.refreshSnapshot()
     }
-
-    func restoreMissingLocalAuthStateIfNeeded() async {
-        guard let appModel else { return }
-        await appModel.restoreMissingLocalAuthStateIfNeeded()
-    }
-
-    func openThreadFromNotification(key: ThreadKey) async {
-        guard let appModel else { return }
-        appModel.activateThread(key)
-        await appModel.refreshSnapshot()
-        if let resolvedKey = await appModel.ensureThreadLoaded(key: key) {
-            appModel.activateThread(resolvedKey)
-            await appModel.refreshSnapshot()
-        }
-    }
-
-    func handleSnapshot(_ snapshot: AppSnapshotRecord?) {}
     func appDidEnterBackground() {
         lastBackgroundedAt = Date()
     }
@@ -114,7 +80,7 @@ final class AppRuntimeController {
             guard let self else { return }
             // Same long-resume short-circuit as iOS: if we were
             // suspended longer than iroh's per-path idle, kill the
-            // existing alleycat Connection so the worker rebuilds
+            // existing paired-host connection so the worker rebuilds
             // before any user request lands.
             if let appModel = self.appModel,
                let duration = backgroundDuration,
@@ -126,35 +92,17 @@ final class AppRuntimeController {
         }
     }
 
-    func handleBackgroundPush() async {}
-
     @ObservationIgnored private var hasRecoveredOnForeground = false
     @ObservationIgnored private var lastBackgroundedAt: Date?
     private static let longResumeThreshold: TimeInterval = 15
 }
 
 @MainActor
-final class AppLifecycleController {
-    static let notificationServerIdKey = "remora.notification.serverId"
-    static let notificationThreadIdKey = "remora.notification.threadId"
-
-    static func notificationThreadKey(from userInfo: [AnyHashable: Any]) -> ThreadKey? {
-        guard let serverId = userInfo[notificationServerIdKey] as? String,
-              let threadId = userInfo[notificationThreadIdKey] as? String,
-              !serverId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !threadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        return ThreadKey(serverId: serverId, threadId: threadId)
-    }
-}
-
-@MainActor
 @Observable
 final class VoiceRuntimeController {
     static let shared = VoiceRuntimeController()
-    static let localServerID = "local"
-    static let persistedLocalVoiceThreadIDKey = "remora.voice.local.thread_id"
+    static let persistedVoiceServerIDKey = "remora.voice.pinned.server_id"
+    static let persistedVoiceThreadIDKey = "remora.voice.pinned.thread_id"
 
     private(set) var activeVoiceSession: VoiceSessionState?
     var handoffModel: String?
@@ -163,7 +111,8 @@ final class VoiceRuntimeController {
 
     func bind(appModel: AppModel) {}
     @discardableResult
-    func startPinnedLocalVoiceCall(
+    func startPinnedVoiceCall(
+        serverId: String,
         cwd: String,
         model: String?,
         approvalPolicy: AppAskForApproval?,
@@ -193,15 +142,4 @@ final class StableSafeAreaInsets {
     }
 }
 
-@MainActor
-final class OrientationResponder {
-    static let shared = OrientationResponder()
-    func start() {}
-}
-
-@MainActor
-final class WatchCompanionBridge {
-    static let shared = WatchCompanionBridge()
-    func start() {}
-}
 #endif

@@ -26,7 +26,6 @@ struct ConversationInfoView: View {
     @State private var isRenaming = false
     @State private var stats: AppConversationStats?
     @State private var serverUsage: AppServerUsageStats?
-    @State private var isShowingMountedFolders = false
 
     private var thread: AppThreadSnapshot? {
         guard let threadKey else { return nil }
@@ -97,9 +96,6 @@ struct ConversationInfoView: View {
             TextField("Thread name", text: $renameText)
             Button("Save") { saveRename() }
             Button("Cancel", role: .cancel) { }
-        }
-        .sheet(isPresented: $isShowingMountedFolders) {
-            MountedFoldersView()
         }
     }
 
@@ -622,25 +618,6 @@ struct ConversationInfoView: View {
                     }
                 }
 
-                if server.isLocal {
-                    Button {
-                        isShowingMountedFolders = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "externaldrive.badge.icloud")
-                                .remoraFont(size: 12)
-                                .foregroundStyle(RemoraTheme.accent)
-                            Text("Mounted folders")
-                                .remoraFont(size: 12)
-                                .foregroundStyle(RemoraTheme.textSecondary)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .remoraFont(size: 11, weight: .semibold)
-                                .foregroundStyle(RemoraTheme.textMuted)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
             }
         }
         .padding(16)

@@ -30,8 +30,6 @@ pub(crate) async fn open_backend(
 ) -> Result<OpenBackendResult, TerminalError> {
     validate_size(size)?;
     match kind {
-        TerminalBackendKind::LocalIsh { cwd } => super::local_ish::open(cwd, size).await,
-        TerminalBackendKind::LocalProot { cwd } => super::local_proot::open(cwd, size).await,
         TerminalBackendKind::RemoteAlleycat {
             node_id,
             token,

@@ -111,7 +111,7 @@ struct AlleycatAddServerSheet: View {
                 Button("Cancel", role: .cancel) {}
             },
             message: {
-                Text("Allow camera access in Settings to scan an Alleycat pairing QR code.")
+                Text("Allow camera access in Settings to scan a Remora pairing QR code.")
             }
         )
     }
@@ -449,9 +449,9 @@ struct AlleycatAddServerSheet: View {
                 do {
                     try AlleycatCredentialStore.shared.saveToken(params.token, nodeId: params.nodeId)
                 } catch {
-                    NSLog("[ALLEYCAT_CREDENTIALS] keychain save failed: %@", error.localizedDescription)
+                    NSLog("[PAIRING_CREDENTIALS] keychain save failed: %@", error.localizedDescription)
                 }
-                // First successful alleycat pair triggers the iroh
+                // The first successful host pairing triggers the iroh
                 // endpoint bind. Persist the freshly-generated device
                 // secret key so the next cold launch reuses the same
                 // `EndpointId`.
@@ -513,7 +513,7 @@ struct AlleycatAddServerSheet: View {
         if !hostName.isEmpty {
             return hostName
         }
-        return "Alleycat \(shortNodeId(params.nodeId))"
+        return "Remora \(shortNodeId(params.nodeId))"
     }
 
     private func shortNodeId(_ raw: String) -> String {
@@ -587,7 +587,7 @@ private struct QRScannerScreen: View {
                     .background(.black.opacity(0.45), in: Capsule())
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("alleycat.scanner.cancelButton")
+            .accessibilityIdentifier("remora.pairing.scanner.cancelButton")
         }
     }
 
@@ -648,7 +648,7 @@ private struct QRScannerScreen: View {
                     .background(.white.opacity(0.14), in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("alleycat.scanner.copyCommandButton")
+            .accessibilityIdentifier("remora.pairing.scanner.copyCommandButton")
         }
         .padding(.leading, 30)
     }
@@ -697,7 +697,7 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
 
     private let captureSession = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
-    private let metadataQueue = DispatchQueue(label: "com.alleycat.qrscanner")
+    private let metadataQueue = DispatchQueue(label: "com.remora.pairing.qrscanner")
     private var didReportScan = false
 
     override func viewDidLoad() {

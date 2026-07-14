@@ -54,9 +54,10 @@ struct TerminalScreen: View {
             guard !didStart else { return }
             didStart = true
             let options = refreshBackendOptions()
-            let initial = initialBackend(from: options, cwd: cwd)
-            selectedBackendID = initial.id
-            await controller.open(backend: initial.backend)
+            if let initial = initialBackend(from: options) {
+                selectedBackendID = initial.id
+                await controller.open(backend: initial.backend)
+            }
             applyConfigSettings()
         }
         .onReceive(NotificationCenter.default.publisher(for: .remoraSavedServersDidChange)) { _ in
@@ -163,7 +164,7 @@ struct TerminalScreen: View {
                         Label(option.title, systemImage: option.systemImage)
                     }
                 }
-                if backendOptions.count <= 1 {
+                if backendOptions.isEmpty {
                     Divider()
                     Button("No remote terminal servers") {}
                         .disabled(true)
@@ -171,7 +172,7 @@ struct TerminalScreen: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: selectedBackend?.systemImage ?? "terminal")
-                    Text(selectedBackend?.title ?? "Local iSH")
+                    Text(selectedBackend?.title ?? "No remote server")
                         .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .bold))
@@ -184,7 +185,7 @@ struct TerminalScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            Text(selectedBackend?.subtitle ?? "On device")
+            Text(selectedBackend?.subtitle ?? "Add remote terminal credentials")
                 .font(.custom("SFMono-Regular", size: 11))
                 .foregroundColor(.white.opacity(0.48))
                 .lineLimit(1)
@@ -374,6 +375,8 @@ struct TerminalScreen: View {
             return controller.output
         }
         switch controller.phase {
+        case .idle where selectedBackend == nil:
+            return "No remote terminal is available. Add a paired Remora host or SSH server with terminal credentials.\n"
         case .idle, .connecting:
             return "Connecting...\n"
         case .running:
@@ -444,14 +447,13 @@ struct TerminalScreen: View {
     }
 
     private func initialBackend(
-        from options: [TerminalBackendOption],
-        cwd: String?
-    ) -> TerminalBackendOption {
+        from options: [TerminalBackendOption]
+    ) -> TerminalBackendOption? {
         if let preferredNodeId = normalized(preferredAlleycatNodeId),
            let match = options.first(where: { $0.alleycatNodeId == preferredNodeId }) {
             return match
         }
-        return options.first ?? TerminalBackendOption.localIsh(cwd: cwd)
+        return options.first
     }
 
     private func selectBackend(_ option: TerminalBackendOption) {
@@ -489,7 +491,7 @@ struct TerminalScreen: View {
     }
 
     private func loadBackendOptions(cwd: String?) -> [TerminalBackendOption] {
-        var options = [TerminalBackendOption.localIsh(cwd: cwd)]
+        var options: [TerminalBackendOption] = []
         var seenNodeIds = Set<String>()
         var seenSshKeys = Set<String>()
         let savedServers = SavedServerStore.load()
@@ -550,7 +552,8 @@ struct TerminalScreen: View {
                     host: host,
                     port: sshPort,
                     username: credential.username,
-                    auth: sshAuth
+                    auth: sshAuth,
+                    cwd: cwd
                 )
             )
         }
@@ -568,7 +571,13 @@ struct TerminalScreen: View {
         let options = refreshBackendOptions()
         guard let selectedBackendID,
               options.contains(where: { $0.id == selectedBackendID }) else {
-            self.selectedBackendID = initialBackend(from: options, cwd: cwd).id
+            controller.close()
+            guard let replacement = initialBackend(from: options) else {
+                self.selectedBackendID = nil
+                return
+            }
+            self.selectedBackendID = replacement.id
+            Task { await controller.open(backend: replacement.backend) }
             return
         }
     }
@@ -772,19 +781,6 @@ private struct TerminalBackendOption: Identifiable, Hashable {
     let runningLabel: String
     let backend: TerminalBackendKind
 
-    static func localIsh(cwd: String?) -> TerminalBackendOption {
-        TerminalBackendOption(
-            id: "local-ish",
-            title: "Local iSH",
-            subtitle: cwd?.isEmpty == false ? cwd! : "/root",
-            systemImage: "iphone",
-            alleycatNodeId: nil,
-            supportsResize: true,
-            runningLabel: "running",
-            backend: .localIsh(cwd: normalized(cwd))
-        )
-    }
-
     static func remoteAlleycat(
         name: String,
         nodeId: String,
@@ -813,7 +809,8 @@ private struct TerminalBackendOption: Identifiable, Hashable {
         host: String,
         port: UInt16,
         username: String,
-        auth: TerminalSshAuth
+        auth: TerminalSshAuth,
+        cwd: String?
     ) -> TerminalBackendOption {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = trimmedName.isEmpty ? "\(username)@\(host)" : trimmedName
@@ -832,7 +829,7 @@ private struct TerminalBackendOption: Identifiable, Hashable {
                 auth: auth,
                 shell: nil,
                 acceptUnknownHost: false,
-                cwd: nil
+                cwd: normalized(cwd)
             )
         )
     }

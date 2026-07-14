@@ -5,10 +5,14 @@ struct AccountView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var server: AppServerSnapshot? {
-        // Account management (ChatGPT login / API key) is local-only, always.
-        // If the local Codex bridge hasn't spun up there's no login target, and
-        // the caller falls through to `AccountDisconnectedView`.
-        appModel.snapshot?.servers.first(where: \.isLocal)
+        guard let snapshot = appModel.snapshot else { return nil }
+        if let activeServerId = snapshot.activeThread?.serverId,
+           let activeServer = snapshot.serverSnapshot(for: activeServerId),
+           activeServer.isConnected,
+           !activeServer.isLocal {
+            return activeServer
+        }
+        return snapshot.servers.first(where: { $0.isConnected && !$0.isLocal })
     }
 
     var body: some View {
@@ -25,10 +29,8 @@ private struct AccountConnectionView: View {
     let server: AppServerSnapshot
     let dismiss: DismissAction
 
-    @State private var apiKey = ""
     @State private var isWorking = false
     @State private var authError: String?
-    @State private var hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
 
     var body: some View {
         NavigationStack {
@@ -59,7 +61,6 @@ private struct AccountConnectionView: View {
             }
             .task(id: server.serverId) {
                 await refreshAccount()
-                hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
             }
         }
     }
@@ -84,9 +85,12 @@ private struct AccountConnectionView: View {
                             .remoraFont(.caption)
                             .foregroundColor(RemoraTheme.textSecondary)
                     }
+                    Text(server.displayName)
+                        .remoraFont(.caption)
+                        .foregroundColor(RemoraTheme.textMuted)
                 }
                 Spacer()
-                if server.isLocal, server.account != nil {
+                if server.account != nil {
                     Button("Logout") {
                         Task { await logout() }
                     }
@@ -99,13 +103,6 @@ private struct AccountConnectionView: View {
             .background(.ultraThinMaterial)
             .cornerRadius(10)
             .padding(.horizontal, 16)
-
-            if server.isLocal, hasStoredApiKey {
-                Text("Local OpenAI API key is saved.")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.accent)
-                    .padding(.horizontal, 20)
-            }
         }
     }
 
@@ -116,7 +113,7 @@ private struct AccountConnectionView: View {
                 .foregroundColor(RemoraTheme.textMuted)
                 .padding(.horizontal, 20)
 
-            if server.isLocal, !isChatGPTAccount {
+            if !isChatGPTAccount {
                 Button {
                     Task {
                         isWorking = true
@@ -141,62 +138,7 @@ private struct AccountConnectionView: View {
                 .padding(.horizontal, 16)
                 .disabled(isWorking)
             }
-
-            if server.isLocal, allowsLocalEnvApiKey {
-                Text("— or save an API key for the local environment —")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.textMuted)
-                    .frame(maxWidth: .infinity)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    if hasStoredApiKey {
-                        Text("OpenAI API key saved in the local environment.")
-                            .remoraFont(.caption)
-                            .foregroundColor(RemoraTheme.textSecondary)
-                            .padding(.horizontal, 16)
-                    } else if isChatGPTAccount {
-                        Text("Save an OpenAI API key in the local Codex environment.")
-                            .remoraFont(.caption)
-                            .foregroundColor(RemoraTheme.textSecondary)
-                            .padding(.horizontal, 16)
-                    }
-
-                    SecureField("sk-...", text: $apiKey)
-                        .remoraFont(.subheadline)
-                        .foregroundColor(RemoraTheme.textPrimary)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(12)
-                        .background(RemoraTheme.surface)
-                        .cornerRadius(8)
-                        .padding(.horizontal, 16)
-
-                    Button {
-                        let key = apiKey.trimmingCharacters(in: .whitespaces)
-                        guard !key.isEmpty else { return }
-                        Task {
-                            isWorking = true
-                            await saveApiKey(key)
-                            isWorking = false
-                        }
-                    } label: {
-                        Text(hasStoredApiKey ? "Update API Key" : "Save API Key")
-                            .remoraFont(.subheadline)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                            .frame(maxWidth: .infinity)
-                            .padding(12)
-                            .background(RemoraTheme.surface)
-                            .cornerRadius(8)
-                            .padding(.horizontal, 16)
-                    }
-                    .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
-                }
-            }
         }
-    }
-
-    private var allowsLocalEnvApiKey: Bool {
-        server.isLocal
     }
 
     private var isChatGPTAccount: Bool {
@@ -252,13 +194,9 @@ private struct AccountConnectionView: View {
     }
 
     private func loginWithChatGPT() async {
-        guard server.isLocal else {
-            authError = "Account login is only available for the local server."
-            return
-        }
         do {
             authError = nil
-            try await appModel.loginLocalChatGPTAccount(serverId: server.serverId)
+            try await appModel.loginChatGPTAccount(serverId: server.serverId)
         } catch ChatGPTOAuthError.cancelled {
             return
         } catch {
@@ -266,39 +204,10 @@ private struct AccountConnectionView: View {
         }
     }
 
-    private func saveApiKey(_ key: String) async {
-        guard server.isLocal else {
-            authError = "API keys can only be saved for the local server."
-            return
-        }
-        do {
-            authError = nil
-            try OpenAIApiKeyStore.shared.save(key)
-            if case .apiKey? = server.account {
-                _ = try await appModel.client.logoutAccount(serverId: server.serverId)
-            }
-            try await appModel.restartLocalServer()
-            hasStoredApiKey = OpenAIApiKeyStore.shared.hasStoredKey
-            guard hasStoredApiKey else {
-                authError = "API key did not persist locally."
-                return
-            }
-            dismiss()
-        } catch {
-            authError = error.localizedDescription
-        }
-    }
-
     private func logout() async {
-        guard server.isLocal else {
-            authError = "Account logout is only available for the local server."
-            return
-        }
         do {
-            try? ChatGPTOAuthTokenStore.shared.clear()
-            try? OpenAIApiKeyStore.shared.clear()
             _ = try await appModel.client.logoutAccount(serverId: server.serverId)
-            try await appModel.restartLocalServer()
+            await appModel.refreshSnapshot()
             authError = nil
         } catch {
             authError = error.localizedDescription
@@ -314,10 +223,10 @@ private struct AccountDisconnectedView: View {
             ZStack {
                 RemoraTheme.backgroundGradient.ignoresSafeArea()
                 VStack(spacing: 16) {
-                    Text("Local Codex isn't running")
+                    Text("No server connected")
                         .remoraFont(.subheadline)
                         .foregroundColor(RemoraTheme.textPrimary)
-                    Text("ChatGPT login and API key entry require the local Codex bridge.")
+                    Text("Connect a remote server to manage its ChatGPT account.")
                         .remoraFont(.caption)
                         .foregroundColor(RemoraTheme.textSecondary)
                         .multilineTextAlignment(.center)

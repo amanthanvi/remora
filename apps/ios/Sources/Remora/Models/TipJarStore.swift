@@ -24,10 +24,10 @@ final class TipJarStore {
     }
 
     private(set) var tiers: [TipTier] = [
-        TipTier(id: "com.remora.app.tip.10", displayName: "$9.99 Tip", fallbackPrice: "$9.99", icon: "support_badge_10"),
-        TipTier(id: "com.remora.app.tip.25", displayName: "$24.99 Tip", fallbackPrice: "$24.99", icon: "support_badge_25"),
-        TipTier(id: "com.remora.app.tip.50", displayName: "$49.99 Tip", fallbackPrice: "$49.99", icon: "support_badge_50"),
-        TipTier(id: "com.remora.app.tip.100", displayName: "$99.99 Tip", fallbackPrice: "$99.99", icon: "support_badge_100"),
+        TipTier(id: "com.remora.app.tip.10", displayName: "$9.99 Tip", fallbackPrice: "$9.99", icon: "heart.fill"),
+        TipTier(id: "com.remora.app.tip.25", displayName: "$24.99 Tip", fallbackPrice: "$24.99", icon: "heart.fill"),
+        TipTier(id: "com.remora.app.tip.50", displayName: "$49.99 Tip", fallbackPrice: "$49.99", icon: "heart.fill"),
+        TipTier(id: "com.remora.app.tip.100", displayName: "$99.99 Tip", fallbackPrice: "$99.99", icon: "heart.fill"),
     ]
     private(set) var purchaseState: PurchaseState = .idle
     private(set) var isLoading = true

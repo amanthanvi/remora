@@ -104,10 +104,6 @@ private final class DirectoryPickerSheetModel {
 
     var canNavigateUp: Bool {
         guard !currentPath.isEmpty, !RemotePath.parse(path: currentPath).isRoot() else { return false }
-        // Clamp the local picker at the user-facing `~` anchor. Everything
-        // above it is iOS container internals the user has no business
-        // poking at.
-        if isLocal, currentPath == HomeAnchor.path { return false }
         return true
     }
 
@@ -125,17 +121,9 @@ private final class DirectoryPickerSheetModel {
     }
 
     func pathSegments() -> [DirectoryPathBreadcrumb] {
-        let raw = RemotePath.parse(path: currentPath).segments().map {
+        RemotePath.parse(path: currentPath).segments().map {
             DirectoryPathBreadcrumb(id: $0.fullPath, label: $0.label, path: $0.fullPath)
         }
-        guard isLocal else { return raw }
-        // Hide every breadcrumb above the user-facing `~` anchor and
-        // relabel the anchor segment itself to "~" so the trail reads
-        // `~ / projects / foo` instead of `var / mobile / … / codex / projects / foo`.
-        let home = HomeAnchor.path
-        let homeRoot = DirectoryPathBreadcrumb(id: home, label: "~", path: home)
-        let suffix = raw.drop { $0.path != home }.dropFirst()
-        return [homeRoot] + Array(suffix)
     }
 
     func relativeDate(for date: Date) -> String {
@@ -235,38 +223,10 @@ private final class DirectoryPickerSheetModel {
         isLoading = true
         errorMessage = nil
 
-        if isLocalServer {
-            await listLocalDirectory(normalizedPath, serverId: serverId)
-        } else {
-            await listRemoteDirectory(normalizedPath, serverId: serverId, appModel: appModel)
-        }
+        await listRemoteDirectory(normalizedPath, serverId: serverId, appModel: appModel)
 
         if serverId == lastLoadedServerId {
             isLoading = false
-        }
-    }
-
-    private func listLocalDirectory(_ path: String, serverId: String) async {
-        // Local paths live inside the iSH fakefs, which iOS-side `FileManager`
-        // cannot see. Route directory enumeration through the iSH shell so we
-        // get the actual fakefs contents. BusyBox-safe pipeline (no GNU
-        // `-printf`).
-        let result = await IshFS.run(
-            "find \(IshFS.shellQuote(path)) -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '{print $NF}' | sort"
-        )
-        guard serverId == lastLoadedServerId else { return }
-        guard result.exitCode == 0 else {
-            errorMessage = result.output.isEmpty
-                ? "Couldn't list \(path)"
-                : result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            return
-        }
-        let dirs = result.output
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
-        allEntries = dirs
-        withAnimation(.easeInOut(duration: 0.2)) {
-            currentPath = path
         }
     }
 
@@ -332,19 +292,10 @@ private final class DirectoryPickerSheetModel {
         }
         let target = RemotePath.parse(path: currentPath).join(name: trimmed).asString()
         do {
-            if isLocalServer {
-                let result = await IshFS.run("mkdir -p \(IshFS.shellQuote(target))")
-                if result.exitCode != 0 {
-                    return result.output.isEmpty
-                        ? DirectoryPickerStrings.createFolderFailed
-                        : result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            } else {
-                try await appModel.client.createRemoteDirectory(
-                    serverId: selectedServerId,
-                    path: target
-                )
-            }
+            try await appModel.client.createRemoteDirectory(
+                serverId: selectedServerId,
+                path: target
+            )
         } catch {
             return error.localizedDescription
         }
@@ -380,9 +331,6 @@ private final class DirectoryPickerSheetModel {
     ) async -> String {
         guard appModel.snapshot?.servers.first(where: { $0.serverId == serverId })?.canBrowseDirectories == true else {
             return "/"
-        }
-        if isLocalServer {
-            return HomeAnchor.path
         }
         do {
             return try await appModel.client.resolveRemoteHome(serverId: serverId)

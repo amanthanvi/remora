@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// Bridge alias: Rust exposes agent identity as an opaque `String` (the
-/// lowercase id alleycat advertises). The legacy `AgentRuntimeKind`
+/// lowercase id the paired host advertises). The legacy `AgentRuntimeKind`
 /// name is kept as a type alias so call sites compile; ALL agent
 /// metadata — label, icon, BETA badge, sort order, capability flags —
 /// comes from `AgentMetadataStore` keyed by id. There is no hardcoded
 /// catalog of agent names in remora, so adding a new agent only
-/// requires an entry in the alleycat manifest.
+/// requires an entry in the host manifest.
 typealias AgentRuntimeKind = String
 
 /// Lookup hook into the Rust-owned `AgentMetadataStore`. Wired up at
@@ -25,7 +25,7 @@ extension AgentRuntimeKind {
     static let opencode: AgentRuntimeKind = "opencode"
 
     /// Presentation order surfaced by `AgentMetadataStore` (sorted by
-    /// each agent's `presentation.sort_order` from the alleycat
+    /// each agent's `presentation.sort_order` from the host
     /// manifest). Empty when no probe has populated the cache yet —
     /// callers should treat that as "no agents available."
     static var presentationOrder: [AgentRuntimeKind] {
@@ -65,8 +65,8 @@ extension AgentRuntimeKind {
         return Int.max
     }
 
-    /// BETA badge driven by `presentation.is_beta` from alleycat. Codex is
-    /// always treated as stable, including cold-start SSH/alleycat paths where
+    /// BETA badge driven by `presentation.is_beta` from host metadata. Codex is
+    /// always treated as stable, including cold-start SSH/pairing paths where
     /// metadata may not be cached yet. Other unknown agents stay beta by
     /// default until metadata says otherwise.
     var isBeta: Bool {
@@ -94,7 +94,7 @@ extension AgentRuntimeKind {
     /// is bundled — callers fall back to a monogram chip via
     /// `AgentIconView`. Remora ships icons for the agents it knows
     /// about (codex, claude, etc.) and renders a monogram for anything
-    /// new that alleycat advertises.
+    /// new that the paired host advertises.
     var bundledAssetName: String? {
         let candidate = "agent_\(self)"
         return UIImage(named: candidate) != nil ? candidate : nil
@@ -126,7 +126,7 @@ extension AgentRuntimeKind {
 /// Renders an agent's icon from the local asset catalog (`agent_<id>`)
 /// when one is bundled, otherwise falls back to a monogram letter chip.
 /// Use this everywhere instead of `Image(kind.assetName)` — it keeps
-/// new alleycat-advertised agents renderable without shipping a remora
+/// newly advertised agents renderable without shipping a Remora
 /// release first.
 struct AgentIconView: View {
     let kind: AgentRuntimeKind

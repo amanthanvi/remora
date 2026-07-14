@@ -253,7 +253,7 @@ final class RealtimeWebRtcSession: NSObject {
         case .headphones, .headsetMic, .usbAudio:
             return .headphones(fallbackName)
         case .carAudio:
-            return .carPlay(fallbackName)
+            return .unknown(fallbackName)
         case .airPlay:
             return .airPlay(fallbackName)
         default:

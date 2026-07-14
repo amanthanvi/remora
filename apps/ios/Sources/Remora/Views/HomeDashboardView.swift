@@ -81,7 +81,6 @@ struct HomeDashboardView: View {
     @State private var zoomDirection: Int = 1
     @State private var renameServerTarget: HomeDashboardServer?
     @State private var renameServerText = ""
-    @State private var isShowingMountedFolders = false
     @State private var inputMode: HomeInputMode = .collapsed
     @State private var searchQuery = ""
     @State private var selectedSearchRuntimeKind: AgentRuntimeKind?
@@ -274,9 +273,6 @@ struct HomeDashboardView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
-            .sheet(isPresented: $isShowingMountedFolders) {
-                MountedFoldersView()
-            }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(sidebarNavBarVisibility, for: .navigationBar)
@@ -467,7 +463,6 @@ struct HomeDashboardView: View {
                 renameServerTarget = server
             },
             onRemove: { server in onDisconnectServer?(server.id) },
-            onShowMountedFolders: { _ in isShowingMountedFolders = true },
             onAdd: onAddServer
         )
         .frame(maxWidth: .infinity)
@@ -628,21 +623,9 @@ struct HomeDashboardView: View {
 }
 
 private struct EmptyHomeMascotView: View {
-    @State private var showingLoop = false
-
-    private let entranceURL = Bundle.main.url(forResource: "remora_home_entrance", withExtension: "png")
-    private let loopURL = Bundle.main.url(forResource: "remora_home", withExtension: "png")
-
     var body: some View {
         RemoraTransmissionPressView {
-            if let imageURL = showingLoop ? loopURL : (entranceURL ?? loopURL) {
-                AlphaAnimatedImageView(
-                    fileURL: imageURL,
-                    repeatCount: showingLoop ? 0 : 1,
-                    onFinished: showingLoop ? nil : { showingLoop = true }
-                )
-                .accessibilityHidden(true)
-            }
+            RemoraLogo(size: 132)
         }
     }
 }

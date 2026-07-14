@@ -2,65 +2,22 @@ import Foundation
 
 /// Convert filesystem paths to short, user-facing strings.
 ///
-/// For **local** codex paths, rewrites the app-container Documents home
-/// and the app's `NSTemporaryDirectory()` to `~` and `/tmp` so the UI
-/// shows `~/projects/foo` and `/tmp/x.txt` instead of
-/// `/var/mobile/Containers/Data/Application/<UUID>/Documents/home/codex/...`.
-///
-/// For **remote** paths, delegates to the existing `abbreviateHomePath`
+/// Delegates to the existing `abbreviateHomePath`
 /// which shortens `/Users/<user>/<subpath>` and `/home/<user>/<subpath>`
 /// to `~/<subpath>`.
 enum PathDisplay {
-    /// Callers pass `isLocal = true` only when `raw` is a path on the
-    /// in-process iOS codex. Remote-server paths (SSH/WebSocket) go
-    /// through `abbreviateHomePath`.
-    static func display(_ raw: String, isLocal: Bool) -> String {
+    static func display(_ raw: String, isLocal _: Bool) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return isLocal ? "~" : trimmed }
-        guard isLocal else { return remoteDisplay(trimmed) }
-        let home = HomeAnchor.path
-        if trimmed == home { return "~" }
-        if trimmed.hasPrefix(home + "/") {
-            return "~/" + trimmed.dropFirst(home.count + 1)
-        }
-        let tmp = realTmp()
-        if !tmp.isEmpty {
-            if trimmed == tmp { return "/tmp" }
-            if trimmed.hasPrefix(tmp + "/") {
-                return "/tmp/" + trimmed.dropFirst(tmp.count + 1)
-            }
-        }
-        return trimmed
+        guard !trimmed.isEmpty else { return trimmed }
+        return remoteDisplay(trimmed)
     }
 
     /// Inverse of `display`. Accepts user-entered display strings (`~/foo`,
     /// `/tmp/x`, or remote `~\foo`) and produces an absolute path for the
     /// selected host.
-    static func expand(_ display: String, isLocal: Bool, remoteHome: String? = nil) -> String {
+    static func expand(_ display: String, isLocal _: Bool, remoteHome: String? = nil) -> String {
         let trimmed = display.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isLocal else {
-            return expandRemoteDisplay(trimmed, remoteHome: remoteHome)
-        }
-        if trimmed == "~" { return HomeAnchor.path }
-        if trimmed.hasPrefix("~/") {
-            return HomeAnchor.path + "/" + trimmed.dropFirst(2)
-        }
-        let tmp = realTmp()
-        if !tmp.isEmpty {
-            if trimmed == "/tmp" { return tmp }
-            if trimmed.hasPrefix("/tmp/") {
-                return tmp + "/" + trimmed.dropFirst(5)
-            }
-        }
-        return trimmed
-    }
-
-    private static func realTmp() -> String {
-        let raw = NSTemporaryDirectory()
-        // Strip trailing slash so comparisons are uniform with prefix
-        // matching that adds `/`.
-        if raw.hasSuffix("/") { return String(raw.dropLast()) }
-        return raw
+        return expandRemoteDisplay(trimmed, remoteHome: remoteHome)
     }
 
     private static func remoteDisplay(_ trimmed: String) -> String {

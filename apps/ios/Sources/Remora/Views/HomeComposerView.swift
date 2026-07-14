@@ -231,9 +231,6 @@ struct HomeComposerView: View {
         Task {
             defer { isSubmitting = false }
             do {
-                guard try await appModel.ensureLocalAuthForThreadStart(serverId: project.serverId) else {
-                    return
-                }
                 inputText = ""
                 attachedImage = nil
                 attachedFiles = []
@@ -257,7 +254,7 @@ struct HomeComposerView: View {
                     serverId: project.serverId,
                     params: launchConfig.threadStartRequest(
                         cwd: project.cwd,
-                        dynamicTools: appModel.localGenerativeUiToolSpecs(for: project.serverId)
+                        dynamicTools: nil
                     )
                 )
                 RecentDirectoryStore.shared.record(path: project.cwd, for: project.serverId)

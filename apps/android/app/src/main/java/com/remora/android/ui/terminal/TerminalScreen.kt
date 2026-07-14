@@ -26,7 +26,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.outlined.PhoneIphone
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -63,7 +62,6 @@ import com.remora.android.core.bridge.GhosttyRendererBridge
 import com.remora.android.core.bridge.GhosttyRendererStatus
 import com.remora.android.state.ActiveTerminalRegistry
 import com.remora.android.state.AlleycatCredentialStore
-import com.remora.android.state.AndroidProotBootstrap
 import com.remora.android.state.AppModel
 import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SavedSshCredential
@@ -85,12 +83,11 @@ fun TerminalScreen(
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val controller = remember { TerminalSessionController(scope) }
-    val prootState by AndroidProotBootstrap.state.collectAsState()
     val rendererStatus = remember { GhosttyRendererBridge.status() }
     var nativeRendererAvailable by remember {
         mutableStateOf(rendererStatus.canCreateAndroidSurface)
     }
-    val backendOptions = remember(cwd, prootState) { loadBackendOptions(context, cwd, prootState) }
+    val backendOptions = remember(cwd) { loadBackendOptions(context, cwd) }
     var selectedBackendId by remember(preferredAlleycatNodeId) { mutableStateOf<String?>(null) }
     val selectedBackend = backendOptions.firstOrNull { it.id == selectedBackendId }
         ?: backendOptions.firstOrNull()
@@ -180,7 +177,6 @@ fun TerminalScreen(
             rendererStatus = rendererStatus,
             nativeRendererAvailable = nativeRendererAvailable,
             onNativeRendererUnavailable = { nativeRendererAvailable = false },
-            prootState = prootState,
             selectedBackend = selectedBackend,
             terminalGridSize = terminalGridSize,
             onTerminalGridSizeChanged = { terminalGridSize = it },
@@ -340,7 +336,6 @@ private fun TerminalOutputPane(
     rendererStatus: GhosttyRendererStatus,
     nativeRendererAvailable: Boolean,
     onNativeRendererUnavailable: () -> Unit,
-    prootState: AndroidProotBootstrap.BootstrapState,
     selectedBackend: TerminalBackendOption?,
     terminalGridSize: TerminalGridSize,
     onTerminalGridSizeChanged: (TerminalGridSize) -> Unit,
@@ -373,7 +368,15 @@ private fun TerminalOutputPane(
                 )
             },
     ) {
-        if (nativeRendererAvailable) {
+        if (selectedBackend == null) {
+            Text(
+                text = terminalEmptyMessage(),
+                color = RemoraTheme.textSecondary,
+                fontFamily = RemoraTheme.monoFont,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+        } else if (nativeRendererAvailable) {
             GhosttyTerminalSurface(
                 controller = controller,
                 rendererStatus = rendererStatus,
@@ -407,7 +410,7 @@ private fun TerminalOutputPane(
                 ) {
                     Text(
                         text = controller.output.ifEmpty {
-                            terminalEmptyMessage(prootState, selectedBackend)
+                            ""
                         },
                         color = RemoraTheme.accent,
                         fontFamily = RemoraTheme.monoFont,
@@ -662,21 +665,8 @@ private fun initialBackendId(
 private fun loadBackendOptions(
     context: Context,
     cwd: String?,
-    prootState: AndroidProotBootstrap.BootstrapState,
 ): List<TerminalBackendOption> {
     val options = mutableListOf<TerminalBackendOption>()
-    if (prootState.status == AndroidProotBootstrap.Status.Ready) {
-        options.add(
-            TerminalBackendOption(
-                id = "local-proot",
-                title = "Local Alpine",
-                runningLabel = "local alpine",
-                icon = Icons.Outlined.PhoneIphone,
-                supportsResize = true,
-                backend = TerminalBackendKind.LocalProot(normalized(cwd)),
-            ),
-        )
-    }
     val credentialStore = AlleycatCredentialStore(context.applicationContext)
     val sshCredentialStore = SshCredentialStore(context.applicationContext)
     val seenNodeIds = mutableSetOf<String>()
@@ -726,7 +716,7 @@ private fun loadBackendOptions(
                     auth = auth,
                     shell = null,
                     acceptUnknownHost = false,
-                    cwd = null,
+                    cwd = normalized(cwd),
                 ),
             ),
         )
@@ -746,24 +736,8 @@ private fun SavedSshCredential.toTerminalSshAuth(): TerminalSshAuth? = when (met
 private fun normalized(value: String?): String? =
     value?.trim()?.takeIf { it.isNotEmpty() }
 
-private fun terminalEmptyMessage(
-    prootState: AndroidProotBootstrap.BootstrapState,
-    selectedBackend: TerminalBackendOption?,
-): String {
-    if (selectedBackend != null) return ""
-    return when (prootState.status) {
-        AndroidProotBootstrap.Status.Pending,
-        AndroidProotBootstrap.Status.Bootstrapping -> "Preparing local Alpine...\n"
-        AndroidProotBootstrap.Status.PtraceDenied ->
-            "Local Alpine is unavailable because this Android environment blocks ptrace.\nRemote shell remains available after pairing an Alleycat host.\n"
-        AndroidProotBootstrap.Status.MissingArtifact ->
-            "Local Alpine is unavailable because proot or the Alpine rootfs is not bundled.\nRemote shell remains available after pairing an Alleycat host.\n"
-        AndroidProotBootstrap.Status.Failed ->
-            "Local Alpine bootstrap failed: ${prootState.message ?: "unknown error"}\nRemote shell remains available after pairing an Alleycat host.\n"
-        AndroidProotBootstrap.Status.Ready ->
-            "Pair an Alleycat host to open a remote shell.\n"
-    }
-}
+private fun terminalEmptyMessage(): String =
+    "Pair an Alleycat host or save SSH credentials to open a remote shell.\n"
 
 private data class TerminalGridSize(
     val cols: Int,

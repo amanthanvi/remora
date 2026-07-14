@@ -2,15 +2,14 @@
 
 ## Scope
 
-This matrix covers transport reliability and startup-path parity for Android websocket + bridge flows.
+This matrix covers transport reliability and startup behavior for Android app-server flows.
 
 ## Automated Regression Scaffolding
 
-Run unit tests for both runtime flavors:
+Run Android unit tests:
 
 ```bash
-./gradlew :app:testOnDeviceDebugUnitTest
-./gradlew :app:testRemoteOnlyDebugUnitTest
+./gradlew :app:testDebugUnitTest
 ```
 
 Current automated checks:
@@ -27,17 +26,17 @@ Current automated checks:
 
 ## Manual Matrix
 
-| Area                                            | onDevice flavor                                                                                                         | remoteOnly flavor                                 |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| App launch                                      | App launches and can start local bridge-backed session                                                                  | App launches and does not auto-start local bridge |
-| Connect local/on-device                         | Success (`ServerConfig.local`)                                                                                          | Expected failure with clear "disabled" error      |
-| Connect remote server                           | Success                                                                                                                 | Success                                           |
-| SSH-discovered remote server                    | Prompts for SSH credentials, connects through SSH port forwarding, and never attempts `ws://host:22` directly           | Same                                              |
-| Local transport drop                            | Reconnect and one-time reinitialize before next non-initialize RPC                                                      | N/A (local startup disabled)                      |
-| Remote transport drop                           | Reconnect behavior via Rust `AppStore` updates and resumed RPC notifications                                            | Same                                              |
-| Thread start/resume fallback sandbox            | `workspace-write` with `danger-full-access` fallback when linux sandbox missing                                         | Same                                              |
-| Thread turn pagination (v0.125+ remote)         | Conversation opens with last 5 turns; "Load earlier messages" button fetches older 5-turn pages via `thread/turns/list` | Same                                              |
-| Thread turn pagination fallback (v0.124 remote) | Capability flips off via response inspection; embedded turns load fully; "Load earlier" button hidden                   | Same                                              |
+| Area                                    | Expected Android behavior                                                                                               |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| App launch                              | App launches and can start an embedded or remote app-server session                                                     |
+| Connect local runtime                   | Success through the in-process Rust app-server path                                                                     |
+| Connect remote server                   | Success                                                                                                                 |
+| SSH-discovered remote server            | Prompts for SSH credentials, connects through SSH port forwarding, and never attempts `ws://host:22` directly           |
+| Local transport drop                    | Reconnect and one-time reinitialize before next non-initialize RPC                                                      |
+| Remote transport drop                   | Reconnect behavior via Rust `AppStore` updates and resumed RPC notifications                                            |
+| Thread start/resume fallback sandbox    | `workspace-write` with `danger-full-access` fallback when Linux sandboxing is unavailable                               |
+| Thread turn pagination (newer remotes)  | Conversation opens with last 5 turns; "Load earlier messages" fetches older 5-turn pages via `thread/turns/list`        |
+| Thread turn pagination fallback         | Capability flips off via response inspection; embedded turns load fully; "Load earlier messages" is hidden             |
 
 ## Terminal UX Matrix
 
@@ -76,10 +75,10 @@ broader composer autocomplete work.
 
 ## Suggested Smoke Steps
 
-1. `onDeviceDebug`: connect local default server, start thread, send turn, toggle network off/on, send another turn.
-2. `onDeviceDebug`: kill local bridge process (or force stop app), relaunch, confirm initialize and thread list recover.
-3. `remoteOnlyDebug`: attempt local connect path, verify explicit disabled error; connect remote server and run thread/list + turn/start.
-4. Both flavors: verify account read/login status refresh still updates UI after reconnect.
+1. Connect the embedded default server, start a thread, send a turn, toggle network off/on, and send another turn.
+2. Force-stop and relaunch the app; confirm initialization and the thread list recover.
+3. Connect a remote server and run `thread/list` plus `turn/start`.
+4. Verify account read/login status refresh still updates the UI after reconnect.
 
 ## Thinking-indicator Minigame (iOS + Android)
 

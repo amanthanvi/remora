@@ -15,7 +15,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
     let sshPortForwardingEnabled: Bool?
     let websocketURL: String?
     let rememberedByUser: Bool
-    /// Legacy Alleycat marker. Unsupported after the iroh-backed migration; kept so
+    /// Legacy pairing marker. Unsupported after the iroh-backed migration; kept so
     /// old records decode and can be treated as requiring a new QR scan.
     let alleycatHost: String?
     let alleycatNodeId: String?
@@ -306,14 +306,14 @@ struct SavedServer: Codable, Identifiable, Equatable {
     }
 
     private static func sshBridgeRuntimeLabel(_ kind: AgentRuntimeKind) -> String {
-        // The runtime kind IS the wire label now — alleycat advertises
+        // The runtime kind IS the wire label now — the paired host advertises
         // each agent by its lowercase id.
         kind
     }
 
-    /// UDP port the alleycat relay was bound on, parsed from the
+    /// UDP port the legacy relay was bound on, parsed from the
     /// synth `serverId` of `alleycat:<host>:<udpPort>` minted in
-    /// the legacy Alleycat QR sheet. Nil for non-Alleycat records.
+    /// the legacy pairing QR sheet. Nil for other records.
     var alleycatUdpPort: UInt16? {
         guard alleycatHost != nil else { return nil }
         guard id.hasPrefix("alleycat:") else { return nil }

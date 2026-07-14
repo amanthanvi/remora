@@ -2,8 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
-APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Remora-*/Build/Products/Debug-iphonesimulator/Remora.app 2>/dev/null | head -1 || true)"
+CONFIGURATION="${XCODE_CONFIG:-Debug}"
+if [[ -n "${XCODE_DERIVED_DATA_PATH:-}" ]]; then
+  APP_PATH="${XCODE_DERIVED_DATA_PATH}/Build/Products/${CONFIGURATION}-iphonesimulator/Remora.app"
+else
+  DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
+  APP_PATH="$(/bin/ls -dt "${DERIVED_DATA_ROOT}"/Remora-*/Build/Products/"${CONFIGURATION}"-iphonesimulator/Remora.app 2>/dev/null | head -1 || true)"
+fi
 BUNDLE_ID="com.remora.app"
 
 PROFILE_ENABLED="${IOS_SIM_PROFILE:-0}"
@@ -21,7 +26,11 @@ PROFILE_PID=""
 mkdir -p "${RUN_DIR}"
 
 if [[ -z "${APP_PATH}" ]]; then
-  echo "ERROR: Remora.app not found in DerivedData (Debug-iphonesimulator)" >&2
+  echo "ERROR: Remora.app not found in DerivedData (${CONFIGURATION}-iphonesimulator)" >&2
+  exit 1
+fi
+if [[ ! -d "${APP_PATH}" ]]; then
+  echo "ERROR: Remora.app not found at ${APP_PATH}" >&2
   exit 1
 fi
 

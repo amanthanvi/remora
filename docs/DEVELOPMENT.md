@@ -27,6 +27,12 @@
   brew install xcodegen
   ```
 
+- **Zig** (required to build the Ghostty renderer; CI pins 0.15.2):
+
+  ```bash
+  brew install zig
+  ```
+
 ## Connect Your Mac to Remora Over SSH
 
 Use this flow to make Codex sessions from your Mac visible in the iOS/Android app.
@@ -68,18 +74,9 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
 
 ## Codex Submodule + Patches
 
-Upstream Codex is vendored as a submodule at `shared/third_party/codex`.
-
-Current local patch set (applied by `sync-codex.sh`):
-
-- `patches/codex/ios-exec-hook.patch`
-- `patches/codex/client-controlled-handoff.patch`
-- `patches/codex/mobile-code-mode-stub.patch`
-
-Additional patches (not auto-applied):
-
-- `patches/codex/android-vendored-openssl.patch`
-- `patches/codex/realtime-transcript-deltas.patch`
+Upstream Codex is vendored as a submodule at `shared/third_party/codex`. The
+applied patch set and the downstream reason for each patch are documented in
+[`patches/codex/README.md`](../patches/codex/README.md).
 
 Sync/apply (idempotent):
 
@@ -118,58 +115,11 @@ xcodebuild -project apps/ios/Remora.xcodeproj -scheme Remora -configuration Debu
 
 ## Build and Run Android
 
-Prerequisites: Java 17, Android SDK + build tools for API 35, Gradle 8.x.
+Prerequisites: Java 17 or newer, Android SDK + build tools for API 35, the
+Android NDK, `cargo-ndk`, Rust via rustup, and Zig.
 
 ```bash
-open -a "Android Studio" apps/android                                  # open in Android Studio
-cd apps/android && ./gradlew :app:testDebugUnitTest                    # run tests
-gradle -p apps/android :app:assembleOnDeviceDebug :app:assembleRemoteOnlyDebug  # build flavors
+make android-emulator-fast                              # Rust JNI + debug APK
+cd apps/android && ./gradlew :app:testDebugUnitTest    # unit tests
+cd apps/android && ./gradlew :app:assembleDebug        # Gradle-only debug assemble
 ```
-
-## TestFlight (iOS)
-
-1. Authenticate with App Store Connect:
-
-   ```bash
-   asc auth login \
-     --name "Remora ASC" \
-     --key-id "<KEY_ID>" \
-     --issuer-id "<ISSUER_ID>" \
-     --private-key "$HOME/AppStore.p8" \
-     --network
-   ```
-
-2. Bootstrap TestFlight defaults:
-
-   ```bash
-   APP_BUNDLE_ID=<BUNDLE_ID> ./apps/ios/scripts/testflight-setup.sh
-   ```
-
-3. Build and upload:
-
-   ```bash
-   APP_BUNDLE_ID=<BUNDLE_ID> \
-   APP_STORE_APP_ID=<APP_STORE_CONNECT_APP_ID> \
-   TEAM_ID=<APPLE_TEAM_ID> \
-   ASC_KEY_ID=<KEY_ID> \
-   ASC_ISSUER_ID=<ISSUER_ID> \
-   ASC_PRIVATE_KEY_PATH="$HOME/AppStore.p8" \
-   ./apps/ios/scripts/testflight-upload.sh
-   ```
-
-   - Reads `MARKETING_VERSION` from `apps/ios/project.yml`; auto-bumps patch if the version is already live.
-   - Auto-increments build number from the latest App Store Connect build.
-
-## App Store Release (iOS)
-
-```bash
-APP_BUNDLE_ID=<BUNDLE_ID> \
-APP_STORE_APP_ID=<APP_STORE_CONNECT_APP_ID> \
-TEAM_ID=<APPLE_TEAM_ID> \
-ASC_KEY_ID=<KEY_ID> \
-ASC_ISSUER_ID=<ISSUER_ID> \
-ASC_PRIVATE_KEY_PATH="$HOME/AppStore.p8" \
-./apps/ios/scripts/app-store-release.sh
-```
-
-Metadata is sourced from `apps/ios/fastlane/metadata/en-US/`.

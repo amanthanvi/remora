@@ -17,7 +17,7 @@ use codex_ipc::{
     ThreadFollowerSubmitUserInputParams, TypedBroadcast, TypedRequest,
 };
 use codex_mobile_client::MobileClient;
-use codex_mobile_client::ffi::{AppClient, AppStore, ServerBridge, SshBridge};
+use codex_mobile_client::ffi::{AppClient, AppStore, ServerBridge};
 use codex_mobile_client::session::connection::ServerConfig;
 use codex_mobile_client::ssh::{SshAuth, SshCredentials};
 use codex_mobile_client::store::snapshot::{AppSnapshot, ServerHealthSnapshot, ThreadSnapshot};
@@ -66,10 +66,6 @@ struct Args {
     /// Use TLS
     #[arg(long)]
     tls: bool,
-
-    /// Override the remote IPC socket path when connecting over SSH.
-    #[arg(long)]
-    ipc_socket_path_override: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -109,10 +105,6 @@ struct AppArgs {
     /// Use TLS
     #[arg(long)]
     tls: bool,
-
-    /// Override the remote IPC socket path when connecting over SSH.
-    #[arg(long)]
-    ipc_socket_path_override: Option<String>,
 
     #[command(subcommand)]
     command: AppCommand,
@@ -177,7 +169,6 @@ struct ServerArgs {
     ws_url: Option<String>,
     port: u16,
     tls: bool,
-    ipc_socket_path_override: Option<String>,
 }
 
 #[derive(Clone)]
@@ -552,7 +543,7 @@ fn server_snapshot_json(
         "host": snapshot.host,
         "port": snapshot.port,
         "isLocal": snapshot.is_local,
-        "hasIpc": snapshot.has_ipc,
+        "hasIpc": false,
         "health": server_health_json(&snapshot.health),
         "requiresOpenaiAuth": snapshot.requires_openai_auth,
         "account": snapshot.account,
@@ -714,13 +705,7 @@ async fn connect_mobile_client(args: &AppArgs) -> Result<(Arc<MobileClient>, Str
             unlock_macos_keychain: false,
         };
         client
-            .connect_remote_over_ssh(
-                config,
-                creds,
-                true,
-                None,
-                args.ipc_socket_path_override.clone(),
-            )
+            .connect_remote_over_ssh(config, creds, true, None)
             .await
             .map_err(|e| e.to_string())?;
     } else {
@@ -1539,9 +1524,15 @@ async fn run_app_session(args: &AppArgs) -> Result<(), String> {
                 params.unwrap_or(AppListThreadsRequest {
                     cursor: None,
                     limit: None,
+                    sort_key: None,
+                    sort_direction: None,
+                    model_providers: None,
+                    source_kinds: None,
                     archived: None,
                     cwd: None,
                     search_term: None,
+                    use_state_db_only: false,
+                    runtime_kinds: None,
                 }),
             )
             .await
@@ -1818,13 +1809,12 @@ async fn run_server_cli(args: ServerArgs) -> Result<(), Box<dyn std::error::Erro
     let app_client = AppClient::new();
     let app_store = AppStore::new();
     let server_bridge = ServerBridge::new();
-    let ssh_bridge = SshBridge::new();
 
     println!("Connecting to {}...", args.host);
 
     if let Some(user) = &args.user {
-        ssh_bridge
-            .ssh_connect_remote_server(
+        server_bridge
+            .connect_remote_over_ssh(
                 server_id.clone(),
                 args.host.clone(),
                 args.host.clone(),
@@ -1836,7 +1826,6 @@ async fn run_server_cli(args: ServerArgs) -> Result<(), Box<dyn std::error::Erro
                 false,
                 true,
                 None,
-                args.ipc_socket_path_override.clone(),
             )
             .await?;
     } else if let Some(ws_url) = &args.ws_url {
@@ -1898,9 +1887,15 @@ async fn run_server_cli(args: ServerArgs) -> Result<(), Box<dyn std::error::Erro
                         AppListThreadsRequest {
                             cursor: None,
                             limit,
+                            sort_key: None,
+                            sort_direction: None,
+                            model_providers: None,
+                            source_kinds: None,
                             archived: None,
                             cwd: None,
                             search_term: None,
+                            use_state_db_only: false,
+                            runtime_kinds: None,
                         },
                     )
                     .await;
@@ -1975,6 +1970,7 @@ async fn run_server_cli(args: ServerArgs) -> Result<(), Box<dyn std::error::Erro
                     .start_thread(
                         sid.to_string(),
                         AppStartThreadRequest {
+                            agent_runtime_kind: None,
                             model: None,
                             cwd,
                             approval_policy: None,
@@ -2055,6 +2051,7 @@ async fn run_server_cli(args: ServerArgs) -> Result<(), Box<dyn std::error::Erro
                             sandbox: None,
                             developer_instructions: None,
                             persist_extended_history: false,
+                            exclude_turns: false,
                         },
                     )
                     .await;
@@ -2251,7 +2248,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_url: args.ws_url,
         port: args.port,
         tls: args.tls,
-        ipc_socket_path_override: args.ipc_socket_path_override,
     })
     .await
 }

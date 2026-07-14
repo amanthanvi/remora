@@ -2769,10 +2769,7 @@ impl MobileClient {
             request_id: upstream::RequestId::Integer(crate::next_request_id()),
             params: upstream::ThreadResumeParams {
                 thread_id: thread_id.to_string(),
-                developer_instructions:
-                    crate::local_runtime_instructions::splice_local_runtime_developer_instructions(
-                        self, server_id, None,
-                    ),
+                developer_instructions: None,
                 exclude_turns,
                 ..Default::default()
             },
@@ -3387,13 +3384,6 @@ impl MobileClient {
         let source = self.snapshot_thread(key)?;
         ensure_thread_is_editable(&source)?;
         let rollback_depth = rollback_depth_for_turn(&source, selected_turn_index as usize)?;
-
-        let developer_instructions =
-            crate::local_runtime_instructions::splice_local_runtime_developer_instructions(
-                self,
-                &key.server_id,
-                developer_instructions,
-            );
 
         let response = self
             .server_thread_fork(

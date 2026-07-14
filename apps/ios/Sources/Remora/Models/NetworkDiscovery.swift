@@ -142,17 +142,6 @@ final class NetworkDiscovery {
         isInitialLoad = true
         scanProgress = 0
         scanProgressLabel = "Discovering services…"
-        if RemoraPlatform.supportsLocalRuntime {
-            servers.append(DiscoveredServer(
-                id: "local",
-                name: RemoraPlatform.localRuntimeDisplayName(),
-                hostname: "127.0.0.1",
-                port: nil,
-                source: .local,
-                hasCodexServer: true
-            ))
-        }
-
         initialLoadTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.2))
             await MainActor.run { [weak self] in
@@ -264,8 +253,7 @@ final class NetworkDiscovery {
             return server
         }
 
-        let local = servers.filter { $0.source == .local }
-        servers = local + reconcileNetworkServers(resolved + metadataSources)
+        servers = reconcileNetworkServers(resolved + metadataSources)
         saveCachedNetworkServers()
     }
 
@@ -758,7 +746,7 @@ final class NetworkDiscovery {
 
 @MainActor
 /// Resolved Bonjour service — name, host (first IPv4), and port. Shared
-/// shape for `_codex._tcp`, `_ssh._tcp`, and `_remora-pair._tcp.` clients.
+/// shape for `_codex._tcp` and `_ssh._tcp` clients.
 struct BonjourResolvedService: Hashable {
     let name: String
     let host: String

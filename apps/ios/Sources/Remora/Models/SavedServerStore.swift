@@ -1,5 +1,4 @@
 import Foundation
-import UIKit
 
 extension Notification.Name {
     static let remoraSavedServersDidChange = Notification.Name("remoraSavedServersDidChange")
@@ -18,7 +17,8 @@ enum SavedServerStore {
     static func load() -> [SavedServer] {
         guard let data = UserDefaults.standard.data(forKey: savedServersKey) else { return [] }
         let decoded = (try? JSONDecoder().decode([SavedServer].self, from: data)) ?? []
-        let migrated = decoded.map { saved -> SavedServer in
+        let migrated = decoded.compactMap { saved -> SavedServer? in
+            guard saved.id != "local", saved.source != .local else { return nil }
             let server = saved.toDiscoveredServer()
             let restored = SavedServer
                 .from(server, rememberedByUser: saved.rememberedByUser)
@@ -29,9 +29,6 @@ enum SavedServerStore {
                     agentName: saved.alleycatAgentName,
                     agentWire: saved.alleycatAgentWire
                 )
-            if shouldReplaceLegacyLocalPlaceholder(restored) {
-                return restored.withName(RemoraPlatform.localRuntimeDisplayName())
-            }
             if shouldReplaceLegacyAlleycatPlaceholder(restored) {
                 return restored.withName(alleycatFallbackDisplayName(restored))
             }
@@ -63,7 +60,7 @@ enum SavedServerStore {
         save(saved)
     }
 
-    /// Legacy Alleycat persistence path. Kept so old app builds can still
+    /// Legacy pairing persistence path. Kept so old app builds can still
     /// decode records; current host pairings use `rememberAlleycat`.
     static func rememberAlleycat(_ server: DiscoveredServer, relayHost: String) {
         var saved = load()
@@ -113,41 +110,9 @@ enum SavedServerStore {
         load().filter(\.rememberedByUser)
     }
 
-    static func reconnectRecords(
-        localDisplayName: String,
-        rememberedOnly: Bool = false
-    ) -> [SavedServerRecord] {
+    static func reconnectRecords(rememberedOnly: Bool = false) -> [SavedServerRecord] {
         let saved = rememberedOnly ? rememberedServers() : load()
-        var records = saved.map { $0.toRecord() }
-        if RemoraPlatform.supportsLocalRuntime,
-           records.contains(where: { $0.id == "local" || $0.source == ServerSource.local.rawValue }) == false {
-            records.append(
-                SavedServerRecord(
-                    id: "local",
-                    name: localDisplayName,
-                    hostname: "127.0.0.1",
-                    port: 0,
-                    codexPorts: [],
-                    sshPort: nil,
-                    source: ServerSource.local.rawValue,
-                    hasCodexServer: true,
-                    wakeMac: nil,
-                    preferredConnectionMode: nil,
-                    preferredCodexPort: nil,
-                    sshPortForwardingEnabled: nil,
-                    websocketUrl: nil,
-                    rememberedByUser: true,
-                    alleycatHost: nil,
-                    alleycatUdpPort: nil,
-                    alleycatNodeId: nil,
-                    alleycatToken: nil,
-                    alleycatRelay: nil,
-                    alleycatAgentName: nil,
-                    alleycatAgentWire: nil
-                )
-            )
-        }
-        return records
+        return saved.map { $0.toRecord() }
     }
 
     static func remove(serverId: String) {
@@ -242,11 +207,6 @@ enum SavedServerStore {
         return normalized.lowercased()
     }
 
-    private static func shouldReplaceLegacyLocalPlaceholder(_ server: SavedServer) -> Bool {
-        server.source == .local
-            && server.name.trimmingCharacters(in: .whitespacesAndNewlines) == "This Device"
-    }
-
     private static func shouldReplaceLegacyAlleycatPlaceholder(_ server: SavedServer) -> Bool {
         guard server.alleycatNodeId != nil else { return false }
         let name = server.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -256,11 +216,11 @@ enum SavedServerStore {
     private static func alleycatFallbackDisplayName(_ server: SavedServer) -> String {
         guard let nodeId = server.alleycatNodeId?.trimmingCharacters(in: .whitespacesAndNewlines),
               !nodeId.isEmpty else {
-            return "Alleycat"
+            return "Remora Host"
         }
         if nodeId.count <= 16 {
-            return "Alleycat \(nodeId)"
+            return "Remora \(nodeId)"
         }
-        return "Alleycat \(nodeId.prefix(8))...\(nodeId.suffix(8))"
+        return "Remora \(nodeId.prefix(8))...\(nodeId.suffix(8))"
     }
 }

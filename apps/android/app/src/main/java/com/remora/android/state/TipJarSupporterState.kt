@@ -29,22 +29,22 @@ object TipJarSupporterState {
     private val tiers: List<Tier> = listOf(
         Tier(
             key = "tip_10",
-            iconRes = com.remora.android.R.drawable.tip_cat_10,
+            iconRes = com.remora.android.R.drawable.supporter_badge,
             productIds = listOf("tip_10", "com.remora.android.tip.10"),
         ),
         Tier(
             key = "tip_25",
-            iconRes = com.remora.android.R.drawable.tip_cat_25,
+            iconRes = com.remora.android.R.drawable.supporter_badge,
             productIds = listOf("tip_25", "com.remora.android.tip.25"),
         ),
         Tier(
             key = "tip_50",
-            iconRes = com.remora.android.R.drawable.tip_cat_50,
+            iconRes = com.remora.android.R.drawable.supporter_badge,
             productIds = listOf("tip_50", "com.remora.android.tip.50"),
         ),
         Tier(
             key = "tip_100",
-            iconRes = com.remora.android.R.drawable.tip_cat_100,
+            iconRes = com.remora.android.R.drawable.supporter_badge,
             productIds = listOf("tip_100", "com.remora.android.tip.100"),
         ),
     )

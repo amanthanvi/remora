@@ -1,7 +1,6 @@
 use crate::MobileClient;
 use crate::ffi::ClientError;
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
-use crate::local_runtime_instructions::splice_local_runtime_developer_instructions;
 use crate::next_request_id;
 use crate::types;
 use base64::Engine;
@@ -367,11 +366,6 @@ impl AppClient {
                 splice_saved_apps_context(c.as_ref(), None, params.developer_instructions);
             params.developer_instructions =
                 splice_generative_ui_preamble(&params.dynamic_tools, params.developer_instructions);
-            params.developer_instructions = splice_local_runtime_developer_instructions(
-                c.as_ref(),
-                &server_id,
-                params.developer_instructions,
-            );
             let params = convert_params::<_, upstream::ThreadStartParams>(params)?;
             let response: upstream::ThreadStartResponse = rpc_runtime(
                 c.as_ref(),
@@ -402,11 +396,6 @@ impl AppClient {
             params.developer_instructions = splice_saved_apps_context(
                 c.as_ref(),
                 Some(thread_id.as_str()),
-                params.developer_instructions,
-            );
-            params.developer_instructions = splice_local_runtime_developer_instructions(
-                c.as_ref(),
-                &server_id,
                 params.developer_instructions,
             );
             // Resume requests don't carry `dynamic_tools` (the server
@@ -521,12 +510,6 @@ impl AppClient {
         params: types::AppForkThreadRequest,
     ) -> Result<types::ThreadKey, ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            let mut params = params;
-            params.developer_instructions = splice_local_runtime_developer_instructions(
-                c.as_ref(),
-                &server_id,
-                params.developer_instructions,
-            );
             let params = convert_params::<_, upstream::ThreadForkParams>(params)?;
             let response: upstream::ThreadForkResponse =
                 rpc(c.as_ref(), &server_id, req!(server_id, ThreadFork, params)).await?;
@@ -2613,15 +2596,8 @@ async fn perform_update_saved_app(
     let html_path = html_dir.join(&html_filename);
     let initial_html = current.widget_html.clone();
 
-    // Path the model gets as its working directory. On iOS we mount the
-    // canonical `Documents/Apps/` at `/mnt/apps/` inside the iSH fakefs at
-    // boot (see IshBridge.m:codex_ish_mount_apps_dir), so `apply_patch`
-    // against `./<file>.html` lands on the same physical bytes the Rust
-    // poller reads from `html_path`. Other platforms hand the iOS-sandbox
-    // path through directly (whatever local-shell they have can see it).
-    #[cfg(all(target_os = "ios", not(target_abi = "macabi")))]
-    let thread_cwd = "/mnt/apps/html".to_string();
-    #[cfg(not(all(target_os = "ios", not(target_abi = "macabi"))))]
+    // Path the model gets as its working directory. Local server processes
+    // receive the same on-disk directory that the live-sync poller reads.
     let thread_cwd = html_dir.to_string_lossy().into_owned();
 
     let developer_instructions = build_saved_app_update_seed(

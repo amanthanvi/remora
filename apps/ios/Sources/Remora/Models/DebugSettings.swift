@@ -12,7 +12,6 @@ enum StreamingEffectKind: String, CaseIterable, Identifiable {
     case rainbow = "Rainbow"
     case fireTrail = "Fire Trail"
     case explosion = "Explosion"
-    case nyanCat = "Nyan Cat"
     case matrixDecode = "Matrix Decode"
     case phosphorCRT = "Phosphor CRT"
     case shockwave = "Shockwave"
@@ -30,7 +29,6 @@ enum StreamingEffectKind: String, CaseIterable, Identifiable {
         case .rainbow: return RainbowEffect(trailLength: 12)
         case .fireTrail: return FireTrailEffect(trailLength: 15)
         case .explosion: return ExplosionEffect()
-        case .nyanCat: return NyanCatEffect()
         case .matrixDecode: return MatrixDecodeEffect()
         case .phosphorCRT: return PhosphorCRTEffect()
         case .shockwave: return ShockwaveEffect()

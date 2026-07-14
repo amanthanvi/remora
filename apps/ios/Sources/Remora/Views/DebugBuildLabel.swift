@@ -3,7 +3,7 @@ import SwiftUI
 enum BuildInfo {
     /// True only for installs that came from the App Store production
     /// listing (App Store receipt, no embedded provisioning profile, not
-    /// simulator, not Debug). TestFlight, dev sideloads, and simulator all
+    /// simulator, not Debug). Beta, development, and simulator installs all
     /// return false.
     static var isAppStoreProduction: Bool {
         #if DEBUG

@@ -208,10 +208,10 @@ final class ThemeManager {
         }
     }
 
-    // MARK: - Shared UserDefaults for Live Activity widget
+    // MARK: - Shared UserDefaults
 
     /// Call after changing the fontFamily preference to sync it to the app group
-    /// so the Live Activity widget can read it.
+    /// so auxiliary surfaces can read it.
     func syncFontPreference() {
         guard let shared = UserDefaults(suiteName: Self.appGroupSuite) else { return }
         let family = UserDefaults.standard.string(forKey: "fontFamily") ?? "mono"

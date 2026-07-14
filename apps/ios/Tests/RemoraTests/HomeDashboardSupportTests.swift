@@ -231,7 +231,7 @@ final class HomeDashboardSupportTests: XCTestCase {
             activeServerId: nil
         )
 
-        XCTAssertEqual(result.first?.sourceLabel, "alleycat")
+        XCTAssertEqual(result.first?.sourceLabel, "paired")
         XCTAssertEqual(result.first?.agentRuntimes.map(\.kind), [.codex, .droid])
     }
 
@@ -373,7 +373,9 @@ final class HomeDashboardSupportTests: XCTestCase {
             activeThread: activeThread,
             pendingApprovals: [],
             pendingUserInputs: [],
-            voiceSession: inactiveVoiceSession()
+            voiceSession: inactiveVoiceSession(),
+            terminalSessions: [],
+            activeTerminalId: nil
         )
     }
 

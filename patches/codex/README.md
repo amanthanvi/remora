@@ -13,7 +13,10 @@ Lets iOS install a function pointer that core's exec layer calls instead of `for
 
 Touches `core/src/exec.rs` and `core/src/unified_exec/process_manager.rs`.
 
-Consumed by `shared/rust-bridge/codex-mobile-client/src/ish_exec.rs` (`set_ios_exec_hook`), `android_exec.rs` (`set_android_tool_resolver`), and `shell_preflight.rs` (`set_mobile_exec_preflight`).
+Consumed by `shared/rust-bridge/codex-mobile-client/src/android_exec.rs`
+(`set_android_tool_resolver`) and `shell_preflight.rs`
+(`set_mobile_exec_preflight`). The iOS callback surface remains inert when no
+platform hook is registered.
 
 ## `mobile-code-mode-stub.patch`
 Replaces the V8 JavaScript runtime in `code-mode` with a stub on iOS, Android, and Linux. Mobile builds can't link `v8` (binary size, JIT entitlements), and the stub returns "exec is unavailable on mobile targets in this build" when invoked.
@@ -33,7 +36,7 @@ Drops the shell-snapshot timeout from 10s → 2s on iOS/Android. The mobile shel
 Touches `core/src/shell_snapshot.rs`.
 
 ## `remote-app-server-websocket-cap.patch`
-Generalizes the remote app-server transport so it can drive any `AsyncRead + AsyncWrite` stream (not just `MaybeTlsStream<TcpStream>`). Required so that a single SSH connection can multiplex multiple websocket-style RPC sessions through litter's tunneling.
+Generalizes the remote app-server transport so it can drive any `AsyncRead + AsyncWrite` stream (not just `MaybeTlsStream<TcpStream>`). Required so that a single SSH connection can multiplex multiple websocket-style RPC sessions through Remora's tunneling.
 
 Refactors `connect_with_stream` into a wire-generic `connect_with_wire<W: JsonRpcWire>` that the upstream `connect()` path now delegates into. Exposes:
 - `JsonRpcWire` trait (re-exported from `codex_app_server_client`)
@@ -42,10 +45,10 @@ Refactors `connect_with_stream` into a wire-generic `connect_with_wire<W: JsonRp
 
 Touches `app-server-client/src/{lib.rs,remote.rs}`.
 
-Consumed by the SSH/Alleycat remote transport paths in `shared/rust-bridge/codex-mobile-client/src/alleycat.rs`, `src/session/connection.rs`, and `src/ssh_bridge.rs`. Websocket-style reconnects use `RemoteAppServerClient::connect_websocket_stream`. JSON-line transports (Pi/non-Codex servers, alleycat jsonl, SSH-bridge bootstrap) use the litter-side `codex_slingshot::json_line_wire::connect_json_line_stream`, which builds a `JsonLineWire` and feeds it into `connect_with_wire`.
+Consumed by the SSH/Alleycat remote transport paths in `shared/rust-bridge/codex-mobile-client/src/alleycat.rs`, `src/session/connection.rs`, and `src/ssh_bridge.rs`. Websocket-style reconnects use `RemoteAppServerClient::connect_websocket_stream`. JSON-line transports (Pi/non-Codex servers, alleycat jsonl, SSH-bridge bootstrap) use Remora's `codex_slingshot::json_line_wire::connect_json_line_stream`, which builds a `JsonLineWire` and feeds it into `connect_with_wire`.
 
 ## `absolute-path-cross-platform.patch`
-Lets `AbsolutePathBuf` deserialize Windows-style absolute paths on POSIX (and vice versa) without trying to canonicalize them through `path_absolutize::Absolutize` (which would mangle them by joining onto a POSIX cwd). Required because litter mobile clients consume thread metadata from servers running on either OS.
+Lets `AbsolutePathBuf` deserialize Windows-style absolute paths on POSIX (and vice versa) without trying to canonicalize them through `path_absolutize::Absolutize` (which would mangle them by joining onto a POSIX cwd). Required because Remora mobile clients consume thread metadata from servers running on either OS.
 
 Touches `utils/absolute-path/src/lib.rs`.
 
@@ -70,7 +73,7 @@ Touches `core/src/realtime_conversation.rs`.
 
 ## Realtime multi-server orchestrator (3 patches)
 
-These three patches together let mobile clients (litter) own dynamic-tool execution and handoff resolution during a realtime audio session, instead of routing everything through the in-process background_agent. They were originally one monolithic patch (`client-controlled-handoff.patch`) but were split for easier maintenance — most upstream churn in the realtime layer affects only one of them.
+These three patches together let Remora own dynamic-tool execution and handoff resolution during a realtime audio session, instead of routing everything through the in-process background_agent. They were originally one monolithic patch (`client-controlled-handoff.patch`) but were split for easier maintenance — most upstream churn in the realtime layer affects only one of them.
 
 Apply order in `sync-codex.sh` matters: `server-hint` first because it introduces the `realtime_v2_session_tools` helper that `dynamic-tools` reuses.
 

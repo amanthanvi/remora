@@ -83,7 +83,7 @@ struct HomeVoiceOrbButton: View {
         )
         .disabled(isDisabled)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint("Starts a local realtime voice conversation.")
+        .accessibilityHint("Starts a realtime voice conversation on the selected connected server.")
         .coachmarkAnchor(.voice)
     }
 }

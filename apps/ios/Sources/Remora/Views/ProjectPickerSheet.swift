@@ -108,7 +108,7 @@ struct ProjectPickerSheet: View {
                             Text(serverName)
                                 .foregroundStyle(RemoraTheme.accent.opacity(0.75))
                         }
-                        Text(PathDisplay.display(project.cwd, isLocal: appModel.isLocalServer(serverId: project.serverId)))
+                        Text(PathDisplay.display(project.cwd, isLocal: false))
                             .foregroundStyle(RemoraTheme.textMuted)
                     }
                     .remoraMonoFont(size: 11, weight: .regular)

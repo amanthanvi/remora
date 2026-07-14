@@ -9,9 +9,9 @@ enum AlleycatCredentialStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .encodingFailed:
-            return "Failed to encode Alleycat token"
+            return "Failed to encode pairing token"
         case .decodingFailed:
-            return "Failed to decode saved Alleycat token"
+            return "Failed to decode saved pairing token"
         case .keychain(let status):
             return "Keychain error (\(status))"
         }
@@ -89,7 +89,7 @@ final class AlleycatCredentialStore {
 
     /// Load the persisted iroh device secret key bytes (32 bytes), or
     /// nil if not yet generated. Used by `AppRuntimeController` at app
-    /// launch to feed the Rust client before any alleycat operation
+    /// launch to feed the Rust client before any pairing operation
     /// triggers the endpoint bind.
     func loadDeviceSecretKey() throws -> Data? {
         let query = deviceKeyQuery().merging([

@@ -10,6 +10,7 @@ STAGING_DIR="${GHOSTTY_BUILD_DIR:-$GENERATED_DIR/ghostty-build}"
 XCODE_DEVELOPER_DIR="${GHOSTTY_XCODE_DEVELOPER_DIR:-$(xcode-select -p)}"
 CLT_DEVELOPER_DIR="${GHOSTTY_CLT_DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
 METAL_TOOLCHAIN_DIR="${GHOSTTY_METAL_TOOLCHAIN_DIR:-}"
+METAL_TOOLCHAINS="${GHOSTTY_METAL_TOOLCHAINS:-${TOOLCHAINS:-Metal}}"
 
 if [ ! -f "$GHOSTTY_DIR/build.zig" ]; then
     echo "error: Ghostty submodule is missing; run git submodule update --init --recursive shared/third_party/ghostty" >&2
@@ -28,6 +29,12 @@ if [ -n "$METAL_TOOLCHAIN_DIR" ]; then
             exit 1
         fi
     done
+fi
+
+if ! env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" TOOLCHAINS="$METAL_TOOLCHAINS" \
+    /usr/bin/xcrun --sdk iphoneos --find metal >/dev/null 2>&1; then
+    echo "error: Xcode Metal Toolchain is unavailable; run: xcodebuild -downloadComponent MetalToolchain" >&2
+    exit 1
 fi
 
 # Apply Remora's mobile-embed patches if not already applied. Idempotent;
@@ -225,6 +232,7 @@ build_slice() {
         env \
             PATH="$STAGING_DIR/bin:$PATH" \
             DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" \
+            TOOLCHAINS="$METAL_TOOLCHAINS" \
             ZIG_GLOBAL_CACHE_DIR="$ZIG_CACHE_DIR/global" \
             ZIG_LOCAL_CACHE_DIR="$ZIG_CACHE_DIR/local" \
             "${zig_args[@]}"

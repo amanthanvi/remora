@@ -4,7 +4,7 @@ import Foundation
 // `VoiceSessionState` is now managed by `RustVoiceHandoffManager` in
 // RustVoiceBridge.swift, mirroring the Rust `VoiceHandoffManager`. The UI
 // display types (`VoiceSessionPhase`, `VoiceSessionAudioRoute`, display
-// helpers, `VoiceActions` protocol) remain iOS-specific. See Task #24.
+// helpers) remain iOS-specific. See Task #24.
 
 struct VoiceSessionDebugEntry: Identifiable, Equatable {
     let id: UUID
@@ -49,16 +49,6 @@ enum VoiceSessionPhase: String, Equatable {
             return "Session Ended"
         }
     }
-
-    var activityPhase: CodexVoiceCallAttributes.ContentState.Phase {
-        switch self {
-        case .connecting: .connecting
-        case .listening: .listening
-        case .thinking, .handoff: .thinking
-        case .speaking: .speaking
-        case .error: .error
-        }
-    }
 }
 
 enum VoiceSessionAudioRoute: Equatable {
@@ -67,7 +57,6 @@ enum VoiceSessionAudioRoute: Equatable {
     case headphones(String)
     case bluetooth(String)
     case airPlay(String)
-    case carPlay(String)
     case unknown(String)
 
     var label: String {
@@ -76,8 +65,7 @@ enum VoiceSessionAudioRoute: Equatable {
             return "Speaker"
         case .receiver:
             return "iPhone"
-        case .headphones(let name), .bluetooth(let name), .airPlay(let name),
-             .carPlay(let name), .unknown(let name):
+        case .headphones(let name), .bluetooth(let name), .airPlay(let name), .unknown(let name):
             return name
         }
     }
@@ -86,7 +74,7 @@ enum VoiceSessionAudioRoute: Equatable {
         switch self {
         case .speaker, .receiver, .unknown:
             return true
-        case .headphones, .bluetooth, .airPlay, .carPlay:
+        case .headphones, .bluetooth, .airPlay:
             return false
         }
     }
@@ -99,7 +87,6 @@ enum VoiceSessionAudioRoute: Equatable {
         case .headphones: return "headphones"
         case .bluetooth: return "dot.radiowaves.left.and.right"
         case .airPlay:   return "airplayaudio"
-        case .carPlay:   return "car.fill"
         case .unknown:   return "speaker.wave.2.fill"
         }
     }
@@ -140,15 +127,6 @@ struct VoiceSessionState: Identifiable, Equatable {
             return "\(transcriptSpeaker): \(transcriptText)"
         }
         return phase.displayTitle
-    }
-
-    var activityContentState: CodexVoiceCallAttributes.ContentState {
-        CodexVoiceCallAttributes.ContentState(
-            phase: phase.activityPhase,
-            routeLabel: route.label,
-            transcriptText: transcriptText,
-            lastError: lastError
-        )
     }
 
     static func initial(threadKey: ThreadKey, threadTitle: String, model: String) -> VoiceSessionState {
@@ -202,7 +180,7 @@ extension VoiceSessionState {
         }
     }
 
-    /// Truncated transcript suitable for glanceable display (CarPlay, widgets).
+    /// Truncated transcript suitable for compact display.
     func truncatedTranscript(maxLength: Int = 80) -> String? {
         guard let text = transcriptText?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else { return nil }
@@ -210,27 +188,4 @@ extension VoiceSessionState {
             ? String(text.prefix(maxLength)) + "…"
             : text
     }
-}
-
-// MARK: - VoiceActions Protocol
-
-/// Actions for controlling a voice session, consumable by any UI layer.
-@MainActor
-protocol VoiceActions: AnyObject {
-    var activeVoiceSession: VoiceSessionState? { get }
-
-    @discardableResult
-    func startPinnedLocalVoiceCall(
-        cwd: String,
-        model: String?,
-        approvalPolicy: AppAskForApproval?,
-        sandboxMode: AppSandboxMode?
-    ) async throws -> ThreadKey
-
-    @discardableResult
-    func startVoiceOnThread(_ key: ThreadKey) async throws -> ThreadKey
-
-    func stopActiveVoiceSession() async
-
-    func toggleActiveVoiceSessionSpeaker() async throws
 }

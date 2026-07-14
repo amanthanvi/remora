@@ -260,7 +260,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios-sim,i686-unknown-linux-musl
+          targets: aarch64-apple-ios-sim
 
       - name: Configure sccache
         run: |
@@ -299,9 +299,6 @@ jobs:
 
       - name: Build Rust for iOS simulator
         run: env -u CARGO_INCREMENTAL ./apps/ios/scripts/build-rust.sh --preserve-current --fast-sim --skip-bindings
-
-      - name: Download Alpine rootfs
-        run: make alpine-fs
 
       - name: Generate Xcode project
         run: ./apps/ios/scripts/regenerate-project.sh

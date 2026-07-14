@@ -53,47 +53,6 @@ struct ExperimentalFeaturesView: View {
                     .tint(RemoraTheme.accent)
                     .listRowBackground(RemoraTheme.surface.opacity(0.6))
 
-                    #if DEBUG
-                    NavigationLink {
-                        ProximityPairView()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "wave.3.right")
-                                .foregroundColor(RemoraTheme.accent)
-                                .frame(width: 20)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Pair")
-                                    .remoraFont(.subheadline)
-                                    .foregroundColor(RemoraTheme.textPrimary)
-                                Text("Walk-up pairing with proximity + haptics")
-                                    .remoraFont(.caption)
-                                    .foregroundColor(RemoraTheme.textSecondary)
-                            }
-                        }
-                    }
-                    .listRowBackground(RemoraTheme.surface.opacity(0.6))
-                    #endif
-
-                    #if !targetEnvironment(macCatalyst) && DEBUG
-                    NavigationLink {
-                        UWBDebugView()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                                .foregroundColor(RemoraTheme.accent)
-                                .frame(width: 20)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("UWB Debug")
-                                    .remoraFont(.subheadline)
-                                    .foregroundColor(RemoraTheme.textPrimary)
-                                Text("Live distance & direction to a paired Mac")
-                                    .remoraFont(.caption)
-                                    .foregroundColor(RemoraTheme.textSecondary)
-                            }
-                        }
-                    }
-                    .listRowBackground(RemoraTheme.surface.opacity(0.6))
-                    #endif
                 } header: {
                     Text("Debug")
                         .foregroundColor(RemoraTheme.textSecondary)

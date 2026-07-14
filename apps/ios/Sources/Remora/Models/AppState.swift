@@ -78,14 +78,14 @@ final class AppState {
     }
 
     private static func agentRuntimeWireValue(_ kind: AgentRuntimeKind) -> String {
-        // AgentRuntimeKind is itself a `String` now (the alleycat agent id).
+        // AgentRuntimeKind is itself a `String` now (the host-provided agent id).
         // No mapping needed — the id IS the persisted wire value.
         kind
     }
 
     private static func agentRuntimeKind(_ raw: String) -> AgentRuntimeKind? {
-        // Fold known aliases into the canonical alleycat id; anything
-        // else round-trips as-is so an alleycat-only agent persists
+        // Fold known aliases into the canonical host id; anything
+        // else round-trips as-is so a host-only agent persists
         // correctly even without local knowledge.
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if trimmed.isEmpty {

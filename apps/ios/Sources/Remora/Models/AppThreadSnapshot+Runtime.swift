@@ -38,7 +38,7 @@ extension AppThreadSnapshot {
 
     var ampReasoningEffortLocked: Bool {
         // The "lock reasoning effort once a thread has started" rule is
-        // advertised by the alleycat manifest as a capability flag, so
+        // advertised by the paired-host manifest as a capability flag, so
         // any future agent with the same constraint inherits the
         // behavior without remora changes.
         guard agentRuntimeKind.metadata?.capabilities?.locksReasoningEffortAfterActivity == true

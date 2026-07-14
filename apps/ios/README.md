@@ -1,4 +1,9 @@
-# iOS App (Planned)
+# Remora for iOS
 
-This directory is reserved for the iOS project migration from repository root.
-Current source of truth remains at root until Phase 3 migration.
+The SwiftUI application lives in `Sources/Remora`. Its project definition is
+`project.yml`; regenerate `Remora.xcodeproj` with
+`./scripts/regenerate-project.sh` after changing targets or source layout.
+
+For local iteration, run `make ios-sim-fast` from the repository root. Remora
+connects to Codex hosts over the network and exposes remote SSH terminals through
+the Ghostty renderer; it does not bundle an on-device Linux environment.

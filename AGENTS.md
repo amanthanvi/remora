@@ -15,7 +15,7 @@
 - `apps/android/core/bridge/.../Rust*.kt` — Android bridge files mapping Kotlin to the shared Rust layer. UniFFI Kotlin sources are generated into `shared/rust-bridge/generated/kotlin/` and consumed directly from there; do not maintain copied binding files under Android source roots.
 - `shared/third_party/codex/` is the upstream Codex submodule.
 - `apps/ios/GeneratedRust/` contains local generated Rust artifacts for iOS builds: UniFFI headers/modulemap plus raw device/simulator staticlibs. These artifacts are not committed.
-- `apps/ios/Frameworks/` contains downloaded/package-lane iOS XCFrameworks (`codex_mobile_client.xcframework` in package builds and `litter_ish.xcframework`). These artifacts are not committed.
+- `apps/ios/Frameworks/` contains package-lane iOS XCFrameworks such as `codex_mobile_client.xcframework`. These artifacts are not committed.
 - `apps/ios/project.yml` is the source of truth for project generation; regenerate `apps/ios/Remora.xcodeproj` instead of hand-editing project files.
 
 ## Architecture
@@ -36,12 +36,12 @@
 - `AppClient` is the public UniFFI client surface for direct server operations and typed results.
 - `DiscoveryBridge` and `SshBridge` are separate Rust utility surfaces. Do not move discovery/SSH policy back into Swift/Kotlin.
 - iOS uses UniFFI-generated Swift plus thin bridge helpers; Android uses UniFFI-generated Kotlin plus thin bridge helpers.
-- iOS Debug/device links the raw static library in `apps/ios/GeneratedRust/ios-device/libcodex_mobile_client.a`. Package/release lanes may still create `apps/ios/Frameworks/codex_mobile_client.xcframework`, but that is not the default debug/device artifact.
+- iOS Debug/device links the raw static library in `apps/ios/GeneratedRust/ios-device/libcodex_mobile_client.a`. The package lane may still create `apps/ios/Frameworks/codex_mobile_client.xcframework`, but that is not the default debug/device artifact.
 
 ## Feature Placement Rules
 
 - Prefer Rust first. If logic is about session state, thread state, streaming, hydration, approvals, auth/account, discovery merge policy, voice transcript/handoff normalization, or status normalization, it belongs in `shared/rust-bridge/codex-mobile-client/`.
-- Keep Swift/Kotlin thin. Platform code should only own UI, platform persistence, platform permissions, audio/session APIs, notifications, ActivityKit/CarPlay/Android services, and render-only projections.
+- Keep Swift/Kotlin thin. Platform code should only own UI, platform persistence, platform permissions, native audio/session APIs, Android services, and render-only projections.
 - Do not parse upstream wire-format strings in Swift/Kotlin. If a status, event kind, or payload shape matters to both platforms, expose it as a typed UniFFI enum/record from Rust.
 - Do not duplicate merge/reducer/state-machine logic in iOS or Android. Shared reconciliation belongs in Rust reducer/store code.
 - If shared Rust needs a direct server operation, expose it on `AppClient` with a mobile-owned request/result shape instead of adding a handwritten wrapper on `AppStore`.
@@ -98,7 +98,6 @@
 
 - **Compose Material3** — primary Android UI toolkit.
 - **Markwon** — Markdown rendering for assistant/system text.
-- **JSch** — SSH transport for remote bootstrap flow.
 - **androidx.security:security-crypto** — encrypted credential storage.
 
 ### Rust Shared Layer (Cargo)
@@ -137,16 +136,15 @@ Incremental policy:
 
 | Target                       | Description                                                                                                                        |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `make ios`                   | Full iOS package lane: sync → patch → bindings → rust (device+sim) → xcframework → litter-ish → xcgen → simulator build            |
-| `make litter-ish`            | Download the pinned `dnakov/litter-ish` release (xcframework + Alpine fakefs). Bump `LITTER_ISH_VERSION` in `Makefile` to upgrade. |
+| `make ios`                   | Full iOS package lane: sync → patch → bindings → Rust (device+sim) → xcframework → xcgen → simulator build                         |
 | `make ios-sim`               | Full iOS package lane + simulator build                                                                                            |
 | `make ios-sim-fast`          | Fast iOS simulator lane using raw simulator staticlib outputs in `GeneratedRust/ios-sim`                                           |
 | `make ios-device`            | Full iOS package lane + device build                                                                                               |
 | `make ios-device-fast`       | Fast iOS device lane using raw staticlib outputs in `GeneratedRust/`                                                               |
 | `make ios-run`               | Full iOS build then opens Xcode                                                                                                    |
-| `make android`               | Full Android pipeline: sync → kotlin bindings → rust JNI → gradle assemble                                                         |
+| `make android`               | Full Android pipeline: sync → Kotlin bindings → Rust JNI → Gradle debug assemble                                                   |
 | `make android-emulator-fast` | Fast Android dev build using the host-appropriate emulator ABI (`arm64-v8a` on Apple Silicon, `x86_64` on Intel)                   |
-| `make android-install`       | Build + install remote-only APK to emulator                                                                                        |
+| `make android-install`       | Build + install the debug APK on a connected device                                                                                |
 | `make all`                   | Both platforms                                                                                                                     |
 | `make rust-ios`              | Alias for the full Rust iOS package lane                                                                                           |
 | `make rust-ios-package`      | Build/package Rust for iOS (device+sim + xcframework)                                                                              |
@@ -158,8 +156,6 @@ Incremental policy:
 | `make bindings`              | Regenerate UniFFI Swift + Kotlin bindings                                                                                          |
 | `make xcgen`                 | Regenerate `Remora.xcodeproj` from `project.yml`                                                                                   |
 | `make test`                  | Run Rust + iOS + Android tests                                                                                                     |
-| `make testflight`            | Full iOS build + TestFlight upload                                                                                                 |
-| `make play-upload`           | Full Android build + Google Play upload                                                                                            |
 | `make clean`                 | Remove all build artifacts + stamp cache                                                                                           |
 
 ### Cache invalidation
@@ -178,15 +174,10 @@ Incremental policy:
 ### Individual scripts (called by Make, can also be run standalone)
 
 - `./apps/ios/scripts/build-rust.sh` — cross-compile Rust for iOS; in fast mode it emits raw staticlibs + headers to `apps/ios/GeneratedRust/`, and in package mode it also creates `codex_mobile_client.xcframework`
-- `./apps/ios/scripts/download-litter-ish.sh` — fetch the pinned `dnakov/litter-ish` GitHub release, extract `litter_ish.xcframework` into `apps/ios/Frameworks/` and `alpine-fakefs/` into `apps/ios/Resources/`. Reads `LITTER_ISH_VERSION` from env (set by `make litter-ish`).
 - `./apps/ios/scripts/sync-codex.sh` — sync codex submodule + apply patches
 - `./apps/ios/scripts/regenerate-project.sh` — regenerate Xcode project via xcodegen; this is the safe path because it removes any accidental nested `apps/ios/Remora.xcodeproj/Remora.xcodeproj` before regenerating
-- `./apps/ios/scripts/testflight-upload.sh` — archive, export IPA, upload to TestFlight
 - `./shared/rust-bridge/generate-bindings.sh` — generate UniFFI Swift/Kotlin bindings
 - `./tools/scripts/build-android-rust.sh` — cross-compile Rust JNI libs for Android via `cargo-ndk`
-- `./tools/scripts/testflight-feedback.sh` — fetch TestFlight feedback with optional screenshot download; supports `SINCE` / `UNTIL` env filtering for createdDate windows
-- `./tools/scripts/fetch-mobile-store-artifacts.py` — one-shot iOS + Android store triage fetcher; use `--last-hours N` or `--since ... --until ...` to pull TestFlight feedback/crashes/crash logs plus Play reviews/crash issues/reports into one output directory and print a Markdown summary with local artifact links. Reuses `testflight-feedback.sh` for the TestFlight feedback path. Android private testing feedback remains Play Console UI-only and is not available through the public APIs used here.
-- `./tools/scripts/triage-mobile-feedback.py` — rerunnable GitHub + TestFlight + Play triage ledger. It wraps `fetch-mobile-store-artifacts.py`, fetches GitHub issues/PRs, stores raw per-run snapshots under `artifacts/mobile-triage/runs/`, and preserves per-item status/notes in `artifacts/mobile-triage/triage-state.json`. Use `mark '<item-id>' --status done --note ...` after an item is handled, or `--status pr-open --note 'Fix PR #...'` when a fix PR has been opened, so later runs do not put the same item back in the unhandled queue.
 
 ### Hot Reload (InjectionIII)
 
@@ -197,8 +188,7 @@ Incremental policy:
 
 ## Autonomous Debugging Runbook
 
-- Prefer the fast lanes for local iteration before package/release lanes: `make ios-sim-fast`, `make ios-device-fast`, and `make android-emulator-fast`.
-- For repeated store-feedback/crash triage across GitHub, TestFlight, and Play, start with `./tools/scripts/triage-mobile-feedback.py --last-hours 24` (or an explicit `--since` / `--until` window). Review `artifacts/mobile-triage/triage-board.md`, then mark handled rows with `./tools/scripts/triage-mobile-feedback.py mark '<item-id>' --status done --note 'fixed in ...'` or `--status pr-open --note 'Fix PR #...'`. Use `fetch-mobile-store-artifacts.py` directly only for one-off raw iOS/Android store snapshots or deeper ASC / Play API debugging.
+- Prefer the fast lanes for local iteration before package lanes: `make ios-sim-fast`, `make ios-device-fast`, and `make android-emulator-fast`.
 - For iOS simulator debugging, install the latest built app directly from DerivedData instead of trusting an older installed simulator copy: `xcrun simctl install booted <.../Build/Products/Debug-iphonesimulator/Remora.app>` then `xcrun simctl launch booted com.remora.app`.
 - For Xcode project regeneration, use `make xcgen` or `./apps/ios/scripts/regenerate-project.sh`. Do not run `xcodegen generate --spec project.yml --project Remora.xcodeproj` from inside `apps/ios`; that produces a nested `apps/ios/Remora.xcodeproj/Remora.xcodeproj`.
 - For Android emulator debugging, build with `make android-emulator-fast`, install with `adb -e install -r apps/android/app/build/outputs/apk/debug/app-debug.apk`, then launch with `adb -e shell am start -n com.remora.android/com.remora.android.MainActivity`.

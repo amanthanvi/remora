@@ -20,8 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.firebase.FirebaseApp
-import com.google.firebase.messaging.FirebaseMessaging
 import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.AppModel
 import com.remora.android.state.OpenAIApiKeyStore
@@ -38,8 +36,8 @@ import uniffi.codex_mobile_client.ThreadKey
 
 class MainActivity : ComponentActivity() {
     companion object {
-        const val EXTRA_NOTIFICATION_SERVER_ID = "remora.notification.serverId"
-        const val EXTRA_NOTIFICATION_THREAD_ID = "remora.notification.threadId"
+        const val EXTRA_OPEN_SERVER_ID = "remora.open.serverId"
+        const val EXTRA_OPEN_THREAD_ID = "remora.open.threadId"
         const val EXTRA_OPEN_PET_SETTINGS = "remora.openPetSettings"
     }
 
@@ -66,8 +64,6 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             LLog.e("MainActivity", "AppModel.start() failed", e)
         }
-        loadPushToken()
-
         var showSplash by mutableStateOf(true)
         var contentReady by mutableStateOf(false)
         var minTimeElapsed by mutableStateOf(false)
@@ -120,7 +116,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        handleNotificationIntent(intent)
+        handleOpenThreadIntent(intent)
         consumeOverlayNavigationIntent(intent)
     }
 
@@ -136,13 +132,13 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         val model = appModel ?: return
-        lifecycleController.onPause(this, model)
+        lifecycleController.onPause(model)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleNotificationIntent(intent)
+        handleOpenThreadIntent(intent)
         consumeOverlayNavigationIntent(intent)
     }
 
@@ -162,8 +158,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun handleNotificationIntent(intent: Intent?) {
-        val threadKey = consumeNotificationThreadKey(intent) ?: return
+    private fun handleOpenThreadIntent(intent: Intent?) {
+        val threadKey = consumeOpenThreadKey(intent) ?: return
         val model = appModel ?: return
         lifecycleScope.launch {
             model.activateThread(threadKey)
@@ -174,16 +170,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun consumeNotificationThreadKey(intent: Intent?): ThreadKey? {
+    private fun consumeOpenThreadKey(intent: Intent?): ThreadKey? {
         intent ?: return null
-        val serverId = intent.getStringExtra(EXTRA_NOTIFICATION_SERVER_ID)?.trim().orEmpty()
-        val threadId = intent.getStringExtra(EXTRA_NOTIFICATION_THREAD_ID)?.trim().orEmpty()
+        val serverId = intent.getStringExtra(EXTRA_OPEN_SERVER_ID)?.trim().orEmpty()
+        val threadId = intent.getStringExtra(EXTRA_OPEN_THREAD_ID)?.trim().orEmpty()
         if (serverId.isEmpty() || threadId.isEmpty()) {
             return null
         }
 
-        intent.removeExtra(EXTRA_NOTIFICATION_SERVER_ID)
-        intent.removeExtra(EXTRA_NOTIFICATION_THREAD_ID)
+        intent.removeExtra(EXTRA_OPEN_SERVER_ID)
+        intent.removeExtra(EXTRA_OPEN_THREAD_ID)
         return ThreadKey(serverId = serverId, threadId = threadId)
     }
 
@@ -195,35 +191,4 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadPushToken() {
-        val cachedToken = getSharedPreferences("remora_push", MODE_PRIVATE)
-            .getString("fcm_token", null)
-            ?.takeIf { it.isNotBlank() }
-        if (cachedToken != null) {
-            lifecycleController.setDevicePushToken(cachedToken)
-        }
-        val messaging = try {
-            if (FirebaseApp.getApps(applicationContext).isEmpty()) {
-                FirebaseApp.initializeApp(applicationContext)
-            }
-            FirebaseMessaging.getInstance()
-        } catch (e: IllegalStateException) {
-            LLog.i("MainActivity", "Firebase is not configured; skipping FCM token fetch: ${e.message}")
-            return
-        }
-
-        messaging.token
-            .addOnSuccessListener { token ->
-                if (token.isNotBlank()) {
-                    getSharedPreferences("remora_push", MODE_PRIVATE)
-                        .edit()
-                        .putString("fcm_token", token)
-                        .apply()
-                    lifecycleController.setDevicePushToken(token)
-                }
-            }
-            .addOnFailureListener { error ->
-                LLog.e("MainActivity", "Failed to fetch FCM token", error)
-            }
-    }
 }

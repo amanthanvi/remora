@@ -39,10 +39,6 @@ final class TerminalSessionController {
         return false
     }
 
-    func openLocalIsh(cwd: String?) async {
-        await open(backend: .localIsh(cwd: normalized(cwd)))
-    }
-
     func open(backend: TerminalBackendKind) async {
         guard sessionId == nil else { return }
         eventGeneration &+= 1
@@ -213,11 +209,6 @@ final class TerminalSessionController {
     fileprivate func markExited(_ code: Int32, generation: Int) {
         guard generation == eventGeneration else { return }
         phase = .exited(code)
-    }
-
-    private func normalized(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func trimOutputIfNeeded() {

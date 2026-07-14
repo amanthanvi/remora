@@ -93,7 +93,7 @@ struct DiscoveredServer: Identifiable, Hashable {
     }
 
     var connectionTarget: ConnectionTarget? {
-        if source == .local { return .local }
+        guard source != .local else { return nil }
         if let websocketURL, let url = URL(string: websocketURL) { return .remoteURL(url) }
         if preferredConnectionMode == .ssh {
             return nil

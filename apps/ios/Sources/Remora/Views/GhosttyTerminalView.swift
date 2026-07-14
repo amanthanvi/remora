@@ -1151,9 +1151,8 @@ final class GhosttyHostView: UIView, UIGestureRecognizerDelegate, UIEditMenuInte
             guard let renderer = self?.renderer else { return }
             // Raw control sequences (Esc, Tab, Ctrl-C, arrows) go straight
             // to the PTY input direction without the bracketed-paste
-            // wrapper. iSH / busybox shells don't enable paste mode by
-            // default, so the wrapper would print as literal text and
-            // break the keystroke.
+            // wrapper. Some remote shells do not enable paste mode, so the
+            // wrapper would print as literal text and break the keystroke.
             if let data = payload.data(using: .utf8) {
                 renderer.sendRawBytes(data)
             }

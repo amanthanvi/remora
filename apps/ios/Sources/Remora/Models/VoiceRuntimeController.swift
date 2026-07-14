@@ -1,4 +1,3 @@
-import ActivityKit
 import AVFoundation
 import Foundation
 import Observation
@@ -6,10 +5,10 @@ import UIKit
 
 @MainActor
 @Observable
-final class VoiceRuntimeController: VoiceActions {
+final class VoiceRuntimeController {
     static let shared = VoiceRuntimeController()
-    static let localServerID = "local"
-    static let persistedLocalVoiceThreadIDKey = "remora.voice.local.thread_id"
+    static let persistedVoiceServerIDKey = "remora.voice.pinned.server_id"
+    static let persistedVoiceThreadIDKey = "remora.voice.pinned.thread_id"
 
     private(set) var activeVoiceSession: VoiceSessionState?
     /// Tracks the local mic mute state for the active realtime session.
@@ -23,11 +22,11 @@ final class VoiceRuntimeController: VoiceActions {
 
     @ObservationIgnored private weak var appModel: AppModel?
     @ObservationIgnored private var realtimeSession: RealtimeWebRtcSession?
-    @ObservationIgnored private lazy var handoffManager = RustHandoffManager(localServerId: Self.localServerID)
+    @ObservationIgnored private var handoffManager = RustHandoffManager(localServerId: "")
+    @ObservationIgnored private var handoffVoiceServerId = ""
     @ObservationIgnored private var updateSubscription: AppStoreSubscription?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var handoffActionPollTask: Task<Void, Never>?
-    @ObservationIgnored private var voiceCallActivity: Activity<CodexVoiceCallAttributes>?
     @ObservationIgnored private var voiceInputDecayToken: UUID?
     @ObservationIgnored private var voiceOutputDecayToken: UUID?
     @ObservationIgnored private var voiceStopRequestedThreadKey: ThreadKey?
@@ -49,14 +48,14 @@ final class VoiceRuntimeController: VoiceActions {
     func bind(appModel: AppModel) {
         let shouldStartEventLoop = self.appModel !== appModel || eventTask == nil || updateSubscription == nil
         self.appModel = appModel
-        syncHandoffServers()
         if shouldStartEventLoop {
             startEventLoopIfNeeded(appModel: appModel)
         }
     }
 
     @discardableResult
-    func startPinnedLocalVoiceCall(
+    func startPinnedVoiceCall(
+        serverId: String,
         cwd: String,
         model: String?,
         approvalPolicy: AppAskForApproval?,
@@ -66,7 +65,8 @@ final class VoiceRuntimeController: VoiceActions {
             return existing.threadKey
         }
         if activeVoiceSession != nil { endVoiceSessionImmediately() }
-        let key = try await ensurePinnedLocalVoiceThread(
+        let key = try await ensurePinnedVoiceThread(
+            serverId: serverId,
             cwd: cwd,
             model: model,
             approvalPolicy: approvalPolicy,
@@ -81,11 +81,13 @@ final class VoiceRuntimeController: VoiceActions {
             return existing.threadKey
         }
         if activeVoiceSession != nil { endVoiceSessionImmediately() }
-        guard key.serverId == Self.localServerID else {
+        guard let server = requireAppModel().snapshot?.serverSnapshot(for: key.serverId),
+              server.isConnected,
+              !server.isLocal else {
             throw NSError(
                 domain: "Remora",
                 code: 3310,
-                userInfo: [NSLocalizedDescriptionKey: "Voice is only available on the local server"]
+                userInfo: [NSLocalizedDescriptionKey: "Connect a remote server before starting voice."]
             )
         }
         return try await prepareAndLaunchRealtimeVoiceSession(for: key)
@@ -181,17 +183,25 @@ final class VoiceRuntimeController: VoiceActions {
         }
     }
 
-    private func ensurePinnedLocalVoiceThread(
+    private func ensurePinnedVoiceThread(
+        serverId: String,
         cwd: String,
         model: String?,
         approvalPolicy: AppAskForApproval?,
         sandboxMode: AppSandboxMode?
     ) async throws -> ThreadKey {
         let appModel = requireAppModel()
-        let serverId = try await ensureLocalServerConnected()
+        guard let server = appModel.snapshot?.serverSnapshot(for: serverId),
+              server.isConnected,
+              !server.isLocal else {
+            throw NSError(
+                domain: "Remora",
+                code: 3301,
+                userInfo: [NSLocalizedDescriptionKey: "Connect a remote server before starting voice."]
+            )
+        }
 
-        if let storedThreadId = persistedLocalVoiceThreadId() {
-            let key = ThreadKey(serverId: serverId, threadId: storedThreadId)
+        if let key = persistedVoiceThreadKey(), key.serverId == serverId {
             if let resolvedKey = await appModel.ensureThreadLoaded(key: key),
                let thread = appModel.threadSnapshot(for: resolvedKey),
                pinnedVoiceThreadMatchesRequestedConfig(
@@ -205,7 +215,7 @@ final class VoiceRuntimeController: VoiceActions {
                 await appModel.refreshSnapshot()
                 return resolvedKey
             } else {
-                setPersistedLocalVoiceThreadId(nil)
+                setPersistedVoiceThreadKey(nil)
             }
         }
 
@@ -219,7 +229,7 @@ final class VoiceRuntimeController: VoiceActions {
                 persistExtendedHistory: true
             ).threadStartRequest(
                 cwd: preferredVoiceThreadCwd(for: nil, fallback: cwd),
-                dynamicTools: appModel.localGenerativeUiToolSpecs(for: serverId)
+                dynamicTools: nil
             )
         )
         do {
@@ -237,25 +247,9 @@ final class VoiceRuntimeController: VoiceActions {
         }
         SavedThreadsStore.add(.init(threadKey: key))
         appModel.store.setActiveThread(key: key)
-        setPersistedLocalVoiceThreadId(key.threadId)
+        setPersistedVoiceThreadKey(key)
         await appModel.refreshSnapshot()
         return key
-    }
-
-    private func ensureLocalServerConnected() async throws -> String {
-        if let server = appModel?.snapshot?.serverSnapshot(for: Self.localServerID), server.isConnected {
-            return server.serverId
-        }
-        let serverId = try await requireAppModel().serverBridge.connectLocalServer(
-            serverId: Self.localServerID,
-            displayName: requireAppModel().resolvedLocalServerDisplayName(),
-            host: "127.0.0.1",
-            port: 0
-        )
-        await requireAppModel().restoreStoredLocalAuthState(serverId: serverId)
-        await requireAppModel().refreshSnapshot()
-        syncHandoffServers()
-        return serverId
     }
 
     /// Synchronously prepares the in-memory voice session (resolves the
@@ -286,7 +280,7 @@ final class VoiceRuntimeController: VoiceActions {
         }
 
         let appModel = requireAppModel()
-        syncHandoffServers()
+        configureHandoffManager(voiceServerId: key.serverId)
         await cleanupKnownRealtimeVoiceSessions(beforeStartingOn: key)
 
         var resolvedKey = key
@@ -323,7 +317,6 @@ final class VoiceRuntimeController: VoiceActions {
             threadTitle: threadTitle,
             model: resolvedModel.isEmpty ? (model ?? "Codex") : resolvedModel
         )
-        syncVoiceCallActivity()
         LLog.info("voice", "activeVoiceSession set to .connecting")
 
         let session = RealtimeWebRtcSession()
@@ -331,8 +324,7 @@ final class VoiceRuntimeController: VoiceActions {
             self?.handleRealtimeRouteChanged(route)
         }
         self.realtimeSession = session
-        // Every new session starts unmuted. The watch can re-mute via
-        // `voice.toggleMute` once it observes the live `WatchVoiceState`.
+        // Every new session starts unmuted.
         isMicrophoneMuted = false
 
         // Detached background launch so the caller can push UI immediately
@@ -392,7 +384,7 @@ final class VoiceRuntimeController: VoiceActions {
                 serverId: resolvedKey.serverId,
                 params: AppStartRealtimeSessionRequest(
                     threadId: resolvedKey.threadId,
-                    prompt: realtimePrompt(),
+                    prompt: realtimePrompt(voiceServerId: resolvedKey.serverId),
                     sessionId: runtimeSessionId,
                     transport: .webrtc(sdp: offerSdp),
                     clientControlledHandoff: true,
@@ -412,14 +404,24 @@ final class VoiceRuntimeController: VoiceActions {
         }
     }
 
-    private func realtimePrompt() -> String {
+    private func realtimePrompt(voiceServerId: String) -> String {
         let remoteServers = appModel?.snapshot?.servers
-            .filter { !$0.isLocal && $0.isConnected }
+            .filter { $0.serverId != voiceServerId && !$0.isLocal && $0.isConnected }
             .map { (name: $0.displayName, hostname: $0.host) } ?? []
         return VoiceSessionControl.buildPrompt(remoteServers: remoteServers)
     }
 
-    private func syncHandoffServers() {
+    private func configureHandoffManager(voiceServerId: String) {
+        if handoffVoiceServerId != voiceServerId {
+            handoffManager = RustHandoffManager(localServerId: voiceServerId)
+            handoffVoiceServerId = voiceServerId
+        }
+        syncHandoffServers(voiceServerId: voiceServerId)
+    }
+
+    private func syncHandoffServers(voiceServerId: String? = nil) {
+        let voiceServerId = voiceServerId ?? activeVoiceSession?.threadKey.serverId ?? handoffVoiceServerId
+        guard !voiceServerId.isEmpty else { return }
         guard let servers = appModel?.snapshot?.servers else { return }
         handoffManager.reset()
         for server in servers {
@@ -427,7 +429,7 @@ final class VoiceRuntimeController: VoiceActions {
                 serverId: server.serverId,
                 name: server.displayName,
                 hostname: server.host,
-                isLocal: server.isLocal,
+                isLocal: server.serverId == voiceServerId,
                 isConnected: server.isConnected
             )
         }
@@ -442,8 +444,8 @@ final class VoiceRuntimeController: VoiceActions {
         if let stopKey = voiceStopRequestedThreadKey, !stopKey.threadId.isEmpty {
             keys.insert(stopKey)
         }
-        if let persistedLocalThreadId = persistedLocalVoiceThreadId(), !persistedLocalThreadId.isEmpty {
-            keys.insert(ThreadKey(serverId: Self.localServerID, threadId: persistedLocalThreadId))
+        if let persistedKey = persistedVoiceThreadKey() {
+            keys.insert(persistedKey)
         }
         return Array(keys)
     }
@@ -496,7 +498,6 @@ final class VoiceRuntimeController: VoiceActions {
         guard var session = activeVoiceSession else { return }
         session.route = route
         activeVoiceSession = session
-        syncVoiceCallActivity()
     }
 
     private func handleRealtimeTranscriptUpdated(key: ThreadKey, update: AppVoiceTranscriptUpdate) {
@@ -507,7 +508,7 @@ final class VoiceRuntimeController: VoiceActions {
     private func handleRealtimeHandoffRequested(key: ThreadKey, request: AppVoiceHandoffRequest) {
         guard activeVoiceSession?.threadKey == key else { return }
 
-        syncHandoffServers()
+        configureHandoffManager(voiceServerId: key.serverId)
         handoffManager.handleHandoffRequest(
             handoffId: request.handoffId,
             voiceServerId: key.serverId,
@@ -608,7 +609,6 @@ final class VoiceRuntimeController: VoiceActions {
                 default: break
                 }
                 activeVoiceSession = session
-                syncVoiceCallActivity()
             }
         case .updateHandoffItem, .completeHandoffItem, .error:
             break
@@ -628,7 +628,7 @@ final class VoiceRuntimeController: VoiceActions {
                     persistExtendedHistory: true
                 ).threadStartRequest(
                     cwd: cwd,
-                    dynamicTools: appModel.localGenerativeUiToolSpecs(for: serverId)
+                    dynamicTools: nil
                 )
             )
             SavedThreadsStore.add(.init(threadKey: key))
@@ -767,7 +767,6 @@ final class VoiceRuntimeController: VoiceActions {
         session.outputLevel = 0
         session.transcriptLiveMessageID = nil
         activeVoiceSession = session
-        syncVoiceCallActivity()
     }
 
     private func endVoiceSessionImmediately() {
@@ -780,7 +779,6 @@ final class VoiceRuntimeController: VoiceActions {
         isMicrophoneMuted = false
         _ = activeKey
         activeVoiceSession = nil
-        endVoiceCallActivity()
     }
 
     private func updateVoiceSessionForPendingStop(_ key: ThreadKey) {
@@ -793,44 +791,6 @@ final class VoiceRuntimeController: VoiceActions {
         session.transcriptText = "Hanging up..."
         session.lastError = nil
         activeVoiceSession = session
-        syncVoiceCallActivity()
-    }
-
-    private func syncVoiceCallActivity() {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        guard let session = activeVoiceSession else {
-            endVoiceCallActivity()
-            return
-        }
-        if voiceCallActivity == nil {
-            let attributes = CodexVoiceCallAttributes(
-                threadId: session.threadKey.threadId,
-                threadTitle: session.threadTitle,
-                model: session.model,
-                startDate: session.startedAt
-            )
-            do {
-                voiceCallActivity = try Activity.request(
-                    attributes: attributes,
-                    content: .init(state: session.activityContentState, staleDate: nil)
-                )
-            } catch {}
-            return
-        }
-        guard let activity = voiceCallActivity else { return }
-        Task {
-            await activity.update(
-                .init(state: session.activityContentState, staleDate: Date(timeIntervalSinceNow: 120))
-            )
-        }
-    }
-
-    private func endVoiceCallActivity() {
-        guard let activity = voiceCallActivity else { return }
-        Task {
-            await activity.end(nil, dismissalPolicy: .after(.now + 2))
-        }
-        voiceCallActivity = nil
     }
 
     private func requireAppModel() -> AppModel {
@@ -846,18 +806,27 @@ final class VoiceRuntimeController: VoiceActions {
         appModel?.snapshot?.serverSnapshot(for: serverId)?.isConnected == true
     }
 
-    private func persistedLocalVoiceThreadId() -> String? {
-        let stored = UserDefaults.standard.string(forKey: Self.persistedLocalVoiceThreadIDKey)?
+    private func persistedVoiceThreadKey() -> ThreadKey? {
+        let serverId = UserDefaults.standard.string(forKey: Self.persistedVoiceServerIDKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return stored.isEmpty ? nil : stored
+        let threadId = UserDefaults.standard.string(forKey: Self.persistedVoiceThreadIDKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !serverId.isEmpty, !threadId.isEmpty else { return nil }
+        return ThreadKey(serverId: serverId, threadId: threadId)
     }
 
-    private func setPersistedLocalVoiceThreadId(_ threadId: String?) {
-        let trimmed = threadId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmed.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.persistedLocalVoiceThreadIDKey)
+    private func setPersistedVoiceThreadKey(_ key: ThreadKey?) {
+        guard let key else {
+            UserDefaults.standard.removeObject(forKey: Self.persistedVoiceServerIDKey)
+            UserDefaults.standard.removeObject(forKey: Self.persistedVoiceThreadIDKey)
+            return
+        }
+        if key.serverId.isEmpty || key.threadId.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.persistedVoiceServerIDKey)
+            UserDefaults.standard.removeObject(forKey: Self.persistedVoiceThreadIDKey)
         } else {
-            UserDefaults.standard.set(trimmed, forKey: Self.persistedLocalVoiceThreadIDKey)
+            UserDefaults.standard.set(key.serverId, forKey: Self.persistedVoiceServerIDKey)
+            UserDefaults.standard.set(key.threadId, forKey: Self.persistedVoiceThreadIDKey)
         }
     }
 
@@ -872,7 +841,7 @@ final class VoiceRuntimeController: VoiceActions {
         if !trimmedFallback.isEmpty {
             return trimmedFallback
         }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
+        return "/"
     }
 
     private func pinnedVoiceThreadMatchesRequestedConfig(
@@ -948,7 +917,6 @@ final class VoiceRuntimeController: VoiceActions {
         if shared?.activeThread == session.threadKey || shared?.phase == .error {
             applySharedVoiceSession(shared, to: &session)
             activeVoiceSession = session
-            syncVoiceCallActivity()
             return
         }
 
