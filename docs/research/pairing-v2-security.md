@@ -11,7 +11,7 @@ Replace the current persistent, host-wide bearer token with a two-stage design:
 2. **Routine access uses a per-host, per-installation signing credential.** The phone creates a non-exportable P-256 key in Secure Enclave or Android Keystore before enrollment. The host stores its public key, exact scopes, the client's authenticated Iroh identity, lifecycle state, and an authorization epoch. Every new connection proves possession against a fresh server nonce. There is no long-lived bearer secret to copy from a QR, mobile database, or host grant database.
 3. **Interactive host confirmation is the default.** Both phone and host show the same transcript-derived short authentication string (SAS), the device label, and the requested scopes. The host commits the grant only after approval. An explicitly unattended invite may omit approval only when it is deliberately created with narrow scopes; the CLI must make that weaker policy conspicuous.
 4. **Manual codes are a separate ingress, not a compressed QR.** On the same LAN, mDNS/NSD supplies the route and host identity. An 8-character base-20 code identifies the pending invitation. The immediately shippable flow treats this code only as a locator and requires bilateral SAS comparison plus host confirmation. A future headless flow may use RFC 9382 SPAKE2, but only after a reviewed implementation, independent test vectors, and interop testing are available. OPAQUE is not justified for ephemeral host-generated invitations.
-5. **Pairing v2 gets a separate ALPN and authorization path.** Use `alleycat/2` while the Alleycat compatibility name is still required. Do not negotiate v2 inside `alleycat/1`, do not silently fall back, and do not let a v1 bearer token mint a v2 credential without a local host approval.
+5. **Pairing v2 gets a separate ALPN and authorization path.** Use `remora-link/2`; retain the Alleycat name only for the existing `alleycat/1` compatibility lane. Do not negotiate v2 inside `alleycat/1`, do not silently fall back, and do not let a v1 bearer token mint a v2 credential without a local host approval.
 
 This keeps Iroh's authenticated encrypted transport and routing, while moving application authorization from “whoever knows the global token” to “this approved device proves possession of this scoped key.” Iroh itself documents its endpoint public key as the peer identity and provides mutual endpoint authentication; authorization remains an application responsibility ([Iroh key types](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh-base/src/key.rs#L58-L70), [Iroh authenticated encryption](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/lib.rs#L81-L95), [accepted peer identity](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/endpoint/connection.rs#L1063-L1079)).
 
@@ -458,7 +458,7 @@ A malicious relay can deny service and observe metadata. It cannot impersonate t
 
 Keep Iroh 0.98.1 for pairing v2's first implementation and make the host accept both explicit ALPNs during the migration window. Iroh 1.0 introduced breaking changes and has already moved beyond the pinned release; upgrading Iroh while replacing authorization would multiply the test matrix without improving the v2 security model ([Iroh v1.0.0 release](https://github.com/n0-computer/iroh/releases/tag/v1.0.0), [current v1.0.2 release](https://github.com/n0-computer/iroh/releases/tag/v1.0.2)). Upgrade Iroh separately after v2 is proven.
 
-The host endpoint currently advertises a one-item ALPN list, so dual-stack migration needs the host builder and dispatcher to advertise/branch on both `alleycat/2` and `alleycat/1` ([current host ALPN](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L18-L43)). The v2 dispatcher must never pass a v2 connection into the v1 token validator or vice versa.
+The host endpoint currently advertises a one-item ALPN list, so dual-stack migration needs the host builder and dispatcher to advertise/branch on both `remora-link/2` and `alleycat/1` ([current host ALPN](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L18-L43)). The v2 dispatcher must never pass a v2 connection into the v1 token validator or vice versa.
 
 ### Shared Rust core
 
@@ -504,7 +504,7 @@ Use a time-bounded dual-stack cutover:
 
 - Mobile accepts v2 invites and creates hardware-backed per-host keys.
 - Host CLI/QR output emits only v2 by default. Legacy output requires an explicit diagnostic flag and states that it is a global bearer.
-- A client that sees a v2 envelope connects only with `alleycat/2`. Failure must not trigger an automatic `alleycat/1` attempt.
+- A client that sees a v2 envelope connects only with `remora-link/2`. Failure must not trigger an automatic `alleycat/1` attempt.
 
 ### Phase 2 — existing paired devices
 
@@ -639,6 +639,6 @@ This report does not change code, but the repository architecture constrains the
 
 ## Final recommendation
 
-Ship **high-entropy QR/copy enrollment → local host confirmation → per-host hardware-backed ES256 device grant**, bound to the authenticated Iroh client and host identities. Keep Iroh 0.98.1 and add an explicit `alleycat/2` lane for the first rollout. Make revocation stateful and immediate, recovery local-first, and v1 migration approval-gated.
+Ship **high-entropy QR/copy enrollment → local host confirmation → per-host hardware-backed ES256 device grant**, bound to the authenticated Iroh client and host identities. Keep Iroh 0.98.1 and add an explicit `remora-link/2` lane for the first rollout. Make revocation stateful and immediate, recovery local-first, and v1 migration approval-gated.
 
 For a typed short code, ship **locator + bilateral SAS + host confirmation** first. Add **SPAKE2** only if headless pairing is important enough to fund a reviewed RFC 9382 implementation and conformance program. Do not use **OPAQUE** for ephemeral invites, do not make a short code a bearer, and do not turn a **12-word high-entropy fallback** into the default experience.
