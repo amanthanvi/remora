@@ -14,6 +14,7 @@ final class AppRuntimeController {
     func bind(appModel: AppModel, voiceRuntime: VoiceRuntimeController) {
         self.appModel = appModel
         self.voiceRuntime = voiceRuntime
+        BackgroundAwarenessController.shared.bind(reconciler: self)
         reachability.bind(appModel: appModel)
         reachability.start()
         loadAndPushAlleycatSecretKey(client: appModel.client)
@@ -91,12 +92,26 @@ final class AppRuntimeController {
 
     func appDidBecomeActive() {
         guard let appModel else { return }
-        // Keep lifecycle state in sync even when foreground recovery exits early
-        // for an already-running voice session.
+        // Foreground activation is authoritative repair even when voice kept a
+        // transport alive while the app was backgrounded.
         appModel.reconnectController.noteAppBecameActive()
         lifecycle.appDidBecomeActive(
             appModel: appModel,
             hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil
+        )
+        // If a background wake timed out or arrived before the Rust runtime was
+        // bound, retry it now. AppLifecycleController above remains the
+        // unconditional foreground repair path when APNs delivered nothing.
+        BackgroundAwarenessController.shared.applicationDidBecomeActive()
+    }
+}
+
+extension AppRuntimeController: BackgroundStateReconciling {
+    func reconcileBackgroundState(expectedCursor: UInt64) async -> AuthenticatedBackgroundStateResult {
+        guard let appModel else { return .failed }
+        return await lifecycle.reconcileBackgroundAwareness(
+            appModel: appModel,
+            expectedCursor: expectedCursor
         )
     }
 }

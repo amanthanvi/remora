@@ -195,16 +195,26 @@ final class AppModel {
     }
 
     func refreshSnapshot() async {
-        pendingSnapshotRefreshTask?.cancel()
-        pendingSnapshotRefreshTask = nil
-        await performSnapshotRefresh()
+        _ = await refreshSnapshotAuthoritative()
     }
 
-    private func performSnapshotRefresh() async {
+    /// Fetches and applies one canonical Rust snapshot while reporting whether
+    /// the read itself succeeded. Background invalidation repair uses this
+    /// result so a swallowed bridge error can never advance an APNs cursor.
+    @discardableResult
+    func refreshSnapshotAuthoritative() async -> Bool {
+        pendingSnapshotRefreshTask?.cancel()
+        pendingSnapshotRefreshTask = nil
+        return await performSnapshotRefresh()
+    }
+
+    private func performSnapshotRefresh() async -> Bool {
         do {
             applySnapshot(try await store.snapshot())
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 
@@ -222,7 +232,7 @@ final class AppModel {
             }
             guard let self else { return }
             self.pendingSnapshotRefreshTask = nil
-            await self.performSnapshotRefresh()
+            _ = await self.performSnapshotRefresh()
         }
     }
 

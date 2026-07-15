@@ -13,6 +13,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         LLog.bootstrap()
 
         LLog.info("lifecycle", "application did finish launching")
+        #if !targetEnvironment(macCatalyst)
+        // Register on every launch so APNs can report token rotation. This does
+        // not request alert permission; visible notification permission remains
+        // an explicit, in-context product decision.
+        BackgroundAwarenessController.shared.start {
+            application.registerForRemoteNotifications()
+        }
+        #endif
         // Pre-initialize Rust bridges (tokio runtime) on a background thread
         // before SwiftUI accesses AppModel.shared, avoiding a priority inversion
         // where the main thread blocks on lower-QoS tokio worker init.
@@ -25,6 +33,49 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         showSplashWindow()
         scheduleKeyboardWarmup()
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        Task { @MainActor in
+            BackgroundAwarenessController.shared.didRegisterForRemoteNotifications(
+                deviceToken: deviceToken
+            )
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        // Never log the token or installation identifier. The OS error itself
+        // is useful for provisioning diagnostics and contains neither.
+        LLog.error("background-awareness", "APNs registration failed", error: error)
+        Task { @MainActor in
+            BackgroundAwarenessController.shared.didFailToRegisterForRemoteNotifications()
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            let result = await BackgroundAwarenessController.shared.handleRemoteNotification(
+                userInfo: userInfo
+            )
+            switch result {
+            case .newData:
+                completionHandler(.newData)
+            case .noData, .unavailable:
+                completionHandler(.noData)
+            case .timedOut, .failed:
+                completionHandler(.failed)
+            }
+        }
     }
 
     // MARK: - Splash window (sits above keyboard)
