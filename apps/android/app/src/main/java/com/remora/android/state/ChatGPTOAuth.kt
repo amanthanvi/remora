@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
 import com.remora.android.util.LLog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +15,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
+import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.UnknownHostException
 import java.net.URL
@@ -40,6 +43,22 @@ object ChatGPTOAuth {
     private const val callbackPort = 1455
     private const val callbackPath = "/auth/callback"
     private const val tokenExchangeMaxAttempts = 5
+    private val oauthDiagnosticAllowedKeys = setOf(
+        "access_token", "code", "error", "error_description", "error_uri", "expires_in",
+        "id_token", "message", "refresh_token", "request_id", "scope", "status", "token_type", "type",
+    )
+
+    private enum class OAuthJsonShape {
+        OBJECT,
+        ARRAY,
+        SCALAR,
+    }
+
+    private data class OAuthJsonStructure(
+        val shape: OAuthJsonShape,
+        val keys: List<String> = emptyList(),
+        val count: Int = 0,
+    )
 
     data class AuthAttempt(
         val state: String,
@@ -362,13 +381,14 @@ object ChatGPTOAuth {
                 ),
             )
             if (status !in 200..299) {
+                val diagnosticBody = oauthErrorResponseMetadata(responseText)
                 LLog.w(
                     "ChatGPTOAuth",
                     "ChatGPT token exchange failed",
-                    fields = mapOf("status" to status, "body" to redactedOAuthResponsePreview(responseText)),
+                    fields = mapOf("status" to status, "body" to diagnosticBody),
                 )
                 throw ChatGPTOAuthException(
-                    "ChatGPT token exchange failed ($status): ${responseText.take(300)}",
+                    "ChatGPT token exchange failed ($status): $diagnosticBody",
                 )
             }
 
@@ -384,29 +404,151 @@ object ChatGPTOAuth {
             ?.substringAfter("=", "")
             ?.let(Uri::decode)
 
-    private fun jsonObjectKeys(text: String): List<String> = try {
-        val payload = JSONObject(text)
-        payload.keys().asSequence().toList().sorted()
+    internal fun jsonObjectKeys(text: String): List<String> = try {
+        val structure = strictJsonStructure(text)
+        if (structure.shape == OAuthJsonShape.OBJECT) structure.keys else emptyList()
     } catch (_: Exception) {
         emptyList()
     }
 
-    private fun redactedOAuthResponsePreview(text: String): String = try {
-        val payload = JSONObject(text)
-        val keys = payload.keys().asSequence().toList()
-        for (key in keys) {
-            if (isSensitiveOAuthKey(key)) {
-                payload.put(key, "<redacted>")
+    internal fun oauthErrorResponseMetadata(text: String): String = try {
+        val structure = strictJsonStructure(text)
+        val metadata = when (structure.shape) {
+            OAuthJsonShape.OBJECT -> {
+                "<JSON object response omitted; keys=" +
+                    structure.keys.ifEmpty { listOf("none") }.joinToString(",") +
+                    ">"
             }
+            OAuthJsonShape.ARRAY -> "<JSON array response omitted; count=" + structure.count + ">"
+            OAuthJsonShape.SCALAR -> "<JSON scalar response omitted>"
         }
-        payload.toString().take(300)
+        metadata.take(300)
     } catch (_: Exception) {
-        text.take(300)
+        "<non-JSON response omitted>"
     }
 
-    private fun isSensitiveOAuthKey(key: String): Boolean {
-        val normalized = key.replace("_", "").lowercase()
-        return normalized.contains("token") || normalized.contains("authorization")
+    private fun strictJsonStructure(text: String): OAuthJsonStructure {
+        validateStrictJsonLexemes(text)
+        return JsonReader(StringReader(text)).use { reader ->
+            reader.isLenient = false
+            val structure = when (reader.peek()) {
+                JsonToken.BEGIN_OBJECT -> {
+                    val keys = linkedSetOf<String>()
+                    reader.beginObject()
+                    while (reader.hasNext()) {
+                        keys += safeOAuthDiagnosticKey(reader.nextName())
+                        reader.skipValue()
+                    }
+                    reader.endObject()
+                    OAuthJsonStructure(
+                        shape = OAuthJsonShape.OBJECT,
+                        keys = boundedOAuthDiagnosticKeys(keys),
+                    )
+                }
+                JsonToken.BEGIN_ARRAY -> {
+                    var count = 0
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        reader.skipValue()
+                        if (count < Int.MAX_VALUE) count += 1
+                    }
+                    reader.endArray()
+                    OAuthJsonStructure(shape = OAuthJsonShape.ARRAY, count = count)
+                }
+                JsonToken.STRING, JsonToken.NUMBER -> {
+                    reader.nextString()
+                    OAuthJsonStructure(shape = OAuthJsonShape.SCALAR)
+                }
+                JsonToken.BOOLEAN -> {
+                    reader.nextBoolean()
+                    OAuthJsonStructure(shape = OAuthJsonShape.SCALAR)
+                }
+                JsonToken.NULL -> {
+                    reader.nextNull()
+                    OAuthJsonStructure(shape = OAuthJsonShape.SCALAR)
+                }
+                else -> throw IllegalArgumentException("response is not JSON")
+            }
+            require(reader.peek() == JsonToken.END_DOCUMENT) { "trailing response content" }
+            structure
+        }
+    }
+
+    private fun validateStrictJsonLexemes(text: String) {
+        var inString = false
+        var escaped = false
+        var index = 0
+        while (index < text.length) {
+            val character = text[index]
+            if (inString) {
+                when {
+                    escaped && character == 'u' -> {
+                        require(index + 4 < text.length) { "incomplete JSON unicode escape" }
+                        require(
+                            text.substring(index + 1, index + 5).all { it.isHexDigit() },
+                        ) { "invalid JSON unicode escape" }
+                        escaped = false
+                        index += 5
+                        continue
+                    }
+                    escaped -> {
+                        require(character in "\"\\/bfnrt") { "invalid JSON escape" }
+                        escaped = false
+                    }
+                    character == '\\' -> escaped = true
+                    character == '"' -> inString = false
+                    character.code <= 0x1f -> throw IllegalArgumentException(
+                        "unescaped control character in JSON string",
+                    )
+                }
+                index += 1
+                continue
+            }
+
+            when {
+                character == '"' -> {
+                    inString = true
+                    index += 1
+                }
+                character in 'A'..'Z' || character in 'a'..'z' -> {
+                    val tokenStart = index
+                    while (
+                        index < text.length &&
+                        (text[index] in 'A'..'Z' || text[index] in 'a'..'z')
+                    ) {
+                        index += 1
+                    }
+                    val token = text.substring(tokenStart, index)
+                    if (
+                        token != token.lowercase() &&
+                        token.lowercase() in setOf("true", "false", "null")
+                    ) {
+                        throw IllegalArgumentException("case-variant JSON literal")
+                    }
+                }
+                character.code <= 0x1f &&
+                    character != '\t' &&
+                    character != '\n' &&
+                    character != '\r' -> throw IllegalArgumentException(
+                    "invalid JSON control character",
+                )
+                else -> index += 1
+            }
+        }
+        require(!inString && !escaped) { "unterminated JSON string" }
+    }
+
+    private fun Char.isHexDigit(): Boolean =
+        this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+    private fun safeOAuthDiagnosticKey(key: String): String {
+        val normalized = key.lowercase()
+        return normalized.takeIf(oauthDiagnosticAllowedKeys::contains) ?: "<other>"
+    }
+
+    private fun boundedOAuthDiagnosticKeys(keys: Set<String>): List<String> {
+        val normalized = keys.sorted()
+        return if (normalized.size <= 12) normalized else normalized.take(12) + "<truncated>"
     }
 
     private fun validateAuthorizationCallback(callbackUri: Uri, attempt: AuthAttempt) {

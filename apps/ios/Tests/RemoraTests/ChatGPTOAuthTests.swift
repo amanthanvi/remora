@@ -81,6 +81,105 @@ final class ChatGPTOAuthTests: XCTestCase {
         XCTAssertEqual(bundle.planType, "plus")
     }
 
+    func testOAuthErrorBodyOmitsNonJSONTokenShapedResponse() {
+        let leakedToken = "sk-proj-this-must-never-reach-diagnostics"
+
+        let preview = ChatGPTOAuth.oauthErrorResponseMetadata("Bearer \(leakedToken)")
+
+        XCTAssertEqual(preview, "<non-JSON response omitted>")
+        XCTAssertFalse(preview.contains(leakedToken))
+    }
+
+    func testOAuthErrorBodyEmitsStructureWithoutAnyResponseValues() {
+        let leakedRefreshToken = "refresh-token-this-must-never-reach-diagnostics"
+        let leakedBearerToken = "sk-proj-this-must-also-be-redacted"
+        let leakedBenignValue = "sk-proj-echoed-under-a-benign-key"
+        let leakedNestedKey = "sk-proj-secret-used-as-a-json-key"
+        let response = """
+        {
+          "error": "invalid_grant",
+          "message": "\(leakedBenignValue)",
+          "details": [
+            {"refresh_token": "\(leakedRefreshToken)"},
+            {"message": "Bearer \(leakedBearerToken)"},
+            {"\(leakedNestedKey)": "invalid"}
+          ]
+        }
+        """
+
+        let preview = ChatGPTOAuth.oauthErrorResponseMetadata(response)
+
+        XCTAssertTrue(preview.contains("JSON object response omitted"))
+        XCTAssertFalse(preview.contains("invalid_grant"))
+        XCTAssertFalse(preview.contains(leakedBenignValue))
+        XCTAssertFalse(preview.contains(leakedRefreshToken))
+        XCTAssertFalse(preview.contains(leakedBearerToken))
+        XCTAssertFalse(preview.contains(leakedNestedKey))
+    }
+
+    func testOAuthResponseMetadataDoesNotExposeCredentialShapedTopLevelKeys() {
+        let leakedKey = "sk-proj-secret-used-as-a-top-level-key"
+        let response = "{\"error\":\"invalid_grant\",\"\(leakedKey)\":\"invalid\"}"
+        let data = Data(response.utf8)
+
+        let keys = ChatGPTOAuth.jsonObjectKeys(data)
+        let preview = ChatGPTOAuth.oauthErrorResponseMetadata(response)
+
+        XCTAssertEqual(keys, ["<other>", "error"])
+        XCTAssertFalse(keys.joined().contains(leakedKey))
+        XCTAssertFalse(preview.contains(leakedKey))
+    }
+
+    func testOAuthResponseMetadataRejectsJSONWithTrailingSecretMaterial() {
+        let leakedToken = "sk-proj-trailing-material-must-be-omitted"
+        let responses = [
+            "{\"error\":\"invalid_grant\"} \(leakedToken)",
+            "[{\"error\":\"invalid_grant\"}] \(leakedToken)",
+            "\"invalid_grant\" \(leakedToken)"
+        ]
+
+        for response in responses {
+            let preview = ChatGPTOAuth.oauthErrorResponseMetadata(response)
+
+            XCTAssertEqual(preview, "<non-JSON response omitted>")
+            XCTAssertFalse(preview.contains(leakedToken))
+        }
+    }
+
+    func testOAuthResponseMetadataRejectsLenientJSONExtensions() {
+        let responses = [
+            "{error:\"invalid_grant\"}",
+            "{\"error\":'invalid_grant'}",
+            "{\"error\":\"invalid_grant\",}",
+            "[1,]"
+        ]
+
+        for response in responses {
+            XCTAssertEqual(
+                ChatGPTOAuth.oauthErrorResponseMetadata(response),
+                "<non-JSON response omitted>"
+            )
+        }
+    }
+
+    func testOAuthResponseMetadataRejectsCaseVariantLiteralsAndRawStringControls() {
+        let responses = [
+            "{\"error\":TRUE}",
+            "[False]",
+            "{\"nested\":{\"value\":NULL}}",
+            "{\"error\":\"line one\nline two\"}",
+            "{\"nested\":[\"before\u{0001}after\"]}"
+        ]
+
+        for response in responses {
+            XCTAssertEqual(
+                ChatGPTOAuth.oauthErrorResponseMetadata(response),
+                "<non-JSON response omitted>"
+            )
+            XCTAssertTrue(ChatGPTOAuth.jsonObjectKeys(Data(response.utf8)).isEmpty)
+        }
+    }
+
     private func jwt(claims: [String: String]) -> String {
         let header = ["alg": "none", "typ": "JWT"]
         let encoder = JSONEncoder()

@@ -129,6 +129,7 @@ dependencies {
         exclude(group = "org.jetbrains", module = "annotations-java5")
     }
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("com.google.code.gson:gson:2.8.9")
     implementation("com.android.billingclient:billing-ktx:7.0.0")
 
     // FCM is an opaque wake transport only. Firebase project configuration is

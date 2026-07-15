@@ -19,10 +19,12 @@ object LLog {
     }
 
     fun t(tag: String, message: String, fields: Map<String, Any?> = emptyMap(), payloadJson: String? = null) {
+        if (!BuildConfig.DEBUG) return
         Log.v(tag, render(message, fields, payloadJson))
     }
 
     fun d(tag: String, message: String, fields: Map<String, Any?> = emptyMap(), payloadJson: String? = null) {
+        if (!BuildConfig.DEBUG) return
         Log.d(tag, render(message, fields, payloadJson))
     }
 
