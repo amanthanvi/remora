@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: remora_relay
+      POSTGRES_USER: remora
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - relay-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remora -d remora_relay"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  relay:
+    build: .
+    command: ["serve", "--config", "/etc/remora-relay/config.toml"]
+    environment:
+      REMORA_RELAY_DATABASE_URL: postgres://remora:local-development-only@postgres/remora_relay
+    secrets:
+      - bootstrap_token
+    volumes:
+      - ./config.compose.toml:/etc/remora-relay/config.toml:ro
+      - relay-data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+secrets:
+  postgres_password:
+    file: .local/postgres-password
+  bootstrap_token:
+    file: .local/bootstrap-token
+
+volumes:
+  relay-postgres:
+  relay-data:

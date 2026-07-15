@@ -1,0 +1,21 @@
+deployment_profile = "local_development"
+
+[server]
+bind = "0.0.0.0:8787"
+
+[database]
+kind = "postgres"
+url_env = "REMORA_RELAY_DATABASE_URL"
+max_connections = 10
+
+[security]
+token_key_path = "/data/push-token.key"
+bootstrap_token_file = "/run/secrets/bootstrap_token"
+
+[push]
+mode = "mock"
+
+[worker]
+batch_size = 64
+poll_interval_ms = 250
+maintenance_interval_ms = 60000

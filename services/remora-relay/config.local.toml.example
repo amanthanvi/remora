@@ -1,0 +1,20 @@
+deployment_profile = "local_development"
+
+[server]
+bind = "127.0.0.1:8787"
+
+[database]
+kind = "local_sqlite"
+path = ".local/remora-relay.sqlite3"
+
+[security]
+token_key_path = ".local/push-token.key"
+allow_unauthenticated_bootstrap_on_loopback = true
+
+[push]
+mode = "mock"
+
+[worker]
+batch_size = 32
+poll_interval_ms = 250
+maintenance_interval_ms = 60000
