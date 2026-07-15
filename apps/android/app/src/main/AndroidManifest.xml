@@ -12,6 +12,8 @@
 
     <application
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -24,6 +26,12 @@
         <meta-data
             android:name="com.remora.android.runtime.ENABLE_ON_DEVICE_BRIDGE"
             android:value="${enableOnDeviceBridge}" />
+        <meta-data
+            android:name="firebase_messaging_installation_id_enabled"
+            android:value="true" />
+        <meta-data
+            android:name="firebase_messaging_notification_delegation_enabled"
+            android:value="false" />
         <activity
             android:name="com.remora.android.MainActivity"
             android:exported="true"
@@ -57,6 +65,13 @@
         <service
             android:name="com.remora.android.state.PetOverlayService"
             android:exported="false" />
+        <service
+            android:name="com.remora.android.background.RemoraFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <receiver
             android:name="com.remora.android.ui.widget.ActiveTurnWidgetReceiver"
             android:exported="true">

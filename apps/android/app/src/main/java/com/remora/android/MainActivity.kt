@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import com.remora.android.background.BackgroundAwareness
 import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.AppModel
 import com.remora.android.state.OpenAIApiKeyStore
@@ -124,7 +125,11 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val model = appModel ?: return
         lifecycleScope.launch {
-            lifecycleController.onResume(this@MainActivity, model)
+            BackgroundAwareness.onForeground(this@MainActivity) {
+                lifecycleController.onResume(this@MainActivity, model)
+            }
+        }
+        lifecycleScope.launch {
             PetOverlayController.syncOverlayService(this@MainActivity)
         }
     }

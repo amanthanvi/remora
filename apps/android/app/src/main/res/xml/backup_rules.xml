@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Device-bound credentials and provider registrations must never restore
+         onto a device whose Android Keystore identity is different. -->
+    <exclude domain="sharedpref" path="remora_push_awareness_v1.xml" />
+    <exclude domain="sharedpref" path="alleycat_credentials.xml" />
+    <exclude domain="sharedpref" path="remora_chatgpt_auth.xml" />
+    <exclude domain="sharedpref" path="remora_openai_api_key.xml" />
+    <exclude domain="sharedpref" path="remora_ssh_credentials.xml" />
+    <exclude domain="sharedpref" path="remora_ssh_trust.xml" />
+</full-backup-content>
