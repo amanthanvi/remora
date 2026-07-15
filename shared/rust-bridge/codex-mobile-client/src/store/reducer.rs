@@ -2365,7 +2365,7 @@ impl AppStoreReducer {
             // will get a ThreadRemoved event next and discard anyway.
             return empty_session_summary(key.clone());
         };
-        app_session_summary(thread, snapshot.servers.get(&key.server_id))
+        app_session_summary(&snapshot, thread, snapshot.servers.get(&key.server_id))
     }
 
     pub(crate) fn emit_thread_item_changed_by_id(&self, key: &ThreadKey, item_id: &str) {

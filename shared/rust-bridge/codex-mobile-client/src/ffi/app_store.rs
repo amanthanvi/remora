@@ -669,6 +669,20 @@ impl AppStore {
         self.inner.app_store.terminal_session_snapshot(&id)
     }
 
+    /// Resolve a non-secret canonical route for opening or attaching a
+    /// terminal to a thread. Passing a server-wide or foreign session id
+    /// fails closed instead of inheriting the currently visible thread.
+    pub fn resolve_thread_terminal_context(
+        &self,
+        key: crate::types::ThreadKey,
+        terminal_session_id: Option<String>,
+    ) -> Result<crate::terminal::ThreadTerminalContext, crate::terminal::ThreadTerminalContextError>
+    {
+        self.inner
+            .app_store
+            .resolve_thread_terminal_context(&key, terminal_session_id.as_deref())
+    }
+
     /// Write `bytes` to the currently-active terminal session, if any.
     /// Returns `Ok(false)` if no active session is set.
     pub async fn write_to_active_terminal(&self, bytes: Vec<u8>) -> Result<bool, ClientError> {
