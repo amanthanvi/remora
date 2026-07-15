@@ -167,6 +167,12 @@ pub struct AlleycatConnectOutcome {
     pub agent_name: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct ColdReconnectGuard {
+    session: Arc<ServerSession>,
+    generation: u64,
+}
+
 fn should_fallback_to_thread_metadata_after_resume_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("no rollout found for thread id")
@@ -465,11 +471,20 @@ impl MobileClient {
     }
 
     async fn clear_oauth_callback_tunnel(&self, server_id: &str) {
+        self.clear_oauth_callback_tunnel_for_session(server_id, None)
+            .await;
+    }
+
+    async fn clear_oauth_callback_tunnel_for_session(
+        &self,
+        server_id: &str,
+        session: Option<Arc<ServerSession>>,
+    ) {
         let tunnel = {
             let mut tunnels = self.oauth_callback_tunnels.lock().await;
             tunnels.remove(server_id)
         };
-        let session = self.sessions_read().get(server_id).cloned();
+        let session = session.or_else(|| self.sessions_read().get(server_id).cloned());
         if let Some(tunnel) = tunnel
             && let Some(session) = session
             && let Some(ssh_client) = session.ssh_client()
@@ -504,24 +519,75 @@ impl MobileClient {
         }
     }
 
-    pub(crate) fn connection_health(
+    pub(crate) fn connection_reconnect_state(
         &self,
         server_id: &str,
-    ) -> Option<crate::session::connection::ConnectionHealth> {
+    ) -> Option<crate::session::connection::ReconnectHealthState> {
         let session = self.sessions_read().get(server_id).cloned()?;
-        let health_rx = session.health();
-        let health = health_rx.borrow().clone();
-        Some(health)
+        Some(session.reconnect_health_state())
+    }
+
+    pub(crate) fn cold_reconnect_guard(&self, server_id: &str) -> Option<ColdReconnectGuard> {
+        let session = self.sessions_read().get(server_id).cloned()?;
+        let state = session.reconnect_health_state();
+        if !state.has_degraded_runtime || state.has_connecting_runtime {
+            return None;
+        }
+        Some(ColdReconnectGuard {
+            session,
+            generation: state.generation,
+        })
+    }
+
+    pub(crate) async fn wait_for_runtime_reconnects_to_settle(
+        &self,
+        server_id: &str,
+        deadline: std::time::Duration,
+    ) -> bool {
+        let session = self.sessions_read().get(server_id).cloned();
+        match session {
+            Some(session) => {
+                session
+                    .wait_for_runtime_reconnects_to_settle(deadline)
+                    .await
+            }
+            None => true,
+        }
     }
 
     async fn replace_existing_session(&self, server_id: &str) {
-        self.clear_oauth_callback_tunnel(server_id).await;
-        let existing = self.sessions_write().remove(server_id);
+        let _ = self
+            .replace_existing_session_with_guard(server_id, None)
+            .await;
+    }
+
+    async fn replace_existing_session_with_guard(
+        &self,
+        server_id: &str,
+        cold_guard: Option<&ColdReconnectGuard>,
+    ) -> bool {
+        let existing = {
+            let mut sessions = self.sessions_write();
+            if let Some(cold_guard) = cold_guard {
+                let Some(current) = sessions.get(server_id).cloned() else {
+                    return false;
+                };
+                if !Arc::ptr_eq(&current, &cold_guard.session)
+                    || !current.try_claim_cold_repair(cold_guard.generation)
+                {
+                    return false;
+                }
+            }
+            sessions.remove(server_id)
+        };
+        self.clear_oauth_callback_tunnel_for_session(server_id, existing.clone())
+            .await;
         self.clear_direct_resume_markers_for_server(server_id);
         if let Some(session) = existing {
             info!("MobileClient: replacing existing server session {server_id}");
             session.disconnect().await;
         }
+        true
     }
 
     /// Common post-`connect_remote_multiplexed` attach work shared by every
@@ -638,6 +704,51 @@ impl MobileClient {
         selected_agent_names: Vec<String>,
         wire: AlleycatAgentWire,
     ) -> Result<AlleycatConnectOutcome, TransportError> {
+        self.connect_remote_over_alleycat_inner(
+            server_id,
+            display_name,
+            params,
+            agent_name,
+            selected_agent_names,
+            wire,
+            None,
+        )
+        .await?
+        .ok_or_else(|| TransportError::ConnectionFailed("cold reconnect deferred".to_string()))
+    }
+
+    pub(crate) async fn reconnect_remote_over_alleycat(
+        &self,
+        server_id: String,
+        display_name: String,
+        params: ParsedAlleycatPairPayload,
+        agent_name: String,
+        selected_agent_names: Vec<String>,
+        wire: AlleycatAgentWire,
+        cold_guard: ColdReconnectGuard,
+    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
+        self.connect_remote_over_alleycat_inner(
+            server_id,
+            display_name,
+            params,
+            agent_name,
+            selected_agent_names,
+            wire,
+            Some(cold_guard),
+        )
+        .await
+    }
+
+    async fn connect_remote_over_alleycat_inner(
+        &self,
+        server_id: String,
+        display_name: String,
+        params: ParsedAlleycatPairPayload,
+        agent_name: String,
+        selected_agent_names: Vec<String>,
+        wire: AlleycatAgentWire,
+        cold_guard: Option<ColdReconnectGuard>,
+    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
         info!(
             "MobileClient: connect_remote_over_alleycat start server_id={} node_id={} agent={} selected_agents={:?} wire={:?}",
             server_id, params.node_id, agent_name, selected_agent_names, wire
@@ -711,18 +822,21 @@ impl MobileClient {
                 health,
                 crate::session::connection::ConnectionHealth::Connected
             ) {
-                let runtime_kinds = existing.runtime_kinds();
+                let runtime_kinds = existing.available_runtime_kinds();
                 let missing = missing_runtime_kinds(&runtime_kinds, &requested_runtime_kinds);
                 if missing.is_empty() {
+                    if cold_guard.is_some() {
+                        return Ok(None);
+                    }
                     info!(
                         "MobileClient: connect_remote_over_alleycat short-circuit; healthy session exists server_id={} runtimes={:?}",
                         server_id, runtime_kinds,
                     );
-                    return Ok(AlleycatConnectOutcome {
+                    return Ok(Some(AlleycatConnectOutcome {
                         server_id,
                         node_id: params.node_id.clone(),
                         agent_name: requested_agent_names,
-                    });
+                    }));
                 }
                 info!(
                     "MobileClient: connect_remote_over_alleycat rebuilding healthy session server_id={} existing_runtimes={:?} missing_selected_runtimes={:?}",
@@ -758,9 +872,14 @@ impl MobileClient {
                 );
             }
         }
+        if !self
+            .replace_existing_session_with_guard(server_id.as_str(), cold_guard.as_ref())
+            .await
+        {
+            return Ok(None);
+        }
         self.app_store
             .upsert_server(&config, ServerHealthSnapshot::Connecting);
-        self.replace_existing_session(server_id.as_str()).await;
 
         let endpoint = match self.alleycat_endpoint().await {
             Ok(endpoint) => endpoint,
@@ -874,11 +993,11 @@ impl MobileClient {
                 .join(",")
         };
 
-        Ok(AlleycatConnectOutcome {
+        Ok(Some(AlleycatConnectOutcome {
             server_id,
             node_id: params.node_id,
             agent_name: persisted_agents,
-        })
+        }))
     }
 
     pub async fn connect_remote_over_ssh_bridges(
@@ -891,6 +1010,55 @@ impl MobileClient {
         runtime_kinds: Vec<AgentRuntimeKind>,
         transport: crate::ssh_bridge::SshBridgeTransport,
     ) -> Result<AlleycatConnectOutcome, TransportError> {
+        self.connect_remote_over_ssh_bridges_inner(
+            ssh_client,
+            server_id,
+            display_name,
+            host,
+            state_root,
+            runtime_kinds,
+            transport,
+            None,
+        )
+        .await?
+        .ok_or_else(|| TransportError::ConnectionFailed("cold reconnect deferred".to_string()))
+    }
+
+    pub(crate) async fn reconnect_remote_over_ssh_bridges(
+        &self,
+        ssh_client: Arc<SshClient>,
+        server_id: String,
+        display_name: String,
+        host: String,
+        state_root: String,
+        runtime_kinds: Vec<AgentRuntimeKind>,
+        transport: crate::ssh_bridge::SshBridgeTransport,
+        cold_guard: ColdReconnectGuard,
+    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
+        self.connect_remote_over_ssh_bridges_inner(
+            ssh_client,
+            server_id,
+            display_name,
+            host,
+            state_root,
+            runtime_kinds,
+            transport,
+            Some(cold_guard),
+        )
+        .await
+    }
+
+    async fn connect_remote_over_ssh_bridges_inner(
+        &self,
+        ssh_client: Arc<SshClient>,
+        server_id: String,
+        display_name: String,
+        host: String,
+        state_root: String,
+        runtime_kinds: Vec<AgentRuntimeKind>,
+        transport: crate::ssh_bridge::SshBridgeTransport,
+        cold_guard: Option<ColdReconnectGuard>,
+    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
         if runtime_kinds.is_empty() {
             return Err(TransportError::ConnectionFailed(
                 "no SSH runtime kinds selected".to_string(),
@@ -912,9 +1080,14 @@ impl MobileClient {
             is_local: false,
             tls: false,
         };
+        if !self
+            .replace_existing_session_with_guard(server_id.as_str(), cold_guard.as_ref())
+            .await
+        {
+            return Ok(None);
+        }
         self.app_store
             .upsert_server(&config, ServerHealthSnapshot::Connecting);
-        self.replace_existing_session(server_id.as_str()).await;
 
         let (runtime_resources, runtime_infos) =
             crate::ssh_bridge::connect_runtime_resources_via_ssh(
@@ -964,7 +1137,7 @@ impl MobileClient {
         );
         self.attach_remote_session(&server_id, session, runtime_infos.clone());
 
-        Ok(AlleycatConnectOutcome {
+        Ok(Some(AlleycatConnectOutcome {
             server_id,
             node_id: host,
             agent_name: runtime_infos
@@ -972,7 +1145,7 @@ impl MobileClient {
                 .map(|runtime| runtime.name.clone())
                 .collect::<Vec<_>>()
                 .join(","),
-        })
+        }))
     }
 
     pub async fn connect_remote_over_ssh(

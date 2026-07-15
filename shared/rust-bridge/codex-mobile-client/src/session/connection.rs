@@ -429,6 +429,14 @@ pub enum ConnectionHealth {
     Unresponsive { since: Instant },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReconnectHealthState {
+    pub aggregate: ConnectionHealth,
+    pub has_degraded_runtime: bool,
+    pub has_connecting_runtime: bool,
+    pub generation: u64,
+}
+
 impl PartialEq for ConnectionHealth {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -619,12 +627,18 @@ fn duration_millis(duration: Duration) -> u64 {
 #[derive(Clone)]
 struct RuntimeHealthReporter {
     runtime_kind: AgentRuntimeKind,
-    state: Arc<StdMutex<HashMap<AgentRuntimeKind, ConnectionHealth>>>,
+    state: Arc<StdMutex<RuntimeHealthState>>,
     session_health_tx: watch::Sender<ConnectionHealth>,
 }
 
+struct RuntimeHealthState {
+    by_runtime: HashMap<AgentRuntimeKind, ConnectionHealth>,
+    generation: u64,
+    cold_repair_claimed: bool,
+}
+
 impl RuntimeHealthReporter {
-    fn update(&self, health: ConnectionHealth) {
+    fn update(&self, health: ConnectionHealth) -> bool {
         let aggregate = {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
@@ -633,10 +647,15 @@ impl RuntimeHealthReporter {
                     error.into_inner()
                 }
             };
-            state.insert(self.runtime_kind.clone(), health);
-            aggregate_runtime_health(state.values())
+            if state.cold_repair_claimed {
+                return false;
+            }
+            state.by_runtime.insert(self.runtime_kind.clone(), health);
+            state.generation = state.generation.saturating_add(1);
+            aggregate_runtime_health(state.by_runtime.values())
         };
         let _ = self.session_health_tx.send(aggregate);
+        true
     }
 }
 
@@ -680,6 +699,38 @@ fn aggregate_runtime_health<'a>(
     }
 
     ConnectionHealth::Disconnected
+}
+
+fn runtime_health_is_degraded(health: &HashMap<AgentRuntimeKind, ConnectionHealth>) -> bool {
+    health.values().any(|value| {
+        matches!(
+            value,
+            ConnectionHealth::Disconnected | ConnectionHealth::Unresponsive { .. }
+        )
+    })
+}
+
+fn runtime_health_has_connecting(health: &HashMap<AgentRuntimeKind, ConnectionHealth>) -> bool {
+    health
+        .values()
+        .any(|value| matches!(value, ConnectionHealth::Connecting { .. }))
+}
+
+fn available_runtime_kinds_from_health(
+    health: &HashMap<AgentRuntimeKind, ConnectionHealth>,
+) -> Vec<AgentRuntimeKind> {
+    let mut kinds = health
+        .iter()
+        .filter_map(|(runtime_kind, health)| {
+            matches!(
+                health,
+                ConnectionHealth::Connected | ConnectionHealth::Connecting { .. }
+            )
+            .then(|| runtime_kind.clone())
+        })
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds
 }
 
 struct ReconnectBackoff {
@@ -797,6 +848,7 @@ pub struct ServerSession {
     event_tx: broadcast::Sender<ServerEvent>,
     ssh_client: Option<Arc<SshClient>>,
     ssh_pid: Option<Arc<StdMutex<Option<u32>>>>,
+    runtime_health_state: Option<Arc<StdMutex<RuntimeHealthState>>>,
     connection_timeline: ConnectionTimeline,
     worker_handle: tokio::task::JoinHandle<()>,
 }
@@ -1090,6 +1142,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            runtime_health_state: None,
             connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         })
@@ -1134,13 +1187,15 @@ impl ServerSession {
         let (url, args) = remote_connect_args(&config);
         let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
         let connection_timeline = ConnectionTimeline::default();
-        let runtime_health_state = Arc::new(StdMutex::new(
-            requested_runtime_kinds
+        let runtime_health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: requested_runtime_kinds
                 .iter()
                 .cloned()
                 .map(|runtime_kind| (runtime_kind, ConnectionHealth::Connected))
                 .collect::<HashMap<_, _>>(),
-        ));
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
         let mut runtime_command_txs = std::collections::HashMap::new();
         let mut runtime_transports: Vec<Arc<dyn RemoteTransport>> = Vec::new();
         let mut worker_handles = Vec::new();
@@ -1203,6 +1258,7 @@ impl ServerSession {
             event_tx,
             ssh_client: extras.ssh_client,
             ssh_pid: extras.ssh_pid,
+            runtime_health_state: Some(runtime_health_state),
             connection_timeline,
             worker_handle,
         })
@@ -1247,6 +1303,74 @@ impl ServerSession {
         self.health_rx.clone()
     }
 
+    pub(crate) fn reconnect_health_state(&self) -> ReconnectHealthState {
+        let Some(runtime_health_state) = self.runtime_health_state.as_ref() else {
+            let health = self.health_rx.borrow().clone();
+            let is_connecting = matches!(health, ConnectionHealth::Connecting { .. });
+            return ReconnectHealthState {
+                aggregate: health,
+                has_degraded_runtime: false,
+                has_connecting_runtime: is_connecting,
+                generation: 0,
+            };
+        };
+        let state = match runtime_health_state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                warn!("runtime health: recovering poisoned lock");
+                error.into_inner()
+            }
+        };
+        ReconnectHealthState {
+            aggregate: aggregate_runtime_health(state.by_runtime.values()),
+            has_degraded_runtime: runtime_health_is_degraded(&state.by_runtime),
+            has_connecting_runtime: runtime_health_has_connecting(&state.by_runtime),
+            generation: state.generation,
+        }
+    }
+
+    pub(crate) fn try_claim_cold_repair(&self, expected_generation: u64) -> bool {
+        let Some(runtime_health_state) = self.runtime_health_state.as_ref() else {
+            return false;
+        };
+        let mut state = match runtime_health_state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                warn!("runtime health: recovering poisoned lock");
+                error.into_inner()
+            }
+        };
+        if state.cold_repair_claimed
+            || state.generation != expected_generation
+            || runtime_health_has_connecting(&state.by_runtime)
+        {
+            return false;
+        }
+        state.cold_repair_claimed = true;
+        state.generation = state.generation.saturating_add(1);
+        true
+    }
+
+    pub(crate) async fn wait_for_runtime_reconnects_to_settle(&self, deadline: Duration) -> bool {
+        let mut health_rx = self.health();
+        let started = Instant::now();
+        loop {
+            if !self.reconnect_health_state().has_connecting_runtime {
+                return true;
+            }
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return !self.reconnect_health_state().has_connecting_runtime;
+            }
+            match tokio::time::timeout(remaining, health_rx.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    return !self.reconnect_health_state().has_connecting_runtime;
+                }
+            }
+        }
+    }
+
     /// Snapshot the bounded local reconnect timeline. This stays inside the
     /// process and contains only low-cardinality, redacted fields.
     pub(crate) fn connection_timeline(&self) -> Vec<ConnectionTimelineEntry> {
@@ -1260,6 +1384,20 @@ impl ServerSession {
         let mut kinds = self.runtime_command_txs.keys().cloned().collect::<Vec<_>>();
         kinds.sort();
         kinds
+    }
+
+    pub(crate) fn available_runtime_kinds(&self) -> Vec<AgentRuntimeKind> {
+        let Some(runtime_health_state) = self.runtime_health_state.as_ref() else {
+            return self.runtime_kinds();
+        };
+        let health = match runtime_health_state.lock() {
+            Ok(health) => health,
+            Err(error) => {
+                warn!("runtime health: recovering poisoned lock");
+                error.into_inner()
+            }
+        };
+        available_runtime_kinds_from_health(&health.by_runtime)
     }
 
     /// Send a typed `ClientRequest` and await the raw JSON response.
@@ -1595,10 +1733,12 @@ async fn reconnect_remote_client(
             attempt,
             ConnectionAttemptOutcome::Pending,
         );
-        health.update(ConnectionHealth::Connecting {
+        if !health.update(ConnectionHealth::Connecting {
             attempt,
             max_attempts: REMOTE_RECONNECT_MAX_ATTEMPTS,
-        });
+        }) {
+            return None;
+        }
 
         let dial_started = Instant::now();
         let connect_result: Result<Reconnected, TransportError> = match transport {
@@ -1618,7 +1758,9 @@ async fn reconnect_remote_client(
                 let replay_outcome = transport
                     .map(|transport| transport.take_replay_outcome())
                     .unwrap_or(ReplayOutcome::Complete);
-                health.update(ConnectionHealth::Connected);
+                if !health.update(ConnectionHealth::Connected) {
+                    return None;
+                }
                 timeline.record(
                     correlation_id,
                     generation,
@@ -1706,7 +1848,7 @@ async fn reconnect_remote_client(
         }
     }
 
-    health.update(ConnectionHealth::Disconnected);
+    let _ = health.update(ConnectionHealth::Disconnected);
     timeline.record(
         correlation_id,
         generation,
@@ -2233,7 +2375,7 @@ fn route_app_server_event(
         AppServerEvent::Disconnected { message } => {
             warn!("event: disconnected: {message}");
             append_android_debug_log(&format!("disconnected={message}"));
-            health.update(ConnectionHealth::Disconnected);
+            let _ = health.update(ConnectionHealth::Disconnected);
         }
     }
 }
@@ -2332,6 +2474,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            runtime_health_state: None,
             connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
@@ -2369,6 +2512,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            runtime_health_state: None,
             connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
@@ -2552,10 +2696,11 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel(4);
         let (health_tx, mut health_rx) = watch::channel(ConnectionHealth::Connected);
         let timeline = ConnectionTimeline::default();
-        let health_state = Arc::new(StdMutex::new(HashMap::from([(
-            "pi".to_string(),
-            ConnectionHealth::Connected,
-        )])));
+        let health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([("pi".to_string(), ConnectionHealth::Connected)]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
         let worker = spawn_remote_runtime_worker(
             "pi".to_string(),
             initial_client,
@@ -2668,6 +2813,95 @@ mod tests {
             ]),
             ConnectionHealth::Disconnected
         );
+
+        let selected_runtime_health = HashMap::from([
+            ("codex".to_string(), ConnectionHealth::Connected),
+            ("pi".to_string(), ConnectionHealth::Disconnected),
+            ("opencode".to_string(), reconnecting),
+        ]);
+        assert_eq!(
+            aggregate_runtime_health(selected_runtime_health.values()),
+            ConnectionHealth::Connected,
+            "a healthy sibling keeps the aggregate session usable"
+        );
+        assert!(
+            runtime_health_is_degraded(&selected_runtime_health),
+            "an exhausted selected runtime must remain visible to cold-repair orchestration"
+        );
+        assert!(
+            runtime_health_has_connecting(&selected_runtime_health),
+            "cold repair must not replace a session while a sibling owns hot recovery"
+        );
+        assert_eq!(
+            available_runtime_kinds_from_health(&selected_runtime_health),
+            vec!["codex".to_string(), "opencode".to_string()],
+            "an exhausted runtime must not satisfy selected-runtime availability checks"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_repair_waits_for_a_hot_sibling_to_settle() {
+        let config = ServerConfig {
+            server_id: "srv".to_string(),
+            display_name: "Server".to_string(),
+            host: "example.local".to_string(),
+            port: 0,
+            websocket_url: None,
+            is_local: false,
+            tls: false,
+        };
+        let mut session = ServerSession::test_stub(config);
+        let runtime_health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([
+                ("codex".to_string(), ConnectionHealth::Connected),
+                ("pi".to_string(), ConnectionHealth::Disconnected),
+                (
+                    "opencode".to_string(),
+                    ConnectionHealth::Connecting {
+                        attempt: 2,
+                        max_attempts: 5,
+                    },
+                ),
+            ]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
+        session.runtime_health_state = Some(Arc::clone(&runtime_health_state));
+        let reporter = RuntimeHealthReporter {
+            runtime_kind: "opencode".to_string(),
+            state: runtime_health_state,
+            session_health_tx: session.health_tx.clone(),
+        };
+        let session = Arc::new(session);
+
+        assert!(
+            !session
+                .wait_for_runtime_reconnects_to_settle(Duration::ZERO)
+                .await
+        );
+        let waiting_session = Arc::clone(&session);
+        let waiter = tokio::spawn(async move {
+            waiting_session
+                .wait_for_runtime_reconnects_to_settle(Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(reporter.update(ConnectionHealth::Connected));
+
+        assert!(waiter.await.expect("settle waiter"));
+        let settled = session.reconnect_health_state();
+        assert_eq!(settled.aggregate, ConnectionHealth::Connected);
+        assert!(settled.has_degraded_runtime);
+        assert!(!settled.has_connecting_runtime);
+        assert!(session.try_claim_cold_repair(settled.generation));
+        assert!(
+            !reporter.update(ConnectionHealth::Connecting {
+                attempt: 1,
+                max_attempts: 5,
+            }),
+            "a hot reconnect starting after the final snapshot must lose to the atomic cold claim"
+        );
+        session.disconnect().await;
     }
 
     #[test]

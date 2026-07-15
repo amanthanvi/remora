@@ -5,14 +5,17 @@
 
 use crate::alleycat::{AgentWire as AlleycatAgentWire, ParsedPairPayload as AlleycatPairPayload};
 use crate::mobile_client::MobileClient;
-use crate::session::connection::{InProcessConfig, ServerConfig};
+use crate::session::connection::{ConnectionHealth, InProcessConfig, ServerConfig};
 use crate::slingshot_url::is_slingshot_connection_url;
 use crate::slingshot_url::parse_slingshot_connection_url;
 use crate::ssh::{SshAuth, SshClient, SshCredentials};
 use crate::types::AgentRuntimeKind;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
+
+const HOT_RECONNECT_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
 
 // ── UniFFI boundary types ───────────────────────────────────────────────
 
@@ -549,31 +552,72 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
 
 // ── Plan execution ──────────────────────────────────────────────────────
 
+pub(crate) fn reconnect_outcome_for_health(
+    health: &ConnectionHealth,
+    has_degraded_runtime: bool,
+    has_connecting_runtime: bool,
+) -> Option<ReconnectOutcome> {
+    if has_degraded_runtime {
+        return None;
+    }
+    if has_connecting_runtime {
+        return Some(ReconnectOutcome::SelfHealing);
+    }
+    match health {
+        ConnectionHealth::Connected => Some(ReconnectOutcome::AlreadyConnected),
+        ConnectionHealth::Connecting { .. } => Some(ReconnectOutcome::SelfHealing),
+        ConnectionHealth::Disconnected | ConnectionHealth::Unresponsive { .. } => None,
+    }
+}
+
 /// Execute a single reconnect plan against the shared `MobileClient`.
 pub(crate) async fn execute_reconnect_plan(
     plan: &ReconnectPlan,
     client: &MobileClient,
 ) -> ReconnectResult {
-    if let Some(health) = client.connection_health(plan.server_id()) {
-        match health {
-            crate::session::connection::ConnectionHealth::Connected => {
-                return ReconnectResult::completed(
-                    plan.server_id(),
-                    ReconnectOutcome::AlreadyConnected,
-                    false,
-                );
-            }
-            crate::session::connection::ConnectionHealth::Connecting { .. } => {
+    if client
+        .connection_reconnect_state(plan.server_id())
+        .is_some_and(|state| state.has_degraded_runtime && state.has_connecting_runtime)
+    {
+        client
+            .wait_for_runtime_reconnects_to_settle(plan.server_id(), HOT_RECONNECT_SETTLE_DEADLINE)
+            .await;
+    }
+
+    let reconnect_state = client.connection_reconnect_state(plan.server_id());
+    if let Some(state) = reconnect_state.as_ref() {
+        if state.has_degraded_runtime && state.has_connecting_runtime {
+            return ReconnectResult::completed(
+                plan.server_id(),
+                ReconnectOutcome::SelfHealing,
+                false,
+            );
+        }
+        if let Some(outcome) = reconnect_outcome_for_health(
+            &state.aggregate,
+            state.has_degraded_runtime,
+            state.has_connecting_runtime,
+        ) {
+            return ReconnectResult::completed(plan.server_id(), outcome, false);
+        }
+    }
+    let cold_repair_required = reconnect_state
+        .as_ref()
+        .is_some_and(|state| state.has_degraded_runtime);
+    let cold_guard = if cold_repair_required {
+        match client.cold_reconnect_guard(plan.server_id()) {
+            Some(guard) => Some(guard),
+            None => {
                 return ReconnectResult::completed(
                     plan.server_id(),
                     ReconnectOutcome::SelfHealing,
                     false,
                 );
             }
-            crate::session::connection::ConnectionHealth::Disconnected
-            | crate::session::connection::ConnectionHealth::Unresponsive { .. } => {}
         }
-    }
+    } else {
+        None
+    };
 
     match plan {
         ReconnectPlan::Ssh {
@@ -677,19 +721,41 @@ pub(crate) async fn execute_reconnect_plan(
                     return ReconnectResult::failed(server_id, error);
                 }
             };
-            match client
-                .connect_remote_over_ssh_bridges(
-                    ssh_client,
-                    server_id.clone(),
-                    display_name.clone(),
-                    host.clone(),
-                    state_root,
-                    selected,
-                    crate::ssh_bridge::SshBridgeTransport::Ephemeral,
-                )
-                .await
-            {
-                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
+            let reconnect = match cold_guard.clone() {
+                Some(guard) => {
+                    client
+                        .reconnect_remote_over_ssh_bridges(
+                            ssh_client,
+                            server_id.clone(),
+                            display_name.clone(),
+                            host.clone(),
+                            state_root,
+                            selected,
+                            crate::ssh_bridge::SshBridgeTransport::Ephemeral,
+                            guard,
+                        )
+                        .await
+                }
+                None => client
+                    .connect_remote_over_ssh_bridges(
+                        ssh_client,
+                        server_id.clone(),
+                        display_name.clone(),
+                        host.clone(),
+                        state_root,
+                        selected,
+                        crate::ssh_bridge::SshBridgeTransport::Ephemeral,
+                    )
+                    .await
+                    .map(Some),
+            };
+            match reconnect {
+                Ok(Some(_)) => {
+                    ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false)
+                }
+                Ok(None) => {
+                    ReconnectResult::completed(server_id, ReconnectOutcome::SelfHealing, false)
+                }
                 Err(e) => {
                     warn!(
                         "reconnect: SSH bridge plan failed server_id={} error={}",
@@ -830,18 +896,39 @@ pub(crate) async fn execute_reconnect_plan(
                 "reconnect: executing Alleycat plan server_id={} node_id={} agent={}",
                 server_id, params.node_id, agent_name
             );
-            match client
-                .connect_remote_over_alleycat(
-                    server_id.clone(),
-                    display_name.clone(),
-                    params.clone(),
-                    agent_name.clone(),
-                    split_agent_names(agent_name),
-                    *wire,
-                )
-                .await
-            {
-                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
+            let reconnect = match cold_guard.clone() {
+                Some(guard) => {
+                    client
+                        .reconnect_remote_over_alleycat(
+                            server_id.clone(),
+                            display_name.clone(),
+                            params.clone(),
+                            agent_name.clone(),
+                            split_agent_names(agent_name),
+                            *wire,
+                            guard,
+                        )
+                        .await
+                }
+                None => client
+                    .connect_remote_over_alleycat(
+                        server_id.clone(),
+                        display_name.clone(),
+                        params.clone(),
+                        agent_name.clone(),
+                        split_agent_names(agent_name),
+                        *wire,
+                    )
+                    .await
+                    .map(Some),
+            };
+            match reconnect {
+                Ok(Some(_)) => {
+                    ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false)
+                }
+                Ok(None) => {
+                    ReconnectResult::completed(server_id, ReconnectOutcome::SelfHealing, false)
+                }
                 Err(e) => {
                     warn!(
                         "reconnect: Alleycat plan failed server_id={} error={}",
@@ -979,6 +1066,35 @@ fn split_agent_names(agent_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_health_short_circuit_requires_every_selected_runtime_to_be_repairable() {
+        assert_eq!(
+            reconnect_outcome_for_health(&ConnectionHealth::Connected, false, false),
+            Some(ReconnectOutcome::AlreadyConnected)
+        );
+        assert_eq!(
+            reconnect_outcome_for_health(
+                &ConnectionHealth::Connecting {
+                    attempt: 2,
+                    max_attempts: 5,
+                },
+                false,
+                true,
+            ),
+            Some(ReconnectOutcome::SelfHealing)
+        );
+        assert_eq!(
+            reconnect_outcome_for_health(&ConnectionHealth::Connected, true, false),
+            None,
+            "aggregate Connected must not hide an exhausted selected runtime"
+        );
+        assert_eq!(
+            reconnect_outcome_for_health(&ConnectionHealth::Connected, false, true),
+            Some(ReconnectOutcome::SelfHealing),
+            "aggregate Connected must not hide a selected runtime's active hot recovery"
+        );
+    }
 
     fn base_server() -> SavedServerRecord {
         SavedServerRecord {

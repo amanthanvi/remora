@@ -1502,6 +1502,54 @@ mod mobile_client_tests {
         assert_eq!(remote_oauth_callback_port(auth_url).unwrap(), 1455);
     }
 
+    #[tokio::test]
+    async fn failed_cold_repair_guard_preserves_the_live_session_and_oauth_tunnel() {
+        let client = MobileClient::new();
+        let server_id = "guard-race";
+        let session = Arc::new(ServerSession::test_stub(make_server_config(server_id)));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock should not be poisoned")
+            .insert(server_id.to_string(), Arc::clone(&session));
+        client.oauth_callback_tunnels.lock().await.insert(
+            server_id.to_string(),
+            OAuthCallbackTunnel {
+                login_id: "login-1".to_string(),
+                local_port: 1455,
+            },
+        );
+        let stale_guard = ColdReconnectGuard {
+            session: Arc::clone(&session),
+            generation: 0,
+        };
+
+        assert!(
+            !client
+                .replace_existing_session_with_guard(server_id, Some(&stale_guard))
+                .await,
+            "a non-multiplexed session cannot satisfy a cold-repair claim"
+        );
+        let current = client
+            .sessions
+            .read()
+            .expect("sessions lock should not be poisoned")
+            .get(server_id)
+            .cloned()
+            .expect("failed guard must preserve the current session");
+        assert!(Arc::ptr_eq(&current, &session));
+        assert!(
+            client
+                .oauth_callback_tunnels
+                .lock()
+                .await
+                .contains_key(server_id),
+            "failed guard must not tear down an in-progress OAuth callback"
+        );
+
+        session.disconnect().await;
+    }
+
     #[test]
     fn approval_request_id_prefers_seed_type_for_local_responses() {
         let approval = PendingApproval {

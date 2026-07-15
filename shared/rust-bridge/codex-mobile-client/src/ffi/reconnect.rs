@@ -7,9 +7,8 @@ use crate::next_request_id;
 use crate::reconnect::{
     ReconnectOutcome, ReconnectPlan, ReconnectPlanDecision, ReconnectResult, SavedServerRecord,
     SlingshotCredentialProvider, SshCredentialProvider, decide_reconnect_plan_with_slingshot,
-    execute_reconnect_plan,
+    execute_reconnect_plan, reconnect_outcome_for_health,
 };
-use crate::session::connection::ConnectionHealth;
 use crate::store::ServerHealthSnapshot;
 use crate::store::snapshot::AppLifecyclePhaseSnapshot;
 use codex_app_server_protocol as upstream;
@@ -32,12 +31,17 @@ struct ReconnectCoordinator {
 
 struct ReconnectCoordinatorState {
     accepting: bool,
-    in_flight: HashMap<String, watch::Sender<bool>>,
+    in_flight: HashMap<String, ActiveReconnect>,
+}
+
+struct ActiveReconnect {
+    cancel_tx: watch::Sender<bool>,
+    completion_tx: watch::Sender<Option<ReconnectResult>>,
 }
 
 enum BeginReconnect {
     Started(ReconnectAttemptGuard),
-    Coalesced,
+    Coalesced(watch::Receiver<Option<ReconnectResult>>),
     Stopped,
 }
 
@@ -68,15 +72,24 @@ impl ReconnectCoordinator {
         if !state.accepting {
             return BeginReconnect::Stopped;
         }
-        if state.in_flight.contains_key(server_id) {
-            return BeginReconnect::Coalesced;
+        if let Some(active) = state.in_flight.get(server_id) {
+            return BeginReconnect::Coalesced(active.completion_tx.subscribe());
         }
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        state.in_flight.insert(server_id.to_string(), cancel_tx);
+        let (completion_tx, _completion_rx) = watch::channel(None);
+        state.in_flight.insert(
+            server_id.to_string(),
+            ActiveReconnect {
+                cancel_tx,
+                completion_tx: completion_tx.clone(),
+            },
+        );
         BeginReconnect::Started(ReconnectAttemptGuard {
             coordinator: Arc::clone(self),
             server_id: server_id.to_string(),
             cancel_rx,
+            completion_tx,
+            finished: false,
         })
     }
 
@@ -121,8 +134,8 @@ impl ReconnectCoordinator {
                 Ok(state) => state,
                 Err(error) => error.into_inner(),
             };
-            for cancel_tx in state.in_flight.values() {
-                let _ = cancel_tx.send(true);
+            for active in state.in_flight.values() {
+                let _ = active.cancel_tx.send(true);
             }
             !state.in_flight.is_empty()
         };
@@ -143,6 +156,8 @@ struct ReconnectAttemptGuard {
     coordinator: Arc<ReconnectCoordinator>,
     server_id: String,
     cancel_rx: watch::Receiver<bool>,
+    completion_tx: watch::Sender<Option<ReconnectResult>>,
+    finished: bool,
 }
 
 impl ReconnectAttemptGuard {
@@ -156,10 +171,22 @@ impl ReconnectAttemptGuard {
             }
         }
     }
+
+    fn finish(&mut self, result: ReconnectResult) -> ReconnectResult {
+        self.finished = true;
+        self.completion_tx.send_replace(Some(result.clone()));
+        result
+    }
 }
 
 impl Drop for ReconnectAttemptGuard {
     fn drop(&mut self) {
+        if !self.finished {
+            self.completion_tx.send_replace(Some(result_for_outcome(
+                self.server_id.clone(),
+                ReconnectOutcome::Cancelled,
+            )));
+        }
         match self.coordinator.state.lock() {
             Ok(mut state) => {
                 state.in_flight.remove(&self.server_id);
@@ -211,11 +238,12 @@ fn resolved_local_display_name(
 }
 
 fn live_reconnect_outcome(inner: &MobileClient, server_id: &str) -> Option<ReconnectOutcome> {
-    match inner.connection_health(server_id) {
-        Some(ConnectionHealth::Connected) => Some(ReconnectOutcome::AlreadyConnected),
-        Some(ConnectionHealth::Connecting { .. }) => Some(ReconnectOutcome::SelfHealing),
-        Some(ConnectionHealth::Disconnected | ConnectionHealth::Unresponsive { .. }) | None => None,
-    }
+    let state = inner.connection_reconnect_state(server_id)?;
+    reconnect_outcome_for_health(
+        &state.aggregate,
+        state.has_degraded_runtime,
+        state.has_connecting_runtime,
+    )
 }
 
 fn outcome_message(outcome: ReconnectOutcome) -> &'static str {
@@ -248,6 +276,24 @@ fn result_for_outcome(server_id: impl Into<String>, outcome: ReconnectOutcome) -
     }
 }
 
+async fn wait_for_coalesced_result(
+    mut completion_rx: watch::Receiver<Option<ReconnectResult>>,
+    server_id: String,
+) -> ReconnectResult {
+    loop {
+        let current = { completion_rx.borrow_and_update().clone() };
+        if let Some(result) = current {
+            return result;
+        }
+        if completion_rx.changed().await.is_err() {
+            return completion_rx
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| result_for_outcome(server_id, ReconnectOutcome::Cancelled));
+        }
+    }
+}
+
 async fn execute_coordinated_plan(
     plan: ReconnectPlan,
     inner: Arc<MobileClient>,
@@ -256,12 +302,12 @@ async fn execute_coordinated_plan(
     let server_id = plan.server_id().to_string();
     let mut attempt = match coordinator.try_begin(&server_id) {
         BeginReconnect::Started(attempt) => attempt,
-        BeginReconnect::Coalesced => {
+        BeginReconnect::Coalesced(completion_rx) => {
             info!(
                 server_id,
                 "ReconnectController: reconnect attempt coalesced with in-flight owner"
             );
-            return result_for_outcome(server_id, ReconnectOutcome::Coalesced);
+            return wait_for_coalesced_result(completion_rx, server_id).await;
         }
         BeginReconnect::Stopped => {
             return result_for_outcome(server_id, ReconnectOutcome::Cancelled);
@@ -269,19 +315,21 @@ async fn execute_coordinated_plan(
     };
     let acquire_slot = Arc::clone(&coordinator.cold_slots).acquire_owned();
     tokio::pin!(acquire_slot);
-    let slot = tokio::select! {
-        result = &mut acquire_slot => match result {
-            Ok(slot) => slot,
-            Err(error) => {
-                return ReconnectResult::failed(
-                    server_id,
-                    format!("reconnect coordinator unavailable: {error}"),
-                );
-            }
-        },
-        () = attempt.cancelled() => {
-            return result_for_outcome(server_id, ReconnectOutcome::Cancelled);
-        }
+    let slot_result = tokio::select! {
+        result = &mut acquire_slot => result.map_err(|error| {
+            ReconnectResult::failed(
+                server_id.clone(),
+                format!("reconnect coordinator unavailable: {error}"),
+            )
+        }),
+        () = attempt.cancelled() => Err(result_for_outcome(
+            server_id.clone(),
+            ReconnectOutcome::Cancelled,
+        )),
+    };
+    let slot = match slot_result {
+        Ok(slot) => slot,
+        Err(result) => return attempt.finish(result),
     };
     let reconnect = execute_reconnect_plan(&plan, &inner);
     tokio::pin!(reconnect);
@@ -292,7 +340,7 @@ async fn execute_coordinated_plan(
         }
     };
     drop(slot);
-    result
+    attempt.finish(result)
 }
 
 #[derive(uniffi::Object)]
@@ -750,9 +798,10 @@ async fn reconnect_server_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginReconnect, ReconnectCoordinator, ReconnectShutdownOutcome, resolved_local_display_name,
+        BeginReconnect, ReconnectCoordinator, ReconnectShutdownOutcome,
+        resolved_local_display_name, wait_for_coalesced_result,
     };
-    use crate::reconnect::SavedServerRecord;
+    use crate::reconnect::{ReconnectOutcome, ReconnectResult, SavedServerRecord};
     use crate::store::snapshot::{
         AppSnapshot, AppVoiceSessionSnapshot, ServerHealthSnapshot, ServerSnapshot,
         ServerTransportDiagnostics,
@@ -782,7 +831,7 @@ mod tests {
         };
         assert!(matches!(
             coordinator.try_begin("srv-a"),
-            BeginReconnect::Coalesced
+            BeginReconnect::Coalesced(_)
         ));
         let BeginReconnect::Started(other) = coordinator.try_begin("srv-b") else {
             panic!("expected independent owner");
@@ -795,6 +844,43 @@ mod tests {
             BeginReconnect::Started(_)
         ));
         drop(other);
+    }
+
+    #[tokio::test]
+    async fn reconnect_coordinator_shares_owner_failure_with_coalesced_waiter() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(mut owner) = coordinator.try_begin("srv-a") else {
+            panic!("expected first owner");
+        };
+        let BeginReconnect::Coalesced(completion_rx) = coordinator.try_begin("srv-a") else {
+            panic!("expected coalesced waiter");
+        };
+
+        let owner_result = ReconnectResult::failed("srv-a", "dial exhausted");
+        owner.finish(owner_result);
+        drop(owner);
+
+        let shared = wait_for_coalesced_result(completion_rx, "srv-a".to_string()).await;
+        assert!(!shared.success);
+        assert_eq!(shared.outcome, ReconnectOutcome::Failed);
+        assert_eq!(shared.error_message.as_deref(), Some("dial exhausted"));
+    }
+
+    #[tokio::test]
+    async fn reconnect_coordinator_reports_cancelled_when_owner_drops_unfinished() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(owner) = coordinator.try_begin("srv-a") else {
+            panic!("expected first owner");
+        };
+        let BeginReconnect::Coalesced(completion_rx) = coordinator.try_begin("srv-a") else {
+            panic!("expected coalesced waiter");
+        };
+
+        drop(owner);
+
+        let shared = wait_for_coalesced_result(completion_rx, "srv-a".to_string()).await;
+        assert!(!shared.success);
+        assert_eq!(shared.outcome, ReconnectOutcome::Cancelled);
     }
 
     #[tokio::test]
