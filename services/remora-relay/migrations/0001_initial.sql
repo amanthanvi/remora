@@ -13,10 +13,44 @@ CREATE TABLE IF NOT EXISTS installations (
     manage_capability_hash BYTEA NOT NULL CHECK (octet_length(manage_capability_hash) = 32),
     next_sequence BIGINT NOT NULL CHECK (next_sequence >= 1),
     replay_floor BIGINT NOT NULL CHECK (replay_floor >= 1),
+    acknowledged_through BIGINT NOT NULL DEFAULT 0 CHECK (acknowledged_through >= 0),
     created_at_ms BIGINT NOT NULL,
     updated_at_ms BIGINT NOT NULL,
-    tombstoned_at_ms BIGINT
+    tombstoned_at_ms BIGINT,
+    CONSTRAINT installations_ack_below_high_watermark
+        CHECK (acknowledged_through < next_sequence)
 );
+
+ALTER TABLE installations
+    ADD COLUMN IF NOT EXISTS acknowledged_through BIGINT NOT NULL DEFAULT 0
+    CHECK (acknowledged_through >= 0);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'installations'::regclass
+          AND conname = 'installations_ack_below_high_watermark'
+    ) THEN
+        ALTER TABLE installations ADD CONSTRAINT installations_ack_below_high_watermark
+            CHECK (acknowledged_through < next_sequence);
+    END IF;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS installation_receipts (
+    idempotency_key_hash BYTEA PRIMARY KEY CHECK (octet_length(idempotency_key_hash) = 32),
+    request_digest BYTEA NOT NULL CHECK (octet_length(request_digest) = 32),
+    installation_id TEXT NOT NULL,
+    response_nonce BYTEA CHECK (response_nonce IS NULL OR octet_length(response_nonce) = 24),
+    response_ciphertext BYTEA,
+    response_expires_at_ms BIGINT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    CHECK ((response_nonce IS NULL) = (response_ciphertext IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS installation_receipts_installation_idx
+    ON installation_receipts(installation_id);
 
 CREATE TABLE IF NOT EXISTS events (
     installation_id TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
@@ -108,7 +142,7 @@ CREATE INDEX IF NOT EXISTS outbox_registration_idx
 ALTER TABLE push_outbox ADD COLUMN IF NOT EXISTS lease_id TEXT;
 
 INSERT INTO relay_schema (singleton, version, updated_at_ms)
-VALUES (TRUE, 3, 0)
+VALUES (TRUE, 4, 0)
 ON CONFLICT (singleton) DO UPDATE SET
     version = EXCLUDED.version,
     updated_at_ms = EXCLUDED.updated_at_ms

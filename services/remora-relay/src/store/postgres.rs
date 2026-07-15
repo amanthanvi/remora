@@ -16,17 +16,20 @@ use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgPoolOptions};
 
 use super::{
     DeliveryOutcome, MaintenanceResult, OutboxLease, StoreDiagnostics, StoreLimits,
-    capability_hash, constant_time_equal, decode_ciphertext, event_digest, push_token_hash,
-    retry_delay_ms, snapshot_digest, to_i64, to_u64, token_aad, validate_expiry, validate_limits,
+    capability_hash, constant_time_equal, decode_ciphertext, event_digest,
+    installation_idempotency_hash, installation_request_digest, open_installation_receipt,
+    push_token_hash, retry_delay_ms, seal_installation_receipt, snapshot_digest, to_i64, to_u64,
+    token_aad, validate_expiry, validate_limits,
 };
 use crate::{
-    CapabilityKind, DeviceRegistrationResponse, EventClass, EventEnvelope, EventPage,
-    IngestEventRequest, IngestEventResponse, IssuedCapability, IssuedInstallation, OpaqueId,
-    OpaqueWakeHint, PresentedCapability, PushEnvironment, PushProviderKind, RelayError,
-    RelayMetrics, Result, SCHEMA_VERSION, SnapshotEnvelope, TokenCipher, crypto::SealedToken,
+    AcknowledgeResponse, CapabilityKind, CreateInstallationRequest, DeviceRegistrationResponse,
+    EventClass, EventEnvelope, EventPage, IngestEventRequest, IngestEventResponse,
+    IssuedCapability, IssuedInstallation, OpaqueId, OpaqueWakeHint, PresentedCapability,
+    PushEnvironment, PushProviderKind, RelayError, RelayMetrics, Result, SCHEMA_VERSION,
+    SnapshotEnvelope, TokenCipher, crypto::SealedToken,
 };
 
-const SUPPORTED_SCHEMA_VERSION: i32 = 3;
+const SUPPORTED_SCHEMA_VERSION: i32 = 4;
 
 #[derive(Clone)]
 pub struct PostgresRelayStore {
@@ -116,7 +119,75 @@ impl PostgresRelayStore {
             .is_ok()
     }
 
-    pub async fn create_installation(&self, now_ms: i64) -> Result<IssuedInstallation> {
+    pub async fn create_installation(
+        &self,
+        request: &CreateInstallationRequest,
+        now_ms: i64,
+    ) -> Result<IssuedInstallation> {
+        let key_hash = installation_idempotency_hash(request.idempotency_key.as_str());
+        let request_digest = installation_request_digest(request);
+        let advisory_key = i64::from_be_bytes(
+            key_hash[..8]
+                .try_into()
+                .expect("SHA-256 prefix has fixed length"),
+        );
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(advisory_key)
+            .execute(&mut *transaction)
+            .await?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT r.request_digest, r.installation_id, r.response_nonce,
+                    r.response_ciphertext, r.response_expires_at_ms,
+                    i.id AS active_installation_id, i.tombstoned_at_ms
+             FROM installation_receipts r
+             LEFT JOIN installations i ON i.id = r.installation_id
+             WHERE r.idempotency_key_hash = $1",
+        )
+        .bind(key_hash.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let stored_digest: Vec<u8> = row.try_get("request_digest")?;
+            if !constant_time_equal(&stored_digest, &request_digest) {
+                self.metrics
+                    .installation_create_conflicts
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(RelayError::Conflict);
+            }
+            let active_installation_id: Option<String> = row.try_get("active_installation_id")?;
+            let tombstoned_at_ms: Option<i64> = row.try_get("tombstoned_at_ms")?;
+            let nonce: Option<Vec<u8>> = row.try_get("response_nonce")?;
+            let ciphertext: Option<Vec<u8>> = row.try_get("response_ciphertext")?;
+            let response_expires_at_ms: i64 = row.try_get("response_expires_at_ms")?;
+            let (Some(_), None, Some(nonce), Some(ciphertext)) =
+                (active_installation_id, tombstoned_at_ms, nonce, ciphertext)
+            else {
+                return Err(RelayError::Tombstoned);
+            };
+            if response_expires_at_ms <= now_ms {
+                return Err(RelayError::Tombstoned);
+            }
+            let installation_id = OpaqueId::parse(row.try_get::<String, _>("installation_id")?)?;
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| RelayError::Crypto)?;
+            let issued = open_installation_receipt(
+                &self.cipher,
+                &key_hash,
+                &request_digest,
+                installation_id,
+                SealedToken { nonce, ciphertext },
+            )?;
+            transaction.commit().await?;
+            self.metrics
+                .installation_create_replayed
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(issued);
+        }
+
+        if request.schema_version != SCHEMA_VERSION {
+            return Err(RelayError::Invalid("schema version"));
+        }
         let installation_id = OpaqueId::random("inst");
         let write = IssuedCapability::random();
         let read = IssuedCapability::random();
@@ -124,26 +195,51 @@ impl PostgresRelayStore {
         let write_hash = capability_hash(CapabilityKind::Write, write.as_str());
         let read_hash = capability_hash(CapabilityKind::Read, read.as_str());
         let manage_hash = capability_hash(CapabilityKind::Manage, manage.as_str());
-        sqlx::query(
-            "INSERT INTO installations (
-                id, write_capability_hash, read_capability_hash, manage_capability_hash,
-                next_sequence, replay_floor, created_at_ms, updated_at_ms
-             ) VALUES ($1, $2, $3, $4, 1, 1, $5, $5)",
-        )
-        .bind(installation_id.as_str())
-        .bind(write_hash.as_slice())
-        .bind(read_hash.as_slice())
-        .bind(manage_hash.as_slice())
-        .bind(now_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(IssuedInstallation {
+        let response_expires_at_ms = now_ms
+            .checked_add(self.limits.installation_receipt_ttl_ms)
+            .ok_or(RelayError::LimitExceeded)?;
+        let issued = IssuedInstallation {
             schema_version: SCHEMA_VERSION,
             installation_id,
             write_capability: write,
             read_capability: read,
             manage_capability: manage,
-        })
+            created: true,
+        };
+        let sealed = seal_installation_receipt(&self.cipher, &key_hash, &request_digest, &issued)?;
+        sqlx::query(
+            "INSERT INTO installations (
+                id, write_capability_hash, read_capability_hash, manage_capability_hash,
+                next_sequence, replay_floor, acknowledged_through, created_at_ms, updated_at_ms
+             ) VALUES ($1, $2, $3, $4, 1, 1, 0, $5, $5)",
+        )
+        .bind(issued.installation_id.as_str())
+        .bind(write_hash.as_slice())
+        .bind(read_hash.as_slice())
+        .bind(manage_hash.as_slice())
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO installation_receipts (
+                idempotency_key_hash, request_digest, installation_id,
+                response_nonce, response_ciphertext, response_expires_at_ms, created_at_ms
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(key_hash.as_slice())
+        .bind(request_digest.as_slice())
+        .bind(issued.installation_id.as_str())
+        .bind(sealed.nonce.as_slice())
+        .bind(sealed.ciphertext)
+        .bind(response_expires_at_ms)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.metrics
+            .installations_created
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(issued)
     }
 
     pub async fn ingest_event(
@@ -389,6 +485,64 @@ impl PostgresRelayStore {
         Ok(page)
     }
 
+    pub async fn acknowledge(
+        &self,
+        installation_id: &OpaqueId,
+        capability: &PresentedCapability,
+        through_cursor: u64,
+        now_ms: i64,
+    ) -> Result<AcknowledgeResponse> {
+        if through_cursor == 0 {
+            return Err(RelayError::Invalid("acknowledgement cursor"));
+        }
+        let through_cursor = to_i64(through_cursor)?;
+        let mut transaction = self.pool.begin().await?;
+        authorize_pg_transaction(
+            &mut transaction,
+            installation_id,
+            CapabilityKind::Read,
+            capability,
+        )
+        .await?;
+        let row = sqlx::query(
+            "SELECT next_sequence, acknowledged_through FROM installations WHERE id = $1",
+        )
+        .bind(installation_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let next_sequence: i64 = row.try_get("next_sequence")?;
+        let acknowledged_through: i64 = row.try_get("acknowledged_through")?;
+        let high_watermark = next_sequence.saturating_sub(1);
+        if through_cursor > high_watermark {
+            return Err(RelayError::Invalid("cursor beyond high watermark"));
+        }
+        let replayed = through_cursor <= acknowledged_through;
+        let current = acknowledged_through.max(through_cursor);
+        if !replayed {
+            sqlx::query(
+                "UPDATE installations SET acknowledged_through = $2, updated_at_ms = $3
+                 WHERE id = $1",
+            )
+            .bind(installation_id.as_str())
+            .bind(current)
+            .bind(now_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        let metric = if replayed {
+            &self.metrics.acknowledgements_replayed
+        } else {
+            &self.metrics.acknowledgements_advanced
+        };
+        metric.fetch_add(1, Ordering::Relaxed);
+        Ok(AcknowledgeResponse::new(
+            installation_id.clone(),
+            to_u64(current)?,
+            replayed,
+        ))
+    }
+
     pub async fn fetch_snapshot(
         &self,
         installation_id: &OpaqueId,
@@ -611,6 +765,13 @@ impl PostgresRelayStore {
         )
         .bind(installation_id.as_str())
         .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE installation_receipts SET response_nonce = NULL, response_ciphertext = NULL
+             WHERE installation_id = $1",
+        )
+        .bind(installation_id.as_str())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1000,6 +1161,28 @@ impl PostgresRelayStore {
             .await?
             .rows_affected();
             result.expired_outbox += changed;
+            if changed < ROW_BATCH as u64 {
+                break;
+            }
+        }
+
+        loop {
+            let changed = sqlx::query(
+                "WITH due AS (
+                    SELECT idempotency_key_hash FROM installation_receipts
+                    WHERE response_ciphertext IS NOT NULL AND response_expires_at_ms <= $1
+                    ORDER BY idempotency_key_hash LIMIT $2 FOR UPDATE SKIP LOCKED
+                 )
+                 UPDATE installation_receipts r
+                 SET response_nonce = NULL, response_ciphertext = NULL
+                 FROM due WHERE r.idempotency_key_hash = due.idempotency_key_hash",
+            )
+            .bind(now_ms)
+            .bind(ROW_BATCH)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            result.expired_installation_receipts += changed;
             if changed < ROW_BATCH as u64 {
                 break;
             }

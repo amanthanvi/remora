@@ -95,6 +95,14 @@ impl IssuedCapability {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn from_stored(value: String) -> Result<Self> {
+        let value = Zeroizing::new(value);
+        if value.len() < 32 || value.len() > 256 || value.chars().any(char::is_whitespace) {
+            return Err(RelayError::Crypto);
+        }
+        Ok(Self(value))
+    }
 }
 
 impl fmt::Debug for IssuedCapability {
@@ -210,6 +218,71 @@ impl FromStr for PushProviderKind {
     }
 }
 
+#[derive(Clone)]
+pub struct IdempotencyKey(Zeroizing<String>);
+
+impl IdempotencyKey {
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = Zeroizing::new(value.into());
+        if value.len() < 32
+            || value.len() > MAX_OPAQUE_ID_LEN
+            || !value.starts_with("txn_")
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(RelayError::Invalid("idempotency key"));
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for IdempotencyKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IdempotencyKey([redacted])")
+    }
+}
+
+impl<'de> Deserialize<'de> for IdempotencyKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateInstallationRequest {
+    pub schema_version: u16,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl CreateInstallationRequest {
+    pub fn new(idempotency_key: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            idempotency_key: IdempotencyKey::parse(idempotency_key)?,
+        })
+    }
+}
+
+impl fmt::Debug for CreateInstallationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateInstallationRequest")
+            .field("schema_version", &self.schema_version)
+            .field("idempotency_key", &"[redacted]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestEventRequest {
@@ -281,6 +354,8 @@ pub struct IssuedInstallation {
     pub write_capability: IssuedCapability,
     pub read_capability: IssuedCapability,
     pub manage_capability: IssuedCapability,
+    #[serde(skip)]
+    pub(crate) created: bool,
 }
 
 impl fmt::Debug for IssuedInstallation {
@@ -292,6 +367,36 @@ impl fmt::Debug for IssuedInstallation {
             .field("read_capability", &"[redacted]")
             .field("manage_capability", &"[redacted]")
             .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgeRequest {
+    pub schema_version: u16,
+    pub through_cursor: u64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AcknowledgeResponse {
+    pub schema_version: u16,
+    pub installation_id: OpaqueId,
+    pub acknowledged_through: u64,
+    pub replayed: bool,
+}
+
+impl AcknowledgeResponse {
+    pub(crate) fn new(
+        installation_id: OpaqueId,
+        acknowledged_through: u64,
+        replayed: bool,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            installation_id,
+            acknowledged_through,
+            replayed,
+        }
     }
 }
 
@@ -395,5 +500,9 @@ mod tests {
             token: "secret-push-token".into(),
         };
         assert!(!format!("{request:?}").contains("secret-push-token"));
+        let create =
+            CreateInstallationRequest::new("txn_model_secret_idempotency_00000000001").unwrap();
+        assert!(!format!("{create:?}").contains("txn_model_secret"));
+        assert!(CreateInstallationRequest::new("too-short").is_err());
     }
 }

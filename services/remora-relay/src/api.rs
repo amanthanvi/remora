@@ -12,15 +12,15 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::{
-    BootstrapAuth, IngestEventRequest, OpaqueId, PresentedCapability, RegisterDeviceRequest,
-    RelayBackend, RelayError, RelayMetrics, Result, TombstoneRegistrationRequest,
-    config::bootstrap_hash, worker::unix_time_ms,
+    AcknowledgeRequest, BootstrapAuth, CreateInstallationRequest, IngestEventRequest, OpaqueId,
+    PresentedCapability, RegisterDeviceRequest, RelayBackend, RelayError, RelayMetrics, Result,
+    SCHEMA_VERSION, TombstoneRegistrationRequest, config::bootstrap_hash, worker::unix_time_ms,
 };
 
 #[derive(Clone, Debug)]
@@ -49,6 +49,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/v1/installations/{installation_id}/snapshot",
             get(fetch_snapshot),
         )
+        .route("/v1/installations/{installation_id}/ack", put(acknowledge))
         .route(
             "/v1/installations/{installation_id}/devices",
             post(register_device),
@@ -94,10 +95,20 @@ async fn metrics(State(state): State<ApiState>) -> Response {
 async fn create_installation(
     State(state): State<ApiState>,
     headers: HeaderMap,
+    payload: std::result::Result<Json<CreateInstallationRequest>, JsonRejection>,
 ) -> Result<Response> {
     authorize_bootstrap(&state.bootstrap_auth, &headers)?;
-    let installation = state.backend.create_installation(unix_time_ms()).await?;
-    Ok((StatusCode::CREATED, Json(installation)).into_response())
+    let Json(request) = payload.map_err(|_| RelayError::Invalid("JSON body"))?;
+    let installation = state
+        .backend
+        .create_installation(request, unix_time_ms())
+        .await?;
+    let status = if installation.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(installation)).into_response())
 }
 
 async fn ingest_event(
@@ -164,6 +175,28 @@ async fn fetch_snapshot(
         )
         .await?;
     Ok(Json(snapshot))
+}
+
+async fn acknowledge(
+    State(state): State<ApiState>,
+    Path(installation_id): Path<String>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<AcknowledgeRequest>, JsonRejection>,
+) -> Result<Json<crate::AcknowledgeResponse>> {
+    let Json(request) = payload.map_err(|_| RelayError::Invalid("JSON body"))?;
+    if request.schema_version != SCHEMA_VERSION {
+        return Err(RelayError::Invalid("schema version"));
+    }
+    let response = state
+        .backend
+        .acknowledge(
+            OpaqueId::parse(installation_id)?,
+            bearer_capability(&headers)?,
+            request.through_cursor,
+            unix_time_ms(),
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 async fn register_device(
@@ -296,6 +329,16 @@ mod tests {
     use super::*;
     use crate::{RelayStore, StoreLimits, TokenCipher};
 
+    fn installation_body(key: &str) -> Body {
+        Body::from(
+            serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "idempotency_key": key,
+            })
+            .to_string(),
+        )
+    }
+
     async fn fixture() -> Router {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.keep().join("relay.sqlite3");
@@ -319,9 +362,11 @@ mod tests {
     async fn installation_capabilities_are_issued_once_and_scoped() {
         let app = fixture().await;
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/v1/installations")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(installation_body("txn_api_scoped_00000000000000000001"))
                     .unwrap(),
             )
             .await
@@ -339,6 +384,37 @@ mod tests {
         assert!(value["write_capability"].as_str().unwrap().len() >= 32);
         assert_ne!(value["write_capability"], value["read_capability"]);
         assert_ne!(value["read_capability"], value["manage_capability"]);
+
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .body(installation_body("txn_api_scoped_00000000000000000001"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_body = to_bytes(replay.into_body(), 64 * 1_024).await.unwrap();
+        assert_eq!(replay_body, body);
+
+        let conflict = app
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "schema_version": SCHEMA_VERSION + 1,
+                            "idempotency_key": "txn_api_scoped_00000000000000000001",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -361,13 +437,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn installation_replay_still_requires_bootstrap_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(RelayMetrics::default());
+        let store = RelayStore::open(
+            directory.path().join("relay.sqlite3"),
+            TokenCipher::from_key([6; 32]),
+            StoreLimits::default(),
+            metrics.clone(),
+        )
+        .unwrap();
+        let bootstrap = "bootstrap-authority-token-000000000001";
+        let app = build_router(ApiState {
+            backend: RelayBackend::LocalSqlite(Arc::new(store)),
+            metrics,
+            bootstrap_auth: BootstrapAuth::TokenHash(bootstrap_hash(bootstrap)),
+            max_body_bytes: 2 * 1_024 * 1_024 + 4_096,
+        });
+        let body_key = "txn_api_bootstrap_replay_000000000001";
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {bootstrap}"))
+                    .body(installation_body(body_key))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .header(
+                        AUTHORIZATION,
+                        "Bearer wrong-bootstrap-authority-000000000001",
+                    )
+                    .body(installation_body(body_key))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let replayed = app
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {bootstrap}"))
+                    .body(installation_body(body_key))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn json_boundaries_reject_unknown_fields_without_echoing_values() {
         let app = fixture().await;
         let installation_response = app
             .clone()
             .oneshot(
                 Request::post("/v1/installations")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(installation_body("txn_api_json_boundary_0000000000001"))
                     .unwrap(),
             )
             .await
@@ -410,7 +548,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/v1/installations")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(installation_body("txn_api_device_scope_000000000000001"))
                     .unwrap(),
             )
             .await
@@ -465,5 +604,118 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replayed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_uses_read_capability_and_returns_current_cursor() {
+        let app = fixture().await;
+        let installation_response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .body(installation_body("txn_api_ack_contract_000000000000001"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let installation: Value = serde_json::from_slice(
+            &to_bytes(installation_response.into_body(), 64 * 1_024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let installation_id = installation["installation_id"].as_str().unwrap();
+        let write = installation["write_capability"].as_str().unwrap();
+        let read = installation["read_capability"].as_str().unwrap();
+        let event_body = serde_json::json!({
+            "event_id": "evt_api_ack_contract_0001",
+            "event_class": "state_changed",
+            "expires_at_ms": unix_time_ms() + 60_000,
+            "ciphertext": "MDAwMDAwMDAwMDAwMDAwMA",
+        });
+        let ingest = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/installations/{installation_id}/events"))
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {write}"))
+                    .body(Body::from(event_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ingest.status(), StatusCode::CREATED);
+
+        let ack_body = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "through_cursor": 1,
+        });
+        let wrong_authority = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/v1/installations/{installation_id}/ack"))
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {write}"))
+                    .body(Body::from(ack_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_authority.status(), StatusCode::UNAUTHORIZED);
+
+        let advanced = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/v1/installations/{installation_id}/ack"))
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {read}"))
+                    .body(Body::from(ack_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(advanced.status(), StatusCode::OK);
+        let advanced: Value =
+            serde_json::from_slice(&to_bytes(advanced.into_body(), 64 * 1_024).await.unwrap())
+                .unwrap();
+        assert_eq!(advanced["installation_id"], installation["installation_id"]);
+        assert_eq!(advanced["acknowledged_through"], 1);
+        assert_eq!(advanced["replayed"], false);
+
+        let replayed = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/v1/installations/{installation_id}/ack"))
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {read}"))
+                    .body(Body::from(ack_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let replayed: Value =
+            serde_json::from_slice(&to_bytes(replayed.into_body(), 64 * 1_024).await.unwrap())
+                .unwrap();
+        assert_eq!(replayed["acknowledged_through"], 1);
+        assert_eq!(replayed["replayed"], true);
+
+        let beyond = app
+            .oneshot(
+                Request::put(format!("/v1/installations/{installation_id}/ack"))
+                    .header("content-type", "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {read}"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "schema_version": SCHEMA_VERSION,
+                            "through_cursor": 2,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(beyond.status(), StatusCode::BAD_REQUEST);
     }
 }

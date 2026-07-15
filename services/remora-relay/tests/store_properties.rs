@@ -7,10 +7,11 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use proptest::prelude::*;
 use remora_relay::{
-    EventClass, FaultInjector, FaultPoint, IngestEventRequest, OpaqueId, PresentedCapability,
-    PushEnvironment, PushProviderKind, RelayError, RelayMetrics, RelayStore, SnapshotUpdate,
-    StoreLimits, TokenCipher,
+    CreateInstallationRequest, EventClass, FaultInjector, FaultPoint, IngestEventRequest, OpaqueId,
+    PresentedCapability, PushEnvironment, PushProviderKind, RelayError, RelayMetrics, RelayStore,
+    SnapshotUpdate, StoreLimits, TokenCipher,
 };
+use rusqlite::Connection;
 
 fn event(index: usize, expiry: i64) -> IngestEventRequest {
     IngestEventRequest {
@@ -26,6 +27,10 @@ fn capability(value: &remora_relay::IssuedCapability) -> PresentedCapability {
     PresentedCapability::parse(value.as_str().to_owned()).unwrap()
 }
 
+fn creation(key: &str) -> CreateInstallationRequest {
+    CreateInstallationRequest::new(key).unwrap()
+}
+
 #[test]
 fn concurrent_ingest_allocates_gap_free_unique_cursors() {
     let directory = tempfile::tempdir().unwrap();
@@ -36,7 +41,9 @@ fn concurrent_ingest_allocates_gap_free_unique_cursors() {
         Arc::new(RelayMetrics::default()),
     )
     .unwrap();
-    let installation = store.create_installation(1_000).unwrap();
+    let installation = store
+        .create_installation(&creation("txn_property_concurrent_00000000001"), 1_000)
+        .unwrap();
     let write = capability(&installation.write_capability);
     let barrier = Arc::new(Barrier::new(48));
     let mut threads = Vec::new();
@@ -61,6 +68,110 @@ fn concurrent_ingest_allocates_gap_free_unique_cursors() {
     assert_eq!(store.diagnostics().unwrap().retained_events, 48);
 }
 
+#[test]
+fn concurrent_installation_retries_create_one_exact_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("relay.sqlite3");
+    let store = RelayStore::open(
+        &database,
+        TokenCipher::from_key([16; 32]),
+        StoreLimits::default(),
+        Arc::new(RelayMetrics::default()),
+    )
+    .unwrap();
+    let request = creation("txn_property_create_race_000000000001");
+    let barrier = Arc::new(Barrier::new(32));
+    let mut threads = Vec::new();
+    for _ in 0..32 {
+        let store = store.clone();
+        let request = request.clone();
+        let barrier = barrier.clone();
+        threads.push(thread::spawn(move || {
+            barrier.wait();
+            store.create_installation(&request, 1_000).unwrap()
+        }));
+    }
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    let first = &results[0];
+    for result in &results[1..] {
+        assert_eq!(result.installation_id, first.installation_id);
+        assert_eq!(
+            result.write_capability.as_str(),
+            first.write_capability.as_str()
+        );
+        assert_eq!(
+            result.read_capability.as_str(),
+            first.read_capability.as_str()
+        );
+        assert_eq!(
+            result.manage_capability.as_str(),
+            first.manage_capability.as_str()
+        );
+    }
+    let connection = Connection::open(&database).unwrap();
+    let installations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM installations", [], |row| row.get(0))
+        .unwrap();
+    let receipts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM installation_receipts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((installations, receipts), (1, 1));
+}
+
+#[test]
+fn concurrent_acknowledgements_never_regress() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = RelayStore::open(
+        directory.path().join("relay.sqlite3"),
+        TokenCipher::from_key([17; 32]),
+        StoreLimits::default(),
+        Arc::new(RelayMetrics::default()),
+    )
+    .unwrap();
+    let installation = store
+        .create_installation(&creation("txn_property_ack_race_0000000000001"), 1_000)
+        .unwrap();
+    let write = capability(&installation.write_capability);
+    let read = capability(&installation.read_capability);
+    for index in 0..64 {
+        store
+            .ingest_event(
+                &installation.installation_id,
+                &write,
+                &event(index, 30_000),
+                1_000,
+            )
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(64));
+    let mut threads = Vec::new();
+    for through_cursor in (1..=64).rev() {
+        let store = store.clone();
+        let installation_id = installation.installation_id.clone();
+        let read = read.clone();
+        let barrier = barrier.clone();
+        threads.push(thread::spawn(move || {
+            barrier.wait();
+            store
+                .acknowledge(&installation_id, &read, through_cursor, 1_001)
+                .unwrap()
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let final_ack = store
+        .acknowledge(&installation.installation_id, &read, 1, 1_002)
+        .unwrap();
+    assert_eq!(final_ack.acknowledged_through, 64);
+    assert!(final_ack.replayed);
+}
+
 struct FailAt(FaultPoint);
 
 impl FaultInjector for FailAt {
@@ -70,6 +181,50 @@ impl FaultInjector for FailAt {
         } else {
             Ok(())
         }
+    }
+}
+
+#[test]
+fn installation_and_receipt_failures_rollback_as_one_transaction() {
+    for point in [
+        FaultPoint::AfterInstallationInsert,
+        FaultPoint::AfterInstallationReceiptInsert,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("relay.sqlite3");
+        let request = creation("txn_property_create_fault_00000000001");
+        let store = RelayStore::open_with_faults(
+            &database,
+            TokenCipher::from_key([18; 32]),
+            StoreLimits::default(),
+            Arc::new(RelayMetrics::default()),
+            Arc::new(FailAt(point)),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.create_installation(&request, 1_000),
+            Err(RelayError::InjectedFault)
+        ));
+        drop(store);
+        let connection = Connection::open(&database).unwrap();
+        let counts: (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM installations),
+                        (SELECT COUNT(*) FROM installation_receipts)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0), "fault point {point:?}");
+        drop(connection);
+        let recovered = RelayStore::open(
+            &database,
+            TokenCipher::from_key([18; 32]),
+            StoreLimits::default(),
+            Arc::new(RelayMetrics::default()),
+        )
+        .unwrap();
+        recovered.create_installation(&request, 1_001).unwrap();
     }
 }
 
@@ -91,7 +246,9 @@ fn every_ingest_fault_point_rolls_back_event_and_outbox_together() {
             Arc::new(FailAt(point)),
         )
         .unwrap();
-        let installation = store.create_installation(1_000).unwrap();
+        let installation = store
+            .create_installation(&creation("txn_property_fault_000000000000001"), 1_000)
+            .unwrap();
         store
             .register_device(
                 &installation.installation_id,
@@ -145,7 +302,9 @@ fn snapshot_revision_is_monotonic_and_event_transactional() {
         Arc::new(RelayMetrics::default()),
     )
     .unwrap();
-    let installation = store.create_installation(1_000).unwrap();
+    let installation = store
+        .create_installation(&creation("txn_property_snapshot_0000000000001"), 1_000)
+        .unwrap();
     let write = capability(&installation.write_capability);
     let read = capability(&installation.read_capability);
     let mut first = event(1, 30_000);
@@ -186,7 +345,9 @@ fn token_rotation_is_generation_bound_and_stale_delete_is_harmless() {
         Arc::new(RelayMetrics::default()),
     )
     .unwrap();
-    let installation = store.create_installation(1_000).unwrap();
+    let installation = store
+        .create_installation(&creation("txn_property_rotation_0000000000001"), 1_000)
+        .unwrap();
     let manage = capability(&installation.manage_capability);
     let first = store
         .register_device(
@@ -247,7 +408,9 @@ proptest! {
             StoreLimits::default(),
             Arc::new(RelayMetrics::default()),
         ).unwrap();
-        let installation = store.create_installation(1_000).unwrap();
+        let installation = store
+            .create_installation(&creation("txn_property_replays_00000000000001"), 1_000)
+            .unwrap();
         let write = capability(&installation.write_capability);
         let mut cursors = HashMap::new();
         for index in history {

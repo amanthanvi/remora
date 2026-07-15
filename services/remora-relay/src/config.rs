@@ -80,6 +80,7 @@ pub struct LimitConfig {
     pub retry_base_ms: i64,
     pub retry_cap_ms: i64,
     pub max_delivery_attempts: u32,
+    pub installation_receipt_ttl_ms: i64,
     pub tombstone_retention_ms: i64,
 }
 
@@ -97,6 +98,7 @@ impl Default for LimitConfig {
             retry_base_ms: limits.retry_base_ms,
             retry_cap_ms: limits.retry_cap_ms,
             max_delivery_attempts: limits.max_delivery_attempts,
+            installation_receipt_ttl_ms: limits.installation_receipt_ttl_ms,
             tombstone_retention_ms: limits.tombstone_retention_ms,
         }
     }
@@ -115,6 +117,7 @@ impl From<LimitConfig> for StoreLimits {
             retry_base_ms: value.retry_base_ms,
             retry_cap_ms: value.retry_cap_ms,
             max_delivery_attempts: value.max_delivery_attempts,
+            installation_receipt_ttl_ms: value.installation_receipt_ttl_ms,
             tombstone_retention_ms: value.tombstone_retention_ms,
         }
     }
@@ -581,6 +584,17 @@ mod tests {
         });
         assert!(config.validate().is_err());
         config.limits.lease_ms = 65_000;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn installation_receipt_recovery_window_is_bounded() {
+        let mut config = local_config();
+        config.limits.installation_receipt_ttl_ms = 0;
+        assert!(config.validate().is_err());
+        config.limits.installation_receipt_ttl_ms = 366 * 24 * 60 * 60 * 1_000;
+        assert!(config.validate().is_err());
+        config.limits.installation_receipt_ttl_ms = 365 * 24 * 60 * 60 * 1_000;
         assert!(config.validate().is_ok());
     }
 }

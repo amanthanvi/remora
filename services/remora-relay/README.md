@@ -12,8 +12,9 @@ The implementation has two deliberately different storage profiles:
 The relay is content-blind by design.
 
 - Event and snapshot bodies are client-produced end-to-end ciphertext. The relay validates only bounds, expiry, identifiers, and idempotency digests.
-- Installation capabilities are random, scoped, and returned only when the installation is created. Only domain-separated SHA-256 capability hashes are stored.
-- The three capabilities have separate authority: `write` ingests encrypted events, `read` fetches events/snapshots, and `manage` rotates or revokes push registrations and tombstones the installation.
+- Installation capabilities are random and scoped. Only domain-separated SHA-256 capability hashes are stored on the installation row.
+- The three capabilities have separate authority: host-only `write` ingests encrypted events; device `read` fetches events/snapshots and advances the advisory acknowledgement cursor; device-admin `manage` rotates or revokes push registrations and tombstones the installation. Do not give the write capability to a mobile reader or use it to acknowledge.
+- Installation creation is retry-safe. The caller supplies a random idempotency key; the relay stores only its domain-separated hash and an AEAD-encrypted copy of the issued capability bundle for the bounded recovery window. Exact retries return byte-identical capability values. Conflicting reuse returns `409`, and an expired or tombstoned receipt returns `410` without minting another installation.
 - Provider device tokens are encrypted at rest with XChaCha20-Poly1305. Associated data binds an encrypted token to its installation, registration, provider, and environment.
 - Application logs and Prometheus metrics are aggregate and low-cardinality. They do not contain capability values, provider tokens, opaque IDs, event bodies, prompt text, transcripts, host paths, or database URLs.
 - APNs/FCM endpoints are fixed in code. Configuration cannot redirect provider credentials to an arbitrary URL.
@@ -33,7 +34,20 @@ expires_at_ms
 
 ## Identity and device registration
 
-`POST /v1/installations` issues the relay identity and all three capabilities. A mobile client must durably persist the returned `installation_id`; a locally generated installation or idempotency identifier is not a relay identity.
+`POST /v1/installations` accepts this closed request and issues the relay identity and all three capabilities:
+
+```json
+{
+  "schema_version": 1,
+  "idempotency_key": "txn_<at-least-28-url-safe-random-characters>"
+}
+```
+
+A mobile client must generate the `txn_` suffix with a cryptographically secure random source; the complete key must be 32–128 URL-safe characters. It must durably persist the returned `installation_id`; a locally generated installation or idempotency identifier is not a relay identity. Fresh creation returns `201`; an exact retry returns `200` with the same response. The default encrypted recovery window is 90 days and is bounded to at most 365 days by `limits.installation_receipt_ttl_ms`. After that window the relay destroys the replayable ciphertext but permanently retains the key hash and request fingerprint, so the consumed key can never silently create a second installation.
+
+The v1 idempotency namespace is relay-global because a deployment has one bootstrap principal. The stable request fingerprint covers semantic schema fields only, never timestamps or transport headers. A future multi-tenant/bootstrap-principal deployment must migrate the stored key hash to include a stable principal identifier before accepting overlapping namespaces; do not make that change by merely altering request routing.
+
+Treat the response as one logical, one-time provisioning transfer. The bootstrap channel receives the full bundle only on the original request or its exact ambiguous retries; no lookup endpoint returns capabilities. Transfer only `write` to the authenticated host and only `read` plus `manage` to the intended device-side secure store. Keep the idempotency key until the capability bundle is durably committed, then clear it. The Rust relay wraps owned capability, decrypted-receipt, token, and idempotency-key buffers in zeroizing containers and redacts their `Debug` output. HTTP/TLS stacks and client-language copies cannot promise physical memory erasure, so clients must minimize copies, avoid immutable analytics/log strings, persist through platform secure storage, and clear mutable temporary buffers where supported.
 
 Device registration is an atomic upsert scoped by `(installation_id, provider, environment)`:
 
@@ -65,6 +79,17 @@ Payload retention does not weaken idempotency. A lightweight receipt containing 
 
 `GET .../events?after=N` returns a high watermark and replay floor. If expiry/retention produced a gap, `reset_required` is true and the event list is empty. The client must fetch the encrypted snapshot when available or perform a full authoritative host repair. Push delivery and outbox state never alter this rule.
 
+After authenticated reconciliation succeeds, the device may `PUT .../ack` with `{ "schema_version": 1, "through_cursor": N }` using the read capability. `N` must be at least one and no greater than the installation high watermark. The relay atomically stores `max(current, N)` and returns the current `acknowledged_through`; `replayed` is true for equal or lower requests. Acknowledgement is advisory per installation. It never deletes events, advances the replay floor, suppresses push, or proves that every possible reader consumed data; expiry and snapshot repair remain authoritative.
+
+```json
+{
+  "schema_version": 1,
+  "installation_id": "inst_...",
+  "acknowledged_through": 42,
+  "replayed": false
+}
+```
+
 An event may atomically carry a newer complete encrypted snapshot. Snapshot revisions are monotonic. A stale revision conflicts and rolls back the event and all associated outbox work in the same transaction.
 
 ## HTTP surface
@@ -74,10 +99,11 @@ An event may atomically carry a newer complete encrypted snapshot. Snapshot revi
 | `GET` | `/health/live` | none | Process liveness. |
 | `GET` | `/health/ready` | none | Database readiness. |
 | `GET` | `/metrics` | deployment/network policy | Aggregate Prometheus counters only. |
-| `POST` | `/v1/installations` | bootstrap bearer, or explicit loopback-only local mode | Issues relay identity and scoped capabilities once. |
+| `POST` | `/v1/installations` | bootstrap bearer, or explicit loopback-only local mode | Idempotently issues relay identity and scoped capabilities. |
 | `POST` | `/v1/installations/{id}/events` | write | Durable encrypted event ingest. |
 | `GET` | `/v1/installations/{id}/events?after=N&limit=M` | read | Cursor page and reset metadata. |
 | `GET` | `/v1/installations/{id}/snapshot` | read | Current unexpired encrypted snapshot. |
+| `PUT` | `/v1/installations/{id}/ack` | read | Monotonically advances advisory device acknowledgement. |
 | `POST` | `/v1/installations/{id}/devices` | manage | Generation-aware provider-token upsert. |
 | `DELETE` | `/v1/installations/{id}/devices/{registration_id}?through_generation=N` | manage | Generation-bounded registration tombstone. |
 | `DELETE` | `/v1/installations/{id}` | manage | Installation and device tombstone. |
@@ -140,4 +166,4 @@ REMORA_RELAY_TEST_DATABASE_URL='postgres://...' \
   --test postgres_contract -- --nocapture
 ```
 
-That contract test verifies the v2-to-v3 receipt/lease-fence migration and newer-schema rejection, concurrently allocates 64 cursors, verifies exact replay, exercises competing outbox leasers and physical lease recovery, checks concurrent rotation versus invalid-token completion, and proves maintenance skips a locked unrelated installation. CI must use the `required-postgres-tests` feature: the target fails if the database variable is absent. Ordinary local unit runs print an explicit skip message rather than substituting SQLite.
+That contract test verifies the populated v3-to-v4 acknowledgement/provisioning-receipt migration and newer-schema rejection, races 32 exact installation creations, concurrently allocates and acknowledges 64 cursors, verifies exact replay, exercises competing outbox leasers and physical lease recovery, checks concurrent rotation versus invalid-token completion, and proves maintenance skips a locked unrelated installation. CI must use the `required-postgres-tests` feature: the target fails if the database variable is absent. Ordinary local unit runs print an explicit skip message rather than substituting SQLite.

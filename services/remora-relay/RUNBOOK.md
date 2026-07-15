@@ -25,6 +25,8 @@ Then start one canary, wait for `/health/ready`, verify aggregate metrics, and e
 - `/health/live` should be `200` whenever the process event loop is alive.
 - `/health/ready` should be `200` only when the database accepts a probe.
 - Alert on sustained increases in `remora_relay_push_dead_lettered_total`, `remora_relay_push_retried_total`, `remora_relay_outbox_leases_recovered_total`, and `remora_relay_cursor_resets_total`.
+- Alert on `remora_relay_installation_create_conflicts_total`; it indicates idempotency-key reuse with a different request fingerprint. Compare only aggregate rates—never log the key.
+- Compare `remora_relay_acknowledgements_advanced_total` and `remora_relay_acknowledgements_replayed_total` for broad health, but never treat acknowledgement as deletion authority or proof that every device reader consumed an event.
 - `remora_relay_push_invalid_tokens_total` may rise after normal app uninstalls or token rotation; investigate sharp correlated spikes.
 - `remora_relay_ingest_conflicts_total` indicates buggy or hostile reuse of an event id with different content.
 
@@ -32,7 +34,7 @@ Metrics intentionally have no installation, registration, event, provider-token,
 
 ## Backup and restore
 
-Back up PostgreSQL and the token-encryption key as one recovery set. The database contains encrypted provider tokens, while the external key is required to decrypt them. Losing the key makes existing registrations unusable; leaking it exposes provider tokens from a database backup.
+Back up PostgreSQL and the service encryption key as one recovery set. The database contains encrypted provider tokens and bounded installation-issuance receipts, while the external key is required to decrypt both. Losing the key makes existing registrations unusable and prevents exact creation-response replay; leaking it exposes provider tokens and any still-live capability receipts from a database backup.
 
 1. Use the PostgreSQL provider's encrypted point-in-time recovery or consistent snapshot facility.
 2. Back up the token key through the secret manager with version history and access audit.
@@ -44,16 +46,16 @@ Event and snapshot ciphertext remains end-to-end encrypted independently of the 
 
 ## Key rotation
 
-The current schema stores no key identifier, so in-place token-key rotation is an operational migration, not a file replacement:
+The current schema stores no key identifier, so in-place service-key rotation is an operational migration, not a file replacement:
 
 1. Disable provider dispatch while leaving event ingest/fetch online, or stop all relay replicas.
 2. Take a fresh database/key backup.
-3. Use a reviewed one-off migration that decrypts each active registration with the old key and re-encrypts it with the new key while preserving associated-data fields and registration generations.
+3. Use a reviewed one-off migration that decrypts and re-encrypts both classes of live ciphertext: every active provider registration, preserving associated-data fields and registration generations; and every non-expired installation receipt, preserving its idempotency-key hash, request fingerprint, installation binding, and expiry. Hash-only consumed receipts need no rewrite.
 4. Atomically replace the mounted key across all replicas.
 5. Start one canary with push disabled, verify it can lease/decrypt registrations, then enable live providers and roll out.
 6. Retain the old key only for the documented rollback window, then revoke and destroy it.
 
-Never rotate by simply overwriting the key while old ciphertext remains. If the key is lost, tombstone existing registrations and require clients to register fresh provider tokens.
+Never rotate by simply overwriting the key while old ciphertext remains. If the key is lost, tombstone existing registrations and require clients to register fresh provider tokens. Existing consumed creation keys remain consumed; do not delete their receipts or allow them to issue replacement installations.
 
 Bootstrap-token rotation is simpler: atomically replace the token file and restart/roll replicas. Existing installation capabilities are unaffected. Provider bearer tokens are read on every attempt and may be atomically refreshed without a relay restart.
 
@@ -98,6 +100,10 @@ Maintenance removes expired events/snapshots, marks expired wake intents, advanc
 
 PostgreSQL maintenance processes bounded `SKIP LOCKED` batches so it does not become a fleet-wide write barrier. Lightweight event-id receipts remain until installation purge to preserve durable idempotency after ciphertext retention ends.
 
+Installation-creation receipts have two retention layers. Replayable capability ciphertext is destroyed after `installation_receipt_ttl_ms` (90 days by default, hard-bounded to 365 days) or immediately when the installation is tombstoned. The idempotency-key hash, request fingerprint, and installation identifier remain as a consumed-key tombstone even after installation purge. Exact retry then returns gone; conflicting fingerprint reuse returns conflict. Never delete those hash-only receipts as routine retention, because doing so would let an old key mint a second installation.
+
+`acknowledged_through` is advisory state only. Maintenance must not use it to delete events, advance `replay_floor`, suppress a wake, or skip snapshot/host repair. A read capability may be copied or used by more than one reader, so the single cursor is not consumer consensus.
+
 - A replay-floor gap intentionally returns `reset_required`; the client must use an encrypted snapshot or full authoritative repair.
 - Installation deletion first tombstones the installation, registrations, and outbox. It is not an immediate physical erase because a short retention window supports safe in-flight shutdown and audit-free operational recovery.
 - To satisfy a shorter deletion requirement, reduce the configured retention only after verifying provider leases and client revocation behavior. Never bypass generation checks on device revocation.
@@ -122,6 +128,6 @@ Provider tokens remain XChaCha20-Poly1305 encrypted and capabilities remain hash
 
 ### Suspected database plus token-key exposure
 
-Treat every active provider token as exposed. Stop dispatch, rotate infrastructure credentials, tombstone registrations, require client re-registration, and rotate the at-rest key through the migration procedure. Event/snapshot contents still require the separate end-to-end application keys.
+Treat every active provider token and every non-expired issuance receipt as exposed. Stop dispatch and installation bootstrap, rotate infrastructure credentials, tombstone registrations, require client re-registration, and rotate the at-rest key through the migration procedure. Consider re-provisioning installations whose capability receipt was live during the exposure. Event/snapshot contents still require the separate end-to-end application keys.
 
 Logs must remain redacted during incident debugging. Do not enable request-body, authorization-header, URL, SQL-parameter, or provider-body logging.

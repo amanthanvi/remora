@@ -2,10 +2,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 pub struct RelayMetrics {
+    pub installations_created: AtomicU64,
+    pub installation_create_replayed: AtomicU64,
+    pub installation_create_conflicts: AtomicU64,
     pub ingest_accepted: AtomicU64,
     pub ingest_replayed: AtomicU64,
     pub ingest_conflicts: AtomicU64,
     pub cursor_resets: AtomicU64,
+    pub acknowledgements_advanced: AtomicU64,
+    pub acknowledgements_replayed: AtomicU64,
     pub registrations_created: AtomicU64,
     pub registrations_tombstoned: AtomicU64,
     pub outbox_coalesced: AtomicU64,
@@ -35,6 +40,21 @@ impl RelayMetrics {
 
         [
             metric(
+                "remora_relay_installations_created_total",
+                "New relay installations durably created.",
+                &self.installations_created,
+            ),
+            metric(
+                "remora_relay_installation_create_replayed_total",
+                "Exact installation-creation retries replayed.",
+                &self.installation_create_replayed,
+            ),
+            metric(
+                "remora_relay_installation_create_conflicts_total",
+                "Conflicting installation idempotency-key reuse attempts.",
+                &self.installation_create_conflicts,
+            ),
+            metric(
                 "remora_relay_ingest_accepted_total",
                 "New durable events accepted.",
                 &self.ingest_accepted,
@@ -53,6 +73,16 @@ impl RelayMetrics {
                 "remora_relay_cursor_resets_total",
                 "Fetches requiring snapshot or host reconciliation.",
                 &self.cursor_resets,
+            ),
+            metric(
+                "remora_relay_acknowledgements_advanced_total",
+                "Durable acknowledgement cursors advanced.",
+                &self.acknowledgements_advanced,
+            ),
+            metric(
+                "remora_relay_acknowledgements_replayed_total",
+                "Acknowledgements that did not advance the durable cursor.",
+                &self.acknowledgements_replayed,
             ),
             metric(
                 "remora_relay_registrations_created_total",

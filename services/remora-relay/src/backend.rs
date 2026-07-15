@@ -2,10 +2,10 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use crate::{
-    DeliveryOutcome, DeviceRegistrationResponse, EventPage, IngestEventRequest,
-    IngestEventResponse, IssuedInstallation, MaintenanceResult, OpaqueId, OutboxLease,
-    PostgresRelayStore, PresentedCapability, PushEnvironment, PushProviderKind, RelayError,
-    RelayStore, Result, SnapshotEnvelope, StoreDiagnostics,
+    AcknowledgeResponse, CreateInstallationRequest, DeliveryOutcome, DeviceRegistrationResponse,
+    EventPage, IngestEventRequest, IngestEventResponse, IssuedInstallation, MaintenanceResult,
+    OpaqueId, OutboxLease, PostgresRelayStore, PresentedCapability, PushEnvironment,
+    PushProviderKind, RelayError, RelayStore, Result, SnapshotEnvelope, StoreDiagnostics,
 };
 
 /// Runtime-selected storage adapter.
@@ -31,12 +31,39 @@ impl RelayBackend {
         }
     }
 
-    pub async fn create_installation(&self, now_ms: i64) -> Result<IssuedInstallation> {
+    pub async fn create_installation(
+        &self,
+        request: CreateInstallationRequest,
+        now_ms: i64,
+    ) -> Result<IssuedInstallation> {
         match self {
-            Self::Postgres(store) => store.create_installation(now_ms).await,
+            Self::Postgres(store) => store.create_installation(&request, now_ms).await,
             Self::LocalSqlite(store) => {
                 let store = Arc::clone(store);
-                blocking(move || store.create_installation(now_ms)).await
+                blocking(move || store.create_installation(&request, now_ms)).await
+            }
+        }
+    }
+
+    pub async fn acknowledge(
+        &self,
+        installation_id: OpaqueId,
+        capability: PresentedCapability,
+        through_cursor: u64,
+        now_ms: i64,
+    ) -> Result<AcknowledgeResponse> {
+        match self {
+            Self::Postgres(store) => {
+                store
+                    .acknowledge(&installation_id, &capability, through_cursor, now_ms)
+                    .await
+            }
+            Self::LocalSqlite(store) => {
+                let store = Arc::clone(store);
+                blocking(move || {
+                    store.acknowledge(&installation_id, &capability, through_cursor, now_ms)
+                })
+                .await
             }
         }
     }

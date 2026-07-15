@@ -168,8 +168,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        EventClass, IngestEventRequest, MockProvider, OpaqueId, PresentedCapability,
-        PushEnvironment, PushProviderKind, RelayMetrics, RelayStore, StoreLimits, TokenCipher,
+        CreateInstallationRequest, EventClass, IngestEventRequest, MockProvider, OpaqueId,
+        PresentedCapability, PushEnvironment, PushProviderKind, RelayMetrics, RelayStore,
+        StoreLimits, TokenCipher,
     };
 
     #[tokio::test]
@@ -188,7 +189,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let installation = store.create_installation(1_000).unwrap();
+        let creation =
+            CreateInstallationRequest::new("txn_worker_retry_000000000000000001").unwrap();
+        let installation = store.create_installation(&creation, 1_000).unwrap();
         let manage =
             PresentedCapability::parse(installation.manage_capability.as_str().to_owned()).unwrap();
         let write =
@@ -260,7 +263,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let installation = store.create_installation(1_000).unwrap();
+        let creation =
+            CreateInstallationRequest::new("txn_worker_drain_000000000000000001").unwrap();
+        let installation = store.create_installation(&creation, 1_000).unwrap();
         let manage =
             PresentedCapability::parse(installation.manage_capability.as_str().to_owned()).unwrap();
         let write =

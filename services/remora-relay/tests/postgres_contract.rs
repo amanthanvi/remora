@@ -2,9 +2,9 @@ use std::{collections::BTreeSet, env, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use remora_relay::{
-    DeliveryOutcome, EventClass, IngestEventRequest, OpaqueId, PostgresRelayStore,
-    PresentedCapability, PushEnvironment, PushProviderKind, RelayError, RelayMetrics, StoreLimits,
-    TokenCipher,
+    CreateInstallationRequest, DeliveryOutcome, EventClass, IngestEventRequest, OpaqueId,
+    PostgresRelayStore, PresentedCapability, PushEnvironment, PushProviderKind, RelayError,
+    RelayMetrics, StoreLimits, TokenCipher,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -21,6 +21,10 @@ fn event(index: usize, event_class: EventClass) -> IngestEventRequest {
 
 fn capability(value: &remora_relay::IssuedCapability) -> PresentedCapability {
     PresentedCapability::parse(value.as_str().to_owned()).unwrap()
+}
+
+fn creation(key: &str) -> CreateInstallationRequest {
+    CreateInstallationRequest::new(key).unwrap()
 }
 
 async fn connect_store(database_url: &str) -> Arc<PostgresRelayStore> {
@@ -59,15 +63,18 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
     assert!(store.ready().await);
 
     let pool = PgPool::connect(&database_url).await.unwrap();
-    sqlx::raw_sql("TRUNCATE TABLE installations CASCADE")
+    sqlx::raw_sql("TRUNCATE TABLE installation_receipts, installations CASCADE")
         .execute(&pool)
         .await
         .unwrap();
 
-    // Exercise the supported v2-to-v3 upgrade shape rather than only proving
-    // that an empty database can be initialized. Version 3 adds durable event
-    // receipts and physical lease fencing to an existing outbox.
-    let legacy_installation = store.create_installation(500).await.unwrap();
+    // Exercise the supported v3-to-v4 upgrade shape rather than only proving
+    // that an empty database can be initialized. Version 4 adds durable
+    // acknowledgements and encrypted installation-creation receipts.
+    let legacy_installation = store
+        .create_installation(&creation("txn_postgres_legacy_000000000000001"), 500)
+        .await
+        .unwrap();
     store
         .register_device(
             &legacy_installation.installation_id,
@@ -89,12 +96,26 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
         )
         .await
         .unwrap();
+    let legacy_tombstoned = store
+        .create_installation(&creation("txn_postgres_legacy_tombstone_0000001"), 503)
+        .await
+        .unwrap();
+    store
+        .tombstone_installation(
+            &legacy_tombstoned.installation_id,
+            &capability(&legacy_tombstoned.manage_capability),
+            504,
+        )
+        .await
+        .unwrap();
     drop(store);
 
     sqlx::raw_sql(
-        "UPDATE relay_schema SET version = 2, updated_at_ms = 2;
-         DROP TABLE event_receipts;
-         ALTER TABLE push_outbox DROP COLUMN lease_id;",
+        "UPDATE relay_schema SET version = 3, updated_at_ms = 3;
+         DROP TABLE installation_receipts;
+         ALTER TABLE installations
+             DROP CONSTRAINT installations_ack_below_high_watermark;
+         ALTER TABLE installations DROP COLUMN acknowledged_through;",
     )
     .execute(&pool)
     .await
@@ -106,7 +127,7 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(migrated_version, 3);
+    assert_eq!(migrated_version, 4);
     let backfilled_receipts = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM event_receipts
          WHERE installation_id = $1 AND event_id = $2",
@@ -129,6 +150,33 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
     .await
     .unwrap();
     assert!(has_lease_id);
+    let legacy_ack = sqlx::query_scalar::<_, i64>(
+        "SELECT acknowledged_through FROM installations WHERE id = $1",
+    )
+    .bind(legacy_installation.installation_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy_ack, 0);
+    let legacy_tombstoned_ack = sqlx::query_scalar::<_, i64>(
+        "SELECT acknowledged_through FROM installations WHERE id = $1",
+    )
+    .bind(legacy_tombstoned.installation_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy_tombstoned_ack, 0);
+    let has_installation_receipts = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM information_schema.tables
+             WHERE table_schema = current_schema()
+               AND table_name = 'installation_receipts'
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(has_installation_receipts);
 
     // A current-schema restart must not rerun backfills or rewrite the schema
     // marker. A newer schema must fail closed instead of attempting rollback.
@@ -161,19 +209,164 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
     .await
     .unwrap_err();
     assert!(matches!(newer_schema_error, RelayError::Configuration(_)));
-    sqlx::query("UPDATE relay_schema SET version = 3 WHERE singleton = TRUE")
+    sqlx::query("UPDATE relay_schema SET version = 4 WHERE singleton = TRUE")
         .execute(&pool)
         .await
         .unwrap();
 
     let store = connect_store(&database_url).await;
-    sqlx::raw_sql("TRUNCATE TABLE installations CASCADE")
+    sqlx::raw_sql("TRUNCATE TABLE installation_receipts, installations CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        "CREATE OR REPLACE FUNCTION remora_test_fail_creation()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected creation failure';
+         END;
+         $$;
+         CREATE TRIGGER remora_test_fail_creation
+         AFTER INSERT ON installation_receipts
+         FOR EACH ROW EXECUTE FUNCTION remora_test_fail_creation();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let fault_request = creation("txn_postgres_create_fault_00000000001");
+    assert!(matches!(
+        store.create_installation(&fault_request, 850).await,
+        Err(RelayError::Postgres(_))
+    ));
+    sqlx::raw_sql(
+        "DROP TRIGGER remora_test_fail_creation ON installation_receipts;
+         DROP FUNCTION remora_test_fail_creation();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let fault_counts = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT (SELECT COUNT(*) FROM installations),
+                (SELECT COUNT(*) FROM installation_receipts)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fault_counts, (0, 0));
+
+    let concurrent_request = creation("txn_postgres_create_race_000000000001");
+    let mut creates = JoinSet::new();
+    for _ in 0..32 {
+        let store = Arc::clone(&store);
+        let request = concurrent_request.clone();
+        creates.spawn(async move { store.create_installation(&request, 900).await.unwrap() });
+    }
+    let mut created = Vec::new();
+    while let Some(result) = creates.join_next().await {
+        created.push(result.unwrap());
+    }
+    let first_created = &created[0];
+    for replayed in &created[1..] {
+        assert_eq!(replayed.installation_id, first_created.installation_id);
+        assert_eq!(
+            replayed.write_capability.as_str(),
+            first_created.write_capability.as_str()
+        );
+        assert_eq!(
+            replayed.read_capability.as_str(),
+            first_created.read_capability.as_str()
+        );
+        assert_eq!(
+            replayed.manage_capability.as_str(),
+            first_created.manage_capability.as_str()
+        );
+    }
+    let create_counts = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT (SELECT COUNT(*) FROM installations),
+                (SELECT COUNT(*) FROM installation_receipts)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(create_counts, (1, 1));
+    let mut conflicting_create = concurrent_request.clone();
+    conflicting_create.schema_version += 1;
+    assert!(matches!(
+        store.create_installation(&conflicting_create, 901).await,
+        Err(RelayError::Conflict)
+    ));
+    let receipt_ciphertext =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT response_ciphertext FROM installation_receipts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for capability in [
+        first_created.write_capability.as_str(),
+        first_created.read_capability.as_str(),
+        first_created.manage_capability.as_str(),
+    ] {
+        assert!(
+            !receipt_ciphertext
+                .windows(capability.len())
+                .any(|window| window == capability.as_bytes())
+        );
+    }
+    sqlx::query(
+        "UPDATE installation_receipts
+         SET response_ciphertext = set_byte(
+             response_ciphertext, 0, (get_byte(response_ciphertext, 0) # 1)
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        store.create_installation(&concurrent_request, 902).await,
+        Err(RelayError::Crypto)
+    ));
+    let post_tamper_installations =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM installations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(post_tamper_installations, 1);
+    sqlx::raw_sql("TRUNCATE TABLE installation_receipts, installations CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let expiring_request = creation("txn_postgres_receipt_expiry_0000000001");
+    store
+        .create_installation(&expiring_request, 800)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE installation_receipts SET response_expires_at_ms = 899")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let receipt_maintenance = store.maintenance(900).await.unwrap();
+    assert_eq!(receipt_maintenance.expired_installation_receipts, 1);
+    assert!(matches!(
+        store.create_installation(&expiring_request, 901).await,
+        Err(RelayError::Tombstoned)
+    ));
+    let consumed_receipt = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT COUNT(*), COUNT(response_ciphertext) FROM installation_receipts",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(consumed_receipt, (1, 0));
+    sqlx::raw_sql("TRUNCATE TABLE installation_receipts, installations CASCADE")
         .execute(&pool)
         .await
         .unwrap();
     drop(pool);
 
-    let installation = store.create_installation(1_000).await.unwrap();
+    let installation = store
+        .create_installation(&creation("txn_postgres_main_0000000000000001"), 1_000)
+        .await
+        .unwrap();
     let write = capability(&installation.write_capability);
     let read = capability(&installation.read_capability);
     let manage = capability(&installation.manage_capability);
@@ -226,6 +419,122 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
     assert_eq!(page.events.len(), 64);
     assert_eq!(page.high_watermark, 64);
     assert!(!page.reset_required);
+
+    let mut acknowledgements = JoinSet::new();
+    for through_cursor in (1..=64).rev() {
+        let store = Arc::clone(&store);
+        let installation_id = installation.installation_id.clone();
+        let read = read.clone();
+        acknowledgements.spawn(async move {
+            store
+                .acknowledge(&installation_id, &read, through_cursor, 1_002)
+                .await
+                .unwrap()
+        });
+    }
+    while let Some(result) = acknowledgements.join_next().await {
+        result.unwrap();
+    }
+    let final_ack = store
+        .acknowledge(&installation.installation_id, &read, 1, 1_002)
+        .await
+        .unwrap();
+    assert_eq!(final_ack.acknowledged_through, 64);
+    assert!(final_ack.replayed);
+    assert!(matches!(
+        store
+            .acknowledge(&installation.installation_id, &write, 64, 1_002)
+            .await,
+        Err(RelayError::Unauthorized)
+    ));
+    assert!(matches!(
+        store
+            .acknowledge(&installation.installation_id, &read, 65, 1_002)
+            .await,
+        Err(RelayError::Invalid(_))
+    ));
+    let reopened = connect_store(&database_url).await;
+    let durable_ack = reopened
+        .acknowledge(&installation.installation_id, &read, 32, 1_002)
+        .await
+        .unwrap();
+    assert_eq!(durable_ack.acknowledged_through, 64);
+    assert!(durable_ack.replayed);
+
+    let race_installation = store
+        .create_installation(&creation("txn_postgres_ack_races_00000000001"), 1_100)
+        .await
+        .unwrap();
+    let race_read = capability(&race_installation.read_capability);
+    let race_write = capability(&race_installation.write_capability);
+    let race_manage = capability(&race_installation.manage_capability);
+    let ingest_race = {
+        let store = Arc::clone(&store);
+        let installation_id = race_installation.installation_id.clone();
+        let write = race_write.clone();
+        tokio::spawn(async move {
+            store
+                .ingest_event(
+                    &installation_id,
+                    &write,
+                    &event(700, EventClass::ConnectionChanged),
+                    1_101,
+                )
+                .await
+        })
+    };
+    let ack_race = {
+        let store = Arc::clone(&store);
+        let installation_id = race_installation.installation_id.clone();
+        let read = race_read.clone();
+        tokio::spawn(async move { store.acknowledge(&installation_id, &read, 1, 1_101).await })
+    };
+    ingest_race.await.unwrap().unwrap();
+    match ack_race.await.unwrap() {
+        Ok(response) => assert_eq!(response.acknowledged_through, 1),
+        Err(RelayError::Invalid(_)) => {}
+        other => panic!("unexpected ingest/ack race result: {other:?}"),
+    }
+    store
+        .acknowledge(&race_installation.installation_id, &race_read, 1, 1_102)
+        .await
+        .unwrap();
+
+    let tombstone_race = {
+        let store = Arc::clone(&store);
+        let installation_id = race_installation.installation_id.clone();
+        let manage = race_manage.clone();
+        tokio::spawn(async move {
+            store
+                .tombstone_installation(&installation_id, &manage, 1_103)
+                .await
+        })
+    };
+    let final_ack_race = {
+        let store = Arc::clone(&store);
+        let installation_id = race_installation.installation_id.clone();
+        let read = race_read.clone();
+        tokio::spawn(async move { store.acknowledge(&installation_id, &read, 1, 1_103).await })
+    };
+    tombstone_race.await.unwrap().unwrap();
+    match final_ack_race.await.unwrap() {
+        Ok(response) => assert_eq!(response.acknowledged_through, 1),
+        Err(RelayError::Tombstoned) => {}
+        other => panic!("unexpected tombstone/ack race result: {other:?}"),
+    }
+    let invariant_pool = PgPool::connect(&database_url).await.unwrap();
+    let (next_sequence, acknowledged_through, tombstoned_at_ms) =
+        sqlx::query_as::<_, (i64, i64, Option<i64>)>(
+            "SELECT next_sequence, acknowledged_through, tombstoned_at_ms
+             FROM installations WHERE id = $1",
+        )
+        .bind(race_installation.installation_id.as_str())
+        .fetch_one(&invariant_pool)
+        .await
+        .unwrap();
+    assert!(acknowledged_through >= 0 && acknowledged_through < next_sequence);
+    assert!(tombstoned_at_ms.is_some());
+    drop(invariant_pool);
 
     let registration = store
         .register_device(
@@ -412,7 +721,10 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
     .expect("rotation and invalid-token completion must not deadlock");
     assert_eq!(store.diagnostics().await.unwrap().active_registrations, 1);
 
-    let expiring_installation = store.create_installation(40_000).await.unwrap();
+    let expiring_installation = store
+        .create_installation(&creation("txn_postgres_expiring_0000000000001"), 40_000)
+        .await
+        .unwrap();
     store
         .ingest_event(
             &expiring_installation.installation_id,
@@ -422,7 +734,10 @@ async fn postgres_cursor_outbox_and_token_generation_contract() {
         )
         .await
         .unwrap();
-    let independent_installation = store.create_installation(40_000).await.unwrap();
+    let independent_installation = store
+        .create_installation(&creation("txn_postgres_independent_00000000001"), 40_000)
+        .await
+        .unwrap();
     let mut held_lock = PgPool::connect(&database_url)
         .await
         .unwrap()
