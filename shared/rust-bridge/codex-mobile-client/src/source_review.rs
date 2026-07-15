@@ -566,11 +566,16 @@ impl DiffInputProjection {
             self.truncated = true;
             return false;
         }
-        let bounded_patch = utf8_prefix(patch, *remaining_bytes);
-        if bounded_patch.len() < patch.len() {
+        let bounded_prefix = utf8_prefix(patch, *remaining_bytes);
+        let bounded_patch = if bounded_prefix.len() < patch.len() {
             self.truncated = true;
-        }
-        *remaining_bytes = remaining_bytes.saturating_sub(bounded_patch.len());
+            complete_line_prefix(bounded_prefix)
+        } else {
+            bounded_prefix
+        };
+        // Account for the entire inspected prefix, including the discarded
+        // partial line, so later inputs cannot reuse the global byte budget.
+        *remaining_bytes = remaining_bytes.saturating_sub(bounded_prefix.len());
         self.inputs.push(OwnedDiffInput {
             path_hint,
             new_path_hint,
@@ -1908,6 +1913,44 @@ Binary files a/picture.png and b/picture.png differ
             projection.inputs[0].source_byte_length,
             oversized.len() as u64
         );
+    }
+
+    #[test]
+    fn projection_discards_a_partial_final_line_at_the_byte_cap() {
+        let mut patch = "diff --git a/a b/a\n".to_string();
+        while patch.len() + "+whole\n".len() < MAX_DIFF_REVIEW_BYTES - 16 {
+            patch.push_str("+whole\n");
+        }
+        let complete_length = patch.len();
+        let bytes_to_cap = MAX_DIFF_REVIEW_BYTES - complete_length;
+        patch.push('+');
+        patch.push_str(&"x".repeat(bytes_to_cap + 32));
+        patch.push('\n');
+
+        let mut projection = DiffInputProjection {
+            inputs: Vec::new(),
+            truncated: false,
+        };
+        let mut remaining = MAX_DIFF_REVIEW_BYTES;
+        assert!(projection.push(
+            &mut remaining,
+            None,
+            None,
+            None,
+            None,
+            &patch,
+            DiffInputKind::Unified,
+        ));
+
+        assert!(projection.truncated);
+        assert_eq!(remaining, 0);
+        assert_eq!(projection.inputs.len(), 1);
+        assert_eq!(projection.inputs[0].patch.len(), complete_length);
+        assert_eq!(
+            projection.inputs[0].patch.as_str(),
+            &patch[..complete_length]
+        );
+        assert!(projection.inputs[0].patch.ends_with('\n'));
     }
 
     #[tokio::test]
