@@ -21,6 +21,33 @@ struct CachedPetPackage: Equatable {
     let spritesheetBytes: Data
 }
 
+/// The coarse runtime signals that can change the pet overlay.
+///
+/// This intentionally excludes thread content so streaming text does not
+/// invalidate the app chrome when the pet's visible state is unchanged.
+struct PetOverlayRuntimeSnapshot: Equatable {
+    let hasPendingApprovals: Bool
+    let hasPendingUserInputs: Bool
+    let activeThreadFailed: Bool
+    let activeThreadRunning: Bool
+    let anyThreadRunning: Bool
+    let anyThreadFailed: Bool
+    let hasConnectedServer: Bool
+
+    init(snapshot: AppSnapshotRecord) {
+        let activeThread = snapshot.activeThread.flatMap { key in
+            snapshot.threads.first(where: { $0.key == key })
+        }
+        hasPendingApprovals = !snapshot.pendingApprovals.isEmpty
+        hasPendingUserInputs = !snapshot.pendingUserInputs.isEmpty
+        activeThreadFailed = activeThread?.info.status == .systemError
+        activeThreadRunning = activeThread?.hasActiveTurn == true
+        anyThreadRunning = snapshot.threads.contains(where: \.hasActiveTurn)
+        anyThreadFailed = snapshot.threads.contains { $0.info.status == .systemError }
+        hasConnectedServer = snapshot.servers.contains(where: \.isConnected)
+    }
+}
+
 @MainActor
 @Observable
 final class PetOverlayController {
@@ -139,44 +166,36 @@ final class PetOverlayController {
     }
 
     func avatarState(snapshot: AppSnapshotRecord?) -> PetAvatarState {
+        avatarState(runtime: snapshot.map { PetOverlayRuntimeSnapshot(snapshot: $0) })
+    }
+
+    func avatarState(runtime: PetOverlayRuntimeSnapshot?) -> PetAvatarState {
         if isLoading { return .waiting }
         if isDragging { return dragDirection }
-        guard let snapshot else { return .idle }
-        if !snapshot.pendingApprovals.isEmpty || !snapshot.pendingUserInputs.isEmpty {
+        guard let runtime else { return .idle }
+        if runtime.hasPendingApprovals || runtime.hasPendingUserInputs {
             return .review
         }
-        let activeThread = snapshot.activeThread.flatMap { key in
-            snapshot.threads.first(where: { $0.key == key })
-        }
-        if activeThread?.info.status == .systemError { return .failed }
-        if activeThread?.hasActiveTurn == true { return .running }
-        if snapshot.threads.contains(where: \.hasActiveTurn) {
-            return .running
-        }
-        if snapshot.threads.contains(where: { $0.info.status == .systemError }) {
-            return .failed
-        }
-        return snapshot.servers.contains(where: \.isConnected) ? .idle : .waiting
+        if runtime.activeThreadFailed { return .failed }
+        if runtime.activeThreadRunning || runtime.anyThreadRunning { return .running }
+        if runtime.anyThreadFailed { return .failed }
+        return runtime.hasConnectedServer ? .idle : .waiting
     }
 
     func avatarMessage(snapshot: AppSnapshotRecord?) -> String? {
+        avatarMessage(runtime: snapshot.map { PetOverlayRuntimeSnapshot(snapshot: $0) })
+    }
+
+    func avatarMessage(runtime: PetOverlayRuntimeSnapshot?) -> String? {
         if isLoading { return "Fetching pet..." }
         if isDragging { return nil }
-        guard let snapshot else { return nil }
-        if !snapshot.pendingApprovals.isEmpty { return "Review needed" }
-        if !snapshot.pendingUserInputs.isEmpty { return "Input needed" }
-        let activeThread = snapshot.activeThread.flatMap { key in
-            snapshot.threads.first(where: { $0.key == key })
-        }
-        if activeThread?.info.status == .systemError { return "Run failed" }
-        if activeThread?.hasActiveTurn == true { return "Working..." }
-        if snapshot.threads.contains(where: \.hasActiveTurn) {
-            return "Working..."
-        }
-        if snapshot.threads.contains(where: { $0.info.status == .systemError }) {
-            return "Thread failed"
-        }
-        return snapshot.servers.contains(where: \.isConnected) ? nil : "Waiting for server"
+        guard let runtime else { return nil }
+        if runtime.hasPendingApprovals { return "Review needed" }
+        if runtime.hasPendingUserInputs { return "Input needed" }
+        if runtime.activeThreadFailed { return "Run failed" }
+        if runtime.activeThreadRunning || runtime.anyThreadRunning { return "Working..." }
+        if runtime.anyThreadFailed { return "Thread failed" }
+        return runtime.hasConnectedServer ? nil : "Waiting for server"
     }
 
     private var cacheDirectory: URL {

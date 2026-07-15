@@ -24,6 +24,8 @@ struct ContentView: View {
     var body: some View {
         @Bindable var bindableAppState = appState
         @Bindable var bindableActionCenter = actionCenter
+        let chromeObservation = appModel.chromeObservation
+        let _ = chromeObservation.revision
 
         GeometryReader { geometry in
             ZStack {
@@ -117,7 +119,7 @@ struct ContentView: View {
                 themeManager.syncSystemColorScheme(colorScheme)
             }
         }
-        .onChange(of: appModel.snapshot?.activeThread) { _, _ in
+        .onChange(of: chromeObservation.activeThread) { _, _ in
             appState.selectedModel = ""
             appState.selectedAgentRuntimeKind = nil
             appState.reasoningEffort = ""
@@ -178,16 +180,14 @@ struct ContentView: View {
         if petOverlay.visible, let pet = petOverlay.selectedPet {
             PetOverlayView(
                 pet: pet,
-                state: petOverlay.avatarState(snapshot: appModel.snapshot),
-                message: petOverlay.avatarMessage(snapshot: appModel.snapshot),
+                state: petOverlay.avatarState(runtime: appModel.chromeObservation.petRuntime),
+                message: petOverlay.avatarMessage(runtime: appModel.chromeObservation.petRuntime),
                 reduceMotion: UIAccessibility.isReduceMotionEnabled
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
 
-        if let approval = appModel.snapshot?.pendingApprovals.first(where: {
-            $0.kind != .mcpElicitation
-        }) {
+        if let approval = appModel.chromeObservation.pendingApproval {
             ApprovalPromptView(approval: approval) { decision in
                 Task {
                     try? await appModel.store.respondToApproval(

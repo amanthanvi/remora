@@ -63,8 +63,9 @@ struct HomeNavigationView: View {
     }
 
     private var actionContext: RemoraActionNavigationContext {
-        let activeKey = appModel.snapshot?.activeThread
-        let summaries = appModel.snapshot?.sessionSummaries ?? []
+        let navigationObservation = appModel.navigationObservation
+        let activeKey = navigationObservation.activeThread
+        let sessions = navigationObservation.sessionTargets
         let terminalOwnsKeyboard = navigationPath.last?.ownsTerminalKeyboard == true
         return RemoraActionNavigationContext(
             canStartThread: defaultNewSessionServerId(
@@ -73,7 +74,7 @@ struct HomeNavigationView: View {
             canSearchThreads: navigationMode == .split || navigationPath.isEmpty,
             canNavigateBack: !navigationPath.isEmpty,
             canNavigateForward: activeKey != nil && visibleConversationKey != activeKey,
-            canCycleThreads: summaries.count > 1,
+            canCycleThreads: sessions.count > 1,
             canOpenTerminal: terminalLauncher != nil,
             isConversationVisible: visibleConversationKey != nil,
             terminalOwnsKeyboard: terminalOwnsKeyboard
@@ -85,16 +86,15 @@ struct HomeNavigationView: View {
             .map { "\($0.serverId)/\($0.threadId)" }
             .joined(separator: "|")
         let pinnedSet = Set(homeDashboardModel.pinnedKeys)
-        let servers = appModel.snapshot?.servers
+        let servers = appModel.navigationObservation.servers
             .map { "\($0.serverId)=\(String(describing: $0.transportState)):\($0.port)" }
-            .joined(separator: "|") ?? ""
-        let sessions = appModel.snapshot?.sessionSummaries
+            .joined(separator: "|")
+        let sessions = appModel.navigationObservation.sessionTargets
             .compactMap { summary -> String? in
                 guard pinnedSet.contains(PinnedThreadKey(threadKey: summary.key)) else { return nil }
                 return "\(homeHydrationId(summary.key)):\(summary.isResumed)"
             }
             .joined(separator: "|")
-            ?? ""
         return "\(pins)|\(servers)|\(sessions)"
     }
 
@@ -290,6 +290,9 @@ struct HomeNavigationView: View {
     }
 
     var body: some View {
+        let navigationObservation = appModel.navigationObservation
+        let _ = navigationObservation.revision
+
         GeometryReader { geometry in
             let resolvedMode = RemoraNavigationLayoutPolicy.mode(for: geometry.size)
             rootNavigationContent(for: resolvedMode)
@@ -311,10 +314,10 @@ struct HomeNavigationView: View {
             homeDashboardModel.bind(appModel: appModel)
             updateHomeDashboardActivity()
             hydratePinnedThreadsIfNeeded()
-            seedInitialConversationIfNeeded(activeKey: appModel.snapshot?.activeThread)
+            seedInitialConversationIfNeeded(activeKey: navigationObservation.activeThread)
             syncActionContext()
         }
-        .onChange(of: appModel.snapshot?.activeThread) { _, newKey in
+        .onChange(of: navigationObservation.activeThread) { _, newKey in
             seedInitialConversationIfNeeded(activeKey: newKey)
         }
         .onChange(of: navigationPath.count) { _, _ in
@@ -342,7 +345,7 @@ struct HomeNavigationView: View {
         .onChange(of: SavedAppsNavigation.shared.pendingConversationThreadId) { _, newThreadId in
             guard let newThreadId else { return }
             _ = SavedAppsNavigation.shared.consumeConversationRequest()
-            guard let key = appModel.snapshot?.threads.first(where: { $0.key.threadId == newThreadId })?.key else {
+            guard let key = navigationObservation.threadKey(threadId: newThreadId) else {
                 return
             }
             // Pop the saved-app detail off the stack, then push the conversation.
@@ -358,10 +361,9 @@ struct HomeNavigationView: View {
         #if targetEnvironment(macCatalyst)
         .onReceive(NotificationCenter.default.publisher(for: .remoraCommandSelectSession)) { notification in
             guard let index = notification.userInfo?["index"] as? Int,
-                  let summaries = appModel.snapshot?.sessionSummaries,
-                  summaries.indices.contains(index) else { return }
+                  navigationObservation.sessionTargets.indices.contains(index) else { return }
             Task { @MainActor in
-                _ = await openSessionAtIndex(summaries[index])
+                _ = await openSessionAtIndex(navigationObservation.sessionTargets[index])
             }
         }
         #endif
@@ -429,7 +431,7 @@ struct HomeNavigationView: View {
     private func defaultNewSessionServerId(preferredServerId: String? = nil) -> String? {
         SessionLaunchSupport.defaultConnectedServerId(
             connectedServerIds: connectedServerOptions.map(\.id),
-            activeThreadKey: appModel.snapshot?.activeThread,
+            activeThreadKey: appModel.navigationObservation.activeThread,
             preferredServerId: preferredServerId
         )
     }
@@ -466,7 +468,7 @@ struct HomeNavigationView: View {
             popCurrentRoute()
             request.finish()
         case .navigateForward:
-            guard let activeKey = appModel.snapshot?.activeThread else {
+            guard let activeKey = appModel.navigationObservation.activeThread else {
                 request.finish(errorMessage: "There is no active thread to open.")
                 return
             }
@@ -494,18 +496,18 @@ struct HomeNavigationView: View {
     }
 
     private func cycleThread(by offset: Int, request: RemoraActionRequest) {
-        guard let summaries = appModel.snapshot?.sessionSummaries,
-              summaries.count > 1 else {
+        let sessions = appModel.navigationObservation.sessionTargets
+        guard sessions.count > 1 else {
             request.finish(errorMessage: "Open at least two threads to cycle between them.")
             return
         }
 
-        let currentKey = visibleConversationKey ?? appModel.snapshot?.activeThread
+        let currentKey = visibleConversationKey ?? appModel.navigationObservation.activeThread
         let currentIndex = currentKey.flatMap { key in
-            summaries.firstIndex(where: { $0.key == key })
+            sessions.firstIndex(where: { $0.key == key })
         } ?? (offset > 0 ? -1 : 0)
-        let targetIndex = (currentIndex + offset + summaries.count) % summaries.count
-        let target = summaries[targetIndex]
+        let targetIndex = (currentIndex + offset + sessions.count) % sessions.count
+        let target = sessions[targetIndex]
 
         Task { @MainActor in
             let errorMessage = await openSessionAtIndex(
@@ -649,7 +651,7 @@ struct HomeNavigationView: View {
     }
 
     private func openSessionAtIndex(
-        _ summary: AppSessionSummary,
+        _ summary: AppModelNavigationObservation.SessionTarget,
         reportsError: Bool = true
     ) async -> String? {
         guard openingRecentSessionKey == nil else {
@@ -773,7 +775,7 @@ struct HomeNavigationView: View {
             guard !hasSeededInitialConversationRoute,
                   !isStartingVoice,
                   navigationPath.isEmpty,
-                  appModel.snapshot?.activeThread == activeKey else {
+                  appModel.navigationObservation.activeThread == activeKey else {
                 return
             }
             hasSeededInitialConversationRoute = true
@@ -1075,7 +1077,7 @@ struct HomeNavigationView: View {
 
     private func hydratePinnedThreadsIfNeeded() {
         let connectedServerIds = Set(
-            (appModel.snapshot?.servers ?? [])
+            appModel.navigationObservation.servers
                 .filter(\.isConnected)
                 .map(\.serverId)
         )
@@ -1085,7 +1087,7 @@ struct HomeNavigationView: View {
             let key = pin.threadKey
             guard connectedServerIds.contains(key.serverId) else { continue }
             let id = homeHydrationId(key)
-            if appModel.snapshot?.sessionSummary(for: key)?.isResumed == true { continue }
+            if appModel.navigationObservation.sessionTarget(for: key)?.isResumed == true { continue }
             guard !hydratingPinnedHomeThreadIds.contains(id) else { continue }
             hydratingPinnedHomeThreadIds.insert(id)
 

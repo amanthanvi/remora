@@ -69,11 +69,15 @@ final class AppModel {
     let serverBridge: ServerBridge
     let ssh: SshBridge
     let reconnectController: ReconnectController
+    let chromeObservation = AppModelChromeObservation()
+    let navigationObservation = AppModelNavigationObservation()
 
     private(set) var snapshot: AppSnapshotRecord? {
         didSet {
             guard oldValue != snapshot else { return }
             snapshotRevision &+= 1
+            chromeObservation.refresh(snapshot: snapshot)
+            navigationObservation.refresh(snapshot: snapshot)
             refreshConversationObservations()
         }
     }
