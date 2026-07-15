@@ -162,6 +162,18 @@ impl AppStoreReducer {
             .cloned()
     }
 
+    /// Project a small read-only value from one canonical thread without
+    /// cloning the complete conversation snapshot. Callers must keep the
+    /// closure bounded because it executes while the store read lock is held.
+    pub(crate) fn project_thread<R>(
+        &self,
+        key: &ThreadKey,
+        project: impl FnOnce(&ThreadSnapshot) -> R,
+    ) -> Option<R> {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        snapshot.threads.get(key).map(project)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AppStoreUpdateRecord> {
         self.updates_tx.subscribe()
     }

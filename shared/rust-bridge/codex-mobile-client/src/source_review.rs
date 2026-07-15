@@ -26,10 +26,16 @@ pub const MAX_SOURCE_PREVIEW_BYTES: usize = 1024 * 1024;
 pub const MAX_DIFF_REVIEW_BYTES: usize = 1024 * 1024;
 
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
+const MAX_WORKSPACE_ROOT_BYTES: usize = 4096;
+const MAX_REMOTE_PATH_BYTES: usize = MAX_RELATIVE_PATH_BYTES + MAX_WORKSPACE_ROOT_BYTES + 1;
 const MAX_DISPLAY_PATH_BYTES: usize = 512;
 const MAX_DIFF_FILES: usize = 2048;
 const MAX_DIFF_HUNKS: usize = 10_000;
 const MAX_DIFF_ROWS: usize = 50_000;
+const MAX_DIFF_SOURCE_ITEMS: usize = 4096;
+const MAX_DIFF_INPUTS: usize = 4096;
+const MAX_SOURCE_TURN_ID_BYTES: usize = 512;
+const MAX_DIFF_PRESENCE_SCAN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SourcePreviewUnsupportedReason {
@@ -220,23 +226,30 @@ fn prepare_source_preview(
     relative_path: &str,
 ) -> Result<PreparedSourcePreview, SourcePreviewUnsupportedReason> {
     let relative_path = WorkspaceRelativePath::parse(relative_path)?;
-    let snapshot = client
+    let cwd = client
         .app_store
-        .thread_snapshot(thread_key)
+        .project_thread(thread_key, |snapshot| {
+            snapshot
+                .info
+                .cwd
+                .as_deref()
+                .and_then(normalized_workspace_root)
+        })
         .ok_or(SourcePreviewUnsupportedReason::ThreadUnavailable)?;
-    let cwd = snapshot
-        .info
-        .cwd
-        .as_deref()
-        .and_then(crate::remote_path::normalize_thread_cwd)
-        .filter(|cwd| remote_path_is_absolute(cwd))
-        .ok_or(SourcePreviewUnsupportedReason::WorkspaceUnavailable)?;
+    let cwd = cwd.ok_or(SourcePreviewUnsupportedReason::WorkspaceUnavailable)?;
 
     Ok(PreparedSourcePreview {
         thread_key: thread_key.clone(),
         workspace_root: cwd,
         relative_path,
     })
+}
+
+fn normalized_workspace_root(value: &str) -> Option<String> {
+    (value.len() <= MAX_WORKSPACE_ROOT_BYTES)
+        .then_some(value)
+        .and_then(crate::remote_path::normalize_thread_cwd)
+        .filter(|cwd| remote_path_is_absolute(cwd))
 }
 
 fn remote_path_is_absolute(path: &str) -> bool {
@@ -294,8 +307,11 @@ pub async fn diff_review_for_thread(
     thread_key: ThreadKey,
 ) -> DiffReviewResult {
     tokio::task::yield_now().await;
-    let snapshot = match client.app_store.thread_snapshot(&thread_key) {
-        Some(snapshot) => snapshot,
+    let projection = match client
+        .app_store
+        .project_thread(&thread_key, project_diff_inputs)
+    {
+        Some(projection) => projection,
         None => {
             return DiffReviewResult::Unsupported {
                 thread_key,
@@ -304,30 +320,51 @@ pub async fn diff_review_for_thread(
         }
     };
 
+    if projection.inputs.is_empty() && !projection.truncated {
+        return DiffReviewResult::Empty { thread_key };
+    }
+    let inputs = projection
+        .inputs
+        .iter()
+        .map(OwnedDiffInput::borrowed)
+        .collect::<Vec<_>>();
+    let mut review = normalize_trusted_diffs(thread_key, &inputs);
+    review.truncated |= projection.truncated;
+
+    DiffReviewResult::Ready { review }
+}
+
+fn project_diff_inputs(snapshot: &crate::store::ThreadSnapshot) -> DiffInputProjection {
     let workspace_root = snapshot
         .info
         .cwd
         .as_deref()
-        .and_then(crate::remote_path::normalize_thread_cwd)
-        .filter(|cwd| remote_path_is_absolute(cwd));
+        .and_then(normalized_workspace_root);
+    let first_item = snapshot.items.len().saturating_sub(MAX_DIFF_SOURCE_ITEMS);
+    let items = &snapshot.items[first_item..];
+    let mut projection = DiffInputProjection {
+        inputs: Vec::new(),
+        truncated: first_item > 0,
+    };
+
     // A TurnDiff is the cumulative authoritative aggregate for its turn. The
     // same changes also exist as individual FileChange items, so collecting
     // both would duplicate rows and counts.
-    let aggregate_turns = snapshot
-        .items
+    let aggregate_turns = items
         .iter()
         .filter_map(|item| match &item.content {
             HydratedConversationItemContent::TurnDiff(data)
                 if bounded_has_non_whitespace(&data.diff) =>
             {
-                Some(item.source_turn_id.as_deref())
+                bounded_source_turn_id(item.source_turn_id.as_deref())
             }
             _ => None,
         })
         .collect::<HashSet<_>>();
 
-    let mut inputs = Vec::new();
-    for item in &snapshot.items {
+    let mut remaining_bytes = MAX_DIFF_REVIEW_BYTES;
+    let mut source_records_seen = 0_usize;
+    'items: for item in items {
         match &item.content {
             HydratedConversationItemContent::FileChange(data) => {
                 // Only completed fallback items describe applied workspace
@@ -336,27 +373,58 @@ pub async fn diff_review_for_thread(
                 if data.status != crate::types::AppOperationStatus::Completed {
                     continue;
                 }
-                let has_aggregate = aggregate_turns.contains(&item.source_turn_id.as_deref());
+                let has_aggregate = bounded_source_turn_id(item.source_turn_id.as_deref())
+                    .is_some_and(|turn_id| aggregate_turns.contains(turn_id));
                 for change in &data.changes {
+                    if source_records_seen >= MAX_DIFF_INPUTS {
+                        projection.truncated = true;
+                        break 'items;
+                    }
+                    source_records_seen += 1;
                     let path_hint =
                         normalize_file_change_hint(workspace_root.as_deref(), &change.path);
                     let has_move = change.move_path.is_some();
                     let new_path_hint = change.move_path.as_deref().and_then(|path| {
                         normalize_file_change_hint(workspace_root.as_deref(), path)
                     });
+                    let has_unconfined_path =
+                        path_hint.is_none() || (has_move && new_path_hint.is_none());
+                    if has_unconfined_path {
+                        // A same-turn aggregate will independently describe a
+                        // normal content change. For move-only metadata, or
+                        // when no aggregate exists, retain a typed redacted
+                        // entry without exposing the FileChange payload.
+                        if (!has_aggregate || has_move)
+                            && !projection.push(
+                                &mut remaining_bytes,
+                                path_hint,
+                                new_path_hint,
+                                Some(bounded_private_identity(&change.path)),
+                                workspace_root.clone(),
+                                &change.diff,
+                                DiffInputKind::RedactedPath,
+                            )
+                        {
+                            break 'items;
+                        }
+                        continue;
+                    }
                     if has_aggregate {
                         // TurnDiff includes applied content changes but core
                         // intentionally omits pure renames. Preserve only the
                         // typed move identity here, without duplicating hunks.
-                        if has_move {
-                            inputs.push(DiffInput {
+                        if has_move
+                            && !projection.push(
+                                &mut remaining_bytes,
                                 path_hint,
                                 new_path_hint,
-                                private_path_identity: Some(stable_id(&change.path)),
-                                workspace_root: workspace_root.clone(),
-                                patch: "",
-                                kind: DiffInputKind::RenameMetadata,
-                            });
+                                Some(bounded_private_identity(&change.path)),
+                                workspace_root.clone(),
+                                "",
+                                DiffInputKind::RenameMetadata,
+                            )
+                        {
+                            break 'items;
                         }
                         continue;
                     }
@@ -365,41 +433,53 @@ pub async fn diff_review_for_thread(
                     } else {
                         DiffInputKind::from_hydrated_kind(&change.kind)
                     };
-                    if kind.accepts_empty_content() || bounded_has_non_whitespace(&change.diff) {
-                        inputs.push(DiffInput {
+                    if (kind.accepts_empty_content() || bounded_has_non_whitespace(&change.diff))
+                        && !projection.push(
+                            &mut remaining_bytes,
                             path_hint,
                             new_path_hint,
-                            private_path_identity: Some(stable_id(&change.path)),
-                            workspace_root: workspace_root.clone(),
-                            patch: change.diff.as_str(),
+                            Some(bounded_private_identity(&change.path)),
+                            workspace_root.clone(),
+                            &change.diff,
                             kind,
-                        });
+                        )
+                    {
+                        break 'items;
                     }
                 }
             }
             HydratedConversationItemContent::TurnDiff(data)
                 if bounded_has_non_whitespace(&data.diff) =>
             {
-                inputs.push(DiffInput {
-                    path_hint: None,
-                    new_path_hint: None,
-                    private_path_identity: None,
-                    workspace_root: workspace_root.clone(),
-                    patch: data.diff.as_str(),
-                    kind: DiffInputKind::Unified,
-                });
+                if !projection.push(
+                    &mut remaining_bytes,
+                    None,
+                    None,
+                    None,
+                    workspace_root.clone(),
+                    &data.diff,
+                    DiffInputKind::Unified,
+                ) {
+                    break 'items;
+                }
             }
             _ => {}
         }
     }
 
-    if inputs.is_empty() {
-        return DiffReviewResult::Empty { thread_key };
-    }
+    projection
+}
 
-    DiffReviewResult::Ready {
-        review: normalize_trusted_diffs(thread_key, &inputs),
-    }
+fn bounded_source_turn_id(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| value.len() <= MAX_SOURCE_TURN_ID_BYTES)
+}
+
+fn bounded_private_identity(value: &str) -> String {
+    stable_id(&format!(
+        "{}\0{}",
+        value.len(),
+        utf8_prefix(value, MAX_RELATIVE_PATH_BYTES)
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,6 +489,7 @@ enum DiffInputKind {
     DeletedContent,
     UpdatedPatch,
     RenameMetadata,
+    RedactedPath,
 }
 
 impl DiffInputKind {
@@ -424,7 +505,7 @@ impl DiffInputKind {
     fn accepts_empty_content(self) -> bool {
         matches!(
             self,
-            Self::AddedContent | Self::DeletedContent | Self::RenameMetadata
+            Self::AddedContent | Self::DeletedContent | Self::RenameMetadata | Self::RedactedPath
         )
     }
 }
@@ -436,15 +517,82 @@ struct DiffInput<'a> {
     private_path_identity: Option<String>,
     workspace_root: Option<String>,
     patch: &'a str,
+    source_byte_length: u64,
     kind: DiffInputKind,
+}
+
+struct OwnedDiffInput {
+    path_hint: Option<String>,
+    new_path_hint: Option<String>,
+    private_path_identity: Option<String>,
+    workspace_root: Option<String>,
+    patch: String,
+    source_byte_length: u64,
+    kind: DiffInputKind,
+}
+
+impl OwnedDiffInput {
+    fn borrowed(&self) -> DiffInput<'_> {
+        DiffInput {
+            path_hint: self.path_hint.clone(),
+            new_path_hint: self.new_path_hint.clone(),
+            private_path_identity: self.private_path_identity.clone(),
+            workspace_root: self.workspace_root.clone(),
+            patch: &self.patch,
+            source_byte_length: self.source_byte_length,
+            kind: self.kind,
+        }
+    }
+}
+
+struct DiffInputProjection {
+    inputs: Vec<OwnedDiffInput>,
+    truncated: bool,
+}
+
+impl DiffInputProjection {
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        remaining_bytes: &mut usize,
+        path_hint: Option<String>,
+        new_path_hint: Option<String>,
+        private_path_identity: Option<String>,
+        workspace_root: Option<String>,
+        patch: &str,
+        kind: DiffInputKind,
+    ) -> bool {
+        if self.inputs.len() >= MAX_DIFF_INPUTS || (*remaining_bytes == 0 && !patch.is_empty()) {
+            self.truncated = true;
+            return false;
+        }
+        let bounded_patch = utf8_prefix(patch, *remaining_bytes);
+        if bounded_patch.len() < patch.len() {
+            self.truncated = true;
+        }
+        *remaining_bytes = remaining_bytes.saturating_sub(bounded_patch.len());
+        self.inputs.push(OwnedDiffInput {
+            path_hint,
+            new_path_hint,
+            private_path_identity,
+            workspace_root,
+            patch: bounded_patch.to_string(),
+            source_byte_length: patch.len() as u64,
+            kind,
+        });
+        true
+    }
 }
 
 fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> DiffReview {
     let source_byte_length = inputs.iter().fold(0_u64, |total, input| {
-        total.saturating_add(input.patch.len() as u64)
+        total.saturating_add(input.source_byte_length)
     });
     let mut remaining = MAX_DIFF_REVIEW_BYTES;
-    let mut truncated = source_byte_length > MAX_DIFF_REVIEW_BYTES as u64;
+    let mut truncated = source_byte_length > MAX_DIFF_REVIEW_BYTES as u64
+        || inputs
+            .iter()
+            .any(|input| input.source_byte_length > input.patch.len() as u64);
     let mut files = Vec::new();
     let mut hunks_seen = 0_usize;
     let mut rows_seen = 0_usize;
@@ -542,7 +690,9 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
 }
 
 fn bounded_has_non_whitespace(value: &str) -> bool {
-    !utf8_prefix(value, MAX_DIFF_REVIEW_BYTES).trim().is_empty()
+    !utf8_prefix(value, MAX_DIFF_PRESENCE_SCAN_BYTES)
+        .trim()
+        .is_empty()
 }
 
 fn complete_line_prefix(value: &str) -> &str {
@@ -556,6 +706,9 @@ fn complete_line_prefix(value: &str) -> &str {
 /// grammar accepted by source preview. Absolute paths are retained only when
 /// they are component-boundary descendants of the authoritative workspace.
 fn normalize_file_change_hint(workspace_root: Option<&str>, value: &str) -> Option<String> {
+    if value.len() > MAX_REMOTE_PATH_BYTES {
+        return None;
+    }
     let candidate = value.trim();
     if candidate.is_empty() {
         return None;
@@ -864,7 +1017,8 @@ fn parse_diff_file(
     let mut marked_added = false;
     let mut marked_deleted = false;
     let mut marked_binary = false;
-    let mut marked_unsupported = false;
+    let mut marked_unsupported = matches!(input_kind, DiffInputKind::RedactedPath);
+    let mut redact_raw_patch = matches!(input_kind, DiffInputKind::RedactedPath);
     let mut hunks = Vec::new();
     let mut current_hunk: Option<InProgressHunk> = None;
     let mut additions = 0_u32;
@@ -875,6 +1029,9 @@ fn parse_diff_file(
     for line in patch.lines() {
         if let Some(header) = parse_hunk_header(line) {
             if let Some(current) = current_hunk.take() {
+                if current.old_remaining > 0 || current.new_remaining > 0 {
+                    truncated = true;
+                }
                 hunks.push(current.hunk);
             }
             if hunks.len() >= hunk_budget {
@@ -980,6 +1137,7 @@ fn parse_diff_file(
 
         if let Some(paths) = line.strip_prefix("diff --git ") {
             if let Some((old, new)) = parse_diff_git_paths(paths) {
+                redact_raw_patch |= git_path_is_absolute(&old) || git_path_is_absolute(&new);
                 old_path = normalize_diff_path(&old, true, workspace_root);
                 new_path = normalize_diff_path(&new, true, workspace_root);
             }
@@ -987,6 +1145,7 @@ fn parse_diff_file(
             .strip_prefix("diff --cc ")
             .or_else(|| line.strip_prefix("diff --combined "))
         {
+            redact_raw_patch |= git_path_is_absolute(path);
             let path = normalize_diff_path(path, false, workspace_root);
             old_path = path.clone();
             new_path = path;
@@ -994,13 +1153,19 @@ fn parse_diff_file(
         } else if line.starts_with("@@@ ") {
             marked_unsupported = true;
         } else if let Some(path) = line.strip_prefix("--- ") {
+            redact_raw_patch |= git_path_is_absolute(path_field(path));
             old_path = normalize_diff_path(path_field(path), true, workspace_root);
         } else if let Some(path) = line.strip_prefix("+++ ") {
+            redact_raw_patch |= git_path_is_absolute(path_field(path));
             new_path = normalize_diff_path(path_field(path), true, workspace_root);
         } else if let Some(path) = line.strip_prefix("rename from ") {
+            redact_raw_patch |= git_path_is_absolute(path);
             rename_from = normalize_diff_path(path, false, workspace_root);
         } else if let Some(path) = line.strip_prefix("rename to ") {
+            redact_raw_patch |= git_path_is_absolute(path);
             rename_to = normalize_diff_path(path, false, workspace_root);
+        } else if let Some(path) = line.strip_prefix("Moved to: ") {
+            redact_raw_patch |= git_path_is_absolute(path);
         } else if line.starts_with("new file mode ") {
             marked_added = true;
         } else if line.starts_with("deleted file mode ") {
@@ -1011,6 +1176,9 @@ fn parse_diff_file(
     }
 
     if let Some(current) = current_hunk {
+        if current.old_remaining > 0 || current.new_remaining > 0 {
+            truncated = true;
+        }
         if hunks.len() < hunk_budget {
             hunks.push(current.hunk);
         } else {
@@ -1028,10 +1196,11 @@ fn parse_diff_file(
     // workspace. Preserve only a redacted identity for that entry: returning
     // its hunks or raw patch would turn trusted server output into a read-like
     // escape around the source-preview confinement contract.
-    let outside_workspace = old_path
-        .iter()
-        .chain(new_path.iter())
-        .any(|path| path.identity.starts_with("outside-workspace:"));
+    let outside_workspace = matches!(input_kind, DiffInputKind::RedactedPath)
+        || old_path
+            .iter()
+            .chain(new_path.iter())
+            .any(|path| path.identity.starts_with("outside-workspace:"));
     if outside_workspace {
         marked_unsupported = true;
         additions = 0;
@@ -1094,7 +1263,7 @@ fn parse_diff_file(
         additions,
         deletions,
         hunks,
-        raw_patch: if outside_workspace {
+        raw_patch: if outside_workspace || redact_raw_patch {
             String::new()
         } else {
             patch.to_string()
@@ -1121,6 +1290,10 @@ fn parse_diff_git_paths(value: &str) -> Option<(String, String)> {
     value
         .rfind(" b/")
         .map(|split| (value[..split].to_string(), value[split + 1..].to_string()))
+}
+
+fn git_path_is_absolute(value: &str) -> bool {
+    decode_git_path(value).is_some_and(|path| remote_path_is_absolute(&path))
 }
 
 fn path_field(value: &str) -> &str {
@@ -1445,6 +1618,7 @@ mod tests {
             private_path_identity: None,
             workspace_root: None,
             patch,
+            source_byte_length: patch.len() as u64,
             kind: DiffInputKind::Unified,
         }
     }
@@ -1622,6 +1796,52 @@ Binary files a/picture.png and b/picture.png differ
                 .map(|file| file.raw_patch.len())
                 .sum::<usize>()
                 <= MAX_DIFF_REVIEW_BYTES
+        );
+    }
+
+    #[test]
+    fn canonical_store_projection_is_bounded_before_normalization() {
+        let mut snapshot = ThreadSnapshot::from_info("server", thread_info(Some("/repo".into())));
+        for index in 0..=MAX_DIFF_SOURCE_ITEMS {
+            snapshot.items.push(HydratedConversationItem {
+                id: format!("item-{index}"),
+                content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                    diff: if index == MAX_DIFF_SOURCE_ITEMS {
+                        "diff --git a/a b/a\n".to_string()
+                    } else {
+                        String::new()
+                    },
+                }),
+                source_turn_id: Some(format!("turn-{index}")),
+                source_turn_index: None,
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            });
+        }
+        let projection = project_diff_inputs(&snapshot);
+        assert!(projection.truncated);
+        assert_eq!(projection.inputs.len(), 1);
+
+        let mut oversized = String::from("diff --git a/a b/a\n");
+        oversized.push_str(&"+x\n".repeat(MAX_DIFF_REVIEW_BYTES));
+        snapshot.items.clear();
+        snapshot.items.push(HydratedConversationItem {
+            id: "oversized".to_string(),
+            content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                diff: oversized.clone(),
+            }),
+            source_turn_id: Some("turn".to_string()),
+            source_turn_index: None,
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        let projection = project_diff_inputs(&snapshot);
+        assert!(projection.truncated);
+        assert_eq!(projection.inputs.len(), 1);
+        assert!(projection.inputs[0].patch.len() <= MAX_DIFF_REVIEW_BYTES);
+        assert_eq!(
+            projection.inputs[0].source_byte_length,
+            oversized.len() as u64
         );
     }
 
@@ -1914,6 +2134,124 @@ Binary files a/picture.png and b/picture.png differ
         assert!(!format!("{redacted:?}").contains("/secret"));
     }
 
+    #[tokio::test]
+    async fn unconfined_file_change_payload_is_fully_redacted() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "outside-file-change".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![
+                    HydratedFileChangeEntryData {
+                        path: "/secret/add.txt".to_string(),
+                        kind: "add".to_string(),
+                        move_path: None,
+                        diff: "private-add\n".to_string(),
+                        additions: 1,
+                        deletions: 0,
+                    },
+                    HydratedFileChangeEntryData {
+                        path: "/secret/delete.txt".to_string(),
+                        kind: "delete".to_string(),
+                        move_path: None,
+                        diff: "private-delete\n".to_string(),
+                        additions: 0,
+                        deletions: 1,
+                    },
+                    HydratedFileChangeEntryData {
+                        path: "/secret/update.txt".to_string(),
+                        kind: "update".to_string(),
+                        move_path: None,
+                        diff: "@@ -1 +1 @@\n-private-old\n+private-new\n".to_string(),
+                        additions: 1,
+                        deletions: 1,
+                    },
+                ],
+            }),
+            source_turn_id: Some("turn".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected redacted entry");
+        };
+        assert_eq!(review.files.len(), 3);
+        for file in &review.files {
+            assert_eq!(file.change_kind, DiffFileChangeKind::Unsupported);
+            assert!(file.relative_path.is_none());
+            assert!(file.old_path.is_none());
+            assert!(file.new_path.is_none());
+            assert!(file.raw_patch.is_empty());
+            assert!(file.hunks.is_empty());
+        }
+        assert_eq!((review.additions, review.deletions), (0, 0));
+        let public_value = format!("{review:?}");
+        assert!(!public_value.contains("/secret"));
+        assert!(!public_value.contains("private-add"));
+        assert!(!public_value.contains("private-delete"));
+        assert!(!public_value.contains("private-old"));
+        assert_eq!(review.source_byte_length, 65);
+    }
+
+    #[test]
+    fn normalized_absolute_metadata_is_omitted_from_raw_export() {
+        let patch = "diff --git /repo/src/a.rs /repo/src/a.rs\n--- /repo/src/a.rs\n+++ /repo/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let review = normalize_trusted_diffs(
+            key(),
+            &[DiffInput {
+                workspace_root: Some("/repo".to_string()),
+                ..unified_input(patch)
+            }],
+        );
+        let file = &review.files[0];
+        assert_eq!(file.relative_path.as_deref(), Some("src/a.rs"));
+        assert_eq!((file.additions, file.deletions), (1, 1));
+        assert_eq!(file.hunks.len(), 1);
+        assert!(file.raw_patch.is_empty());
+        assert!(!format!("{file:?}").contains("/repo"));
+    }
+
+    #[tokio::test]
+    async fn absolute_move_metadata_is_omitted_from_raw_export() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "move".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![HydratedFileChangeEntryData {
+                    path: "/repo/old.rs".to_string(),
+                    kind: "update".to_string(),
+                    move_path: Some("/repo/new.rs".to_string()),
+                    diff: "@@ -1 +1 @@\n-old\n+new\n\n\nMoved to: /repo/new.rs".to_string(),
+                    additions: 1,
+                    deletions: 1,
+                }],
+            }),
+            source_turn_id: Some("turn".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        let file = &review.files[0];
+        assert_eq!(file.change_kind, DiffFileChangeKind::Renamed);
+        assert_eq!(file.old_path.as_deref(), Some("old.rs"));
+        assert_eq!(file.new_path.as_deref(), Some("new.rs"));
+        assert!(file.raw_patch.is_empty());
+        assert!(!format!("{file:?}").contains("/repo"));
+    }
+
     #[test]
     fn hunk_parser_enforces_declared_ranges() {
         let patch =
@@ -1923,6 +2261,19 @@ Binary files a/picture.png and b/picture.png differ
         assert_eq!((file.additions, file.deletions), (1, 1));
         assert_eq!(file.hunks[0].rows.len(), 2);
         assert!(file.hunks[0].rows.iter().all(|row| row.text != "extra"));
+    }
+
+    #[test]
+    fn incomplete_hunks_are_marked_truncated() {
+        for patch in [
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n",
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n+new\n",
+        ] {
+            let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+            assert!(review.truncated, "incomplete patch: {patch:?}");
+            assert_eq!(review.files.len(), 1);
+            assert_eq!(review.files[0].hunks.len(), 1);
+        }
     }
 
     #[test]
