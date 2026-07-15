@@ -110,7 +110,6 @@
 		2A49978368A500D83B9E6907 /* rose-pine-dawn.json in Resources */ = {isa = PBXBuildFile; fileRef = 5774EFA5B16F5AFB43C7D1EA /* rose-pine-dawn.json */; };
 		2A7FF8038EDD5F522681643F /* ConversationTurnRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FEF2824DA02F95ACAC68916 /* ConversationTurnRow.swift */; };
 		2BFAE88B97F1D26424011F01 /* MacCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2A2037285CE8B757B6D3F79 /* MacCommands.swift */; };
-		2C22245B4C5B80B106FD5D4F /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 96555CB1E83E5568A410D2BB /* AppIcon.icon */; };
 		2C45020BA3CDF447B703028C /* RemoraLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30C0DF13F976468BCB6AC957 /* RemoraLogo.swift */; };
 		2C4F5B05489CE526DBA304E1 /* dracula-soft.json in Resources */ = {isa = PBXBuildFile; fileRef = BCA67ABE5B9931ABFD6D0297 /* dracula-soft.json */; };
 		2C9DE07276A8A66D13849181 /* ConversationDisplayUITestHarnessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765C6F054278979294EB4C5C /* ConversationDisplayUITestHarnessView.swift */; };
@@ -530,7 +529,6 @@
 		EB3293CA40E130449A0695A8 /* rose-pine-moon.json in Resources */ = {isa = PBXBuildFile; fileRef = 62D2D8C742D61CAF043B682D /* rose-pine-moon.json */; };
 		EB3E44B57875810C23718933 /* ServerPillRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE50C377DC2C55E179EFB79 /* ServerPillRow.swift */; };
 		EB5AFB889162C222D4CA5AE4 /* GhosttyTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBAC08ED78E62A2E738001EE /* GhosttyTerminalView.swift */; };
-		EBD626818990CAE4485DA972 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 96555CB1E83E5568A410D2BB /* AppIcon.icon */; };
 		ECC27810011DBF49E4B9CF4C /* gruvbox-light-soft.json in Resources */ = {isa = PBXBuildFile; fileRef = 04E1D32C283E09F5CED01C4D /* gruvbox-light-soft.json */; };
 		EEE7EDA49DB0C52A8B8C631F /* ConversationComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576B75F09A2487B4EB1D40A6 /* ConversationComposerTextView.swift */; };
 		EFCB0907784D493C57A595BF /* CatalystVoiceStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F53771DCADCC8768DCCCAB97 /* CatalystVoiceStubs.swift */; };
@@ -755,7 +753,6 @@
 		9295B2EC0343A4FC6825DA85 /* SavedAppsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedAppsStore.swift; sourceTree = "<group>"; };
 		945F96224B74447D4F142741 /* HomeDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeDashboardView.swift; sourceTree = "<group>"; };
 		94EFB4ABDBB1423FB25E9F65 /* AppModelConversationObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelConversationObservation.swift; sourceTree = "<group>"; };
-		96555CB1E83E5568A410D2BB /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		974822255928A225B0097573 /* poimandres.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = poimandres.json; sourceTree = "<group>"; };
 		98423D9A7F3686F8D9AB3C2D /* ThreadSearchResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadSearchResultsView.swift; sourceTree = "<group>"; };
 		9863C8A6DCC237695A04D4C9 /* WallpaperManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperManager.swift; sourceTree = "<group>"; };
@@ -1121,7 +1118,6 @@
 			children = (
 				D534C5868B3B87F92E1CBF16 /* AppDelegate.swift */,
 				7EBBCD6284E873201668C2E7 /* AppDestinationViews.swift */,
-				96555CB1E83E5568A410D2BB /* AppIcon.icon */,
 				07FEAB11BA99AE0498705A12 /* Assets.xcassets */,
 				29F6852AC9984149BCE1BAD9 /* ContentView.swift */,
 				4C2A0965A1B9CFC4B5ED05B5 /* Extensions.swift */,
@@ -1446,7 +1442,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				EBD626818990CAE4485DA972 /* AppIcon.icon in Resources */,
 				776530FE62363B4D4FE70CE0 /* Assets.xcassets in Resources */,
 				53E2883811935DF7F9498FB1 /* BerkeleyMono-Bold-Oblique.otf in Resources */,
 				DED683CD2262DFB630E4505D /* BerkeleyMono-Bold.otf in Resources */,
@@ -1541,7 +1536,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2C22245B4C5B80B106FD5D4F /* AppIcon.icon in Resources */,
 				92FEF02B5DC468A925F7A40C /* Assets.xcassets in Resources */,
 				D17CC5D508C4C526629AA68D /* BerkeleyMono-Bold-Oblique.otf in Resources */,
 				B87F0A2C1CD98BE5C6A534D6 /* BerkeleyMono-Bold.otf in Resources */,
