@@ -13,6 +13,17 @@ use codex_app_server_client::{AppServerClient, RemoteAppServerConnectArgs};
 
 use crate::transport::TransportError;
 
+/// Whether the transport's replay handshake proved that the replacement
+/// stream is caught up. `AuthoritativeRefreshRequired` is deliberately a
+/// transport-neutral outcome: Alleycat maps its `drift_reload` attach result
+/// here, while transports without replay semantics retain the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ReplayOutcome {
+    #[default]
+    Complete,
+    AuthoritativeRefreshRequired,
+}
+
 /// Transport-scoped state that must outlive the worker's `client` binding
 /// (e.g. the iroh `Connection` backing an Alleycat stream). The worker
 /// swaps the keepalive Arc on each successful reconnect so the previous
@@ -58,6 +69,19 @@ pub(crate) trait RemoteTransport: Send + Sync + 'static {
         args: &RemoteAppServerConnectArgs,
         websocket_url: &str,
     ) -> Result<Reconnected, TransportError>;
+
+    /// Low-cardinality route label for local connection timelines. It must
+    /// never contain a host, URL, token, account, or other user data.
+    fn route_label(&self) -> &'static str {
+        "managed"
+    }
+
+    /// Return and clear the replay outcome produced by the most recent
+    /// successful reconnect. Implementations that do not negotiate replay
+    /// completeness use the default `Complete` outcome.
+    fn take_replay_outcome(&self) -> ReplayOutcome {
+        ReplayOutcome::Complete
+    }
 
     /// Hint that the host network may have changed (e.g. iOS resumed the
     /// app from background suspension). Transports that have an iroh

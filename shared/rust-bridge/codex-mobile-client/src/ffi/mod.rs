@@ -29,7 +29,7 @@ pub use discovery::{
 };
 pub use errors::ClientError;
 pub use parser::MessageParser;
-pub use reconnect::ReconnectController;
+pub use reconnect::{ReconnectController, ReconnectShutdownOutcome};
 pub use remote_path::RemotePath;
 pub use ssh::{AppSshBridgeConnectResult, AppSshConnectionResult, AppSshSessionResult, SshBridge};
 pub use terminal::{
@@ -41,6 +41,6 @@ pub use terminal::{
 
 // Re-export reconnect boundary types so UniFFI can discover them.
 pub use crate::reconnect::{
-    ReconnectResult, SavedServerRecord, SlingshotCredentialProvider, SlingshotCredentialRecord,
-    SshAuthMethodRecord, SshCredentialProvider, SshCredentialRecord,
+    ReconnectOutcome, ReconnectResult, SavedServerRecord, SlingshotCredentialProvider,
+    SlingshotCredentialRecord, SshAuthMethodRecord, SshCredentialProvider, SshCredentialRecord,
 };

@@ -76,7 +76,64 @@ pub struct ReconnectResult {
     pub server_id: String,
     pub success: bool,
     pub needs_local_auth_restore: bool,
+    pub outcome: ReconnectOutcome,
     pub error_message: Option<String>,
+}
+
+/// Typed result for reconnect orchestration.
+///
+/// `success` remains on [`ReconnectResult`] for source compatibility with
+/// existing platform callers. New callers should use this enum to distinguish
+/// a completed connection from an already-healthy/self-healing session and
+/// from actionable credential, pairing, or configuration failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ReconnectOutcome {
+    Connected,
+    AlreadyConnected,
+    SelfHealing,
+    Coalesced,
+    Cancelled,
+    MissingSshCredential,
+    MissingSlingshotCredential,
+    RePairRequired,
+    RepairRequired,
+    ConfigurationRequired,
+    NotFound,
+    Failed,
+}
+
+impl ReconnectResult {
+    pub(crate) fn completed(
+        server_id: impl Into<String>,
+        outcome: ReconnectOutcome,
+        needs_local_auth_restore: bool,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            success: true,
+            needs_local_auth_restore,
+            outcome,
+            error_message: None,
+        }
+    }
+
+    pub(crate) fn blocked(
+        server_id: impl Into<String>,
+        outcome: ReconnectOutcome,
+        error_message: impl Into<String>,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            success: false,
+            needs_local_auth_restore: false,
+            outcome,
+            error_message: Some(error_message.into()),
+        }
+    }
+
+    pub(crate) fn failed(server_id: impl Into<String>, error_message: impl Into<String>) -> Self {
+        Self::blocked(server_id, ReconnectOutcome::Failed, error_message)
+    }
 }
 
 /// Callback interface for platform-side SSH credential storage.
@@ -139,6 +196,26 @@ pub(crate) enum ReconnectPlan {
         agent_name: String,
         wire: AlleycatAgentWire,
     },
+}
+
+impl ReconnectPlan {
+    pub(crate) fn server_id(&self) -> &str {
+        match self {
+            Self::Ssh { server_id, .. }
+            | Self::SshBridge { server_id, .. }
+            | Self::Local { server_id, .. }
+            | Self::DirectRemote { server_id, .. }
+            | Self::RemoteUrl { server_id, .. }
+            | Self::Slingshot { server_id, .. }
+            | Self::Alleycat { server_id, .. } => server_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ReconnectPlanDecision {
+    Plan(ReconnectPlan),
+    NoAction(ReconnectOutcome),
 }
 
 // ── Transport resolution helpers ────────────────────────────────────────
@@ -291,9 +368,28 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
     is_connected: bool,
     multi_clanker_and_quic_enabled: bool,
 ) -> Option<ReconnectPlan> {
+    match decide_reconnect_plan_with_slingshot(
+        server,
+        credential,
+        slingshot_credential,
+        is_connected,
+        multi_clanker_and_quic_enabled,
+    ) {
+        ReconnectPlanDecision::Plan(plan) => Some(plan),
+        ReconnectPlanDecision::NoAction(_) => None,
+    }
+}
+
+pub(crate) fn decide_reconnect_plan_with_slingshot(
+    server: &SavedServerRecord,
+    credential: Option<&SshCredentialRecord>,
+    slingshot_credential: Option<&SlingshotCredentialRecord>,
+    is_connected: bool,
+    multi_clanker_and_quic_enabled: bool,
+) -> ReconnectPlanDecision {
     // 1. Skip if already connected
     if is_connected {
-        return None;
+        return ReconnectPlanDecision::NoAction(ReconnectOutcome::AlreadyConnected);
     }
 
     // 2. Stable Alleycat pairing wins before legacy tunnel/direct transports.
@@ -307,7 +403,7 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
                 Some("jsonl") => AlleycatAgentWire::Jsonl,
                 _ => AlleycatAgentWire::Websocket,
             };
-            return Some(ReconnectPlan::Alleycat {
+            return ReconnectPlanDecision::Plan(ReconnectPlan::Alleycat {
                 server_id: server.id.clone(),
                 display_name: server.name.clone(),
                 params: AlleycatPairPayload {
@@ -321,36 +417,57 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
                 wire,
             });
         }
-    }
 
-    // 3. SSH bridge records need to reconnect as the multiplexed in-process
-    // bridge group. Falling through to the legacy SSH plan would only
-    // bootstrap direct Codex.
-    if multi_clanker_and_quic_enabled && is_ssh_bridge_record(server) {
-        if let Some(cred) = credential {
-            return Some(ReconnectPlan::SshBridge {
-                server_id: server.id.clone(),
-                display_name: server.name.clone(),
-                host: server.hostname.clone(),
-                ssh_port: resolved_ssh_port(server),
-                credential: cred.clone(),
-                runtime_kinds: parse_ssh_bridge_runtime_kinds(
-                    server.alleycat_agent_name.as_deref(),
-                ),
-            });
+        // 3. SSH bridge records need to reconnect as the multiplexed
+        // in-process bridge group. Falling through to the legacy SSH plan
+        // would only bootstrap direct Codex.
+        if is_ssh_bridge_record(server) {
+            if let Some(cred) = credential {
+                return ReconnectPlanDecision::Plan(ReconnectPlan::SshBridge {
+                    server_id: server.id.clone(),
+                    display_name: server.name.clone(),
+                    host: server.hostname.clone(),
+                    ssh_port: resolved_ssh_port(server),
+                    credential: cred.clone(),
+                    runtime_kinds: parse_ssh_bridge_runtime_kinds(
+                        server.alleycat_agent_name.as_deref(),
+                    ),
+                });
+            }
+            return ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential);
         }
-        return None;
+
+        // A partially persisted modern pairing must not silently fall back to
+        // a different transport. That hides credential loss and can tear down
+        // a viable session before the user is told to repair the pairing.
+        let has_modern_pairing_state = server.alleycat_node_id.is_some()
+            || server.alleycat_token.is_some()
+            || server.alleycat_relay.is_some()
+            || server.alleycat_agent_name.is_some()
+            || matches!(
+                server.alleycat_agent_wire.as_deref(),
+                Some("jsonl" | "websocket")
+            );
+        if has_modern_pairing_state {
+            return ReconnectPlanDecision::NoAction(ReconnectOutcome::RepairRequired);
+        }
     }
 
-    // 4. WebSocket URL override → RemoteUrl
+    // 4. WebSocket URL override -> RemoteUrl
     if let Some(ref ws_url) = server.websocket_url {
         // Slingshot URLs are saved-server markers. They require the
         // ChatGPT-token-aware Slingshot connector, not the generic websocket
         // transport.
         if is_slingshot_connection_url(ws_url) {
-            let slingshot = parse_slingshot_connection_url(ws_url)?;
-            let credential = slingshot_credential?;
-            return Some(ReconnectPlan::Slingshot {
+            let Some(slingshot) = parse_slingshot_connection_url(ws_url) else {
+                return ReconnectPlanDecision::NoAction(ReconnectOutcome::ConfigurationRequired);
+            };
+            let Some(credential) = slingshot_credential else {
+                return ReconnectPlanDecision::NoAction(
+                    ReconnectOutcome::MissingSlingshotCredential,
+                );
+            };
+            return ReconnectPlanDecision::Plan(ReconnectPlan::Slingshot {
                 server_id: server.id.clone(),
                 display_name: server.name.clone(),
                 base_url: slingshot.base_url,
@@ -358,7 +475,7 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
                 credential: credential.clone(),
             });
         }
-        return Some(ReconnectPlan::RemoteUrl {
+        return ReconnectPlanDecision::Plan(ReconnectPlan::RemoteUrl {
             server_id: server.id.clone(),
             display_name: server.name.clone(),
             websocket_url: ws_url.clone(),
@@ -370,7 +487,7 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
     // 5. Explicit SSH mode + credential → Ssh
     if mode.as_deref() == Some("ssh") {
         if let Some(cred) = credential {
-            return Some(ReconnectPlan::Ssh {
+            return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
                 server_id: server.id.clone(),
                 display_name: server.name.clone(),
                 host: server.hostname.clone(),
@@ -379,12 +496,12 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
             });
         }
         // SSH preferred but no credential — cannot reconnect
-        return None;
+        return ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential);
     }
 
     // 6. Direct Codex port available → DirectRemote
     if let Some(port) = direct_codex_port(server) {
-        return Some(ReconnectPlan::DirectRemote {
+        return ReconnectPlanDecision::Plan(ReconnectPlan::DirectRemote {
             server_id: server.id.clone(),
             display_name: server.name.clone(),
             host: server.hostname.clone(),
@@ -395,7 +512,7 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
     // 7. No explicit mode, but credential available → SSH (legacy fallback)
     if mode.is_none() {
         if let Some(cred) = credential {
-            return Some(ReconnectPlan::Ssh {
+            return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
                 server_id: server.id.clone(),
                 display_name: server.name.clone(),
                 host: server.hostname.clone(),
@@ -407,14 +524,27 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
 
     // 8. Local source → Local
     if server.source == "local" {
-        return Some(ReconnectPlan::Local {
+        return ReconnectPlanDecision::Plan(ReconnectPlan::Local {
             server_id: server.id.clone(),
             display_name: server.name.clone(),
         });
     }
 
-    // 9. No viable transport
-    None
+    // 9. Legacy or disabled modern pairings require a deliberate new pairing
+    // instead of a silent no-op.
+    let has_pairing_state = server.alleycat_host.is_some()
+        || server.alleycat_udp_port.is_some()
+        || server.alleycat_node_id.is_some()
+        || server.alleycat_token.is_some()
+        || server.alleycat_relay.is_some()
+        || server.alleycat_agent_name.is_some()
+        || server.alleycat_agent_wire.is_some();
+    if has_pairing_state {
+        return ReconnectPlanDecision::NoAction(ReconnectOutcome::RePairRequired);
+    }
+
+    // 10. No viable transport.
+    ReconnectPlanDecision::NoAction(ReconnectOutcome::ConfigurationRequired)
 }
 
 // ── Plan execution ──────────────────────────────────────────────────────
@@ -424,6 +554,27 @@ pub(crate) async fn execute_reconnect_plan(
     plan: &ReconnectPlan,
     client: &MobileClient,
 ) -> ReconnectResult {
+    if let Some(health) = client.connection_health(plan.server_id()) {
+        match health {
+            crate::session::connection::ConnectionHealth::Connected => {
+                return ReconnectResult::completed(
+                    plan.server_id(),
+                    ReconnectOutcome::AlreadyConnected,
+                    false,
+                );
+            }
+            crate::session::connection::ConnectionHealth::Connecting { .. } => {
+                return ReconnectResult::completed(
+                    plan.server_id(),
+                    ReconnectOutcome::SelfHealing,
+                    false,
+                );
+            }
+            crate::session::connection::ConnectionHealth::Disconnected
+            | crate::session::connection::ConnectionHealth::Unresponsive { .. } => {}
+        }
+    }
+
     match plan {
         ReconnectPlan::Ssh {
             server_id,
@@ -465,23 +616,13 @@ pub(crate) async fn execute_reconnect_plan(
                 .connect_remote_over_ssh(config, ssh_creds, true, None)
                 .await
             {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: SSH plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -525,12 +666,7 @@ pub(crate) async fn execute_reconnect_plan(
                         "reconnect: SSH bridge plan failed to connect server_id={} error={}",
                         server_id, e
                     );
-                    return ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    };
+                    return ReconnectResult::failed(server_id, e.to_string());
                 }
             };
             let selected =
@@ -538,12 +674,7 @@ pub(crate) async fn execute_reconnect_plan(
             let state_root = match ssh_bridge_state_root(host) {
                 Ok(path) => path,
                 Err(error) => {
-                    return ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(error),
-                    };
+                    return ReconnectResult::failed(server_id, error);
                 }
             };
             match client
@@ -558,23 +689,13 @@ pub(crate) async fn execute_reconnect_plan(
                 )
                 .await
             {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: SSH bridge plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -596,23 +717,13 @@ pub(crate) async fn execute_reconnect_plan(
                 .connect_local(config, InProcessConfig::default())
                 .await
             {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: true,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, true),
                 Err(e) => {
                     warn!(
                         "reconnect: Local plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -636,23 +747,13 @@ pub(crate) async fn execute_reconnect_plan(
                 tls: false,
             };
             match client.connect_remote(config).await {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: DirectRemote plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -675,23 +776,13 @@ pub(crate) async fn execute_reconnect_plan(
                 tls: false,
             };
             match client.connect_remote(config).await {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: RemoteUrl plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -718,23 +809,13 @@ pub(crate) async fn execute_reconnect_plan(
                 )
                 .await
             {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: Slingshot plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -760,23 +841,13 @@ pub(crate) async fn execute_reconnect_plan(
                 )
                 .await
             {
-                Ok(_) => ReconnectResult {
-                    server_id: server_id.clone(),
-                    success: true,
-                    needs_local_auth_restore: false,
-                    error_message: None,
-                },
+                Ok(_) => ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false),
                 Err(e) => {
                     warn!(
                         "reconnect: Alleycat plan failed server_id={} error={}",
                         server_id, e
                     );
-                    ReconnectResult {
-                        server_id: server_id.clone(),
-                        success: false,
-                        needs_local_auth_restore: false,
-                        error_message: Some(e.to_string()),
-                    }
+                    ReconnectResult::failed(server_id, e.to_string())
                 }
             }
         }
@@ -1247,6 +1318,35 @@ mod tests {
         let mut s = base_server();
         s.preferred_connection_mode = Some("ssh".into());
         assert!(compute_reconnect_plan(&s, None, false, false).is_none());
+        assert!(matches!(
+            decide_reconnect_plan_with_slingshot(&s, None, None, false, false),
+            ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential)
+        ));
+    }
+
+    #[test]
+    fn plan_reports_missing_slingshot_credential() {
+        let mut s = base_server();
+        s.websocket_url = Some("slingshot://env_123?baseUrl=https://chatgpt.com".into());
+
+        assert!(matches!(
+            decide_reconnect_plan_with_slingshot(&s, None, None, false, false),
+            ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSlingshotCredential)
+        ));
+    }
+
+    #[test]
+    fn plan_reports_incomplete_modern_pairing_as_repair_required() {
+        let mut s = base_server();
+        s.has_codex_server = false;
+        s.port = 0;
+        s.alleycat_node_id = Some("node123".into());
+        s.alleycat_agent_name = Some("codex".into());
+
+        assert!(matches!(
+            decide_reconnect_plan_with_slingshot(&s, None, None, false, true),
+            ReconnectPlanDecision::NoAction(ReconnectOutcome::RepairRequired)
+        ));
     }
 
     #[test]

@@ -504,6 +504,16 @@ impl MobileClient {
         }
     }
 
+    pub(crate) fn connection_health(
+        &self,
+        server_id: &str,
+    ) -> Option<crate::session::connection::ConnectionHealth> {
+        let session = self.sessions_read().get(server_id).cloned()?;
+        let health_rx = session.health();
+        let health = health_rx.borrow().clone();
+        Some(health)
+    }
+
     async fn replace_existing_session(&self, server_id: &str) {
         self.clear_oauth_callback_tunnel(server_id).await;
         let existing = self.sessions_write().remove(server_id);
@@ -2649,12 +2659,42 @@ pub(super) fn runtime_kinds_support_account_sync(runtime_kinds: &[AgentRuntimeKi
 ///      ends up routing through `thread/resume`, which calls
 ///      `try_add_connection_to_thread` server-side and replays any
 ///      in-flight requests for the new connection.
-pub(super) fn run_post_reconnect_resubscribe(app_store: Arc<AppStoreReducer>, server_id: String) {
+pub(super) fn run_post_reconnect_resubscribe(
+    app_store: Arc<AppStoreReducer>,
+    server_id: String,
+    authoritative_refresh_required: bool,
+) {
     MobileClient::spawn_detached(async move {
         let Some(client) = crate::ffi::shared::shared_mobile_client_if_initialized() else {
             return;
         };
         client.clear_direct_resume_markers_for_server(&server_id);
+
+        if authoritative_refresh_required {
+            let session = match client.get_session(&server_id) {
+                Ok(session) => session,
+                Err(error) => {
+                    warn!(
+                        "MobileClient: replay-drift reconcile missing session server_id={}: {}",
+                        server_id, error
+                    );
+                    return;
+                }
+            };
+            info!(
+                "MobileClient: replay drift requires authoritative thread-list reconcile server_id={}",
+                server_id
+            );
+            if let Err(error) =
+                refresh_thread_list_from_app_server(session, Arc::clone(&app_store), &server_id)
+                    .await
+            {
+                warn!(
+                    "MobileClient: replay-drift thread-list reconcile failed server_id={}: {}",
+                    server_id, error
+                );
+            }
+        }
 
         let snapshot = app_store.snapshot();
         let mut keys_to_resume: Vec<ThreadKey> = Vec::new();

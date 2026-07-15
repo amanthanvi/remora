@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::{debug, info, warn};
 
-use crate::session::remote_transport::{Reconnected, RemoteTransport, SessionKeepalive};
+use crate::session::remote_transport::{
+    Reconnected, RemoteTransport, ReplayOutcome, SessionKeepalive,
+};
 use crate::transport::TransportError;
 use crate::types::AgentRuntimeKind;
 
@@ -137,6 +139,7 @@ pub struct AlleycatReconnectTransport {
     endpoint: Endpoint,
     current_session: Arc<tokio::sync::Mutex<Option<Arc<AlleycatSession>>>>,
     last_seen_seq: Arc<AtomicU64>,
+    authoritative_refresh_required: AtomicBool,
 }
 
 impl AlleycatReconnectTransport {
@@ -153,6 +156,7 @@ impl AlleycatReconnectTransport {
             endpoint,
             current_session: Arc::new(tokio::sync::Mutex::new(None)),
             last_seen_seq: Arc::new(AtomicU64::new(0)),
+            authoritative_refresh_required: AtomicBool::new(false),
         }
     }
 
@@ -163,7 +167,7 @@ impl AlleycatReconnectTransport {
     pub async fn connect_initial(
         &self,
     ) -> Result<(AppServerClient, Arc<AlleycatSession>), AlleycatError> {
-        connect_app_server_client(
+        let (client, session, _) = connect_app_server_client(
             &self.endpoint,
             self.params.clone(),
             self.agent.clone(),
@@ -171,7 +175,8 @@ impl AlleycatReconnectTransport {
             Some(Arc::clone(&self.last_seen_seq)),
             None,
         )
-        .await
+        .await?;
+        Ok((client, session))
     }
 
     /// Register the freshly-built session with the transport so external
@@ -194,7 +199,7 @@ impl RemoteTransport for AlleycatReconnectTransport {
         // the alleycat handshake on it. The previous Connection is dropped
         // only after the new keepalive is installed in the worker.
         let resume_from = self.last_seen_seq.load(Ordering::Relaxed);
-        let (client, session) = connect_app_server_client(
+        let (client, session, replay_outcome) = connect_app_server_client(
             &self.endpoint,
             self.params.clone(),
             self.agent.clone(),
@@ -204,12 +209,31 @@ impl RemoteTransport for AlleycatReconnectTransport {
         )
         .await
         .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
+        self.authoritative_refresh_required.store(
+            replay_outcome == ReplayOutcome::AuthoritativeRefreshRequired,
+            Ordering::Release,
+        );
         *self.current_session.lock().await = Some(Arc::clone(&session));
         let keepalive: Arc<dyn SessionKeepalive> = session;
         Ok(Reconnected {
             client,
             keepalive: Some(keepalive),
         })
+    }
+
+    fn route_label(&self) -> &'static str {
+        "alleycat"
+    }
+
+    fn take_replay_outcome(&self) -> ReplayOutcome {
+        if self
+            .authoritative_refresh_required
+            .swap(false, Ordering::AcqRel)
+        {
+            ReplayOutcome::AuthoritativeRefreshRequired
+        } else {
+            ReplayOutcome::Complete
+        }
     }
 
     async fn notify_network_change(&self) {
@@ -521,14 +545,14 @@ pub async fn restart_agent(
     Ok(())
 }
 
-pub async fn connect_app_server_client(
+pub(crate) async fn connect_app_server_client(
     endpoint: &Endpoint,
     params: ParsedPairPayload,
     agent: String,
     wire: AgentWire,
     seq_tracker: Option<Arc<AtomicU64>>,
     resume_from: Option<u64>,
-) -> Result<(AppServerClient, Arc<AlleycatSession>), AlleycatError> {
+) -> Result<(AppServerClient, Arc<AlleycatSession>, ReplayOutcome), AlleycatError> {
     let (connection, mut send, mut recv) = open_stream_on(endpoint, &params).await?;
     write_json_frame(
         &mut send,
@@ -543,6 +567,7 @@ pub async fn connect_app_server_client(
     let response: Response = read_json_frame(&mut recv).await?;
     validate_response(&response)?;
     log_session_info(&params, &agent, response.session.as_ref(), resume_from);
+    let replay_outcome = replay_outcome_from_session(response.session.as_ref());
     let label = format!("alleycat://{}/{}", params.node_id, agent);
     let args = RemoteAppServerConnectArgs {
         endpoint: RemoteAppServerEndpoint::WebSocket {
@@ -574,7 +599,14 @@ pub async fn connect_app_server_client(
         agent,
         wire,
     });
-    Ok((AppServerClient::Remote(remote), session))
+    Ok((AppServerClient::Remote(remote), session, replay_outcome))
+}
+
+fn replay_outcome_from_session(session: Option<&SessionInfoWire>) -> ReplayOutcome {
+    match session.map(|session| session.attached) {
+        Some(AttachKindWire::DriftReload) => ReplayOutcome::AuthoritativeRefreshRequired,
+        _ => ReplayOutcome::Complete,
+    }
 }
 
 pub(crate) async fn connect_jsonl_agent_stream(
@@ -926,6 +958,35 @@ mod tests {
         };
         let value = serde_json::to_value(request).expect("serialize");
         assert_eq!(value["resume"]["last_seq"], 42);
+    }
+
+    #[test]
+    fn drift_reload_requires_authoritative_refresh() {
+        let session = SessionInfoWire {
+            attached: AttachKindWire::DriftReload,
+            current_seq: 42,
+            floor_seq: 10,
+        };
+        assert_eq!(
+            replay_outcome_from_session(Some(&session)),
+            ReplayOutcome::AuthoritativeRefreshRequired
+        );
+    }
+
+    #[test]
+    fn complete_replay_does_not_force_authoritative_refresh() {
+        for attached in [AttachKindWire::Fresh, AttachKindWire::Resumed] {
+            let session = SessionInfoWire {
+                attached,
+                current_seq: 42,
+                floor_seq: 10,
+            };
+            assert_eq!(
+                replay_outcome_from_session(Some(&session)),
+                ReplayOutcome::Complete
+            );
+        }
+        assert_eq!(replay_outcome_from_session(None), ReplayOutcome::Complete);
     }
 
     #[test]

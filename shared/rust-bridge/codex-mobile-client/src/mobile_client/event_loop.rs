@@ -154,6 +154,35 @@ impl MobileClient {
                             });
                         }
                     }
+                    Ok(ServerEvent::TransportReconnected {
+                        runtime_kind,
+                        generation,
+                        authoritative_refresh_required,
+                    }) => {
+                        info!(
+                            "transport reconnected server_id={} runtime={:?} generation={} authoritative_refresh_required={}",
+                            server_id, runtime_kind, generation, authoritative_refresh_required
+                        );
+                        if let Some(current) = sessions
+                            .read()
+                            .ok()
+                            .and_then(|guard| guard.get(&server_id).cloned())
+                            .filter(|current| Arc::ptr_eq(current, &oauth_session))
+                        {
+                            run_connect_warmup(
+                                Arc::clone(&sessions),
+                                Arc::clone(&app_store),
+                                server_id.clone(),
+                                current,
+                                "reconnect",
+                            );
+                            run_post_reconnect_resubscribe(
+                                Arc::clone(&app_store),
+                                server_id.clone(),
+                                authoritative_refresh_required,
+                            );
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         info!("event stream closed for {server_id}");
                         break;
@@ -173,28 +202,18 @@ impl MobileClient {
         let mut health_rx = session.health();
         let processor = Arc::clone(&self.event_processor);
         let sessions = Arc::clone(&self.sessions);
-        let app_store = Arc::clone(&self.app_store);
         Self::spawn_detached(async move {
             if !session_is_current(&sessions, &server_id, &session) {
                 info!("health reader exiting for stale server session {server_id}");
                 return;
             }
             processor.emit_connection_state(&server_id, "connecting");
-            // Initialize as if previously Connected so the first observation —
-            // which after a successful connect_* call is normally Connected —
-            // does not double-fire alongside spawn_post_connect_warmup. A real
-            // disconnect/reconnect cycle still triggers the transition below.
-            let mut prev_connected: bool = true;
             loop {
                 if !session_is_current(&sessions, &server_id, &session) {
                     info!("health reader exiting for stale server session {server_id}");
                     break;
                 }
                 let health = health_rx.borrow().clone();
-                let is_connected = matches!(
-                    health,
-                    crate::session::connection::ConnectionHealth::Connected
-                );
                 let health_wire = match health {
                     crate::session::connection::ConnectionHealth::Disconnected => "disconnected",
                     crate::session::connection::ConnectionHealth::Connecting { .. } => "connecting",
@@ -204,28 +223,6 @@ impl MobileClient {
                     }
                 };
                 processor.emit_connection_state(&server_id, health_wire);
-
-                if !prev_connected && is_connected {
-                    let session = sessions
-                        .read()
-                        .ok()
-                        .and_then(|guard| guard.get(&server_id).cloned());
-                    if let Some(session) = session {
-                        run_connect_warmup(
-                            Arc::clone(&sessions),
-                            Arc::clone(&app_store),
-                            server_id.clone(),
-                            session,
-                            "reconnect",
-                        );
-                    }
-                    // Re-subscribe per-thread listeners on the new
-                    // connection: server-side `ConnectionId` changed, so
-                    // turn-stream events would otherwise be silently
-                    // dropped until the user navigates.
-                    run_post_reconnect_resubscribe(Arc::clone(&app_store), server_id.clone());
-                }
-                prev_connected = is_connected;
 
                 if health_rx.changed().await.is_err() {
                     break;

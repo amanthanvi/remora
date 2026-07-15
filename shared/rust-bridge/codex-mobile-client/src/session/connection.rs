@@ -6,9 +6,11 @@
 //! Uses upstream `RemoteAppServerClient` for remote connections and
 //! upstream `InProcessClientHandle` for local (in-process) connections.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use codex_app_server_client::{
@@ -24,13 +26,17 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::logging::{LogLevelName, log_rust};
-use crate::session::remote_transport::{Reconnected, RemoteTransport, SessionKeepalive};
+use crate::session::remote_transport::{
+    Reconnected, RemoteTransport, ReplayOutcome, SessionKeepalive,
+};
 use crate::ssh::{RemoteShell, SshBootstrapResult, SshBootstrapTransport, SshClient};
 use crate::transport::{RpcError, TransportError};
 use crate::types::AgentRuntimeKind;
 
 const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
-const REMOTE_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const REMOTE_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
+const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
+const CONNECTION_TIMELINE_CAPACITY: usize = 128;
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 const APP_SERVER_PROXY_WEBSOCKET_URL: &str = "ws://codex-app-server-proxy.localhost/rpc";
 
@@ -444,6 +450,281 @@ impl PartialEq for ConnectionHealth {
     }
 }
 
+/// Why the session worker entered transport recovery. These values are used
+/// only in the app's bounded local timeline and structured local logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionTrigger {
+    RequestTransportError,
+    EventStreamEnded,
+    TransportDisconnected,
+}
+
+impl ConnectionTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestTransportError => "request_transport_error",
+            Self::EventStreamEnded => "event_stream_ended",
+            Self::TransportDisconnected => "transport_disconnected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionStage {
+    AttemptStarted,
+    DialFinished,
+    BackoffScheduled,
+    Ready,
+    Exhausted,
+}
+
+impl ConnectionStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AttemptStarted => "attempt_started",
+            Self::DialFinished => "dial_finished",
+            Self::BackoffScheduled => "backoff_scheduled",
+            Self::Ready => "ready",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionAttemptOutcome {
+    Pending,
+    Succeeded,
+    TransientFailure,
+    Exhausted,
+}
+
+impl ConnectionAttemptOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Succeeded => "succeeded",
+            Self::TransientFailure => "transient_failure",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+/// Redacted entry in a monotonically-sequenced, process-local reconnect
+/// timeline. It intentionally has no host, URL, node ID, token, account, or
+/// payload field. The bounded ring supports deterministic regression tests
+/// and local diagnostics without creating remote telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConnectionTimelineEntry {
+    pub sequence: u64,
+    pub correlation_id: u64,
+    pub generation: u64,
+    pub trigger: ConnectionTrigger,
+    pub stage: ConnectionStage,
+    pub stage_elapsed_ms: u64,
+    pub journey_elapsed_ms: u64,
+    pub route: &'static str,
+    pub runtime_kind: AgentRuntimeKind,
+    pub attempt: u32,
+    pub outcome: ConnectionAttemptOutcome,
+}
+
+#[derive(Default)]
+struct ConnectionTimelineState {
+    next_sequence: u64,
+    entries: VecDeque<ConnectionTimelineEntry>,
+}
+
+#[derive(Clone, Default)]
+struct ConnectionTimeline {
+    state: Arc<StdMutex<ConnectionTimelineState>>,
+}
+
+static NEXT_CONNECTION_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ConnectionTimeline {
+    fn next_correlation_id(&self) -> u64 {
+        NEXT_CONNECTION_CORRELATION_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        correlation_id: u64,
+        generation: u64,
+        trigger: ConnectionTrigger,
+        stage: ConnectionStage,
+        stage_elapsed: Duration,
+        journey_elapsed: Duration,
+        route: &'static str,
+        runtime_kind: &AgentRuntimeKind,
+        attempt: u32,
+        outcome: ConnectionAttemptOutcome,
+    ) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                warn!("connection timeline: recovering poisoned lock");
+                error.into_inner()
+            }
+        };
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let entry = ConnectionTimelineEntry {
+            sequence: state.next_sequence,
+            correlation_id,
+            generation,
+            trigger,
+            stage,
+            stage_elapsed_ms: duration_millis(stage_elapsed),
+            journey_elapsed_ms: duration_millis(journey_elapsed),
+            route,
+            runtime_kind: runtime_kind.clone(),
+            attempt,
+            outcome,
+        };
+        if state.entries.len() == CONNECTION_TIMELINE_CAPACITY {
+            state.entries.pop_front();
+        }
+        state.entries.push_back(entry.clone());
+        drop(state);
+
+        info!(
+            connection_timeline = true,
+            sequence = entry.sequence,
+            correlation_id = entry.correlation_id,
+            generation = entry.generation,
+            trigger = entry.trigger.as_str(),
+            stage = entry.stage.as_str(),
+            stage_elapsed_ms = entry.stage_elapsed_ms,
+            journey_elapsed_ms = entry.journey_elapsed_ms,
+            route = entry.route,
+            runtime = entry.runtime_kind.as_str(),
+            attempt = entry.attempt,
+            outcome = entry.outcome.as_str(),
+            "connection timeline"
+        );
+    }
+
+    fn snapshot(&self) -> Vec<ConnectionTimelineEntry> {
+        match self.state.lock() {
+            Ok(state) => state.entries.iter().cloned().collect(),
+            Err(error) => error.into_inner().entries.iter().cloned().collect(),
+        }
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Clone)]
+struct RuntimeHealthReporter {
+    runtime_kind: AgentRuntimeKind,
+    state: Arc<StdMutex<HashMap<AgentRuntimeKind, ConnectionHealth>>>,
+    session_health_tx: watch::Sender<ConnectionHealth>,
+}
+
+impl RuntimeHealthReporter {
+    fn update(&self, health: ConnectionHealth) {
+        let aggregate = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(error) => {
+                    warn!("runtime health: recovering poisoned lock");
+                    error.into_inner()
+                }
+            };
+            state.insert(self.runtime_kind.clone(), health);
+            aggregate_runtime_health(state.values())
+        };
+        let _ = self.session_health_tx.send(aggregate);
+    }
+}
+
+fn aggregate_runtime_health<'a>(
+    health: impl IntoIterator<Item = &'a ConnectionHealth>,
+) -> ConnectionHealth {
+    let health = health.into_iter().collect::<Vec<_>>();
+    if health
+        .iter()
+        .any(|value| matches!(value, ConnectionHealth::Connected))
+    {
+        // A multiplexed server remains useful while at least one selected
+        // runtime is ready. Individual reconnect events still drive
+        // per-runtime replay/reconciliation, so a failed sibling cannot hide.
+        return ConnectionHealth::Connected;
+    }
+
+    let connecting = health.iter().filter_map(|value| match value {
+        ConnectionHealth::Connecting {
+            attempt,
+            max_attempts,
+        } => Some((*attempt, *max_attempts)),
+        _ => None,
+    });
+    if let Some((attempt, max_attempts)) = connecting.max_by_key(|value| value.0) {
+        return ConnectionHealth::Connecting {
+            attempt,
+            max_attempts,
+        };
+    }
+
+    if let Some(since) = health
+        .iter()
+        .filter_map(|value| match value {
+            ConnectionHealth::Unresponsive { since } => Some(*since),
+            _ => None,
+        })
+        .min()
+    {
+        return ConnectionHealth::Unresponsive { since };
+    }
+
+    ConnectionHealth::Disconnected
+}
+
+struct ReconnectBackoff {
+    base: Duration,
+    cap: Duration,
+    state: u64,
+}
+
+impl ReconnectBackoff {
+    fn production() -> Self {
+        let bytes = uuid::Uuid::new_v4().into_bytes();
+        let mut seed = 0_u64;
+        for chunk in bytes.chunks_exact(8) {
+            seed ^= u64::from_le_bytes(chunk.try_into().expect("uuid chunk length"));
+        }
+        Self::with_seed(seed)
+    }
+
+    fn with_seed(seed: u64) -> Self {
+        Self {
+            base: REMOTE_RECONNECT_BASE_DELAY,
+            cap: REMOTE_RECONNECT_MAX_DELAY,
+            state: seed.max(1),
+        }
+    }
+
+    fn delay_after_failure(&mut self, failed_attempt: u32) -> Duration {
+        let exponent = failed_attempt.saturating_sub(1).min(31);
+        let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+        let window = self.base.saturating_mul(multiplier).min(self.cap);
+
+        // Xorshift64*: compact, deterministic for tests, and sufficient for
+        // desynchronizing retries. Production seeds come from OS-backed UUID
+        // randomness; this is not used for cryptography.
+        let mut value = self.state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.state = value;
+        let sample = value.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let window_millis = duration_millis(window);
+        Duration::from_millis(sample % window_millis.saturating_add(1))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal command type for the worker task
 // ---------------------------------------------------------------------------
@@ -491,6 +772,14 @@ pub enum ServerEvent {
         runtime_kind: AgentRuntimeKind,
         request: ServerRequest,
     },
+    /// A runtime worker installed a replacement transport. Re-subscription is
+    /// always required because the server-side connection ID changed; a
+    /// replay drift additionally requires an authoritative state refresh.
+    TransportReconnected {
+        runtime_kind: AgentRuntimeKind,
+        generation: u64,
+        authoritative_refresh_required: bool,
+    },
 }
 
 /// Manages the full connection lifecycle to a single Codex server.
@@ -508,6 +797,7 @@ pub struct ServerSession {
     event_tx: broadcast::Sender<ServerEvent>,
     ssh_client: Option<Arc<SshClient>>,
     ssh_pid: Option<Arc<StdMutex<Option<u32>>>>,
+    connection_timeline: ConnectionTimeline,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -800,6 +1090,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         })
     }
@@ -842,6 +1133,14 @@ impl ServerSession {
         });
         let (url, args) = remote_connect_args(&config);
         let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
+        let connection_timeline = ConnectionTimeline::default();
+        let runtime_health_state = Arc::new(StdMutex::new(
+            requested_runtime_kinds
+                .iter()
+                .cloned()
+                .map(|runtime_kind| (runtime_kind, ConnectionHealth::Connected))
+                .collect::<HashMap<_, _>>(),
+        ));
         let mut runtime_command_txs = std::collections::HashMap::new();
         let mut runtime_transports: Vec<Arc<dyn RemoteTransport>> = Vec::new();
         let mut worker_handles = Vec::new();
@@ -857,7 +1156,7 @@ impl ServerSession {
                 primary_tx = Some(command_tx.clone());
             }
             let runtime_kind = resource.runtime_kind.clone();
-            runtime_command_txs.insert(resource.runtime_kind, command_tx);
+            runtime_command_txs.insert(resource.runtime_kind.clone(), command_tx);
             if let Some(transport) = resource.transport.as_ref() {
                 runtime_transports.push(Arc::clone(transport));
             }
@@ -867,7 +1166,12 @@ impl ServerSession {
                 resource.keepalive,
                 command_rx,
                 event_tx.clone(),
-                health_tx.clone(),
+                RuntimeHealthReporter {
+                    runtime_kind: resource.runtime_kind.clone(),
+                    state: Arc::clone(&runtime_health_state),
+                    session_health_tx: health_tx.clone(),
+                },
+                connection_timeline.clone(),
                 args.clone(),
                 url.clone(),
                 resource.transport,
@@ -899,6 +1203,7 @@ impl ServerSession {
             event_tx,
             ssh_client: extras.ssh_client,
             ssh_pid: extras.ssh_pid,
+            connection_timeline,
             worker_handle,
         })
     }
@@ -940,6 +1245,12 @@ impl ServerSession {
     /// Get a watch receiver for health state changes.
     pub fn health(&self) -> watch::Receiver<ConnectionHealth> {
         self.health_rx.clone()
+    }
+
+    /// Snapshot the bounded local reconnect timeline. This stays inside the
+    /// process and contains only low-cardinality, redacted fields.
+    pub(crate) fn connection_timeline(&self) -> Vec<ConnectionTimelineEntry> {
+        self.connection_timeline.snapshot()
     }
 
     pub fn runtime_kinds(&self) -> Vec<AgentRuntimeKind> {
@@ -1249,23 +1560,47 @@ async fn reconnect_remote_client(
     keepalive: &mut Option<Arc<dyn SessionKeepalive>>,
     args: &RemoteAppServerConnectArgs,
     websocket_url: &str,
-    health_tx: &watch::Sender<ConnectionHealth>,
+    health: &RuntimeHealthReporter,
+    timeline: &ConnectionTimeline,
+    runtime_kind: &AgentRuntimeKind,
+    trigger: ConnectionTrigger,
+    generation: u64,
     transport: Option<&Arc<dyn RemoteTransport>>,
-) -> bool {
+) -> Option<ReplayOutcome> {
+    let correlation_id = timeline.next_correlation_id();
+    let journey_started = Instant::now();
+    let route = transport.map_or("websocket", |transport| transport.route_label());
+    let mut backoff = ReconnectBackoff::production();
+
     for attempt in 1..=REMOTE_RECONNECT_MAX_ATTEMPTS {
         append_android_debug_log(&format!(
-            "reconnect_start url={} attempt={}/{}",
-            websocket_url, attempt, REMOTE_RECONNECT_MAX_ATTEMPTS
+            "reconnect_start correlation_id={} generation={} route={} runtime={} trigger={} attempt={}/{}",
+            correlation_id,
+            generation,
+            route,
+            runtime_kind,
+            trigger.as_str(),
+            attempt,
+            REMOTE_RECONNECT_MAX_ATTEMPTS
         ));
-        info!(
-            "remote reconnect start url={} attempt={}/{}",
-            websocket_url, attempt, REMOTE_RECONNECT_MAX_ATTEMPTS
+        timeline.record(
+            correlation_id,
+            generation,
+            trigger,
+            ConnectionStage::AttemptStarted,
+            Duration::ZERO,
+            journey_started.elapsed(),
+            route,
+            runtime_kind,
+            attempt,
+            ConnectionAttemptOutcome::Pending,
         );
-        let _ = health_tx.send(ConnectionHealth::Connecting {
+        health.update(ConnectionHealth::Connecting {
             attempt,
             max_attempts: REMOTE_RECONNECT_MAX_ATTEMPTS,
         });
 
+        let dial_started = Instant::now();
         let connect_result: Result<Reconnected, TransportError> = match transport {
             Some(t) => t.reconnect(args, websocket_url).await,
             None => connect_remote_client(args).await.map(|client| Reconnected {
@@ -1280,35 +1615,111 @@ async fn reconnect_remote_client(
                 if next.keepalive.is_some() {
                     *keepalive = next.keepalive;
                 }
-                let _ = health_tx.send(ConnectionHealth::Connected);
-                info!(
-                    "remote server session reconnected: {} (attempt {attempt}/{})",
-                    websocket_url, REMOTE_RECONNECT_MAX_ATTEMPTS
+                let replay_outcome = transport
+                    .map(|transport| transport.take_replay_outcome())
+                    .unwrap_or(ReplayOutcome::Complete);
+                health.update(ConnectionHealth::Connected);
+                timeline.record(
+                    correlation_id,
+                    generation,
+                    trigger,
+                    ConnectionStage::DialFinished,
+                    dial_started.elapsed(),
+                    journey_started.elapsed(),
+                    route,
+                    runtime_kind,
+                    attempt,
+                    ConnectionAttemptOutcome::Succeeded,
+                );
+                timeline.record(
+                    correlation_id,
+                    generation,
+                    trigger,
+                    ConnectionStage::Ready,
+                    Duration::ZERO,
+                    journey_started.elapsed(),
+                    route,
+                    runtime_kind,
+                    attempt,
+                    ConnectionAttemptOutcome::Succeeded,
                 );
                 append_android_debug_log(&format!(
-                    "reconnect_success url={} attempt={}/{}",
-                    websocket_url, attempt, REMOTE_RECONNECT_MAX_ATTEMPTS
+                    "reconnect_success correlation_id={} generation={} route={} runtime={} attempt={}/{}",
+                    correlation_id,
+                    generation,
+                    route,
+                    runtime_kind,
+                    attempt,
+                    REMOTE_RECONNECT_MAX_ATTEMPTS
                 ));
-                return true;
+                return Some(replay_outcome);
             }
             Err(error) => {
                 warn!(
-                    "remote server reconnect failed: {} (attempt {attempt}/{}) - {}",
-                    websocket_url, REMOTE_RECONNECT_MAX_ATTEMPTS, error
+                    "remote server reconnect failed route={} runtime={} correlation_id={} generation={} attempt={}/{} error={}",
+                    route,
+                    runtime_kind,
+                    correlation_id,
+                    generation,
+                    attempt,
+                    REMOTE_RECONNECT_MAX_ATTEMPTS,
+                    error
+                );
+                timeline.record(
+                    correlation_id,
+                    generation,
+                    trigger,
+                    ConnectionStage::DialFinished,
+                    dial_started.elapsed(),
+                    journey_started.elapsed(),
+                    route,
+                    runtime_kind,
+                    attempt,
+                    ConnectionAttemptOutcome::TransientFailure,
                 );
                 append_android_debug_log(&format!(
-                    "reconnect_failed url={} attempt={}/{} error={}",
-                    websocket_url, attempt, REMOTE_RECONNECT_MAX_ATTEMPTS, error
+                    "reconnect_failed correlation_id={} generation={} route={} runtime={} attempt={}/{}",
+                    correlation_id,
+                    generation,
+                    route,
+                    runtime_kind,
+                    attempt,
+                    REMOTE_RECONNECT_MAX_ATTEMPTS
                 ));
                 if attempt < REMOTE_RECONNECT_MAX_ATTEMPTS {
-                    tokio::time::sleep(REMOTE_RECONNECT_DELAY).await;
+                    let delay = backoff.delay_after_failure(attempt);
+                    timeline.record(
+                        correlation_id,
+                        generation,
+                        trigger,
+                        ConnectionStage::BackoffScheduled,
+                        delay,
+                        journey_started.elapsed(),
+                        route,
+                        runtime_kind,
+                        attempt,
+                        ConnectionAttemptOutcome::TransientFailure,
+                    );
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
     }
 
-    let _ = health_tx.send(ConnectionHealth::Disconnected);
-    false
+    health.update(ConnectionHealth::Disconnected);
+    timeline.record(
+        correlation_id,
+        generation,
+        trigger,
+        ConnectionStage::Exhausted,
+        Duration::ZERO,
+        journey_started.elapsed(),
+        route,
+        runtime_kind,
+        REMOTE_RECONNECT_MAX_ATTEMPTS,
+        ConnectionAttemptOutcome::Exhausted,
+    );
+    None
 }
 
 fn ssh_reconnect_remote_host(state: &WebSocketReconnectState) -> &'static str {
@@ -1577,6 +1988,10 @@ impl RemoteTransport for SshReconnectTransport {
             }
         }
     }
+
+    fn route_label(&self) -> &'static str {
+        "ssh"
+    }
 }
 
 #[async_trait::async_trait]
@@ -1593,6 +2008,10 @@ impl RemoteTransport for SlingshotReconnectTransport {
                 keepalive: None,
             })
     }
+
+    fn route_label(&self) -> &'static str {
+        "slingshot"
+    }
 }
 
 fn spawn_remote_runtime_worker(
@@ -1601,13 +2020,15 @@ fn spawn_remote_runtime_worker(
     initial_keepalive: Option<Arc<dyn SessionKeepalive>>,
     mut command_rx: mpsc::Receiver<SessionCommand>,
     event_tx: broadcast::Sender<ServerEvent>,
-    health_tx: watch::Sender<ConnectionHealth>,
+    health: RuntimeHealthReporter,
+    timeline: ConnectionTimeline,
     reconnect_args: RemoteAppServerConnectArgs,
     reconnect_url: String,
     reconnect_transport: Option<Arc<dyn RemoteTransport>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut keepalive: Option<Arc<dyn SessionKeepalive>> = initial_keepalive;
+        let mut reconnect_generation = 0_u64;
         loop {
             tokio::select! {
                 command = command_rx.recv() => {
@@ -1625,27 +2046,39 @@ fn spawn_remote_runtime_worker(
                                     TransportError::SendFailed(error.to_string()),
                                 )),
                             };
-                            if matches!(result, Err(RpcError::Transport(_)))
-                                && reconnect_remote_client(
+                            if matches!(result, Err(RpcError::Transport(_))) {
+                                reconnect_generation = reconnect_generation.saturating_add(1);
+                                if let Some(replay_outcome) = reconnect_remote_client(
                                     &mut client,
                                     &mut keepalive,
                                     &reconnect_args,
                                     &reconnect_url,
-                                    &health_tx,
+                                    &health,
+                                    &timeline,
+                                    &runtime_kind,
+                                    ConnectionTrigger::RequestTransportError,
+                                    reconnect_generation,
                                     reconnect_transport.as_ref(),
                                 )
                                 .await
-                            {
-                                result = match client.request(request_retry).await {
-                                    Ok(Ok(value)) => Ok(value),
-                                    Ok(Err(error)) => Err(RpcError::Server {
-                                        code: error.code,
-                                        message: error.message,
-                                    }),
-                                    Err(error) => Err(RpcError::Transport(
-                                        TransportError::SendFailed(error.to_string()),
-                                    )),
-                                };
+                                {
+                                    emit_transport_reconnected(
+                                        &event_tx,
+                                        &runtime_kind,
+                                        reconnect_generation,
+                                        replay_outcome,
+                                    );
+                                    result = match client.request(request_retry).await {
+                                        Ok(Ok(value)) => Ok(value),
+                                        Ok(Err(error)) => Err(RpcError::Server {
+                                            code: error.code,
+                                            message: error.message,
+                                        }),
+                                        Err(error) => Err(RpcError::Transport(
+                                            TransportError::SendFailed(error.to_string()),
+                                        )),
+                                    };
+                                }
                             }
                             let _ = response_tx.send(result);
                         }
@@ -1685,33 +2118,55 @@ fn spawn_remote_runtime_worker(
                 }
                 event = client.next_event() => {
                     let Some(event) = event else {
-                        if reconnect_remote_client(
+                        reconnect_generation = reconnect_generation.saturating_add(1);
+                        if let Some(replay_outcome) = reconnect_remote_client(
                             &mut client,
                             &mut keepalive,
                             &reconnect_args,
                             &reconnect_url,
-                            &health_tx,
+                            &health,
+                            &timeline,
+                            &runtime_kind,
+                            ConnectionTrigger::EventStreamEnded,
+                            reconnect_generation,
                             reconnect_transport.as_ref(),
                         )
                         .await {
+                            emit_transport_reconnected(
+                                &event_tx,
+                                &runtime_kind,
+                                reconnect_generation,
+                                replay_outcome,
+                            );
                             continue;
                         }
                         break;
                     };
-                    if let AppServerEvent::Disconnected { .. } = &event
-                        && reconnect_remote_client(
+                    if let AppServerEvent::Disconnected { .. } = &event {
+                        reconnect_generation = reconnect_generation.saturating_add(1);
+                        if let Some(replay_outcome) = reconnect_remote_client(
                             &mut client,
                             &mut keepalive,
                             &reconnect_args,
                             &reconnect_url,
-                            &health_tx,
+                            &health,
+                            &timeline,
+                            &runtime_kind,
+                            ConnectionTrigger::TransportDisconnected,
+                            reconnect_generation,
                             reconnect_transport.as_ref(),
                         )
-                        .await
-                    {
-                        continue;
+                        .await {
+                            emit_transport_reconnected(
+                                &event_tx,
+                                &runtime_kind,
+                                reconnect_generation,
+                                replay_outcome,
+                            );
+                            continue;
+                        }
                     }
-                    route_app_server_event(&event_tx, &health_tx, runtime_kind.clone(), &event);
+                    route_app_server_event(&event_tx, &health, runtime_kind.clone(), &event);
                 }
             }
         }
@@ -1728,13 +2183,27 @@ fn spawn_remote_runtime_worker(
     })
 }
 
+fn emit_transport_reconnected(
+    event_tx: &broadcast::Sender<ServerEvent>,
+    runtime_kind: &AgentRuntimeKind,
+    generation: u64,
+    replay_outcome: ReplayOutcome,
+) {
+    let _ = event_tx.send(ServerEvent::TransportReconnected {
+        runtime_kind: runtime_kind.clone(),
+        generation,
+        authoritative_refresh_required: replay_outcome
+            == ReplayOutcome::AuthoritativeRefreshRequired,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Event routing helpers
 // ---------------------------------------------------------------------------
 
 fn route_app_server_event(
     event_tx: &broadcast::Sender<ServerEvent>,
-    health_tx: &watch::Sender<ConnectionHealth>,
+    health: &RuntimeHealthReporter,
     runtime_kind: AgentRuntimeKind,
     event: &AppServerEvent,
 ) {
@@ -1764,7 +2233,7 @@ fn route_app_server_event(
         AppServerEvent::Disconnected { message } => {
             warn!("event: disconnected: {message}");
             append_android_debug_log(&format!("disconnected={message}"));
-            let _ = health_tx.send(ConnectionHealth::Disconnected);
+            health.update(ConnectionHealth::Disconnected);
         }
     }
 }
@@ -1863,6 +2332,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
     }
@@ -1899,6 +2369,7 @@ impl ServerSession {
             event_tx,
             ssh_client: None,
             ssh_pid: None,
+            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
     }
@@ -2078,15 +2549,25 @@ mod tests {
             reconnects: Arc::clone(&reconnects),
         });
         let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, _) = broadcast::channel(4);
+        let (event_tx, mut event_rx) = broadcast::channel(4);
         let (health_tx, mut health_rx) = watch::channel(ConnectionHealth::Connected);
+        let timeline = ConnectionTimeline::default();
+        let health_state = Arc::new(StdMutex::new(HashMap::from([(
+            "pi".to_string(),
+            ConnectionHealth::Connected,
+        )])));
         let worker = spawn_remote_runtime_worker(
             "pi".to_string(),
             initial_client,
             None,
             command_rx,
             event_tx,
-            health_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "pi".to_string(),
+                state: health_state,
+                session_health_tx: health_tx,
+            },
+            timeline.clone(),
             test_remote_args("drop-test-bridge"),
             "drop-test-bridge".to_string(),
             Some(reconnect_transport),
@@ -2115,12 +2596,140 @@ mod tests {
         assert_eq!(response, json!({"source": "reconnected"}));
         assert_eq!(reconnects.load(Ordering::SeqCst), 1);
         assert_eq!(*health_rx.borrow_and_update(), ConnectionHealth::Connected);
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("reconnect event should be emitted")
+            .expect("reconnect event channel should remain open");
+        assert!(matches!(
+            event,
+            ServerEvent::TransportReconnected {
+                runtime_kind,
+                generation: 1,
+                authoritative_refresh_required: false,
+            } if runtime_kind == "pi"
+        ));
+        let entries = timeline.snapshot();
+        assert!(
+            entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert_eq!(entries.first().map(|entry| entry.generation), Some(1));
+        assert_eq!(
+            entries.last().map(|entry| entry.outcome),
+            Some(ConnectionAttemptOutcome::Succeeded)
+        );
+        assert!(entries.iter().all(|entry| entry.route == "managed"));
 
         command_tx
             .send(SessionCommand::Shutdown)
             .await
             .expect("worker should accept shutdown");
         worker.await.expect("worker should shut down cleanly");
+    }
+
+    #[test]
+    fn replay_drift_is_forwarded_as_authoritative_refresh_event() {
+        let (event_tx, mut event_rx) = broadcast::channel(1);
+        emit_transport_reconnected(
+            &event_tx,
+            &"codex".to_string(),
+            7,
+            ReplayOutcome::AuthoritativeRefreshRequired,
+        );
+        assert!(matches!(
+            event_rx.try_recv().expect("reconnect event"),
+            ServerEvent::TransportReconnected {
+                runtime_kind,
+                generation: 7,
+                authoritative_refresh_required: true,
+            } if runtime_kind == "codex"
+        ));
+    }
+
+    #[test]
+    fn multiplexed_health_stays_connected_while_one_runtime_recovers() {
+        let reconnecting = ConnectionHealth::Connecting {
+            attempt: 2,
+            max_attempts: 5,
+        };
+        assert_eq!(
+            aggregate_runtime_health([&ConnectionHealth::Connected, &reconnecting]),
+            ConnectionHealth::Connected
+        );
+        assert_eq!(
+            aggregate_runtime_health([&ConnectionHealth::Disconnected, &reconnecting]),
+            reconnecting
+        );
+        assert_eq!(
+            aggregate_runtime_health([
+                &ConnectionHealth::Disconnected,
+                &ConnectionHealth::Disconnected,
+            ]),
+            ConnectionHealth::Disconnected
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_is_seeded_bounded_full_jitter() {
+        let mut first = ReconnectBackoff::with_seed(0xC0DE);
+        let mut second = ReconnectBackoff::with_seed(0xC0DE);
+        let first_schedule = (1..=12)
+            .map(|attempt| first.delay_after_failure(attempt))
+            .collect::<Vec<_>>();
+        let second_schedule = (1..=12)
+            .map(|attempt| second.delay_after_failure(attempt))
+            .collect::<Vec<_>>();
+        assert_eq!(first_schedule, second_schedule);
+        assert!(
+            first_schedule
+                .iter()
+                .all(|delay| *delay <= REMOTE_RECONNECT_MAX_DELAY)
+        );
+        assert!(first_schedule.iter().any(|delay| !delay.is_zero()));
+
+        for (index, delay) in first_schedule.iter().take(6).enumerate() {
+            let multiplier = 1_u32 << index;
+            let window = REMOTE_RECONNECT_BASE_DELAY
+                .saturating_mul(multiplier)
+                .min(REMOTE_RECONNECT_MAX_DELAY);
+            assert!(
+                *delay <= window,
+                "attempt {} exceeded jitter window",
+                index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn connection_timeline_is_monotonic_and_bounded() {
+        let timeline = ConnectionTimeline::default();
+        let correlation_id = timeline.next_correlation_id();
+        for generation in 1..=(CONNECTION_TIMELINE_CAPACITY as u64 + 5) {
+            timeline.record(
+                correlation_id,
+                generation,
+                ConnectionTrigger::EventStreamEnded,
+                ConnectionStage::Ready,
+                Duration::from_millis(1),
+                Duration::from_millis(generation),
+                "alleycat",
+                &"codex".to_string(),
+                1,
+                ConnectionAttemptOutcome::Succeeded,
+            );
+        }
+        let entries = timeline.snapshot();
+        assert_eq!(entries.len(), CONNECTION_TIMELINE_CAPACITY);
+        assert!(
+            entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert_eq!(
+            entries.last().map(|entry| entry.generation),
+            Some(CONNECTION_TIMELINE_CAPACITY as u64 + 5)
+        );
     }
 
     #[test]
