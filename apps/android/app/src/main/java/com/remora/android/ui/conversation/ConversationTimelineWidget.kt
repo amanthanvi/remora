@@ -383,19 +383,19 @@ internal fun wrapWidgetHtml(
         <meta name="viewport" content="width=device-width,initial-scale=1.0">
         <style>
         :root {
-            --color-background-primary: #000000;
-            --color-background-secondary: #111111;
-            --color-background-tertiary: #1a1a1a;
+            --color-background-primary: #02082C;
+            --color-background-secondary: #011B44;
+            --color-background-tertiary: #022753;
             --color-background-info: #0d253a;
             --color-background-danger: #3a1414;
             --color-background-success: #0d2a14;
             --color-background-warning: #3a2a0d;
-            --color-text-primary: #F3F3F3;
-            --color-text-secondary: #B3B3B3;
-            --color-text-tertiary: #8A8A8A;
-            --color-text-info: #00FF9C;
+            --color-text-primary: #EAFBFF;
+            --color-text-secondary: #A8DCEB;
+            --color-text-tertiary: #83AFC2;
+            --color-text-info: #0DD5F0;
             --color-text-danger: #FF6B6B;
-            --color-text-success: #00FF9C;
+            --color-text-success: #22C55E;
             --color-text-warning: #FFD166;
             --color-info: var(--color-text-info);
             --color-danger: var(--color-text-danger);
@@ -404,9 +404,9 @@ internal fun wrapWidgetHtml(
             --color-border-tertiary: rgba(255,255,255,0.08);
             --color-border-secondary: rgba(255,255,255,0.16);
             --color-border-primary: rgba(255,255,255,0.24);
-            --color-border-info: rgba(0,255,156,0.4);
+            --color-border-info: rgba(13,213,240,0.4);
             --color-border-danger: rgba(255,107,107,0.4);
-            --color-border-success: rgba(0,255,156,0.4);
+            --color-border-success: rgba(34,197,94,0.4);
             --color-border-warning: rgba(255,209,102,0.4);
             --font-sans: -apple-system, system-ui, Roboto, sans-serif;
             --font-serif: Georgia, 'Times New Roman', serif;

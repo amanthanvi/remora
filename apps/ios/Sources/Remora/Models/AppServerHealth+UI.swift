@@ -19,7 +19,7 @@ extension AppServerHealth {
     var accentColor: Color {
         switch self {
         case .connected:
-            return RemoraTheme.accent
+            return RemoraTheme.success
         case .connecting, .unresponsive:
             return .orange
         case .disconnected, .unknown:
@@ -47,7 +47,7 @@ extension AppServerTransportState {
     var accentColor: Color {
         switch self {
         case .connected:
-            return RemoraTheme.accent
+            return RemoraTheme.success
         case .connecting, .unresponsive:
             return .orange
         case .disconnected, .unknown:

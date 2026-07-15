@@ -25,4 +25,15 @@ class RemoraAppearanceModeTest {
         assertEquals(false, RemoraAppearanceMode.LIGHT.resolvesDarkTheme(systemIsDark = true))
         assertEquals(true, RemoraAppearanceMode.DARK.resolvesDarkTheme(systemIsDark = false))
     }
+
+    @Test
+    fun defaultThemesUseRemoraIdentity() {
+        assertEquals("remora-dark", RemoraResolvedTheme.defaultDark.slug)
+        assertEquals("Remora", RemoraResolvedTheme.defaultDark.name)
+        assertEquals(RemoraColorThemeType.DARK, RemoraResolvedTheme.defaultDark.type)
+
+        assertEquals("remora-light", RemoraResolvedTheme.defaultLight.slug)
+        assertEquals("Remora Light", RemoraResolvedTheme.defaultLight.name)
+        assertEquals(RemoraColorThemeType.LIGHT, RemoraResolvedTheme.defaultLight.type)
+    }
 }

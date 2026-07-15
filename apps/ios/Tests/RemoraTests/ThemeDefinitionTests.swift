@@ -47,4 +47,22 @@ final class ThemeDefinitionTests: XCTestCase {
         XCTAssertEqual(theme.colors["button.background"], "#7e57c2")
         XCTAssertEqual(theme.colors["editor.background"], "#011627")
     }
+
+    func testDefaultThemesUseRemoraOceanPalette() {
+        XCTAssertEqual(ResolvedTheme.defaultDark.slug, "remora-dark")
+        XCTAssertEqual(ResolvedTheme.defaultDark.background, "#02082C")
+        XCTAssertEqual(ResolvedTheme.defaultDark.accent, "#0DD5F0")
+        XCTAssertEqual(ResolvedTheme.defaultDark.accentStrong, "#07F2FB")
+        XCTAssertEqual(ResolvedTheme.defaultDark.textMuted, "#83AFC2")
+        XCTAssertEqual(ResolvedTheme.defaultDark.warning, "#E2A644")
+        XCTAssertEqual(ResolvedTheme.defaultDark.textOnAccent, "#0D0D0D")
+
+        XCTAssertEqual(ResolvedTheme.defaultLight.slug, "remora-light")
+        XCTAssertEqual(ResolvedTheme.defaultLight.background, "#F7FCFE")
+        XCTAssertEqual(ResolvedTheme.defaultLight.accent, "#036F8F")
+        XCTAssertEqual(ResolvedTheme.defaultLight.accentStrong, "#036F8F")
+        XCTAssertEqual(ResolvedTheme.defaultLight.textMuted, "#4E6671")
+        XCTAssertEqual(ResolvedTheme.defaultLight.warning, "#A84400")
+        XCTAssertEqual(ResolvedTheme.defaultLight.textOnAccent, "#FFFFFF")
+    }
 }

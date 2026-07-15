@@ -27,7 +27,7 @@ struct TerminalScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    private let accent = Color(red: 0, green: 1, blue: 0.612)
+    private var accent: Color { RemoraTheme.accentStrong }
     private let alleycatServerIdPrefix = "alleycat:"
 
     var body: some View {

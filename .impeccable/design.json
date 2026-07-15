@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-15T12:25:08Z",
+  "title": "Design System: Remora",
+  "extensions": {
+    "colorMeta": {
+      "ocean-abyss-dark": {
+        "role": "neutral",
+        "displayName": "Ocean Abyss",
+        "canonical": "#02082C",
+        "tonalRamp": ["#010411", "#02082C", "#011B44", "#022753", "#034875", "#055E9B", "#30AFC6", "#A6EAEE"]
+      },
+      "current-cyan": {
+        "role": "primary",
+        "displayName": "Current Cyan",
+        "canonical": "#0DD5F0",
+        "tonalRamp": ["#002A34", "#00465A", "#006D86", "#0394B1", "#0DD5F0", "#5AF4F7", "#A6FAFC", "#E8FEFF"]
+      },
+      "ocean-mist-light": {
+        "role": "neutral",
+        "displayName": "Ocean Mist",
+        "canonical": "#F7FCFE",
+        "tonalRamp": ["#102A36", "#365866", "#4E6671", "#83A5B4", "#B7DCE7", "#DCEFF5", "#EAF7FB", "#F7FCFE"]
+      },
+      "current-blue-light": {
+        "role": "primary",
+        "displayName": "Current Blue",
+        "canonical": "#036F8F",
+        "tonalRamp": ["#002B3A", "#00465D", "#005A75", "#036F8F", "#2D91AD", "#69B7CB", "#B7DCE7", "#EAF7FB"]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Native screen and panel titles."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Messages, settings, and explanatory copy with system scaling."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Controls, status, metadata, and compact chips."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "state-standard",
+        "value": "180ms ease-out",
+        "purpose": "Native-feeling feedback for selection and state changes; disabled under reduced motion."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button Dark",
+      "kind": "button",
+      "refersTo": "button-primary-dark",
+      "description": "The single high-emphasis action on a dark task surface.",
+      "html": "<button class=\"ds-btn-primary-dark\">Connect host</button>",
+      "css": ".ds-btn-primary-dark { background:#07F2FB; color:#02082C; border:0; border-radius:10px; padding:10px 16px; font:600 12px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; transition:background 180ms ease-out; } .ds-btn-primary-dark:hover { background:#5AF4F7; } .ds-btn-primary-dark:focus-visible { outline:2px solid #EAFBFF; outline-offset:2px; } .ds-btn-primary-dark:active { background:#0DD5F0; }"
+    },
+    {
+      "name": "Ghost Button Dark",
+      "kind": "button",
+      "refersTo": "button-ghost-dark",
+      "description": "A secondary action that preserves task hierarchy.",
+      "html": "<button class=\"ds-btn-ghost-dark\">Cancel</button>",
+      "css": ".ds-btn-ghost-dark { background:transparent; color:#A8DCEB; border:1px solid #044875; border-radius:10px; padding:9px 15px; font:500 12px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; transition:border-color 180ms ease-out,color 180ms ease-out; } .ds-btn-ghost-dark:hover { color:#EAFBFF; border-color:#0DD5F0; } .ds-btn-ghost-dark:focus-visible { outline:2px solid #0DD5F0; outline-offset:2px; }"
+    },
+    {
+      "name": "Host Input Dark",
+      "kind": "input",
+      "refersTo": "input-dark",
+      "description": "A compact address or pairing field on an ocean surface.",
+      "html": "<input class=\"ds-input-dark\" value=\"studio-mac.local\" aria-label=\"Host address\">",
+      "css": ".ds-input-dark { background:#022753; color:#EAFBFF; border:1px solid #044875; border-radius:10px; padding:10px 12px; font:400 14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; } .ds-input-dark:focus { outline:2px solid #0DD5F0; outline-offset:1px; border-color:#0DD5F0; } .ds-input-dark::selection { background:#0DD5F0; color:#02082C; }"
+    },
+    {
+      "name": "Selected Runtime Chip",
+      "kind": "chip",
+      "refersTo": "runtime-chip-selected",
+      "description": "A selected harness or runtime with both shape and color reinforcement.",
+      "html": "<span class=\"ds-runtime-chip-selected\">✓ Codex</span>",
+      "css": ".ds-runtime-chip-selected { display:inline-flex; align-items:center; gap:6px; background:#011B44; color:#EAFBFF; border:1px solid #0DD5F0; border-radius:8px; padding:6px 9px; font:500 12px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; } .ds-runtime-chip-selected:focus-visible { outline:2px solid #07F2FB; outline-offset:2px; }"
+    },
+    {
+      "name": "Host Container",
+      "kind": "card",
+      "refersTo": "container-dark",
+      "description": "A flat tonal container for host identity, transport state, and actions.",
+      "html": "<section class=\"ds-host-container\"><strong>Studio Mac</strong><span>Connected · Codex</span></section>",
+      "css": ".ds-host-container { display:flex; flex-direction:column; gap:6px; background:#011B44; color:#EAFBFF; border:1px solid #044875; border-radius:12px; padding:12px; font:400 14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; } .ds-host-container strong { font-weight:600; } .ds-host-container span { color:#A8DCEB; font-size:12px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Deep Current",
+    "overview": "Remora is a restrained native product interface shaped by the deep water in its canonical icon. Dark mode uses layered navy rather than pure black; light mode uses cool ocean-tinted neutrals rather than sterile white. Bright cyan is rare and directional: it marks primary actions, focus, selection, and links. The interface is dense enough for professional coding-agent work but remains calm under sustained use. It explicitly rejects the original fork's black-and-neon-green terminal identity, generic royal-blue AI dashboards, and decorative glass or gradient treatments. User-selected terminal palettes are content, not app chrome, and remain visually independent.",
+    "keyCharacteristics": [
+      "Deep navy tonal layering with no decorative shadows.",
+      "One icon-derived cyan action voice.",
+      "Green, amber, and red reserved for semantic state.",
+      "Native controls, compact spacing, and mono-forward typography.",
+      "Cross-platform role parity without pixel-for-pixel imitation."
+    ],
+    "rules": [
+      {
+        "name": "The One Current Rule",
+        "body": "Cyan owns action and focus and should occupy no more than roughly ten percent of a task screen. Its rarity gives it authority.",
+        "section": "colors"
+      },
+      {
+        "name": "The Semantic Waterline Rule",
+        "body": "Green always means success or connected, amber means pending or warning, and red means failure or danger. Brand cyan must never replace these states.",
+        "section": "colors"
+      },
+      {
+        "name": "The Terminal Isolation Rule",
+        "body": "App chrome follows this system; Ghostty and other user-selected terminal themes retain their own palettes without tinting.",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Scale Rule",
+        "body": "Preserve Dynamic Type and Android font scaling. Fixed sizes describe defaults only and never cap accessibility scaling.",
+        "section": "typography"
+      },
+      {
+        "name": "The Water-Column Rule",
+        "body": "Elevation is a three-step surface scale, not a shadow stack: base, surface, raised surface.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do derive new brand color from the documented ocean roles.",
+      "Do use cyan for primary action, current selection, focus, and links.",
+      "Do preserve semantic green, amber, and red with text, icons, or shapes.",
+      "Do keep iOS and Android role-equivalent while respecting native controls.",
+      "Do preserve user-selected terminal palettes and remote content colors.",
+      "Do verify WCAG 2.2 AA contrast in both appearance modes."
+    ],
+    "donts": [
+      "Don't restore the original fork's black-and-neon-green terminal identity.",
+      "Don't build a generic hacker-terminal surface that uses green for every action and state.",
+      "Don't use Codex royal blue (#0169CC) as Remora's primary identity.",
+      "Don't build stock blue SaaS or AI dashboards with ornamental gradients, glass cards, or decorative glows.",
+      "Don't use side-stripe accents, gradient text, or wide soft card shadows.",
+      "Don't recolor Ghostty or another user-selected terminal theme to match app chrome."
+    ]
+  }
+}

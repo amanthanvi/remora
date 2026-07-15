@@ -85,40 +85,46 @@ data class RemoraResolvedTheme(
     companion object {
         val defaultLight =
             resolve(
-                slug = "codex-light",
+                slug = "remora-light",
                 definition =
                     RemoraThemeDefinition(
-                        name = "Codex Light",
+                        name = "Remora Light",
                         type = RemoraColorThemeType.LIGHT,
                         colors =
                             mapOf(
-                                "editor.background" to "#FFFFFF",
-                                "editor.foreground" to "#0D0D0D",
-                                "sideBar.background" to "#FCFCFC",
-                                "sideBar.foreground" to "#212121",
-                                "activityBar.background" to "#FCFCFC",
-                                "textLink.foreground" to "#0169CC",
-                                "button.background" to "#0169CC",
+                                "editor.background" to "#F7FCFE",
+                                "editor.foreground" to "#102A36",
+                                "sideBar.background" to "#EAF7FB",
+                                "sideBar.foreground" to "#365866",
+                                "activityBar.background" to "#DCEFF5",
+                                "editorLineNumber.foreground" to "#4E6671",
+                                "editorGroup.border" to "#B7DCE7",
+                                "panel.border" to "#D8E8F1",
+                                "textLink.foreground" to "#036F8F",
+                                "button.background" to "#036F8F",
                             ),
                     ),
             )
 
         val defaultDark =
             resolve(
-                slug = "codex-dark",
+                slug = "remora-dark",
                 definition =
                     RemoraThemeDefinition(
-                        name = "Codex Dark",
+                        name = "Remora",
                         type = RemoraColorThemeType.DARK,
                         colors =
                             mapOf(
-                                "editor.background" to "#111111",
-                                "editor.foreground" to "#FCFCFC",
-                                "sideBar.background" to "#131313",
-                                "sideBar.foreground" to "#8F8F8F",
-                                "activityBar.background" to "#131313",
-                                "textLink.foreground" to "#0169CC",
-                                "button.background" to "#0169CC",
+                                "editor.background" to "#02082C",
+                                "editor.foreground" to "#EAFBFF",
+                                "sideBar.background" to "#011B44",
+                                "sideBar.foreground" to "#A8DCEB",
+                                "activityBar.background" to "#022753",
+                                "editorLineNumber.foreground" to "#83AFC2",
+                                "editorGroup.border" to "#044875",
+                                "panel.border" to "#02356A",
+                                "textLink.foreground" to "#0DD5F0",
+                                "button.background" to "#07F2FB",
                             ),
                     ),
             )
@@ -178,7 +184,7 @@ data class RemoraResolvedTheme(
                 separator = separator,
                 danger = if (definition.type == RemoraColorThemeType.DARK) Color(0xFFFF5555) else Color(0xFFD32F2F),
                 success = if (definition.type == RemoraColorThemeType.DARK) Color(0xFF6EA676) else Color(0xFF2E7D32),
-                warning = if (definition.type == RemoraColorThemeType.DARK) Color(0xFFE2A644) else Color(0xFFE65100),
+                warning = if (definition.type == RemoraColorThemeType.DARK) Color(0xFFE2A644) else Color(0xFFA84400),
                 textOnAccent = if (brightness(accentStrong) > 0.5f) Color(0xFF0D0D0D) else Color.White,
                 codeBackground = background,
             )

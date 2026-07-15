@@ -10,7 +10,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Text
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.graphics.Color
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.BuildConfig
 
@@ -72,7 +71,7 @@ fun DebugBuildLabel(modifier: Modifier = Modifier) {
     Text(
         text = BuildInfo.shortLabel,
         style = MaterialTheme.typography.labelSmall,
-        color = RemoraTheme.textMuted.copy(alpha = 0.55f),
+        color = RemoraTheme.textMuted,
         textAlign = TextAlign.End,
         modifier = modifier.padding(horizontal = 14.dp, vertical = 2.dp),
     )

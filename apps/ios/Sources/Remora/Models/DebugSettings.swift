@@ -19,7 +19,7 @@ enum StreamingEffectKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var effect: any StreamingTextEffect {
-        let accent = Color(red: 0, green: 1, blue: 0.612)
+        let accent = RemoraTheme.accentStrong
         switch self {
         case .fadeEdge: return FadeEdgeEffect(edgeWidth: 4)
         case .sparkle: return SparkleEffect(sparkleCount: 8, color: accent)
