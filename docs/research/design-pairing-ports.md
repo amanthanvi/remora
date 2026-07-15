@@ -154,7 +154,7 @@ derivation are also implementation details, not ports created for every helper.
 
 ## External interface
 
-### Pairing code and capability draft
+### Propose from opaque input
 
 ```rust
 #[derive(Clone, uniffi::Record)]
@@ -163,32 +163,11 @@ pub struct RemotePairingCode {
     pub encoded: String,
 }
 
-#[derive(uniffi::Object)]
-pub struct RemotePairingDraft {
-    // Private Arc<RemotePairingDraftInner>.
-    // Contains secret material and an owner nonce; never serializable.
-}
-
-#[uniffi::export]
-impl RemotePairingDraft {
-    /// Pure and bounded. It does not perform I/O or mutate the draft.
-    pub fn review(&self) -> RemotePairingReview;
+#[derive(Clone, Eq, PartialEq, Hash, uniffi::Record)]
+pub struct RemoteHostProposalId {
+    pub value: String,
 }
 ```
-
-`prepare_remote_host_pairing` parses and validates the code, loads or creates
-the device identity through the secret port, authenticates the host, and returns
-only after it has a current typed runtime offer. It performs no durable
-per-host journal write. The invite secret remains only in the draft's Rust
-memory and expires on a monotonic deadline.
-
-The object is logically move-only even though UniFFI transports it as an
-`Arc`. Multiple native references share one internal state. Exactly one commit
-may win. A second commit receives the original successful result if its
-acceptance is byte-for-byte equivalent, or `DraftConsumed` otherwise. Discard
-is idempotent and invalidates an uncommitted draft immediately.
-
-### Review and acceptance
 
 ```rust
 #[derive(Clone, Eq, PartialEq, Hash, uniffi::Record)]
@@ -202,7 +181,8 @@ pub struct RemoteRuntimeId {
 }
 
 #[derive(Clone, uniffi::Record)]
-pub struct RemotePairingReview {
+pub struct RemoteHostProposal {
+    pub proposal_id: RemoteHostProposalId,
     pub host_id: RemoteHostId,
     pub revision: u64,
     pub suggested_display_name: String,
@@ -237,66 +217,103 @@ pub struct RemoteRuntimeCapabilities {
     pub permission_controls: bool,
 }
 
-#[derive(Clone, uniffi::Record)]
-pub struct RemotePairingAcceptance {
-    /// Prevents accepting an offer other than the one the user reviewed.
-    pub review_revision: u64,
-    pub display_name: Option<String>,
-    pub selected_runtime_ids: Vec<RemoteRuntimeId>,
-}
 ```
 
-The review omits invite bytes, token, raw node ID, endpoint key, relay URL,
+`propose_remote_host` performs bounded recognition, authenticates the host, and
+returns a current semantic offer. It does not write a durable pairing target.
+The private proposal cache retains the validated invite credential, identity
+pin, adapter discriminator, and route hints until a short monotonic deadline.
+The public proposal omits invite bytes, token, raw node ID, endpoint key, relay URL,
 ALPN, transport kind, harness wire, route candidates, and resume cursors. Host
 strings are length-limited, control-character stripped, and projected into
 mobile-owned semantic fields.
 
-The revision is not a general workflow revision. It changes only when a fresh
-authenticated offer supersedes the draft's cached offer. If commit detects a
-changed host offer, it refreshes the draft internally and returns
-`ReviewChanged { current_revision }`; the caller renders `draft.review()` again
-and asks for a new typed acceptance. It never silently changes the selected
-runtimes after consent.
+Equivalent codes deduplicate to the same live proposal. Conflicting adapters
+that both claim an input cause `AmbiguousCode`; registration order never selects
+a security meaning. A proposal is process-local, single-host, and non-durable.
+After process death or expiry the user must rescan.
 
-### Connection, discard, and unpairing results
+### Declare desired state
+
+```rust
+#[derive(Clone, uniffi::Enum)]
+pub enum RemoteHostTarget {
+    PairedFromProposal {
+        proposal_id: RemoteHostProposalId,
+        expected_proposal_revision: u64,
+        display_name: Option<String>,
+        selected_runtime_ids: Vec<RemoteRuntimeId>,
+    },
+    PairedExisting {
+        host_id: RemoteHostId,
+        expected_target_revision: u64,
+        display_name: String,
+        selected_runtime_ids: Vec<RemoteRuntimeId>,
+    },
+    Absent {
+        host_id: RemoteHostId,
+        expected_target_revision: Option<u64>,
+    },
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteHostTargetReceipt {
+    pub host_id: RemoteHostId,
+    pub target_revision: u64,
+    pub disposition: RemoteHostTargetDisposition,
+}
+
+#[derive(Clone, uniffi::Enum)]
+pub enum RemoteHostTargetDisposition {
+    Accepted,
+    Unchanged,
+}
+```
+
+`PairedFromProposal` is the fixed typed consent operation. The target is
+accepted only if the proposal revision, host identity, expiry, display name, and
+runtime selection still validate. The core then persists desired intent and the
+credential through its journal/secret transaction before returning the receipt.
+
+`PairedExisting` changes the display name or desired runtime set for a paired
+host using optimistic concurrency. Reasserting an equivalent existing target is
+idempotent and also nudges reconciliation, so no separate public retry method is
+needed.
+
+`Absent` is unpairing. Once this target is durably accepted, the host becomes
+locally unusable immediately. Remote credential revocation and secret cleanup
+continue in the reconciler. The receipt never overstates remote invalidation.
+
+### Observe convergence through AppStore
 
 ```rust
 #[derive(Clone, uniffi::Record)]
-pub struct RemoteHostConnection {
+pub struct RemoteHostPairingSnapshot {
     pub host_id: RemoteHostId,
-    pub disposition: RemoteHostConnectionDisposition,
+    pub target_revision: u64,
+    pub target: RemoteHostTargetKind,
+    pub observed: RemoteHostObservedState,
+    pub display_name: String,
+    pub runtimes: Vec<RemoteRuntimeObserved>,
+    pub failure: Option<RemoteHostObservedFailure>,
+    pub remote_revocation: Option<RemoteCredentialRevocation>,
 }
 
 #[derive(Clone, uniffi::Enum)]
-pub enum RemoteHostConnectionDisposition {
-    PairedAndConnected,
+pub enum RemoteHostTargetKind {
+    Paired,
+    Absent,
+}
+
+#[derive(Clone, uniffi::Enum)]
+pub enum RemoteHostObservedState {
+    Activating,
     Connected,
-    AlreadyConnected,
-}
-
-#[derive(Clone, uniffi::Record)]
-pub struct RemotePairingDiscard {
-    pub disposition: RemotePairingDiscardDisposition,
-}
-
-#[derive(Clone, uniffi::Enum)]
-pub enum RemotePairingDiscardDisposition {
-    Discarded,
-    AlreadyDiscarded,
-    AlreadyCommitted,
-}
-
-#[derive(Clone, uniffi::Record)]
-pub struct RemoteHostUnpairing {
-    pub host_id: RemoteHostId,
-    pub disposition: RemoteHostUnpairingDisposition,
-    pub remote_credential: RemoteCredentialRevocation,
-}
-
-#[derive(Clone, uniffi::Enum)]
-pub enum RemoteHostUnpairingDisposition {
-    Unpaired,
-    AlreadyUnpaired,
+    Degraded,
+    Unavailable,
+    NeedsRepair,
+    Revoking,
+    Absent,
 }
 
 #[derive(Clone, uniffi::Enum)]
@@ -307,16 +324,15 @@ pub enum RemoteCredentialRevocation {
 }
 ```
 
-Connection health, per-runtime degradation, reconnect progress, and terminal
-availability remain in `AppStore`. A successful commit means that at least one
-selected runtime is attached and a recoverable durable pairing exists. It does
-not claim every selected runtime is healthy forever.
+The durable target and observed state are intentionally separate. A target can
+be `Paired` while observed state is `Activating`, `Degraded`, or `Unavailable`.
+That is not false success: the receipt acknowledges durable intent, while the
+snapshot reports current reality. A target can be `Absent` while observed state
+is `Revoking` until remote and local cleanup finish.
 
-Local unpairing wins even when the host is unavailable. Once the local
-revocation tombstone is durable, reconnect is blocked. The result reports
-whether host-side credential revocation was confirmed, unsupported by the
-current v1 protocol, or deferred. UI copy must not claim remote invalidation
-when the host protocol cannot provide it.
+Ordinary runtime health, thread/session hydration, and terminal state remain in
+their existing `AppStore` projections. The pairing snapshot owns only desired
+host membership, activation/repair, and revocation convergence.
 
 ## External errors and retry contract
 
@@ -324,20 +340,19 @@ when the host protocol cannot provide it.
 #[derive(Debug, uniffi::Error)]
 pub enum RemoteHostPairingError {
     InvalidCode { reason: PairingCodeFailure },
+    AmbiguousCode,
     IncompatibleHost { required_client_version: Option<String> },
-    DraftExpired,
-    DraftDiscarded,
-    DraftConsumed,
-    DraftOwnerMismatch,
-    ReviewChanged { current_revision: u64 },
+    ProposalNotFound,
+    ProposalExpired,
+    ProposalConsumed,
+    ProposalChanged { current_revision: u64 },
     InvalidRuntimeSelection,
     AuthenticationRejected,
     HostIdentityMismatch,
     HostUnavailable { retry_after_ms: Option<u64> },
     NoSafeRoute { retry_after_ms: Option<u64> },
-    NoRuntimeAttached,
     NotPaired,
-    Revoked,
+    StaleTarget { current_revision: u64 },
     SecretStoreUnavailable { operation: SecretOperation },
     JournalUnavailable { operation: JournalOperation },
     ConcurrentModification,
@@ -365,21 +380,25 @@ pub enum SecretOperation {
 
 #[derive(Clone, uniffi::Enum)]
 pub enum JournalOperation {
-    BeginCommit,
-    ActivateHost,
-    LoadHost,
-    BeginRevocation,
-    FinishRevocation,
+    AcceptPairedTarget,
+    UpdatePairedTarget,
+    AcceptAbsentTarget,
+    LoadTargets,
     Recover,
 }
 ```
 
-External errors hide adapter mechanics:
+These errors mean the requested target transition was not durably accepted.
+Host/route/runtime failures after a target is accepted belong in
+`RemoteHostObservedFailure`, not as a late error from `set_remote_host_target`.
+External errors still hide adapter mechanics:
 
-- direct-path and owned-relay exhaustion becomes `NoSafeRoute`;
-- host timeouts become `HostUnavailable`;
-- bearer rejection or device-proof rejection becomes
-  `AuthenticationRejected`;
+- host and relay failures during proposal creation are normalized to
+  `HostUnavailable`/`NoSafeRoute` in the proposal error detail;
+- failures during reconciliation become display-safe observed failures;
+- bearer rejection or device-proof rejection during proposal creation becomes
+  `AuthenticationRejected`; after acceptance it becomes `NeedsRepair` and never
+  silently falls back to a weaker dialect;
 - Keychain, keystore, preferences, file, and compare-and-swap errors map to
   their typed secret/journal operation;
 - raw adapter errors remain in redacted Rust diagnostics under the correlation
@@ -387,36 +406,37 @@ External errors hide adapter mechanics:
 
 Retry rules are part of the interface:
 
-- `HostUnavailable`, `NoSafeRoute`, and `NoRuntimeAttached` may retry the same
-  unexpired draft.
-- `ReviewChanged` requires the user to review and accept the new revision.
+- proposal-time host/route failures may retry the same code while it remains
+  valid;
+- `ProposalChanged` requires a fresh returned proposal and new consent;
 - `SecretStoreUnavailable` and `JournalUnavailable` are retryable only after
-  the failing facility becomes available; the transaction state decides
-  whether the same draft can continue.
-- `DraftExpired`, `InvalidCode`, `AuthenticationRejected`,
+  the failing facility becomes available;
+- `ProposalExpired`, `InvalidCode`, `AuthenticationRejected`,
   `HostIdentityMismatch`, and `IncompatibleHost` require a new code or a
   host/client update.
-- `Revoked` and `NotPaired` require an explicit new pairing.
-- `ConcurrentModification` is retryable by reloading canonical state; callers
-  do not invent merge policy.
+- `StaleTarget` requires reloading the current target revision from `AppStore`.
+- A retryable observed failure is retried automatically with bounded backoff;
+  reasserting an unchanged paired target may request immediate reconsideration
+  but cannot bypass host rate limits or authentication failures.
 
 ## Required invariants
 
-### Capability and consent
+### Proposal, target, and consent
 
-1. A draft is created only by a specific `MobileClient` and cannot be forged,
-   serialized, or committed by another client instance.
-2. A draft authorizes one host identity, one invite credential, and one current
-   authenticated review. It cannot be retargeted.
-3. A draft is process-local, time-limited, and logically single-consume.
-4. Prepare never creates a durable paired-host record. Process death before
-   commit requires a rescan.
-5. Commit accepts only the exact review revision the user saw. Host identity or
-   runtime-offer changes never inherit prior consent.
-6. Every selected runtime ID must appear in the review and be selectable. At
+1. A proposal is created only by a specific `MobileClient`, is process-local,
+   time-limited, single-host, and single-consume.
+2. A proposal binds one authenticated host identity, one dialect adapter, one
+   invite credential, and one current semantic offer. It cannot be retargeted.
+3. Propose never creates durable desired state. Process death before accepting
+   `PairedFromProposal` requires a rescan.
+4. `PairedFromProposal` accepts only the exact proposal revision the user saw.
+   Identity or runtime-offer changes never inherit prior consent.
+5. `PairedExisting` and `Absent` require the current target revision. Stale
+   settings screens cannot overwrite newer desired state.
+6. Every selected runtime ID must appear in the proposal and be selectable. At
    least one runtime must be selected.
-7. Discard prevents any later commit, even if an in-flight host adapter call
-   completes late.
+7. Desired target is durable; observed state is current. A target receipt never
+   implies current connectivity or completed remote revocation.
 
 ### Security and identity
 
@@ -446,10 +466,9 @@ Retry rules are part of the interface:
 17. Every staged secret is named by a journal transaction before it is written,
     so recovery can identify and delete or finish it.
 18. Journal transitions use compare-and-swap revisions. A stale writer cannot
-    overwrite a revocation or a newer pairing generation.
-19. Revocation wins races. Once `Revoking` is durably written, prepare may show
-    the host but commit, reconnect, and late adapter completions cannot reactivate
-    it.
+    overwrite an absent target or a newer paired generation.
+19. Absence wins races. Once `Absent`/`Revoking` is durably written, a stale
+    paired reconciler and late adapter completion cannot reactivate the host.
 20. A secure-delete failure leaves `Revoking` in place. The host remains locally
     unusable until cleanup succeeds.
 21. Recovery is idempotent. Repeating startup recovery after any crash point
@@ -459,62 +478,61 @@ Retry rules are part of the interface:
 
 ### Sessions and platform parity
 
-23. The full selected runtime intent is persisted even if only a subset attaches
-    initially. Later reconnect retries the missing members.
-24. One host operation lock serializes prepare replacement, commit, reconnect,
-    and unpair transitions that affect that host. Unrelated hosts may proceed
-    concurrently.
-25. Existing healthy sessions return `AlreadyConnected`. Duplicate equivalent
-    commits coalesce rather than creating duplicate sessions.
+23. The full selected runtime target is persisted even if zero or only a subset
+    attaches initially. The reconciler retains intent and retries eligible
+    members; it never silently shrinks the target.
+24. One host operation lock serializes target transitions and reconciliation
+    effects for that host. Unrelated hosts may proceed concurrently.
+25. Duplicate equivalent target submissions return `Unchanged` and do not
+    create duplicate sessions or remote operations.
 26. Replacement resources become authoritative before stale resources are
     closed, except revocation, which closes first and forbids replacement.
 27. `AppStore` updates are authoritative. Native code never hand-patches a
     paired host after a successful operation.
-28. iOS and Android use the same review, acceptance, error, and result types.
+28. iOS and Android use the same proposal, target, error, and snapshot types.
     Native code owns only capture, rendering, navigation, permissions, and the
     narrow secret adapter implementation.
 
 ## Internal port 1: remote-owned host
 
-The host is remote but owned, so it gets a domain-level port. The port is
-private to the Rust module and deals in authenticated domain types, not JSON
-frames, QUIC streams, or relay URLs.
+The host is remote but owned, so each complete protocol family satisfies one
+domain-level port. The port is private to the Rust module and deals in
+authenticated domain types, not JSON frames, QUIC streams, or relay URLs.
 
 ```rust
 #[async_trait]
 trait RemotePairingHostPort: Send + Sync {
-    async fn inspect(
+    /// Cheap, bounded, and side-effect-free. Ambiguity fails closed.
+    fn recognize(&self, code: &RemotePairingCode) -> Recognition;
+
+    async fn propose(
         &self,
-        request: HostInspectRequest,
+        request: HostProposalRequest,
     ) -> Result<AuthenticatedHostOffer, HostPortError>;
 
-    async fn establish(
+    async fn reconcile_paired(
         &self,
-        request: HostEstablishRequest,
+        request: HostReconcileRequest,
     ) -> Result<EstablishedRemoteHost, HostPortError>;
 
-    async fn reconnect(
-        &self,
-        request: HostReconnectRequest,
-    ) -> Result<EstablishedRemoteHost, HostPortError>;
-
-    async fn revoke(
+    async fn reconcile_absent(
         &self,
         request: HostRevokeRequest,
     ) -> Result<HostRevocation, HostPortError>;
 }
 ```
 
-Private request types carry a validated invite, pinned host identity, a secret
-lease, selected semantic runtime IDs, idempotency key, and resume cursors.
+Private request types carry the opaque code or sealed dialect grant, pinned host
+identity, a secret lease, selected semantic runtime IDs, idempotency key, and
+resume cursors.
 Private results carry authenticated offers or logical runtime resources that
 can be handed to `MobileClient`. They do not expose the underlying transport.
 
 Adapters:
 
-- `IrohAlleycatHostAdapter`: production adapter for current `alleycat/1`, list
-  agents, WebSocket/JSONL attachment, sequence resume, and future Remora Link
-  protocol versions.
+- `IrohAlleycatDialectAdapter`: production vertical adapter for current v1 code
+  recognition, `alleycat/1`, list agents, Iroh transport, WebSocket/JSONL
+  attachment, sequence resume, and future compatible Remora Link versions.
 - `ScriptedHostAdapter`: in-memory test adapter that can change offers, reject
   credentials, delay completions, partially attach runtimes, report replay
   drift, and support or reject remote revocation.
@@ -523,10 +541,16 @@ Adapters:
   pairing path must not be wrapped as equivalent without a separate security
   redesign.
 
-The adapter owns protocol negotiation and harness selection. The core owns user
-intent, commit ordering, durable state, and session reconciliation. This is a
+The adapter owns code decoding, protocol negotiation, transport, and harness
+selection. The core owns consent, target ordering, durable state, and convergence policy. This is a
 real seam because production and scripted adapters both exist, and a future
 host protocol can vary without changing Swift/Kotlin.
+
+Registration is deterministic. Exactly one adapter must strongly recognize a
+code. No adapter may delegate an unrecognized or authentication-failed code to a
+weaker adapter as fallback. A genuinely new protocol family adds one vertical
+adapter and one registration entry, not coordinated decoder, planner,
+transport, relay, and harness plug-ins.
 
 ## Internal port 2: owned relay, nested in the host adapter
 
@@ -714,77 +738,74 @@ but neither the adapter nor platform code decodes them.
 The secret store and journal cannot participate in one OS-level transaction.
 The module therefore owns a small recovery protocol.
 
-### Prepare
+### Propose
 
-1. Parse and normalize the code in Rust under strict size/depth limits.
-2. Derive and validate the host identity pin.
+1. Enforce global code size and text limits.
+2. Ask every registered host adapter for bounded, side-effect-free recognition.
+   Zero matches is `InvalidCode`; more than one strong match is `AmbiguousCode`.
 3. Load the device identity from the secret port. If absent, generate it, write
-   it durably, read it back, and only then allow the host adapter to bind.
-4. Call the host port to authenticate and inspect the offer. The host adapter
-   may use the relay port internally.
-5. Normalize runtimes and create an expiring `RemotePairingDraft` bound to this
-   `MobileClient` and host generation.
-6. Return the draft. Do not journal an unaccepted invite.
+   it durably, read it back, and only then allow the selected adapter to bind.
+4. Ask that adapter to authenticate the host and produce a semantic offer. The
+   adapter may use its nested relay port.
+5. Normalize display fields and runtime semantics in the core. Cache the sealed
+   adapter grant under a random, expiring proposal ID.
+6. Return the secret-free proposal. Do not journal unaccepted intent.
 
-### Commit
+### Accept a paired target
 
-1. Acquire the per-host operation lock and validate draft owner, lifecycle,
-   expiry, review revision, display name, and runtime selection.
-2. Read the current journal generation. A `Revoking` or `Revoked` generation
-   blocks commit unless an explicit new-pairing generation has first completed
-   old secure cleanup.
-3. CAS a `CommitIntent` containing the Rust-generated credential alias. No
-   secret has been written yet.
-4. Write and verify the host credential through the secret port.
-5. Ask the host port to establish the selected runtimes using an idempotency key
-   derived from the transaction ID. Require at least one attachment.
-6. CAS `CommitIntent` to `ActiveHost`. If this fails because revocation won,
-   close the new resources and continue revocation cleanup.
-7. Hand established resources to `MobileClient`, publish canonical `AppStore`
-   state, mark the draft committed, and return `PairedAndConnected`.
+1. Acquire the per-host operation lock and validate proposal ownership, expiry,
+   revision, display name, and runtime selection.
+2. Read the current target generation. A `Revoking`/`Absent` generation blocks
+   stale acceptance until secure cleanup finishes and a new proposal is made.
+3. CAS a `CommitIntent` containing desired state, adapter discriminator,
+   identity pin, and Rust-generated credential alias. No secret is written yet.
+4. Write and verify the sealed host credential through the secret port.
+5. CAS `CommitIntent` to `ActiveHost`; consume the proposal.
+6. Return `Accepted` and schedule reconciliation. Do not wait for the host to be
+   online or for every selected runtime to attach.
 
-If the process dies after step 3, recovery sees an intent with no secret and
-removes it. If it dies after step 4, recovery can delete the named staged
-secret. If it dies after step 5, remote resources time out or are closed by
-idempotent recovery. If it dies after step 6, recovery reconnects the active
-host and attaches it to `MobileClient`.
+If the process dies after step 3, recovery removes the intent with no secret. If
+it dies after step 4, recovery can delete the named staged secret or finish the
+same target generation. If it dies after step 5, startup sees an active paired
+target and reconciles it.
 
-This ordering prefers a short-lived staged credential over an unjournaled
-orphan credential. It also means a secret-store outage fails before a remote
-session is presented as paired.
+This ordering makes the target receipt honest: durable user intent and recovery
+material exist, while connectivity remains separately observable.
 
-### Connect an already paired host
+### Reconcile a paired target
 
-1. Load `ActiveHost`; absence is `NotPaired`, `Revoking`/`Revoked` is `Revoked`.
-2. Return `AlreadyConnected` if canonical runtime state satisfies the desired
-   set.
+1. Load `ActiveHost` and its exact target revision.
+2. If current sessions already satisfy desired runtimes, project `Connected` or
+   `Degraded` and stop.
 3. Read the credential by opaque alias.
-4. Ask the host port to reconnect using the stored identity pin, desired
-   runtimes, and sequence cursors.
-5. Replace stale resources only after replacements prove the same host identity
-   and at least one runtime attaches.
-6. Update cursors and canonical `AppStore` state.
+4. Ask the recorded vertical adapter to reconcile the pinned host and desired
+   runtimes using the target generation as an idempotency key.
+5. Reject any identity change. Replace stale resources only after replacements
+   prove the same host identity.
+6. Update sequence cursors and observed `AppStore` state only if the target
+   revision is still current. Late results for superseded or absent targets are
+   closed and ignored.
+7. Classify failures into automatic backoff, `Unavailable`, or `NeedsRepair`.
 
-Cold launch and network recovery call this same Rust implementation. Native
-code does not reconstruct a pair payload or push a `SavedServerRecord` back into
-Rust.
+Cold launch, network changes, session loss, and reasserted targets schedule this
+same implementation. Duplicate lifecycle hints coalesce per host. Native code
+does not reconstruct pair payloads or push `SavedServerRecord` into Rust.
 
-### Unpair
+### Accept and reconcile an absent target
 
-1. Acquire the host operation lock.
-2. CAS `ActiveHost` or incomplete `CommitIntent` to `RevokingHost`. If the CAS
-   fails, reload and retry or return the already-finished outcome.
-3. Cancel reconnect work, invalidate drafts for the host, close runtime and
-   terminal resources, and remove active canonical store state.
-4. Ask the host port for device/token revocation. Record confirmed,
-   unsupported, or deferred status without weakening local revocation.
+1. CAS the current target to `RevokingHost` with a new absent target revision.
+2. Return `Accepted`. From this point local connection is forbidden.
+3. Cancel paired reconciliation, invalidate proposals for the host, close
+   runtime and terminal resources, and remove active canonical session state.
+4. Ask the recorded host adapter for device/token revocation. Record confirmed,
+   unsupported, or deferred without weakening local absence.
 5. Delete the credential through the secret port.
-6. CAS to `RevokedHost`. Retain a bounded tombstone so stale journal restores or
-   late completions cannot resurrect the prior generation.
+6. CAS to `RevokedHost`/observed `Absent`. Retain a bounded tombstone so stale
+   restores and late completions cannot resurrect the prior generation.
 
-If step 5 fails, remain `RevokingHost`, return
-`SecretStoreUnavailable(DeleteHostCredential)`, and retry cleanup on startup.
-No reconnect is permitted from `RevokingHost`.
+If secret deletion fails, remain `RevokingHost`, project the typed storage
+failure, and retry cleanup on startup. No paired reconciliation is permitted
+from that journal state.
 
 ## Hidden implementation and locality
 
@@ -793,11 +814,13 @@ A coherent layout is:
 ```text
 shared/rust-bridge/codex-mobile-client/src/remote_host_pairing/
   mod.rs                    facade and external-operation implementation
-  ffi.rs                    UniFFI-safe records, enums, errors, draft object
-  draft.rs                  capability ownership, expiry, single-consume logic
+  ffi.rs                    UniFFI-safe proposal, target, snapshot, errors
+  proposal.rs               expiry, dedupe, adapter recognition, sealed grants
+  target.rs                 desired target model and optimistic concurrency
   identity.rs               code validation and stable host/runtime identity
-  transaction.rs            commit/revoke ordering and recovery decisions
-  recovery.rs               journal scan and crash reconciliation
+  transaction.rs            target acceptance and cross-store recovery
+  reconciler.rs             desired-to-observed convergence and backoff
+  recovery.rs               journal scan and startup convergence
   projection.rs             AppStore and semantic runtime projection
   ports/
     host.rs                 RemotePairingHostPort
@@ -805,7 +828,7 @@ shared/rust-bridge/codex-mobile-client/src/remote_host_pairing/
     secrets.rs              PairingSecretPort
     journal.rs              PairingJournalPort
   adapters/
-    host_alleycat.rs         current host protocol adapter
+    host_alleycat.rs         current vertical dialect adapter
     relay_iroh.rs            direct/relay Iroh behavior
     journal_atomic_file.rs   shared production journal adapter
 ```
@@ -819,7 +842,8 @@ apps/android/core/bridge/.../PairingSecretAdapter.kt
 
 The module hides:
 
-- v1 JSON/URL parsing, compatibility aliases, version checks, and redaction;
+- dialect recognition, v1 JSON/URL parsing, compatibility aliases, version
+  checks, and redaction;
 - future v2 invite/device-credential semantics;
 - stable host/runtime IDs and display-safe projection;
 - device identity load/create/bind ordering;
@@ -828,7 +852,8 @@ The module hides:
   replay drift, and partial runtime recovery;
 - secret aliases, journal versions, CAS generations, transaction IDs,
   compensation, tombstones, and crash recovery;
-- per-host operation locks and late-completion suppression;
+- desired/observed reconciliation, per-host locks, backoff, and late-completion
+  suppression;
 - `MobileClient` session handoff and authoritative `AppStore` updates;
 - legacy record import and hard-cutover cleanup.
 
@@ -839,132 +864,124 @@ rather than reconstructing raw Alleycat fields in terminal code.
 ## Thin Swift usage
 
 ```swift
-@State private var draft: RemotePairingDraft?
-@State private var review: RemotePairingReview?
+@State private var proposal: RemoteHostProposal?
 
 func inspect(_ scannedOrPastedText: String) {
     Task {
-        let prepared = try await appModel.client.prepareRemoteHostPairing(
+        proposal = try await appModel.client.proposeRemoteHost(
             code: RemotePairingCode(encoded: scannedOrPastedText)
         )
-        draft = prepared
-        review = prepared.review()
     }
 }
 
-func connect(name: String?, selected: [RemoteRuntimeId]) {
-    guard let draft, let review else { return }
+func accept(name: String?, selected: [RemoteRuntimeId]) {
+    guard let proposal else { return }
     Task {
-        let result = try await appModel.client.commitRemoteHostPairing(
-            draft: draft,
-            acceptance: RemotePairingAcceptance(
-                reviewRevision: review.revision,
+        let receipt = try await appModel.client.setRemoteHostTarget(
+            target: .pairedFromProposal(
+                proposalId: proposal.proposalId,
+                expectedProposalRevision: proposal.revision,
                 displayName: name,
                 selectedRuntimeIds: selected
             )
         )
-        // Navigate by result.hostId. Health comes from AppStore.
+        // Navigate by receipt.hostId. Observe convergence in AppStore.
     }
 }
 
-func cancel() {
-    guard let draft else { return }
-    _ = appModel.client.discardRemoteHostPairing(draft: draft)
-}
-
-func reconnect(_ hostId: RemoteHostId) async throws {
-    _ = try await appModel.client.connectPairedRemoteHost(hostId: hostId)
-}
-
-func remove(_ hostId: RemoteHostId) async throws {
-    _ = try await appModel.client.unpairRemoteHost(hostId: hostId)
+func remove(_ host: RemoteHostPairingSnapshot) async throws {
+    _ = try await appModel.client.setRemoteHostTarget(
+        target: .absent(
+            hostId: host.hostId,
+            expectedTargetRevision: host.targetRevision
+        )
+    )
 }
 ```
 
 Swift owns the camera permission, scanner, clipboard, text editing, selections,
-and navigation. It has no parse/list/connect/save-token/remember-server sequence
-and no endpoint-key lifecycle calls.
+and navigation. It observes `RemoteHostPairingSnapshot` through the existing
+`AppStore` subscription. It has no parse/list/connect/save-token/remember-server
+sequence, reconnect choreography, or endpoint-key lifecycle calls.
 
 ## Thin Kotlin usage
 
 ```kotlin
-var draft by mutableStateOf<RemotePairingDraft?>(null)
-var review by mutableStateOf<RemotePairingReview?>(null)
+var proposal by mutableStateOf<RemoteHostProposal?>(null)
 
 suspend fun inspect(scannedOrPastedText: String) {
-    val prepared = appModel.client.prepareRemoteHostPairing(
+    proposal = appModel.client.proposeRemoteHost(
         RemotePairingCode(encoded = scannedOrPastedText),
     )
-    draft = prepared
-    review = prepared.review()
 }
 
-suspend fun connect(name: String?, selected: List<RemoteRuntimeId>) {
-    val prepared = requireNotNull(draft)
-    val shown = requireNotNull(review)
-    val result = appModel.client.commitRemoteHostPairing(
-        draft = prepared,
-        acceptance = RemotePairingAcceptance(
-            reviewRevision = shown.revision,
+suspend fun accept(name: String?, selected: List<RemoteRuntimeId>) {
+    val shown = requireNotNull(proposal)
+    appModel.client.setRemoteHostTarget(
+        RemoteHostTarget.PairedFromProposal(
+            proposalId = shown.proposalId,
+            expectedProposalRevision = shown.revision,
             displayName = name,
             selectedRuntimeIds = selected,
         ),
     )
-    // Navigate by result.hostId. Health comes from AppStore.
 }
 
-fun cancel() {
-    draft?.let(appModel.client::discardRemoteHostPairing)
-}
-
-suspend fun reconnect(hostId: RemoteHostId) {
-    appModel.client.connectPairedRemoteHost(hostId)
-}
-
-suspend fun remove(hostId: RemoteHostId) {
-    appModel.client.unpairRemoteHost(hostId)
+suspend fun remove(host: RemoteHostPairingSnapshot) {
+    appModel.client.setRemoteHostTarget(
+        RemoteHostTarget.Absent(
+            hostId = host.hostId,
+            expectedTargetRevision = host.targetRevision,
+        ),
+    )
 }
 ```
 
-Compose and SwiftUI render the same fixed review semantics. They do not render
-generic server-authored actions and do not decode a journaled attempt.
+Compose and SwiftUI render the same fixed proposal and observed-state semantics.
+They do not render generic server-authored actions and do not decode journal or
+adapter state.
 
 ## Testing strategy
 
 The external interface remains the primary test surface. Construct the real
 module with `ScriptedHostAdapter`, `InMemoryRelayAdapter`,
 `InMemoryPairingSecretAdapter`, `InMemoryPairingJournalAdapter`, deterministic
-clock/entropy, and a real in-memory `AppStore`. Call only prepare, review,
-commit, discard, connect, and unpair.
+clock/entropy, and a real in-memory `AppStore`. Call only propose and set-target,
+then observe convergence through `AppStore`.
 
 ### Interface contract tests
 
 1. Malformed, missing-identity, missing-credential, invalid-route, expired, and
    incompatible codes produce typed errors.
-2. A prepared review contains semantic host/runtime data but none of the token,
+2. A proposal contains semantic host/runtime data but none of the token,
    relay, raw node, wire, ALPN, endpoint key, or cursor sentinels.
-3. A draft from one `MobileClient` cannot be committed by another.
-4. Two native references to one draft still allow only one semantic commit.
-5. Equivalent duplicate commit returns the original outcome; different input
-   after consumption fails.
-6. Discard racing inspect/commit wins before durable commit and ignores late
-   adapter completion.
+3. Zero adapter recognizers produces `InvalidCode`; two strong recognizers
+   produce `AmbiguousCode` independent of registration order.
+4. A proposal from one `MobileClient` cannot be accepted by another.
+5. Equivalent duplicate paired target returns `Unchanged`; a conflicting stale
+   target revision fails without side effects.
+6. An absent target racing paired reconciliation wins after its CAS and ignores
+   late adapter completion.
 7. Expiry uses the monotonic clock even if wall time moves backward.
-8. A changed authenticated offer increments the review revision and requires
+8. A changed authenticated offer increments the proposal revision and requires
    fresh acceptance.
 9. Empty, unknown, unavailable, duplicate, and cross-host runtime selections
    fail before secret or journal side effects.
-10. Successful commit produces one `ActiveHost`, one credential alias, at least
-    one runtime attachment, and authoritative `AppStore` state.
-11. Partial runtime attachment persists the complete desired set and later
-    reconnect retries missing members.
-12. A healthy existing session returns `AlreadyConnected`; concurrent reconnects
+10. Accepted paired target produces one `ActiveHost` and one credential alias,
+    returns before network completion, then converges to authoritative
+    `AppStore` state.
+11. Zero initial attachment preserves the paired target as `Unavailable`;
+    partial attachment preserves the complete desired set as `Degraded`; later
+    reconciliation retries eligible members.
+12. A healthy session makes reconciliation a no-op; concurrent triggers
     coalesce.
-13. Unpair racing commit writes `Revoking`/`Revoked`, closes late resources, and
+13. Absent target racing activation writes `Revoking`/`Revoked`, closes late resources, and
     cannot be undone by a stale CAS.
 14. Unsupported v1 remote revocation is reported honestly while local
     revocation remains effective.
-15. Logs, errors, journal bytes, and external records contain no raw secret
+15. Duplicate cold-start, network-change, session-loss, and manual target hints
+    converge without storms or duplicate approval.
+16. Logs, errors, journal bytes, and external records contain no raw secret
     sentinels except encrypted/opaque secret-adapter storage.
 
 ### Cross-port crash matrix
@@ -1024,14 +1041,16 @@ test suite over the shallow old one.
 
 ### Cross-platform verification
 
-- Generated bindings expose only code, draft, typed review/acceptance, host ID,
-  semantic runtime types, results, and typed errors.
+- Generated bindings expose only code, proposal, typed target, host ID, observed
+  snapshot, semantic runtime types, receipts, and typed errors.
 - Generated bindings do not expose node ID, token, relay URL, protocol version,
   ALPN, WebSocket/JSONL, endpoint key, or journal record.
 - iOS Keychain and Android secure-storage adapters pass the same adapter
   contract fixtures.
-- SwiftUI and Compose fixtures render identical review and error semantics.
-- QR, paste, cancel, commit, reconnect, and unpair work on both platforms.
+- SwiftUI and Compose fixtures render identical proposal, target, observed-state,
+  and error semantics.
+- QR, paste, accept-paired, automatic reconnect, and accept-absent work on both
+  platforms.
 - The minimum integration gate remains the commands in `CONTEXT.md`.
 
 ## Migration and hard cutover
@@ -1059,13 +1078,14 @@ Use an independently revertible, time-bounded transition with one default.
 7. Records missing a credential, identity pin, or usable runtime intent become a
    typed `NeedsRepair`/`RePairRequired` projection. Do not guess a wire or claim
    successful migration.
-8. Add the capability-scoped external interface and cut both pairing sheets to
-   it in the same change set. This becomes the only default pairing path.
-9. Route cold reconnect and paired terminals through `RemoteHostId` plus the
-   journal/secret ports. Stop sending `SavedServerRecord` Alleycat fields across
-   UniFFI.
-10. Route remove-server through `unpair_remote_host`, including secret deletion
-    and tombstone recovery.
+8. Add the propose/set-target external interface and observed pairing snapshots;
+   cut both pairing sheets to it in the same change set. This becomes the only
+   default pairing path.
+9. Make target reconciliation the sole paired-host cold-recovery authority.
+   Route paired terminals through `RemoteHostId` plus the journal/secret ports.
+   Stop sending `SavedServerRecord` Alleycat fields across UniFFI.
+10. Route remove-server through target `Absent`, including asynchronous remote
+    revocation, secret deletion, and tombstone recovery.
 11. After migration tests and the defined compatibility window, remove
     `AlleycatBridge`, `AppAlleycatPairPayload`, `AppAlleycatAgentWire`, external
     list/connect methods, explicit endpoint-key lifecycle calls, platform token
@@ -1081,12 +1101,14 @@ as an adapter that satisfies authenticated remote-host semantics.
 
 ### Where this design is deep
 
-- A caller learns one fixed review/acceptance flow while the module hides host
+- A caller learns proposal plus desired target while the module hides host
   authentication, relay behavior, secrets, transaction recovery, reconnect,
   runtime attachment, and revocation.
-- The capability object prevents invalid combinations structurally. It removes
-  offer-cache IDs and owner/host matching from caller knowledge.
-- Host protocol changes are local to the host adapter.
+- Automatic reconciliation removes resume, recover, retry, and lifecycle
+  choreography from callers.
+- Vertical adapters prevent invalid decoder/transport/relay/harness
+  combinations structurally.
+- Host dialect changes are local to one adapter.
 - Relay policy changes are local to the nested relay adapter.
 - OS secret behavior is local to two narrow platform adapters.
 - Journal schema and crash recovery are local to Rust.
@@ -1095,13 +1117,15 @@ as an adapter that satisfies authenticated remote-host semantics.
 
 ### Where this design is intentionally less deep
 
-- Five operations plus one pure draft accessor are a larger external interface
-  than the minimal design's three methods.
-- The caller knows there is a prepare/review/commit consent split. That is
-  irreducible product behavior, not a transport phase.
-- The caller handles `ReviewChanged` by re-rendering and asking for consent
-  again. Hiding that would risk silently applying stale approval.
-- Unaccepted work is not recoverable after process death. The user rescans.
+- The caller must understand the difference between durable target and observed
+  state. That distinction is essential to avoid equating accepted intent with
+  current connectivity.
+- The caller handles proposal revision changes by re-rendering and asking for
+  consent again. Hiding that would silently apply stale approval.
+- Unaccepted proposals do not survive process death. The user rescans.
+- A vertical dialect adapter can be internally large. Its depth is valuable only
+  while universal consent, persistence, retry, and store policy remain in the
+  core.
 
 ### Locality gains
 
@@ -1110,15 +1134,15 @@ as an adapter that satisfies authenticated remote-host semantics.
 - Relay details never spread into the transaction core.
 - Cross-store failure policy lives beside the journal state machine.
 - Secret aliases and migration live beside the port that enforces them.
-- Revocation and reconnect share one generation/CAS authority.
+- Activation, reconnect, runtime repair, and revocation share one target
+  generation/CAS authority.
 
 ### Costs and risks
 
-- UniFFI object lifetime must be tested carefully across Swift ARC and Kotlin
-  GC. Logical single-consume state cannot rely on `Drop` timing.
-- Passing a draft object through `AppClient` is less serialization-friendly than
-  an opaque string ID. That is intentional: drafts are process-local
-  capabilities.
+- Desired-state semantics require a clear UI: `Paired + Unavailable` means the
+  app will keep trying, not that the operation was falsely reported connected.
+- Reasserted targets and lifecycle hints need coalescing and bounded backoff to
+  prevent network storms.
 - Four internal ports create more implementation types. Each is justified by a
   production and test adapter, and secret storage has two production adapters.
   Do not create further ports for pure helpers.

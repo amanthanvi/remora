@@ -219,13 +219,13 @@ Trusted-publishing bootstrap is package-specific and should be operationally exp
 
 | Harness | Detection and launch | Existing state that must remain authoritative | Recommendation |
 |---|---|---|---|
-| Codex CLI | Resolve `codex`; launch `codex app-server` over stdio or a local socket; verify initialize/readiness | `${CODEX_HOME:-~/.codex}`, project `.codex`, auth/proxy environment | First-class; already supported |
-| Claude Code | Resolve `claude`; launch structured stream-JSON mode with session ID/resume | `${CLAUDE_CONFIG_DIR:-~/.claude}`, `~/.claude.json`, Keychain, cwd | First-class; remove dangerous permission bypass defaults |
-| OpenCode | Resolve `opencode`; lazily launch `opencode serve` on loopback and an OS-assigned port | XDG paths, `OPENCODE_CONFIG*`, auth state | First-class after current Basic-auth handling is fixed |
+| Codex CLI | Resolve `codex`; use stdio as the cross-platform default, with Unix-domain sockets only on Unix; verify initialize/readiness | `${CODEX_HOME:-~/.codex}`, project `.codex`, auth/proxy environment | First-class; already supported |
+| Claude Code | Resolve `claude`; launch structured stream-JSON mode with session ID/resume | Preserve the active `CLAUDE_CONFIG_DIR` root wholesale, macOS Keychain, cwd | First-class; set permission bypass off by default while retaining stdio approval mediation |
+| OpenCode | Resolve `opencode`; launch `serve --hostname=127.0.0.1 --port=0 --no-mdns`, capture the reported port, then health-check | XDG paths, `OPENCODE_CONFIG*`, auth state | First-class after current Basic-auth handling and version-gated port discovery are fixed |
 | Pi | Resolve configured path, `pi`, then `pi-coding-agent`; launch `--mode rpc` | User environment and Pi home/config | First-class; bridge already present |
-| Gemini CLI | Resolve `gemini`; structured `--output-format stream-json` exists | `${GEMINI_CLI_HOME:-~}/.gemini`, project config, saved chats | Later bridge; do not claim persistent approval/thread parity yet |
+| Gemini CLI | Resolve `gemini`; use `gemini -p <prompt> --output-format stream-json` or non-TTY stdin, plus `--resume` where supported | `${GEMINI_CLI_HOME:-~}/.gemini`, project config, saved chats, cwd `.env` behavior | Later bridge; do not claim persistent approval/thread parity yet |
 
-Codex's official app-server documentation describes the protocol and supported transports ([Codex app server](https://developers.openai.com/codex/app-server)); its config reference documents `CODEX_HOME` ([Codex config](https://developers.openai.com/codex/config-reference)). Claude documents its structured CLI modes and config overrides ([CLI reference](https://code.claude.com/docs/en/cli-reference), [settings](https://code.claude.com/docs/en/settings)). OpenCode documents `serve` and its config ([CLI](https://opencode.ai/docs/cli/), [config](https://opencode.ai/docs/config/)). Gemini documents headless JSONL and session handling ([headless mode](https://geminicli.com/docs/cli/headless/), [sessions](https://geminicli.com/docs/cli/session-management/)).
+Codex's official app-server documentation describes the protocol and supported transports ([Codex app server](https://developers.openai.com/codex/app-server)); its config reference documents `CODEX_HOME` ([Codex config](https://developers.openai.com/codex/config-reference)). Claude documents its structured CLI modes and configuration-root override ([CLI reference](https://code.claude.com/docs/en/cli-reference), [environment variables](https://code.claude.com/docs/en/env-vars)). OpenCode documents `serve` and its config ([CLI](https://opencode.ai/docs/cli/), [config](https://opencode.ai/docs/config/)); the exact port-output adapter must be version-gated because it is source behavior rather than a stable machine protocol. Gemini documents headless JSONL, session handling, and automatic `.env` loading from the cwd/parents/home ([headless mode](https://geminicli.com/docs/cli/headless/), [sessions](https://geminicli.com/docs/cli/session-management/), [configuration](https://geminicli.com/docs/get-started/configuration/)). Treat Gemini's cwd as a secret-loading boundary, never return loaded environment values to mobile/logs, and never set `GEMINI_CLI_TRUST_WORKSPACE=true` on the user's behalf.
 
 Amp, Factory Droid, Hermes, Devin, Grok, and Shell appear in upstream Alleycat's current manifest, but Remora does not directly depend on all of those bridges. Report them as experimental or unavailable until compatibility tests exist. Raw shell must default off.
 
@@ -244,7 +244,7 @@ On Unix, accept an executable regular file or a symlink to one and never inject 
 
 Capture a bounded user environment snapshot during explicit installation and expose `remora-link doctor --refresh-environment`. A background service does not inherit the user's interactive shell environment. Upstream Alleycat reconstructs a login-shell environment and applies mise/direnv overlays ([launch environment](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/bridge-core/src/launch_environment.rs)); Remora Link should not execute arbitrary project-local direnv/mise hooks merely to detect tools. If project environment evaluation is supported, run it only for a user-initiated launch in an explicitly trusted working directory, with timeouts and diagnostics.
 
-Probe candidates with null stdin, capped output, a 2–5 second timeout, and a nonmutating version/capability command. Presence does not prove login state. Show `installed`, `login required`, `ready`, and `incompatible` as distinct typed states.
+Probe candidates with null stdin, capped output, a 2–5 second timeout, and a nonmutating version/capability command. Presence does not prove login state. Show `installed`, `auth unknown`, `login required`, `ready`, and `incompatible` as distinct typed states. Claim `login required` or `ready` only when a documented nonmutating auth probe or the first real protocol handshake establishes it.
 
 ### Safe subprocess contract
 
@@ -253,8 +253,9 @@ Probe candidates with null stdin, capped output, a 2–5 second timeout, and a n
 - Preserve harness config/home overrides, locale, proxy, SSH agent, temp, and XDG variables. Never log or transmit the complete environment.
 - Drain stdout/stderr concurrently with line and total-buffer caps.
 - Use protocol readiness, not sleeps: Codex initialize or readiness; OpenCode `/global/health`.
-- Bind auxiliary harness servers only to loopback. Generate a high-entropy `OPENCODE_SERVER_PASSWORD` and implement its current Basic authentication rather than relying on old token assumptions.
+- Bind auxiliary harness servers only to loopback. For OpenCode, explicitly pass `--hostname=127.0.0.1 --port=0 --no-mdns`, capture its actual bound port, and then probe `/global/health`; do not use the current Alleycat bind-port-0/drop-listener/spawn-fixed-port sequence, which has a TOCTOU race. Generate a high-entropy `OPENCODE_SERVER_PASSWORD` and implement current Basic authentication rather than relying on old token assumptions ([network resolution](https://github.com/anomalyco/opencode/blob/4394b324c972c17952a3c890c608b71739b343c3/packages/opencode/src/cli/network.ts), [serve output](https://github.com/anomalyco/opencode/blob/4394b324c972c17952a3c890c608b71739b343c3/packages/opencode/src/cli/cmd/serve.ts), [current Alleycat launcher](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/opencode-bridge/src/opencode_proc.rs)).
 - Track process ownership and kill only processes Remora Link spawned. Use a process group on Unix and a Job Object with kill-on-close on Windows.
+- Shutdown deterministically: close protocol stdin or request graceful shutdown, wait a bounded interval, terminate the owned process group/Job Object, force-kill if necessary, and always wait/reap.
 - Default to each harness's normal permission/approval behavior. Do not silently add Claude permission bypass, Gemini auto-approval, or equivalent flags.
 - Make shared-backend spawn single-flight and bound retries/backoff.
 
@@ -263,7 +264,7 @@ Probe candidates with null stdin, capped output, a 2–5 second timeout, and a n
 The required migration is a deliberate re-pair, not secret-bearing identity import.
 
 1. Detect an already-installed Kittylitter executable and service without invoking `npx kittylitter` or downloading anything.
-2. If available, run the installed `kittylitter status --json` to inventory its executable, service, endpoint ID, and paths. Treat output as untrusted input.
+2. After independently confirming an existing service/state directory, the installed `kittylitter status --json` may inventory PID, version, node ID, token fingerprint, relay, config path, uptime, and agents. It does **not** report the executable path or service definition, and offline status can initialize state, so inspect launchd/systemd/Windows startup registration and the running process separately ([status implementation](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/cli/status.rs)).
 3. Install/start Remora Link under its new service, path, host-key, and token identity. Leave Kittylitter running temporarily.
 4. Show the harnesses Remora Link resolved, their absolute paths and versions, and readiness/login state.
 5. Generate a new Remora Link QR/pairing offer.
@@ -273,6 +274,8 @@ The required migration is a deliberate re-pair, not secret-bearing identity impo
 9. Stop/uninstall the old service using the already-installed Kittylitter executable. Preserve its config/state by default; offer a separately confirmed purge later.
 
 Do not copy Kittylitter's `host.key`, token, config directory, service definition, or control socket into Remora Link. Existing harness authentication and projects remain available because Remora Link uses the user's real environment and state directories. In-flight sessions and host replay buffers do not migrate.
+
+New Remora Link pairings must write to Remora-named mobile credential namespaces. Keep time-bounded legacy reads and deletion only so the user can roll back to or forget a Kittylitter pairing; do not import legacy credentials into the new pairing.
 
 If the old service points into an expired npm cache and no executable remains, report the exact service/path and provide an explicit platform-specific cleanup procedure. Do not fetch and execute a fresh Kittylitter package merely to uninstall it.
 
@@ -332,18 +335,17 @@ Implement one typed endpoint-construction path and make status report both desir
 [relay]
 mode = "n0"                 # n0 | custom | disabled | managed
 urls = ["https://relay.example.com"]
-auth_token_env = "REMORA_LINK_RELAY_TOKEN"
 allow_public_fallback = false
 ```
 
 Semantics:
 
-- `n0`: current Iroh public preset; appropriate initial default and development fallback.
+- `n0`: current Iroh public preset; acceptable for preview/development bootstrap, but public N0 infrastructure is rate-limited and has no Remora production service guarantee.
 - `custom`: construct the endpoint with Iroh's custom relay map. A dedicated configuration fails closed unless `allow_public_fallback` is explicitly true.
-- `disabled`: direct/LAN-only operation with clear reachability diagnostics.
+- `disabled`: relay-disabled/direct-only operation with clear reachability diagnostics. Do not promise LAN reachability until pairing/discovery supplies usable direct addresses; the current v1 payload does not.
 - `managed`: reserved for a Remora-operated enrollment/broker contract; do not alias it to N0.
 
-Iroh's endpoint builder exposes custom relay configuration ([Iroh builder docs](https://docs.rs/iroh/0.98.1/iroh/endpoint/struct.Builder.html)). Its relay implementation supports open access, endpoint allow/deny lists, shared-token authentication, and HTTP authorization callouts ([relay README](https://github.com/n0-computer/iroh/blob/57fb5c2805d6c64b12765f8ef6efe43efbd03a2a/iroh-relay/README.md)). Shared-token relay support requires the client endpoint to possess and safely store the credential; a URL in the existing v1 QR is insufficient.
+Iroh 0.98.1's endpoint builder exposes custom relay configuration ([Iroh builder docs](https://docs.rs/iroh/0.98.1/iroh/endpoint/struct.Builder.html)). Current Iroh relay software supports open access, endpoint allow/deny lists, shared-token authentication, and HTTP authorization callouts ([relay README](https://github.com/n0-computer/iroh/blob/57fb5c2805d6c64b12765f8ef6efe43efbd03a2a/iroh-relay/README.md)), but the pinned 0.98.1 client does not expose the newer shared-token client API. Initial 0.98 self-hosting must therefore use open access, endpoint allowlisting, or an HTTP authorization policy. Shared-token relays depend on the isolated Iroh upgrade and secure credential provisioning to **both** host and mobile endpoints; a URL in the v1 QR is insufficient and the QR must not carry the shared secret.
 
 Keep v1's singular `relay` field until both mobile platforms support a richer schema. Multiple configured relay regions may be useful, but do not claim multi-relay pairing support before the host advertisement and iOS/Android dial paths implement it.
 
@@ -404,7 +406,7 @@ Each phase is independently reviewable and avoids mixing protocol redesign with 
 
 - Resolver tests cover explicit paths, service `PATH`, version managers, spaces/Unicode, symlinks, Windows `PATHEXT`, and Codex desktop candidates.
 - Instrumented tests assert that detection never invokes a package manager, installer, or network downloader.
-- Each adapter distinguishes absent, installed, login-required, ready, incompatible, timeout, and crashed.
+- Each adapter distinguishes absent, installed, auth-unknown, login-required, ready, incompatible, timeout, and crashed without overstating what a version probe proves.
 - Project cwd/config/auth remain unchanged; secrets are redacted from logs.
 - Dangerous approval bypass and raw shell are off by default.
 - Owned processes are reaped; attached user processes are never killed.
@@ -420,7 +422,7 @@ Each phase is independently reviewable and avoids mixing protocol redesign with 
 
 ### Relay
 
-- N0, custom authenticated, custom unauthenticated, disabled, and explicit fallback modes have deterministic status.
+- N0, custom open/allowlisted, disabled, and explicit fallback modes have deterministic status on Iroh 0.98.1; authenticated shared-token mode is gated on the isolated Iroh upgrade and secure host/mobile provisioning.
 - A custom relay test proves the host endpoint actually registers there and both iOS and Android connect through it.
 - Dedicated custom mode fails closed when the relay is unavailable unless public fallback is explicitly enabled.
 - Direct-path upgrade and relay-only operation preserve the authenticated endpoint identity.

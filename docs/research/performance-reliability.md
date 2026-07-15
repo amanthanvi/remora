@@ -78,14 +78,14 @@ The upstream app-server client defines 10-second connect and initialize timeouts
 
 Use one absolute monotonic deadline and report which phase exhausted it. Suggested initial phase caps inside an eight-second foreground connect budget are:
 
-| Phase | Initial cap | Notes |
-| --- | ---: | --- |
-| Endpoint cold bind and resolver/relay setup | 2.0 s | Cache and report separately from a warm endpoint. |
-| QUIC connection and path selection | 3.0 s | Distinguish direct, relay, and no viable path. |
-| Bidirectional stream open | 1.0 s | Usually negligible after a healthy connection. |
-| Control request/response | 2.0 s | Includes host scheduling delay; preserve remaining journey deadline. |
-| App-server initialize | 4.0 s | Candidate reduction from upstream's generic 10 s; validate on slow hosts before adoption. |
-| Session attach and first benign RPC | 1.0 s | Detect a false-positive `Connected` state. |
+| Phase                                       | Initial cap | Notes                                                                                     |
+| ------------------------------------------- | ----------: | ----------------------------------------------------------------------------------------- |
+| Endpoint cold bind and resolver/relay setup |       2.0 s | Cache and report separately from a warm endpoint.                                         |
+| QUIC connection and path selection          |       3.0 s | Distinguish direct, relay, and no viable path.                                            |
+| Bidirectional stream open                   |       1.0 s | Usually negligible after a healthy connection.                                            |
+| Control request/response                    |       2.0 s | Includes host scheduling delay; preserve remaining journey deadline.                      |
+| App-server initialize                       |       4.0 s | Candidate reduction from upstream's generic 10 s; validate on slow hosts before adoption. |
+| Session attach and first benign RPC         |       1.0 s | Detect a false-positive `Connected` state.                                                |
 
 These are nested maxima, not additive entitlements. No phase may extend the journey's absolute deadline.
 
@@ -122,20 +122,20 @@ Recovery success must therefore mean more than “QUIC connected.” It must inc
 
 These are release gates for controlled direct and relay test cohorts, plus rolling field SLIs if privacy-reviewed collection is later added. Do not merge direct and relay distributions, cold and warm endpoints, or one-runtime and multi-runtime connects.
 
-| Journey / invariant | Start and stop signal | Proposed target | Required cohorts |
-| --- | --- | --- | --- |
-| Agent choices ready | Valid payload accepted -> selectable agent list rendered | Direct p50 <= 0.75 s, p95 <= 2.0 s, p99 <= 4.0 s; relay p50 <= 1.25 s, p95 <= 3.0 s, p99 <= 6.0 s; terminal error <= 8 s | iOS/Android; cold/warm endpoint; direct/relay |
-| Primary runtime ready | Connect tapped -> selected primary runtime attached and benign RPC succeeds | Direct p50 <= 1.0 s, p95 <= 2.5 s, p99 <= 5.0 s; relay p50 <= 1.75 s, p95 <= 4.0 s, p99 <= 8.0 s | 1, 3, and 7 selected runtimes; host idle/loaded |
-| Complete selected set | Connect tapped -> all selected runtimes ready or typed partial deadline | Three runtimes: direct p95 <= 4 s, relay p95 <= 7 s; hard deadline 8 s; every missing runtime named with a typed failure | Serial, concurrency 2, and unbounded experimental arms |
-| Foreground transport recovery | Recoverable live connection loss -> benign RPC succeeds on replacement | p95 <= 3 s direct, <= 5 s relay; p99 <= 8 s; >= 99.5% within 10 s and >= 99.9% within 30 s after a usable path exists | reset, blackhole, host restart, relay/direct path loss |
-| Resume recovery | app-active callback -> active thread authoritative and benign RPC succeeds | p95 <= 3 s direct, <= 5 s relay; p99 <= 8 s | 5, 14, 16, 30, and 120 s suspension; unchanged and changed path |
-| Replay correctness | Disconnect injection -> recovered snapshot | Zero missing or duplicate user-visible effects in the deterministic fault suite; zero blind mutation replays; drift reload always performs authoritative reconcile | Fresh, resumed, duplicate, reordered, and below-floor cursor cases |
-| Reconnect amplification | One network generation or lifecycle transition | One active reconnect per server; triggers coalesce; <= 3 dials/server in first 10 s; <= 3 aggregate remote dials concurrently until experiments justify another value | 1, 10, and 50 saved servers; synchronized clients |
-| Discovery first useful result | Discovery sheet opened -> first saved/cached or live server visible | Saved/cached p95 <= 100 ms; first live result p95 <= 1.5 s; complete/cancelled sweep <= 6 s/250 ms | empty/populated mDNS; /24; Tailscale absent/present |
-| Constrained-network discovery | Path becomes expensive, constrained, metered, or cellular | Zero automatic /24 probes; user-initiated scan must explain cost before probing | iOS Low Data Mode/cellular; Android metered/cellular |
-| Foreground idle network cost | Stable paired foreground idle for 60 min | <= 4 deliberate keepalive intervals/min/runtime and <= 100 KiB bidirectional keepalive traffic/hour/runtime; calibrate from packet capture | Wi-Fi/cellular; direct/relay; 1/3 runtimes |
-| Background idle work | Background with no active voice/session exception | Zero Remora-scheduled discovery or retry timers; at most one coalesced recovery burst after foregrounding | iOS suspension; Android Doze/App Standby |
-| Host service recovery | Native daemon terminated unexpectedly | Supervisor observes nonzero exit, restart attempt begins <= 2 s, health returns <= 5 s, and launcher reports the transition | launchd, systemd, Windows Service Control Manager |
+| Journey / invariant           | Start and stop signal                                                       | Proposed target                                                                                                                                                       | Required cohorts                                                   |
+| ----------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Agent choices ready           | Valid payload accepted -> selectable agent list rendered                    | Direct p50 <= 0.75 s, p95 <= 2.0 s, p99 <= 4.0 s; relay p50 <= 1.25 s, p95 <= 3.0 s, p99 <= 6.0 s; terminal error <= 8 s                                              | iOS/Android; cold/warm endpoint; direct/relay                      |
+| Primary runtime ready         | Connect tapped -> selected primary runtime attached and benign RPC succeeds | Direct p50 <= 1.0 s, p95 <= 2.5 s, p99 <= 5.0 s; relay p50 <= 1.75 s, p95 <= 4.0 s, p99 <= 8.0 s                                                                      | 1, 3, and 7 selected runtimes; host idle/loaded                    |
+| Complete selected set         | Connect tapped -> all selected runtimes ready or typed partial deadline     | Three runtimes: direct p95 <= 4 s, relay p95 <= 7 s; hard deadline 8 s; every missing runtime named with a typed failure                                              | Serial, concurrency 2, and unbounded experimental arms             |
+| Foreground transport recovery | Recoverable live connection loss -> benign RPC succeeds on replacement      | p95 <= 3 s direct, <= 5 s relay; p99 <= 8 s; >= 99.5% within 10 s and >= 99.9% within 30 s after a usable path exists                                                 | reset, blackhole, host restart, relay/direct path loss             |
+| Resume recovery               | app-active callback -> active thread authoritative and benign RPC succeeds  | p95 <= 3 s direct, <= 5 s relay; p99 <= 8 s                                                                                                                           | 5, 14, 16, 30, and 120 s suspension; unchanged and changed path    |
+| Replay correctness            | Disconnect injection -> recovered snapshot                                  | Zero missing or duplicate user-visible effects in the deterministic fault suite; zero blind mutation replays; drift reload always performs authoritative reconcile    | Fresh, resumed, duplicate, reordered, and below-floor cursor cases |
+| Reconnect amplification       | One network generation or lifecycle transition                              | One active reconnect per server; triggers coalesce; <= 3 dials/server in first 10 s; <= 3 aggregate remote dials concurrently until experiments justify another value | 1, 10, and 50 saved servers; synchronized clients                  |
+| Discovery first useful result | Discovery sheet opened -> first saved/cached or live server visible         | Saved/cached p95 <= 100 ms; first live result p95 <= 1.5 s; complete/cancelled sweep <= 6 s/250 ms                                                                    | empty/populated mDNS; /24; Tailscale absent/present                |
+| Constrained-network discovery | Path becomes expensive, constrained, metered, or cellular                   | Zero automatic /24 probes; user-initiated scan must explain cost before probing                                                                                       | iOS Low Data Mode/cellular; Android metered/cellular               |
+| Foreground idle network cost  | Stable paired foreground idle for 60 min                                    | <= 4 deliberate keepalive intervals/min/runtime and <= 100 KiB bidirectional keepalive traffic/hour/runtime; calibrate from packet capture                            | Wi-Fi/cellular; direct/relay; 1/3 runtimes                         |
+| Background idle work          | Background with no active voice/session exception                           | Zero Remora-scheduled discovery or retry timers; at most one coalesced recovery burst after foregrounding                                                             | iOS suspension; Android Doze/App Standby                           |
+| Host service recovery         | Native daemon terminated unexpectedly                                       | Supervisor observes nonzero exit, restart attempt begins <= 2 s, health returns <= 5 s, and launcher reports the transition                                           | launchd, systemd, Windows Service Control Manager                  |
 
 For availability percentages, the denominator is an attempt that has a usable network path and valid credentials. Authentication rejection, explicit protocol incompatibility, user cancellation, and an unavailable host are separately counted outcomes, not hidden exclusions.
 
@@ -169,22 +169,22 @@ Add an internal, narrow `ConnectionAttemptTrace` emitted as structured tracing f
 
 Recommended fields:
 
-| Field | Shape |
-| --- | --- |
-| `correlation_id` | Random per user journey; copied across platform, Rust, and host logs |
-| `server_key` | Ephemeral keyed hash for grouping within one install, not raw identity |
-| `runtime_kind` | Typed runtime, or `control` for list/restart operations |
-| `transport` / `route` | Alleycat, direct WebSocket, SSH, slingshot; direct, relay, unknown |
-| `trigger` | pair, user-connect, request-failure, event-EOF, foreground, long-resume, network-generation, manual |
-| `network_generation` | Monotonic local counter after path debounce |
-| `attempt` / `retry_budget_remaining` | Integers |
-| `phase` | endpoint-bind, resolve, quic-connect, stream-open, control-write, control-read, app-initialize, attach, replay, reconcile, first-RPC |
-| `phase_elapsed_ms` / `journey_elapsed_ms` | Monotonic durations |
-| `outcome` | success, partial, cancelled, coalesced, deadline, transient, permanent, uncertain |
-| `error_kind` | Typed low-cardinality class; keep raw details in local debug logs only |
-| `resume_kind` / `events_replayed` | fresh, resumed, drift-reload; count |
-| `selected_count` / `ready_count` | Integers for multiplexed connection |
-| `active_dial_count` | Gauge sampled at attempt start/end |
+| Field                                     | Shape                                                                                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `correlation_id`                          | Random per user journey; copied across platform, Rust, and host logs                                                                 |
+| `server_key`                              | Ephemeral keyed hash for grouping within one install, not raw identity                                                               |
+| `runtime_kind`                            | Typed runtime, or `control` for list/restart operations                                                                              |
+| `transport` / `route`                     | Alleycat, direct WebSocket, SSH, slingshot; direct, relay, unknown                                                                   |
+| `trigger`                                 | pair, user-connect, request-failure, event-EOF, foreground, long-resume, network-generation, manual                                  |
+| `network_generation`                      | Monotonic local counter after path debounce                                                                                          |
+| `attempt` / `retry_budget_remaining`      | Integers                                                                                                                             |
+| `phase`                                   | endpoint-bind, resolve, quic-connect, stream-open, control-write, control-read, app-initialize, attach, replay, reconcile, first-RPC |
+| `phase_elapsed_ms` / `journey_elapsed_ms` | Monotonic durations                                                                                                                  |
+| `outcome`                                 | success, partial, cancelled, coalesced, deadline, transient, permanent, uncertain                                                    |
+| `error_kind`                              | Typed low-cardinality class; keep raw details in local debug logs only                                                               |
+| `resume_kind` / `events_replayed`         | fresh, resumed, drift-reload; count                                                                                                  |
+| `selected_count` / `ready_count`          | Integers for multiplexed connection                                                                                                  |
+| `active_dial_count`                       | Gauge sampled at attempt start/end                                                                                                   |
 
 Use `std::time::Instant` inside Rust and a monotonic clock on each platform. Wall-clock timestamps may be attached only for log ordering. Carry the journey ID through the UniFFI call and include it in host control messages when the protocol can evolve compatibly.
 
@@ -216,14 +216,14 @@ All lifecycle, reachability, request-failure, EOF, and manual triggers feed this
 
 Classify before retrying:
 
-| Class | Examples | Policy |
-| --- | --- | --- |
-| Permanent until user/config changes | Invalid token, protocol mismatch, malformed payload, unsupported runtime, trust/auth rejection | Stop immediately; surface a typed action. |
-| Network unavailable | No validated path, iOS path unsatisfied, Android network unvalidated/Doze | Do not burn attempts; wait for a new network generation or foreground. |
-| Transient transport | Reset, EOF, relay failure, timeout, path abandonment | Retry within budget using jitter. |
-| Load shed | Host busy, explicit retry-after | Honor server delay plus seeded jitter. |
-| Ambiguous mutation | Connection lost after send but before response | Do not replay blindly; query/reconcile using the stable local request ID. |
-| Application rejection | JSON-RPC method/validation error | Return to caller; no transport reconnect. |
+| Class                               | Examples                                                                                       | Policy                                                                    |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Permanent until user/config changes | Invalid token, protocol mismatch, malformed payload, unsupported runtime, trust/auth rejection | Stop immediately; surface a typed action.                                 |
+| Network unavailable                 | No validated path, iOS path unsatisfied, Android network unvalidated/Doze                      | Do not burn attempts; wait for a new network generation or foreground.    |
+| Transient transport                 | Reset, EOF, relay failure, timeout, path abandonment                                           | Retry within budget using jitter.                                         |
+| Load shed                           | Host busy, explicit retry-after                                                                | Honor server delay plus seeded jitter.                                    |
+| Ambiguous mutation                  | Connection lost after send but before response                                                 | Do not replay blindly; query/reconcile using the stable local request ID. |
+| Application rejection               | JSON-RPC method/validation error                                                               | Return to caller; no transport reconnect.                                 |
 
 ### Backoff candidates
 
@@ -241,12 +241,12 @@ Seed test jitter from `(test_seed, server_key, network_generation)` so simulatio
 
 Compare four arms rather than adopting constants by intuition:
 
-| Arm | Delay policy | Expected tradeoff |
-| --- | --- | --- |
-| Current | 1 s fixed, five attempts | Simple, but correlated; attempts burn while offline. |
-| Full jitter | `U(0, min(cap, base * 2^n))` | Low peak load and fast median; may occasionally retry nearly immediately. |
-| Equal jitter | `cap/2 + U(0, cap/2)` | Higher minimum delay and slower median; lower chance of adjacent retries. |
-| Decorrelated jitter | `U(base, previous * 3)` capped | Responsive to variable outages, but state and tails are less intuitive. |
+| Arm                 | Delay policy                   | Expected tradeoff                                                         |
+| ------------------- | ------------------------------ | ------------------------------------------------------------------------- |
+| Current             | 1 s fixed, five attempts       | Simple, but correlated; attempts burn while offline.                      |
+| Full jitter         | `U(0, min(cap, base * 2^n))`   | Low peak load and fast median; may occasionally retry nearly immediately. |
+| Equal jitter        | `cap/2 + U(0, cap/2)`          | Higher minimum delay and slower median; lower chance of adjacent retries. |
+| Decorrelated jitter | `U(base, previous * 3)` capped | Responsive to variable outages, but state and tails are less intuitive.   |
 
 For each arm, simulate 1, 10, 1,000, and 50,000 clients recovering from 1 s, 5 s, 30 s, and 5 min outages. Compare median/p99 time to ready, total dials, peak dials per 100 ms, host CPU, relay errors, and energy proxy (radio-active windows). Repeat with 1, 3, 10, and 50 saved servers per client and with a retry-after response. The winning policy must meet the recovery SLO without concentrating work.
 
@@ -319,38 +319,38 @@ They validate happy-path legacy pair decisions, one reconnect-and-retry case, an
 
 Every row must run for iOS and Android unless marked Rust-only or host-package-only. A pass includes the expected state invariant as well as latency; “eventually reconnects” is insufficient.
 
-| ID | Journey / injected condition | Deterministic injection | Expected invariant | Primary measurements |
-| --- | --- | --- | --- | --- |
-| P1 | Valid payload, warm endpoint, direct path | Loopback host; no faults | One list request; choices match host; no secret fields logged | Pair-to-list phase histogram, connections opened |
-| P2 | Cold endpoint | Fresh process/key loaded vs fresh key | Endpoint identity persistence works; cold bind separately attributed | Bind, resolve, direct/relay selection, total time |
-| P3 | Relay-only | Host/direct route blocked; fixed relay | Ready within relay SLO; route labeled relay | QUIC/connect phases, relay bytes, errors |
-| P4 | Host accepts list then changes availability | Versioned agent snapshot; selected runtime removed before Connect | Typed partial/permanent result; no indefinite stale use | Extra list calls, error latency, UI outcome |
-| P5 | 1/3/7 selected runtimes | Host adds fixed per-runtime delay | First-ready/all-ready semantics preserved | Serial vs bounded-2 vs unbounded latency and peak dials |
-| P6 | One runtime fails, others succeed | Reset one named runtime during initialize | Server can become usable; missing runtime named; selection intent retained | Ready count, partial deadline, later recovery |
-| T1 | QUIC connect blackhole | Never complete scripted connect | Absolute journey deadline wins; task/resources released | Deadline accuracy, leaked tasks/sockets |
-| T2 | Stream opens; control response never arrives | Host reads request and withholds response | Control deadline fires; failure typed transient | Phase timeout and retry schedule |
-| T3 | Oversized/malformed frame | Host emits invalid length/JSON | Immediate protocol failure; bounded allocation; no retry storm | Error class, RSS peak, attempts |
-| T4 | Protocol or token rejection | Fixed mismatch/invalid token | Permanent failure; zero automatic retries | Attempts, user action surfaced |
-| R1 | Foreground stream EOF | Drop event stream at seeded sequence | One reconnect owner; replay from exact last sequence | Ready time, dials, replay count |
-| R2 | Reset after request applied, before response | Host persists mutation then resets | No blind replay; authoritative reconcile yields one effect | Mutation apply count, uncertain outcome duration |
-| R3 | Duplicate/late event | Duplicate and reorder seeded sequences | Reducer remains consistent; no duplicate UI effect | Dedup decisions, final snapshot hash |
-| R4 | Replay cursor below host floor | Host returns drift-reload | Mandatory authoritative reload before recovered | Drift count, reconcile time, snapshot hash |
-| R5 | Host restart | Kill daemon for 1/5/30 s | Backoff follows seeded schedule; recovery meets SLO after host ready | Attempts, peak dials, time from host-ready |
-| R6 | Fifty clients resume together | Virtual clients, same outage, distinct seeds | No fixed-delay synchronization; host remains responsive | Dials/100 ms, CPU, p99 recovery |
-| L1 | Suspend 5/14/16/30/120 s, path unchanged | Platform lifecycle harness | Monotonic threshold; <= 1 recovery journey | Close/migrate choice, triggers coalesced, ready time |
-| L2 | Wi-Fi -> cellular/VPN/Tailscale | Network-generation script and device handoff | Old generation cancelled/joined; one immediate attempt on new usable path | Callback-to-ready, route changes, dials |
-| L3 | Offline 30 s, then online | Unsatisfied/unvalidated path | Zero polling attempts while offline; immediate event-gated attempt | Attempts while offline, path-to-ready |
-| L4 | Expensive/constrained/metered path | Device setting or injected fingerprint | No automatic subnet scan; policy visible in trace | Probes, bytes, radio energy |
-| L5 | Android Doze/App Standby | Official `adb` commands | No assumption persistent socket survives; one coalesced foreground recovery | Background attempts, resume ready, energy |
-| D1 | Discovery on populated /24 | Deterministic 253-host map, three ports | First useful result streams early; peak probes within chosen budget | First/complete result, 759 max candidates, peak sockets |
-| D2 | Discovery cancelled on sheet close | Cancel at 100/500/2,000 ms | Native scan stops <= 250 ms; no detached probe tail | Post-cancel sockets/bytes/tasks |
-| D3 | Tailscale absent/blackholed | Local API endpoints fail/blackhole | Source deadline does not hold complete scan; notice policy correct | Per-source and complete duration |
-| D4 | Android DNS blocks `8.8.8.8` | Firewall only public resolver | Failure is typed; system/private DNS alternative arm measured | Resolver time, connect success, privacy/network compatibility |
-| E1 | Foreground idle 1/3 runtimes | 60-minute physical-device run | Keepalive cadence/traffic meets budget; no discovery | Packets, bytes, PowerMetric/Instruments, thermal |
-| E2 | Background idle, no voice | 60-minute background/Doze run | No app retry/discovery timers; clean foreground recovery | Wakeups, bytes, attempts, resume ready |
-| H1 | Host daemon crash | Exit 42 after ready | OS supervisor sees failure and restarts; health reports generation | Exit visibility, restart and ready time |
-| H2 | Upgrade during active sessions | Atomic binary replacement + service restart | No npm-cache path dependency; version changes once; clients recover | Downtime, rollback, version/health output |
-| H3 | Package mismatch / optional package omitted | Root/platform version mismatch; `--omit=optional` | Fast actionable install/start error; never download executable in lifecycle script | Error clarity, exit code, network activity |
+| ID  | Journey / injected condition                 | Deterministic injection                                           | Expected invariant                                                                 | Primary measurements                                          |
+| --- | -------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| P1  | Valid payload, warm endpoint, direct path    | Loopback host; no faults                                          | One list request; choices match host; no secret fields logged                      | Pair-to-list phase histogram, connections opened              |
+| P2  | Cold endpoint                                | Fresh process/key loaded vs fresh key                             | Endpoint identity persistence works; cold bind separately attributed               | Bind, resolve, direct/relay selection, total time             |
+| P3  | Relay-only                                   | Host/direct route blocked; fixed relay                            | Ready within relay SLO; route labeled relay                                        | QUIC/connect phases, relay bytes, errors                      |
+| P4  | Host accepts list then changes availability  | Versioned agent snapshot; selected runtime removed before Connect | Typed partial/permanent result; no indefinite stale use                            | Extra list calls, error latency, UI outcome                   |
+| P5  | 1/3/7 selected runtimes                      | Host adds fixed per-runtime delay                                 | First-ready/all-ready semantics preserved                                          | Serial vs bounded-2 vs unbounded latency and peak dials       |
+| P6  | One runtime fails, others succeed            | Reset one named runtime during initialize                         | Server can become usable; missing runtime named; selection intent retained         | Ready count, partial deadline, later recovery                 |
+| T1  | QUIC connect blackhole                       | Never complete scripted connect                                   | Absolute journey deadline wins; task/resources released                            | Deadline accuracy, leaked tasks/sockets                       |
+| T2  | Stream opens; control response never arrives | Host reads request and withholds response                         | Control deadline fires; failure typed transient                                    | Phase timeout and retry schedule                              |
+| T3  | Oversized/malformed frame                    | Host emits invalid length/JSON                                    | Immediate protocol failure; bounded allocation; no retry storm                     | Error class, RSS peak, attempts                               |
+| T4  | Protocol or token rejection                  | Fixed mismatch/invalid token                                      | Permanent failure; zero automatic retries                                          | Attempts, user action surfaced                                |
+| R1  | Foreground stream EOF                        | Drop event stream at seeded sequence                              | One reconnect owner; replay from exact last sequence                               | Ready time, dials, replay count                               |
+| R2  | Reset after request applied, before response | Host persists mutation then resets                                | No blind replay; authoritative reconcile yields one effect                         | Mutation apply count, uncertain outcome duration              |
+| R3  | Duplicate/late event                         | Duplicate and reorder seeded sequences                            | Reducer remains consistent; no duplicate UI effect                                 | Dedup decisions, final snapshot hash                          |
+| R4  | Replay cursor below host floor               | Host returns drift-reload                                         | Mandatory authoritative reload before recovered                                    | Drift count, reconcile time, snapshot hash                    |
+| R5  | Host restart                                 | Kill daemon for 1/5/30 s                                          | Backoff follows seeded schedule; recovery meets SLO after host ready               | Attempts, peak dials, time from host-ready                    |
+| R6  | Fifty clients resume together                | Virtual clients, same outage, distinct seeds                      | No fixed-delay synchronization; host remains responsive                            | Dials/100 ms, CPU, p99 recovery                               |
+| L1  | Suspend 5/14/16/30/120 s, path unchanged     | Platform lifecycle harness                                        | Monotonic threshold; <= 1 recovery journey                                         | Close/migrate choice, triggers coalesced, ready time          |
+| L2  | Wi-Fi -> cellular/VPN/Tailscale              | Network-generation script and device handoff                      | Old generation cancelled/joined; one immediate attempt on new usable path          | Callback-to-ready, route changes, dials                       |
+| L3  | Offline 30 s, then online                    | Unsatisfied/unvalidated path                                      | Zero polling attempts while offline; immediate event-gated attempt                 | Attempts while offline, path-to-ready                         |
+| L4  | Expensive/constrained/metered path           | Device setting or injected fingerprint                            | No automatic subnet scan; policy visible in trace                                  | Probes, bytes, radio energy                                   |
+| L5  | Android Doze/App Standby                     | Official `adb` commands                                           | No assumption persistent socket survives; one coalesced foreground recovery        | Background attempts, resume ready, energy                     |
+| D1  | Discovery on populated /24                   | Deterministic 253-host map, three ports                           | First useful result streams early; peak probes within chosen budget                | First/complete result, 759 max candidates, peak sockets       |
+| D2  | Discovery cancelled on sheet close           | Cancel at 100/500/2,000 ms                                        | Native scan stops <= 250 ms; no detached probe tail                                | Post-cancel sockets/bytes/tasks                               |
+| D3  | Tailscale absent/blackholed                  | Local API endpoints fail/blackhole                                | Source deadline does not hold complete scan; notice policy correct                 | Per-source and complete duration                              |
+| D4  | Android DNS blocks `8.8.8.8`                 | Firewall only public resolver                                     | Failure is typed; system/private DNS alternative arm measured                      | Resolver time, connect success, privacy/network compatibility |
+| E1  | Foreground idle 1/3 runtimes                 | 60-minute physical-device run                                     | Keepalive cadence/traffic meets budget; no discovery                               | Packets, bytes, PowerMetric/Instruments, thermal              |
+| E2  | Background idle, no voice                    | 60-minute background/Doze run                                     | No app retry/discovery timers; clean foreground recovery                           | Wakeups, bytes, attempts, resume ready                        |
+| H1  | Host daemon crash                            | Exit 42 after ready                                               | OS supervisor sees failure and restarts; health reports generation                 | Exit visibility, restart and ready time                       |
+| H2  | Upgrade during active sessions               | Atomic binary replacement + service restart                       | No npm-cache path dependency; version changes once; clients recover                | Downtime, rollback, version/health output                     |
+| H3  | Package mismatch / optional package omitted  | Root/platform version mismatch; `--omit=optional`                 | Fast actionable install/start error; never download executable in lifecycle script | Error clarity, exit code, network activity                    |
 
 ## Discovery and battery constraints
 
@@ -377,11 +377,11 @@ A disposable harness under `/tmp` compared three trivial loopback daemons on thi
 
 Environment: Darwin 25.5.0 arm64, Mac17,6, 64 GiB; Node v24.13.0; npm 11.18.0; rustc 1.97.0. The Rust executable was compiled directly with `rustc`. No npm install, protocol stack, TLS, logging, persistence, or production dependencies were included.
 
-| Variant | Ready median | Ready p95 | Idle RSS median | Idle RSS p95 | Crash visible to launcher caller? |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Native Rust daemon, direct | 3.35 ms | 6.74 ms | 1,696 KiB | 1,696 KiB | Yes, when the supervisor owns it |
-| Long-lived Node daemon | 22.38 ms | 24.67 ms | 46,672 KiB | 46,784 KiB | Yes; foreground process exited 42 |
-| Node/npm-style launcher that detaches Rust | 22.65 ms | 25.98 ms | 1,696 KiB resident child | 1,696 KiB | No; launcher exited 0 before child exited 42 |
+| Variant                                    | Ready median | Ready p95 |          Idle RSS median | Idle RSS p95 | Crash visible to launcher caller?            |
+| ------------------------------------------ | -----------: | --------: | -----------------------: | -----------: | -------------------------------------------- |
+| Native Rust daemon, direct                 |      3.35 ms |   6.74 ms |                1,696 KiB |    1,696 KiB | Yes, when the supervisor owns it             |
+| Long-lived Node daemon                     |     22.38 ms |  24.67 ms |               46,672 KiB |   46,784 KiB | Yes; foreground process exited 42            |
+| Node/npm-style launcher that detaches Rust |     22.65 ms |  25.98 ms | 1,696 KiB resident child |    1,696 KiB | No; launcher exited 0 before child exited 42 |
 
 Directional result:
 

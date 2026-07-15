@@ -138,7 +138,7 @@ design statement is not counted as an implemented mitigation.
 | --- | --- | --- |
 | Active remote pairing | `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:22-33` fixes protocol v1 and ALPN `alleycat/1`; the parsed payload contains a raw `token`. `alleycat.rs:301-320` sends it on list, restart, and connect. | Iroh authenticates/encrypts the peer route, but authorization is one reusable host-wide bearer secret with no scope, subject key, expiry, or per-device revoke. |
 | Pairing input | iOS accepts QR or clipboard JSON and shows a token-bearing example at `apps/ios/Sources/Remora/Views/RemotePairingSheet.swift:129-221`; Android does the same at `apps/android/app/src/main/java/com/remora/android/ui/discovery/RemotePairingSheet.kt:313-325`. | QR images, clipboard history, screen capture, logs, or a malicious app with clipboard access can disclose full host authority. |
-| Host implementation | The pinned Alleycat host compares one global token before list/restart/connect in [`host.rs`](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L225); its pair payload contains that token in [`host.rs`](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L238-L249). | Rotating the global token invalidates all future clients, but there is no device-scoped grant or selective revocation. Existing streams are not a durable revocation boundary. |
+| Host implementation | The pinned Alleycat host compares one global token before list/restart/connect in [`host.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L225); its pair payload contains that token in [`host.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L238-L249). | Rotating the global token invalidates all future clients, but there is no device-scoped grant or selective revocation. Existing streams are not a durable revocation boundary. |
 | Iroh path | `alleycat.rs:633-692` binds a persisted endpoint key and connects to a known endpoint ID over the selected ALPN; `alleycat.rs:695-744` bounds JSON frames to 1 MiB. | The transport has peer authentication, encryption, and a useful frame bound. The stable app-wide device endpoint can also correlate the same mobile device across hosts. |
 | Dormant proximity pairing | `shared/rust-bridge/codex-mobile-client/src/pair/mod.rs:283-343` binds `0.0.0.0`, publishes Bonjour data, and accepts WebSocket clients. `pair/mod.rs:236-265` returns a `ws://` URL after a hello; `pair/mod.rs:45-71` trusts client-supplied distance. No handwritten Swift/Kotlin caller was found. | This FFI-reachable path is not suitable as a v2 fallback: it lacks channel encryption, peer authentication, replay protection, rate limits, and cryptographic proximity proof. Its text frames and event queue are unbounded. |
 | iOS secret storage | `apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift:50-149` stores the token as `WhenUnlockedThisDeviceOnly` and the Iroh key as `AfterFirstUnlockThisDeviceOnly`. | At-rest protection and non-migrating accessibility classes are good foundations. Token persistence failure is logged but pairing still succeeds at `RemotePairingSheet.swift:449-473`, creating a false-success/recovery inconsistency. |
@@ -148,8 +148,8 @@ design statement is not counted as an implemented mitigation.
 | Remote approvals | `types/server_requests.rs:225-272` knows `server_id`, thread, turn, item, command/path, and grant root. Yet `mobile_client/user_input.rs:300-343`, `mobile_client/event_loop.rs:401-409`, and `store/reducer.rs:1078-1089,1890-1909` resolve or de-duplicate approvals by `request_id` alone. | Identical request IDs from different hosts or harnesses can collide, suppress, or resolve the wrong pending approval. The response is not bound to a connection epoch, harness, challenge nonce, or expiry. |
 | Reconnect retry | `shared/rust-bridge/codex-mobile-client/src/session/connection.rs:1616-1649` clones any JSON-RPC request and retries it after a transport failure. | If the first mutating request reached the host but its reply was lost, reconnect can execute the mutation twice. There is no local read/mutation classification or receipt requirement at this layer. |
 | Remote file content | `ffi/client/remote_content.rs:139-190,301-324` reads a caller-supplied remote path by launching a one-off shell/PowerShell command, with a 20 MB command-output cap but no thread-root confinement in that helper. | Exposing this helper as a Link file-preview primitive would turn a read grant into arbitrary host-file disclosure and shell-dependent policy. A new root-bound typed API is required instead. |
-| Harness policy | The pinned Alleycat host rejects unknown/disabled agent names, but current defaults include broad harness options such as Claude permission bypass and Amp allow-all in [`config.rs`](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L107-L168), plus an enabled shell harness in [`config.rs`](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L263-L288). | Name allowlisting is useful but insufficient. Link v2 must not inherit permissive defaults, a generic shell, arbitrary path/arguments/environment, or remote install authority. |
-| Dependency update | `shared/rust-bridge/Cargo.toml:28-31` depends on Alleycat `main`; `tools/scripts/update-alleycat-main.sh:26-48` resolves the branch tip and updates the lockfile unless an environment variable disables it. | A routine or release build can ingest new process-launch code from a mutable branch. The lockfile pins a build, but normal build orchestration must not refresh it without review. |
+| Harness policy | The pinned Alleycat host rejects unknown/disabled agent names, but current defaults include broad harness options such as Claude permission bypass and Amp allow-all in [`config.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L107-L168), plus an enabled shell harness in [`config.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L263-L288). | Name allowlisting is useful but insufficient. Link v2 must not inherit permissive defaults, a generic shell, arbitrary path/arguments/environment, or remote install authority. |
+| Dependency and protocol source | `shared/rust-bridge/Cargo.toml:28-31` pins all four Alleycat crates to commit `3c6dfe…` in Aman's fork. Normal build/check/test lanes consume the pin unchanged (`Makefile:356-378`). Updating is the explicit `make update-remora-link REV=<40-sha>` flow; `tools/scripts/update-remora-link.sh:10-59` validates the revision, refuses dirty Cargo inputs, updates exact packages, and restores manifest/lock on failure. Remora's remote-host wire remains handwritten in `alleycat.rs`, not type-shared with those crates. | Build-time branch drift is mitigated. Residual risk is a reviewed-but-incompatible or compromised pin/host update, plus security semantic drift between the separately implemented host protocol and Remora client adapter. |
 
 The current Iroh transport is therefore not "insecure transport." The central
 gap is that transport authentication is followed by bearer-token authorization
@@ -264,7 +264,7 @@ flowchart LR
 | Transport credentials hidden behind terminal handles | Authenticate Alleycat/SSH terminal backends. | Never project token/auth values into `AppStore`, UniFFI snapshots, logs, analytics, or UI; use opaque non-secret transport references. |
 | Audit trail | Supports incident detection and revocation investigation. | Secret-free, integrity-protected, bounded retention, reliable timestamps/correlation IDs. |
 | Host compute, device battery, relay quota, and harness slots | Availability and cost. | Authentication before expensive work, backpressure, quotas, timeouts, collapse, and rate limits. |
-| Dependency lock and release artifact | Determines code with host process authority. | Reviewed immutable revisions, provenance, reproducible CI input, no implicit branch-tip refresh. |
+| Dependency lock, protocol fixtures, and release artifact | Determine code with host process authority and whether host/client security semantics agree. | Reviewed immutable revisions, provenance, reproducible CI input, compatibility fixtures against the exact host artifact, and no implicit dependency refresh. |
 
 ## Attacker model
 
@@ -446,16 +446,23 @@ before final success or explicitly roll back/revoke the tentative host grant;
 surface `NeedsRepair` rather than success; keep host-side device management as
 the authoritative recovery path.
 
-### AP-10 — Mutable dependency tip compromises the host launcher
+### AP-10 — Pinned host/client protocol sources drift after an update
 
-1. A normal build resolves a new Alleycat `main` commit.
-2. A compromised upstream branch or account introduces grant bypass or process
-   launch code.
-3. CI/release builds and ships it without a deliberate dependency review.
+1. An explicit pin update changes bridge/harness behavior or the separately
+   deployed host daemon changes its remote-host protocol.
+2. The dependency build succeeds, but Remora's handwritten `alleycat.rs` wire is
+   not type-shared with the host implementation.
+3. Host and client interpret authentication, scope, replay, revocation, or
+   fallback fields differently, or a compromised reviewed revision alters
+   process-launch policy.
+4. A normal compatibility path becomes an authorization bypass, unsafe
+   downgrade, or production denial after rollout.
 
-**Break the path:** pin reviewed immutable revisions/releases, require explicit
-update PRs and lockfile diff review, verify provenance/checksums, and prohibit
-network branch-tip refresh during normal CI/release builds.
+**Break the path:** retain the exact revision pin and explicit update command;
+review manifest/lock and host source together; require provenance for the host
+artifact; run captured protocol/security fixtures against that exact artifact;
+fail closed on unknown fields/versions; and stage host/client migration without
+silent fallback.
 
 ## Threat register
 
@@ -471,7 +478,7 @@ network branch-tip refresh during normal CI/release builds.
 | TM-008 | Push spoof/reorder/drop/duplicate causes unsafe state or resource drain | Approval freshness, battery, privacy | Push token/service compromise or normal best-effort behavior | Stale UI, denial, metadata disclosure; control if push treated as authority | No push implementation today | Opaque schema; no content/action; expiry/sequence/collapse; rate limits; authenticated full reconcile; secret push-token handling | high |
 | TM-009 | Device key, grant, SSH secret, or push token extraction/backup leakage | Device/host identity and credentials | Device malware, backup restore, exportable key, logging/crash dump | Impersonation and account compromise | iOS device-only Keychain classes; Android encrypted preferences | Non-exportable Keychain/Keystore keys; split background/interactive keys; backup exclusion; no logs; atomic persistence; wipe local records on forget | high |
 | TM-010 | SSH MITM, cleartext downgrade, or transport-specific broader privileges | Sessions, credentials, host actions | Unknown/changed host key accepted or fallback to `ws://`/HTTP | Credential theft and unauthorized host control | Shared SHA-256 host pin validation | Fail closed on changed/unknown key except explicit verified enrollment; prohibit cleartext Link; identical grants/policy over SSH/Iroh; pin survives route | high |
-| TM-011 | Mutable dependency or harness binary substitution | Link verifier and launcher integrity | Upstream/build/host filesystem compromise | Grant bypass or host code execution | Cargo.lock pins current resolved commit | Immutable reviewed dependency inputs; update PRs; artifact provenance; binary ownership/mode/integrity checks; no normal branch refresh | high |
+| TM-011 | Pinned dependency compromise, host/client protocol drift, or harness binary substitution | Link verifier, protocol, and launcher integrity | Compromised/review-defective explicit update, separately deployed host change, or host filesystem compromise | Grant/replay/scope mismatch, authorization bypass, denial, or host code execution | All four crates use one exact fork revision; normal lanes do not advance it; explicit update validates the SHA and restores Cargo inputs on failure | Joint host/client security review; exact-artifact protocol fixtures; staged compatibility gate; artifact provenance; binary ownership/mode/integrity checks; no silent version fallback | high |
 | TM-012 | Frame, connection, event, process, or transcript exhaustion | Host/device/relay availability | Any reachable or paired attacker floods work | Crash, battery/cost drain, starvation | Alleycat frames capped at 1 MiB | Pre-auth connection limits; bounded queues; per-grant/session quotas; backpressure; launch limits; timeouts; bounded transcript retention | medium |
 | TM-013 | Stable device endpoint enables cross-host correlation | Device privacy | Two hosts/relay logs compare one app-wide EndpointId | Linkage of user/device activity | Stable endpoint supports reconnect | Prefer per-host device keys/endpoint identities or a privacy-preserving binding; disclose residual relay metadata; rotate on unpair | medium |
 | TM-014 | Revocation or secure-state rollback after crash/restore | Grant integrity and incident response | Corrupt storage, backup restore, clock rollback, concurrent enroll/revoke | Reanimated grant or false UI state | Platform encrypted stores | Monotonic host policy epoch, authenticated versioned records, atomic fsync/replace, tombstone-first revoke, deterministic recovery matrix | high |
@@ -633,9 +640,14 @@ constraints { session_limit, approval_modes, terminal_access, ... }
 
 ### 8. Supply chain and audit
 
-- Release and CI builds consume immutable reviewed dependency revisions. The
-  `update-alleycat-main.sh` behavior belongs in an explicit dependency-update
-  workflow, not normal build initialization.
+- Preserve the current exact-revision dependency model. Normal build/check/test
+  lanes must consume the committed pin without network-driven revision changes;
+  only the explicit `make update-remora-link REV=<sha>` workflow may update it.
+- Treat a pin update as a host/client protocol change even when Rust compilation
+  succeeds. Review host daemon, bridge/harness code, manifest, and lockfile
+  together; verify artifact provenance; and run security/compatibility fixtures
+  captured from the exact host revision because the Remora wire types are
+  handwritten rather than type-shared.
 - Record enrollment, grant issuance, policy changes, launch, approval decision,
   revocation, rejection, dependency version, and security-relevant recovery with
   opaque correlation IDs. Do not record secret or content fields.
@@ -685,7 +697,7 @@ These are testable security properties, not implementation suggestions.
 | V-11 | SSH and Iroh accept the same grant and enforce the same capability/revocation policy. | Transport-conformance suite plus unknown/changed SSH key, direct-to-relay migration, and cleartext/downgrade rejection. |
 | V-12 | Parser and runtime work are bounded before and after authentication. | Fuzz invite/grant/harness frames; oversized/deep/Unicode payloads; connection/event/process floods; verify memory/CPU/process limits and recovery. |
 | V-13 | iOS and Android expose one shared Rust-owned authorization/reconciliation state machine. | Binding parity tests and repository guard tests that reject native grant parsing, status-string policy, or duplicated reducer logic. |
-| V-14 | Release inputs are immutable and auditable. | CI fails if a normal build changes `Cargo.lock`, resolves a branch tip, lacks provenance, or packages an unreviewed harness/dependency revision. |
+| V-14 | Release inputs are immutable, auditable, and protocol-compatible with the deployed host. | CI fails if a normal build changes Cargo inputs, if the explicit update lacks review/provenance, or if exact-artifact host/client fixtures fail authentication, grants, replay, revocation, version rejection, or harness policy. |
 | V-15 | No bearer token, SSH auth, private key, grant proof secret, or push token crosses an observable snapshot/UniFFI/log boundary. | Type-level/API review plus serialization/debug/log scanning and repository guard tests for credential-bearing fields. |
 | V-16 | A transport failure cannot cause an ambiguous mutation to execute twice. | Fault-inject before send, after host commit, before response, and during reconnect; verify read-only retry, transactional command-ID receipts, or typed unknown outcome plus reconcile. |
 | V-17 | Remote file reads cannot escape the exact thread workspace or cross context. | Absolute/traversal/mixed-separator/symlink race/Unicode/NUL/non-file/binary/oversize tests across POSIX and Windows semantics; wrong host/server/thread/root tests. |
@@ -735,9 +747,11 @@ Treat each item as a release blocker for Remora Link v2.
     replay handling, approval identity, reconciliation, and status normalization
     stay in Rust. Swift/Kotlin own only UI, secure-storage adapters, permissions,
     and platform notification plumbing.
-13. **NR-13 — Normal builds are immutable.** CI/release and ordinary local
-    builds do not refresh dependency branch tips or install harnesses. Updates
-    are explicit, reviewed, and lockfile-pinned.
+13. **NR-13 — Normal builds are immutable and pin updates prove compatibility.**
+    CI/release and ordinary local builds consume the committed exact revision
+    and do not install harnesses. Updates remain explicit and reviewed, and
+    cannot ship until the separately implemented host/client protocol passes
+    exact-artifact security fixtures without a silent fallback.
 14. **NR-14 — Bounds remain enforced.** Every invite, grant, frame, event queue,
     transcript, reconnect loop, push rate, concurrent connection, harness
     process, and approval backlog has a tested limit and backpressure behavior.
@@ -781,7 +795,7 @@ control does not lower the current rating.
 | Retry and remote content | `src/session/connection.rs`, `src/ffi/client/remote_content.rs` | Method safety classification, mutation receipts/unknown outcomes, and a new workspace-root-bound typed file-read capability without shell fallback. |
 | SSH | `src/terminal/ssh_known_hosts.rs`, `src/terminal/ssh/connect.rs`, platform trust/credential adapters | Preserve fail-closed host pins, unify grant policy, avoid cleartext/tunnel privilege drift, protect credentials. |
 | Harness/process launch | Future Link daemon plus pinned Alleycat bridge-core/host code | Typed operator allowlist, trusted executable resolution, safe fixed launch policy, no shell/install/bypass, isolation and quotas. |
-| Dependency workflow | `shared/rust-bridge/Cargo.toml`, `Cargo.lock`, `tools/scripts/update-alleycat-main.sh` | Immutable release inputs, explicit reviewed update workflow, provenance and lockfile enforcement. |
+| Dependency and protocol update workflow | `shared/rust-bridge/Cargo.toml`, `Cargo.lock`, `Makefile:352-378`, `tools/scripts/update-remora-link.sh`, handwritten `src/alleycat.rs` wire | Preserve the exact pin and rollback-safe explicit updater; add joint host/client review, exact-artifact protocol/security fixtures, provenance, and staged compatibility enforcement. |
 | Hosted relay/push | Not present in repository (`CONTEXT.md:19-21`) | Separate service threat model before implementation: tenant isolation, routing-token lifecycle, metadata retention, abuse/rate limiting, push credential protection, incident response. |
 
 ## Residual risk and acceptance criteria
