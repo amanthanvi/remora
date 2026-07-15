@@ -32,6 +32,7 @@ struct HomeDashboardView: View {
     let onOpenProjectPicker: () -> Void
     let onThreadCreated: (ThreadKey) -> Void
     let onShowSettings: () -> Void
+    let onShowCommandPalette: () -> Void
     /// Optional: surface an "Apps" button alongside Settings. Wired by the
     /// hosting navigation when a "Saved Apps" launcher should be exposed.
     var onShowApps: (() -> Void)? = nil
@@ -62,6 +63,7 @@ struct HomeDashboardView: View {
     /// new thread.
     var onForkThread: (@MainActor (HomeDashboardRecentSession) async -> Void)? = nil
     var onInputModeChange: ((HomeInputMode) -> Void)? = nil
+    var requestedInputMode: HomeInputMode? = nil
 
     @State private var deleteTargetThread: HomeDashboardRecentSession?
     @State private var replyTargetThread: HomeDashboardRecentSession?
@@ -188,11 +190,22 @@ struct HomeDashboardView: View {
 
     var body: some View {
         canvas
-            .onAppear { onInputModeChange?(inputMode) }
+            .onAppear {
+                if let requestedInputMode {
+                    inputMode = requestedInputMode
+                }
+                onInputModeChange?(inputMode)
+            }
             .onChange(of: inputMode) { _, nextMode in
                 onInputModeChange?(nextMode)
                 if nextMode != .search {
                     selectedSearchRuntimeKind = nil
+                }
+            }
+            .onChange(of: requestedInputMode) { _, requestedMode in
+                guard let requestedMode, inputMode != requestedMode else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    inputMode = requestedMode
                 }
             }
             .task { await TipJarStore.shared.loadProducts() }
@@ -290,6 +303,13 @@ struct HomeDashboardView: View {
                     Image(systemName: "gearshape")
                         .foregroundColor(RemoraTheme.textSecondary)
                 }
+                .accessibilityLabel("Settings")
+                Button(action: onShowCommandPalette) {
+                    Image(systemName: "command")
+                        .foregroundColor(RemoraTheme.textSecondary)
+                }
+                .accessibilityLabel("Commands")
+                .accessibilityIdentifier("home.commandsButton")
                 if let onShowApps {
                     Button(action: onShowApps) {
                         Image(systemName: "square.grid.2x2")

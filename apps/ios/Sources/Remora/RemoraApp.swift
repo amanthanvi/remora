@@ -6,6 +6,7 @@ struct RemoraApp: App {
     @State private var appModel = AppModel.shared
     @State private var voiceRuntime = VoiceRuntimeController.shared
     @State private var appRuntime = AppRuntimeController.shared
+    @State private var actionCenter = RemoraActionCenter.shared
     @State private var themeManager = ThemeManager.shared
     @State private var wallpaperManager = WallpaperManager.shared
     @Environment(\.scenePhase) private var scenePhase
@@ -20,10 +21,13 @@ struct RemoraApp: App {
             // `MacWindowTitleBarStyler` via
             // `UIWindowScene.sizeRestrictions`.
             .commands {
-                RemoraCommands(appModel: appModel)
+                RemoraCommands(actionCenter: actionCenter, appModel: appModel)
             }
         #else
         mainWindowGroup
+            .commands {
+                RemoraCommands(actionCenter: actionCenter, appModel: appModel)
+            }
         #endif
     }
 

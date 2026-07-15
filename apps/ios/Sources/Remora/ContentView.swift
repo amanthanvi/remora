@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var appState = AppState()
     @State private var stableSafeAreaInsets = StableSafeAreaInsets()
     @State private var conversationWarmup = ConversationWarmupCoordinator()
+    @State private var actionCenter = RemoraActionCenter.shared
     @State private var petOverlay = PetOverlayController.shared
     @State private var composerBottomInset: CGFloat = 0
     @State private var splashDismissed = false
@@ -22,6 +23,7 @@ struct ContentView: View {
 
     var body: some View {
         @Bindable var bindableAppState = appState
+        @Bindable var bindableActionCenter = actionCenter
 
         GeometryReader { geometry in
             ZStack {
@@ -87,6 +89,13 @@ struct ContentView: View {
             if forceDiscoveryForUITest {
                 appState.showServerPicker = true
             }
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["REMORA_UI_TEST_SHOW_COMMAND_PALETTE"] == "1" {
+                DispatchQueue.main.async {
+                    actionCenter.presentPalette()
+                }
+            }
+            #endif
         }
         .onChange(of: colorScheme) { _, nextColorScheme in
             // iOS toggles `colorScheme` while capturing light+dark
@@ -135,11 +144,17 @@ struct ContentView: View {
                         .frame(width: 0, height: 0)
                 }
         }
-        #if targetEnvironment(macCatalyst)
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandShowSettings)) { _ in
-            appState.showSettings = true
+        .sheet(isPresented: $bindableActionCenter.isPalettePresented) {
+            CommandPaletteView()
+                .environment(appModel)
+                .environment(appState)
+                .environment(themeManager)
+                .environment(\.textScale, textScale)
+                .background {
+                    InterfaceStyleSynchronizer(style: themeManager.appearanceMode.userInterfaceStyle)
+                        .frame(width: 0, height: 0)
+                }
         }
-        #endif
     }
 
     private func standardHomeNavigationView(topInset: CGFloat, bottomInset: CGFloat) -> some View {

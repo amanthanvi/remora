@@ -6,6 +6,8 @@ import os
 struct ConversationInputBar: View {
     @Environment(AppState.self) private var appState
     @Environment(AppModel.self) private var appModel
+    @State private var actionCenter = RemoraActionCenter.shared
+    @State private var composerActionOwner = UUID()
     let snapshot: ConversationComposerSnapshot
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @AppStorage("fastMode") private var fastMode = false
@@ -163,6 +165,7 @@ struct ConversationInputBar: View {
             appModel.clearComposerPrefill(id: prefill.id)
         }
         .onChange(of: isComposerFocused) { _, focused in
+            actionCenter.setComposerFocused(focused, owner: composerActionOwner)
             if focused {
                 guard !hasLoggedFirstFocus else { return }
                 hasLoggedFirstFocus = true
@@ -174,12 +177,28 @@ struct ConversationInputBar: View {
             hasLoggedKeyboardShown = true
             os_signpost(.event, log: conversationViewSignpostLog, name: "KeyboardShown")
         }
-        #if targetEnvironment(macCatalyst)
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandSendComposer)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .remoraActionRequested)) { notification in
+            guard let request = notification.object as? RemoraActionRequest,
+                  request.id == .sendMessage else { return }
+            // Multiple conversation views may stay alive during navigation or
+            // warmup. Only the composer registered as the current focus owner
+            // consumes the shared request; inactive composers must not race to
+            // complete it with an error.
+            guard actionCenter.composerOwnsFocus(composerActionOwner) else { return }
+            guard isComposerFocused else {
+                request.finish(errorMessage: "Focus this composer before sending.")
+                return
+            }
+            let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty || attachedImage != nil || !attachedFiles.isEmpty else {
+                request.finish(errorMessage: "Enter a message or attach a file before sending.")
+                return
+            }
             handleSend()
+            request.finish()
         }
-        #endif
         .onDisappear {
+            actionCenter.setComposerFocused(false, owner: composerActionOwner)
             if voiceManager.isRecording { voiceManager.cancelRecording() }
             popupRefreshTask?.cancel()
             popupRefreshTask = nil
