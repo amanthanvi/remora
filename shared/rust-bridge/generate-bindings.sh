@@ -22,8 +22,6 @@ if [[ -z "${RUSTC_WRAPPER:-}" ]] && [[ "${CARGO_INCREMENTAL:-}" != "1" ]] && com
     export RUSTC_WRAPPER="$(command -v sccache)"
 fi
 
-"$WORKSPACE_DIR/../../tools/scripts/update-alleycat-main.sh" --shared
-
 PROFILE="debug"
 GENERATE_SWIFT=1
 GENERATE_KOTLIN=1

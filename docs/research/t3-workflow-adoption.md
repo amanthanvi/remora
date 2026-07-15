@@ -307,9 +307,9 @@ This phase can ship without files or a third pane. It improves the current conve
 Use the repository's normal cross-platform gate after boundary changes:
 
 ```bash
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rebuild-bindings
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rust-test
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make ios-sim-fast
+make rebuild-bindings
+make rust-test
+make ios-sim-fast
 cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
