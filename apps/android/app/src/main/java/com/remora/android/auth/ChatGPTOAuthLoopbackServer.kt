@@ -232,8 +232,8 @@ internal class ChatGPTOAuthLoopbackServer private constructor(
                 body {
                   margin: 0;
                   font-family: sans-serif;
-                  background: #0b0b0b;
-                  color: #f2f2f2;
+                  background: #02082c;
+                  color: #eafbff;
                   display: flex;
                   align-items: center;
                   justify-content: center;
@@ -249,11 +249,11 @@ internal class ChatGPTOAuthLoopbackServer private constructor(
                   margin: 0 0 12px 0;
                 }
                 p {
-                  color: #c7c7c7;
+                  color: #a8dceb;
                   margin: 0;
                 }
                 a {
-                  color: #00ff9c;
+                  color: #0dd5f0;
                 }
               </style>
               <script>

@@ -68,7 +68,9 @@ extension AppServerSnapshot {
             return .orange
         }
         if connectionProgressLabel != nil {
-            return RemoraTheme.accent
+            return currentConnectionStep?.kind == .connected
+                ? RemoraTheme.success
+                : RemoraTheme.warning
         }
         if transportState == .connected, !isLocal, account == nil {
             return .orange

@@ -124,7 +124,7 @@ struct ResolvedTheme {
         self.separator = c["panel.border"] ?? Self.adjustBrightness(bg, by: d.type == .dark ? 0.04 : -0.04)
         self.danger = d.type == .dark ? "#FF5555" : "#D32F2F"
         self.success = d.type == .dark ? "#6EA676" : "#2E7D32"
-        self.warning = d.type == .dark ? "#E2A644" : "#E65100"
+        self.warning = d.type == .dark ? "#E2A644" : "#A84400"
         self.codeBackground = bg
 
         // Compute textOnAccent based on accent brightness
@@ -180,24 +180,28 @@ struct ResolvedTheme {
 
 extension ResolvedTheme {
     static let defaultLight = ResolvedTheme(
-        slug: "codex-light",
-        definition: ThemeDefinition(name: "Codex Light", type: .light, colors: [
-            "editor.background": "#FFFFFF", "editor.foreground": "#0D0D0D",
-            "sideBar.background": "#FCFCFC", "sideBar.foreground": "#212121",
-            "activityBar.background": "#FCFCFC",
-            "textLink.foreground": "#0169CC", "button.background": "#0169CC",
+        slug: "remora-light",
+        definition: ThemeDefinition(name: "Remora Light", type: .light, colors: [
+            "editor.background": "#F7FCFE", "editor.foreground": "#102A36",
+            "sideBar.background": "#EAF7FB", "sideBar.foreground": "#365866",
+            "activityBar.background": "#DCEFF5",
+            "editorLineNumber.foreground": "#4E6671",
+            "editorGroup.border": "#B7DCE7", "panel.border": "#D8E8F1",
+            "textLink.foreground": "#036F8F", "button.background": "#036F8F",
             "gitDecoration.addedResourceForeground": "#00A240",
             "gitDecoration.deletedResourceForeground": "#E02E2A",
         ])
     )
 
     static let defaultDark = ResolvedTheme(
-        slug: "codex-dark",
-        definition: ThemeDefinition(name: "Codex Dark", type: .dark, colors: [
-            "editor.background": "#111111", "editor.foreground": "#FCFCFC",
-            "sideBar.background": "#131313", "sideBar.foreground": "#8F8F8F",
-            "activityBar.background": "#131313",
-            "textLink.foreground": "#0169CC", "button.background": "#0169CC",
+        slug: "remora-dark",
+        definition: ThemeDefinition(name: "Remora", type: .dark, colors: [
+            "editor.background": "#02082C", "editor.foreground": "#EAFBFF",
+            "sideBar.background": "#011B44", "sideBar.foreground": "#A8DCEB",
+            "activityBar.background": "#022753",
+            "editorLineNumber.foreground": "#83AFC2",
+            "editorGroup.border": "#044875", "panel.border": "#02356A",
+            "textLink.foreground": "#0DD5F0", "button.background": "#07F2FB",
             "gitDecoration.addedResourceForeground": "#00A240",
             "gitDecoration.deletedResourceForeground": "#E02E2A",
         ])

@@ -44,7 +44,7 @@ struct DebugBuildLabel: View {
         if !BuildInfo.isAppStoreProduction, let label = BuildInfo.shortLabel {
             Text(label)
                 .remoraFont(.caption2)
-                .foregroundColor(RemoraTheme.textMuted.opacity(0.55))
+                .foregroundColor(RemoraTheme.textMuted)
                 .monospacedDigit()
                 .accessibilityHidden(true)
         }

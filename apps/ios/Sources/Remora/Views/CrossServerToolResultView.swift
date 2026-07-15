@@ -165,7 +165,7 @@ struct SessionServerCardRow: View {
             case .status(let connected):
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(connected ? RemoraTheme.accent : RemoraTheme.textMuted.opacity(0.5))
+                        .fill(connected ? RemoraTheme.success : RemoraTheme.textMuted.opacity(0.5))
                         .frame(width: 8, height: 8)
                     Text(connected ? "Connected" : "Offline")
                         .remoraFont(.caption)

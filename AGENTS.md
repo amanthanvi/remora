@@ -198,7 +198,9 @@ Incremental policy:
 
 - Swift style follows standard Xcode defaults: 4-space indentation, `UpperCamelCase` for types, `lowerCamelCase` for properties/functions.
 - Kotlin style follows standard Android/Kotlin conventions: 4-space indentation, `UpperCamelCase` types, `lowerCamelCase` members.
-- Dark theme: pure `Color.black` backgrounds, `#00FF9C` accent, `SFMono-Regular` font throughout.
+- Default theme: icon-derived deep navy (`#02082C`) surfaces with an ocean-cyan
+  (`#0DD5F0`) accent and `SFMono-Regular` typography. Preserve green for
+  semantic success and leave user-selectable terminal palettes unchanged.
 - Keep concurrency boundaries explicit (`actor`, `@MainActor`) and avoid cross-actor mutable state.
 - Group iOS files by layer (`Views`, `Models`, `Bridge`) and Android files by module (`app/ui`, `app/state`, `core/*`).
 - No repository-local SwiftLint/SwiftFormat config is currently committed; keep formatting consistent with existing files.

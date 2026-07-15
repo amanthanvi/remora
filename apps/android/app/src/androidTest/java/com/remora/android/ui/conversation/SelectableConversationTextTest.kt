@@ -19,7 +19,7 @@ class SelectableConversationTextTest {
         configureSelectableMarkdownTextView(
             textView = textView,
             textColor = 0xFFFFFFFF.toInt(),
-            linkColor = 0xFF00FF9C.toInt(),
+            linkColor = 0xFF0DD5F0.toInt(),
             textSize = 14f,
         )
 

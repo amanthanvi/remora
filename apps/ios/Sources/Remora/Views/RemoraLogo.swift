@@ -4,9 +4,11 @@ struct RemoraLogo: View {
     var size: CGFloat
 
     var body: some View {
-        Image(systemName: "waveform.path.ecg")
-            .font(.system(size: size * 0.58, weight: .bold))
-            .foregroundStyle(RemoraTheme.accent)
+        Image("remora_mascot")
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .scaledToFit()
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }

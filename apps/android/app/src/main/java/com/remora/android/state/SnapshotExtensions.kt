@@ -14,8 +14,8 @@ import com.remora.android.ui.common.AgentRuntimeKind
 import com.remora.android.ui.common.runtimeLabel
 import uniffi.codex_mobile_client.ThreadSummaryStatus
 
-/** Accent green matching iOS theme. */
-private val AccentGreen = Color(0xFF00FF9C)
+/** Semantic connected/success green; brand actions use the ocean theme accent. */
+private val ConnectedGreen = Color(0xFF22C55E)
 private val WarningOrange = Color(0xFFFF9500)
 private val SecondaryGray = Color(0xFF8E8E93)
 
@@ -32,7 +32,7 @@ val AppServerHealth.displayLabel: String
 
 val AppServerHealth.accentColor: Color
     get() = when (this) {
-        AppServerHealth.CONNECTED -> AccentGreen
+        AppServerHealth.CONNECTED -> ConnectedGreen
         AppServerHealth.CONNECTING, AppServerHealth.UNRESPONSIVE -> WarningOrange
         AppServerHealth.DISCONNECTED, AppServerHealth.UNKNOWN -> SecondaryGray
     }
@@ -48,7 +48,7 @@ val AppServerTransportState.displayLabel: String
 
 val AppServerTransportState.accentColor: Color
     get() = when (this) {
-        AppServerTransportState.CONNECTED -> AccentGreen
+        AppServerTransportState.CONNECTED -> ConnectedGreen
         AppServerTransportState.CONNECTING, AppServerTransportState.UNRESPONSIVE -> WarningOrange
         AppServerTransportState.DISCONNECTED, AppServerTransportState.UNKNOWN -> SecondaryGray
     }
@@ -104,7 +104,11 @@ val AppServerSnapshot.statusColor: Color
     get() = when {
         currentConnectionStep?.state == AppConnectionStepState.FAILED -> Color(0xFFFF6B6B)
         currentConnectionStep?.state == AppConnectionStepState.AWAITING_USER_INPUT -> WarningOrange
-        connectionProgressLabel != null -> AccentGreen
+        connectionProgressLabel != null -> if (currentConnectionStep?.kind == AppConnectionStepKind.CONNECTED) {
+            ConnectedGreen
+        } else {
+            WarningOrange
+        }
         transportState == AppServerTransportState.CONNECTED && !isLocal && account == null -> WarningOrange
         else -> transportState.accentColor
     }

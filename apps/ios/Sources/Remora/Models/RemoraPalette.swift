@@ -21,22 +21,22 @@ enum RemoraPalette {
         )
     }
 
-    static var accent: Pair        { pair("accent", lightFallback: "#4A4A4A", darkFallback: "#B0B0B0") }
-    static var accentStrong: Pair   { pair("accentStrong", lightFallback: "#00995D", darkFallback: "#00FF9C") }
-    static var textPrimary: Pair    { pair("textPrimary", lightFallback: "#1A1A1A", darkFallback: "#FFFFFF") }
-    static var textSecondary: Pair  { pair("textSecondary", lightFallback: "#6B6B6B", darkFallback: "#888888") }
-    static var textMuted: Pair      { pair("textMuted", lightFallback: "#9E9E9E", darkFallback: "#555555") }
-    static var textBody: Pair       { pair("textBody", lightFallback: "#2D2D2D", darkFallback: "#E0E0E0") }
-    static var textSystem: Pair     { pair("textSystem", lightFallback: "#3A4A3F", darkFallback: "#C6D0CA") }
-    static var surface: Pair        { pair("surface", lightFallback: "#F2F2F7", darkFallback: "#1A1A1A") }
-    static var surfaceLight: Pair   { pair("surfaceLight", lightFallback: "#E5E5EA", darkFallback: "#2A2A2A") }
-    static var border: Pair         { pair("border", lightFallback: "#D1D1D6", darkFallback: "#333333") }
-    static var separator: Pair      { pair("separator", lightFallback: "#E0E0E0", darkFallback: "#1E1E1E") }
+    static var accent: Pair        { pair("accent", lightFallback: "#036F8F", darkFallback: "#0DD5F0") }
+    static var accentStrong: Pair   { pair("accentStrong", lightFallback: "#036F8F", darkFallback: "#07F2FB") }
+    static var textPrimary: Pair    { pair("textPrimary", lightFallback: "#102A36", darkFallback: "#EAFBFF") }
+    static var textSecondary: Pair  { pair("textSecondary", lightFallback: "#365866", darkFallback: "#A8DCEB") }
+    static var textMuted: Pair      { pair("textMuted", lightFallback: "#4E6671", darkFallback: "#83AFC2") }
+    static var textBody: Pair       { pair("textBody", lightFallback: "#294653", darkFallback: "#CEE3EA") }
+    static var textSystem: Pair     { pair("textSystem", lightFallback: "#486674", darkFallback: "#A4B7C1") }
+    static var surface: Pair        { pair("surface", lightFallback: "#EAF7FB", darkFallback: "#011B44") }
+    static var surfaceLight: Pair   { pair("surfaceLight", lightFallback: "#DCEFF5", darkFallback: "#022753") }
+    static var border: Pair         { pair("border", lightFallback: "#B7DCE7", darkFallback: "#044875") }
+    static var separator: Pair      { pair("separator", lightFallback: "#D8E8F1", darkFallback: "#02356A") }
     static var danger: Pair         { pair("danger", lightFallback: "#D32F2F", darkFallback: "#FF5555") }
     static var success: Pair        { pair("success", lightFallback: "#2E7D32", darkFallback: "#6EA676") }
-    static var warning: Pair        { pair("warning", lightFallback: "#E65100", darkFallback: "#E2A644") }
+    static var warning: Pair        { pair("warning", lightFallback: "#A84400", darkFallback: "#E2A644") }
     static var textOnAccent: Pair   { pair("textOnAccent", lightFallback: "#FFFFFF", darkFallback: "#0D0D0D") }
-    static var codeBackground: Pair { pair("codeBackground", lightFallback: "#F0F0F5", darkFallback: "#111111") }
+    static var codeBackground: Pair { pair("codeBackground", lightFallback: "#F7FCFE", darkFallback: "#02082C") }
 
     // MARK: - Font
 

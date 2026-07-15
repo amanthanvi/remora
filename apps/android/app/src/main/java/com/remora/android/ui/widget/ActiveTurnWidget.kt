@@ -74,10 +74,10 @@ class ActiveTurnWidget : GlanceAppWidget() {
     }
 }
 
-private val BgColor = ColorProvider(androidx.compose.ui.graphics.Color.Black)
-private val PrimaryText = ColorProvider(androidx.compose.ui.graphics.Color.White)
-private val SecondaryText = ColorProvider(androidx.compose.ui.graphics.Color(0xFF8E8E93))
-private val AccentGreen = ColorProvider(androidx.compose.ui.graphics.Color(0xFF00FF9C))
+private val BgColor = ColorProvider(androidx.compose.ui.graphics.Color(0xFF02082C))
+private val PrimaryText = ColorProvider(androidx.compose.ui.graphics.Color(0xFFEAFBFF))
+private val SecondaryText = ColorProvider(androidx.compose.ui.graphics.Color(0xFF6E8FA8))
+private val AccentOcean = ColorProvider(androidx.compose.ui.graphics.Color(0xFF0DD5F0))
 private val WarningOrange = ColorProvider(androidx.compose.ui.graphics.Color(0xFFFF9500))
 private val DangerRed = ColorProvider(androidx.compose.ui.graphics.Color(0xFFFF6B6B))
 
@@ -106,7 +106,7 @@ private fun ActiveTurnContent(
             Text(
                 text = "Codex",
                 style = TextStyle(
-                    color = AccentGreen,
+                    color = AccentOcean,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 ),
@@ -199,7 +199,7 @@ private fun IdlePlaceholder() {
             Text(
                 text = "Codex",
                 style = TextStyle(
-                    color = AccentGreen,
+                    color = AccentOcean,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                 ),

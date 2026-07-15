@@ -253,7 +253,7 @@ private struct ThemePickerRow: View {
             ThemePreviewBadge(
                 backgroundHex: entry?.backgroundHex ?? "#000000",
                 foregroundHex: entry?.foregroundHex ?? "#FFFFFF",
-                accentHex: entry?.accentHex ?? "#00FF00"
+                accentHex: entry?.accentHex ?? "#0DD5F0"
             )
 
             Text(entry?.name ?? "Unknown Theme")
