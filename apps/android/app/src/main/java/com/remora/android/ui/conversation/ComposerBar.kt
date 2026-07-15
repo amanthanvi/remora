@@ -56,6 +56,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -69,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -174,6 +176,7 @@ fun ComposerBar(
     onSlashError: ((String) -> Unit)? = null,
     pendingUserInput: PendingUserInputRequest? = null,
     onDismissPendingUserInput: (() -> Unit)? = null,
+    onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
@@ -204,8 +207,11 @@ fun ComposerBar(
             ),
         )
     }
-    var showAttachMenu by remember { mutableStateOf(false) }
-    var showExpanded by remember { mutableStateOf(false) }
+    var showAttachMenu by remember(threadKey) { mutableStateOf(false) }
+    var showExpanded by remember(threadKey) { mutableStateOf(false) }
+    var isInlineInputFocused by remember(threadKey) { mutableStateOf(false) }
+    var isPendingInputFocused by remember(pendingUserInput?.id) { mutableStateOf(false) }
+    var isGoalPanelInteractionActive by remember(threadKey) { mutableStateOf(false) }
     val inlineFocusRequester = remember { FocusRequester() }
     val transcriptionManager = remember { VoiceTranscriptionManager() }
     val isRecording by transcriptionManager.isRecording.collectAsState()
@@ -248,12 +254,12 @@ fun ComposerBar(
             SLASH_COMMANDS.filter { it.name.startsWith(q) || q.isEmpty() }
         }
     }
-    var showSlashMenu by remember { mutableStateOf(false) }
+    var showSlashMenu by remember(threadKey) { mutableStateOf(false) }
     LaunchedEffect(slashQuery) { showSlashMenu = slashQuery != null && filteredCommands.isNotEmpty() }
 
     // @file search state
     var fileSearchResults by remember { mutableStateOf<List<String>>(emptyList()) }
-    var showFileMenu by remember { mutableStateOf(false) }
+    var showFileMenu by remember(threadKey) { mutableStateOf(false) }
     var fileSearchJob by remember { mutableStateOf<Job?>(null) }
     LaunchedEffect(text) {
         val atIdx = text.lastIndexOf('@')
@@ -283,6 +289,29 @@ fun ComposerBar(
     var userInputAnswers by remember { mutableStateOf(mapOf<String, String>()) }
     var pendingUserInputSubmitError by remember(pendingUserInput?.id) { mutableStateOf<String?>(null) }
     var isSubmittingPendingUserInput by remember(pendingUserInput?.id) { mutableStateOf(false) }
+
+    LaunchedEffect(
+        isInlineInputFocused,
+        isPendingInputFocused,
+        isGoalPanelInteractionActive,
+        showAttachMenu,
+        showExpanded,
+        showSlashMenu,
+        showFileMenu,
+    ) {
+        onInputFocusChanged(
+            isInlineInputFocused ||
+                isPendingInputFocused ||
+                isGoalPanelInteractionActive ||
+                showAttachMenu ||
+                showExpanded ||
+                showSlashMenu ||
+                showFileMenu,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     suspend fun handleGoalCommand(args: String?) {
         val raw = args?.trim().orEmpty()
@@ -608,7 +637,11 @@ fun ComposerBar(
                     },
                 )
             }
-            GoalPanel(current, goalActions)
+            GoalPanel(
+                goal = current,
+                actions = goalActions,
+                onInteractionStateChanged = { isGoalPanelInteractionActive = it },
+            )
         }
 
         activePlanProgress?.let { progress ->
@@ -727,7 +760,7 @@ fun ComposerBar(
                             }
                         }
                     } else {
-                        var answer by remember { mutableStateOf("") }
+                        var answer by remember(pendingUserInput.id, question.id) { mutableStateOf("") }
                         BasicTextField(
                             value = answer,
                             onValueChange = {
@@ -739,6 +772,7 @@ fun ComposerBar(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(RemoraTheme.surface, RoundedCornerShape(8.dp))
+                                .onFocusChanged { isPendingInputFocused = it.isFocused }
                                 .padding(8.dp),
                         )
                     }
@@ -840,7 +874,9 @@ fun ComposerBar(
                     !isRecording && !isTranscribing,
                 onExpand = { showExpanded = true },
                 modifier = Modifier.weight(1f),
-                textFieldModifier = Modifier.focusRequester(inlineFocusRequester),
+                textFieldModifier = Modifier
+                    .focusRequester(inlineFocusRequester)
+                    .onFocusChanged { isInlineInputFocused = it.isFocused },
                 overlays = {
                     // Slash command popup
                     DropdownMenu(
@@ -1707,7 +1743,11 @@ data class GoalCardActions(
 }
 
 @Composable
-private fun GoalPanel(goal: AppThreadGoal, actions: GoalCardActions) {
+private fun GoalPanel(
+    goal: AppThreadGoal,
+    actions: GoalCardActions,
+    onInteractionStateChanged: (Boolean) -> Unit,
+) {
     val tint = when (goal.status) {
         AppThreadGoalStatus.ACTIVE -> RemoraTheme.accent
         AppThreadGoalStatus.PAUSED -> RemoraTheme.textMuted
@@ -1752,10 +1792,18 @@ private fun GoalPanel(goal: AppThreadGoal, actions: GoalCardActions) {
         AppThreadGoalStatus.COMPLETE -> null
     }
 
-    var showMenu by remember { mutableStateOf(false) }
-    var showEditDialog by remember { mutableStateOf(false) }
-    var showBudgetDialog by remember { mutableStateOf(false) }
-    var showClearConfirm by remember { mutableStateOf(false) }
+    var showMenu by remember(goal.threadId) { mutableStateOf(false) }
+    var showEditDialog by remember(goal.threadId) { mutableStateOf(false) }
+    var showBudgetDialog by remember(goal.threadId) { mutableStateOf(false) }
+    var showClearConfirm by remember(goal.threadId) { mutableStateOf(false) }
+    LaunchedEffect(goal.threadId, showMenu, showEditDialog, showBudgetDialog, showClearConfirm) {
+        onInteractionStateChanged(
+            showMenu || showEditDialog || showBudgetDialog || showClearConfirm,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInteractionStateChanged(false) }
+    }
 
     // Pulsing status dot — only animates while the goal is active. Mirrors
     // the iOS pill's 0.35 ↔ 1.0 ease-in-out at 1.1s autoreverse.

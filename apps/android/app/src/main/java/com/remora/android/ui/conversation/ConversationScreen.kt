@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -85,6 +86,7 @@ fun ConversationScreen(
     onNavigateToSessions: (() -> Unit)? = null,
     onShowDirectoryPicker: (() -> Unit)? = null,
     onOpenSavedApp: ((String) -> Unit)? = null,
+    onComposerFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val snapshot by appModel.snapshot.collectAsState()
@@ -232,19 +234,53 @@ fun ConversationScreen(
         }
     }
 
-    var showModelSelector by remember { mutableStateOf(false) }
-    var showCollaborationModeSelector by remember { mutableStateOf(false) }
-    var showRenameDialog by remember { mutableStateOf(false) }
+    var showModelSelector by remember(threadKey) { mutableStateOf(false) }
+    var showCollaborationModeSelector by remember(threadKey) { mutableStateOf(false) }
+    var showRenameDialog by remember(threadKey) { mutableStateOf(false) }
     var renameDraft by remember(threadKey) { mutableStateOf("") }
-    var showPermissionsSheet by remember { mutableStateOf(false) }
-    var showExperimentalSheet by remember { mutableStateOf(false) }
-    var showSkillsSheet by remember { mutableStateOf(false) }
-    var showSessionDiffSheet by remember { mutableStateOf(false) }
-    var slashErrorMessage by remember { mutableStateOf<String?>(null) }
-    var reloadErrorMessage by remember { mutableStateOf<String?>(null) }
+    var showPermissionsSheet by remember(threadKey) { mutableStateOf(false) }
+    var showExperimentalSheet by remember(threadKey) { mutableStateOf(false) }
+    var showSkillsSheet by remember(threadKey) { mutableStateOf(false) }
+    var showSessionDiffSheet by remember(threadKey) { mutableStateOf(false) }
+    var slashErrorMessage by remember(threadKey) { mutableStateOf<String?>(null) }
+    var reloadErrorMessage by remember(threadKey) { mutableStateOf<String?>(null) }
+    var composerInteractionActive by remember(threadKey) { mutableStateOf(false) }
     var collaborationModesLoading by remember { mutableStateOf(false) }
     var collaborationModePresets by remember {
         mutableStateOf<List<uniffi.codex_mobile_client.AppCollaborationModePreset>>(emptyList())
+    }
+    LaunchedEffect(
+        threadKey,
+        composerInteractionActive,
+        showModelSelector,
+        showCollaborationModeSelector,
+        showRenameDialog,
+        showPermissionsSheet,
+        showExperimentalSheet,
+        showSkillsSheet,
+        showSessionDiffSheet,
+        slashErrorMessage,
+        reloadErrorMessage,
+        thread?.pendingPlanImplementationPrompt,
+        isMinigameActive,
+    ) {
+        onComposerFocusChanged(
+            composerInteractionActive ||
+                showModelSelector ||
+                showCollaborationModeSelector ||
+                showRenameDialog ||
+                showPermissionsSheet ||
+                showExperimentalSheet ||
+                showSkillsSheet ||
+                showSessionDiffSheet ||
+                slashErrorMessage != null ||
+                reloadErrorMessage != null ||
+                thread?.pendingPlanImplementationPrompt != null ||
+                isMinigameActive,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onComposerFocusChanged(false) }
     }
     LaunchedEffect(showModelSelector, server?.health, server?.account, server?.availableModels, server?.rateLimits) {
         if (showModelSelector || (server?.account != null && server.rateLimits == null)) {
@@ -830,6 +866,7 @@ fun ConversationScreen(
                         onDismissPendingUserInput = {
                             pendingInput?.let { dismissedUserInputs.dismiss(it.id) }
                         },
+                        onInputFocusChanged = { composerInteractionActive = it },
                     )
 
                     Spacer(Modifier.navigationBarsPadding())

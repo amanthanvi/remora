@@ -39,6 +39,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -99,6 +100,7 @@ fun HomeComposerBar(
     onThreadCreated: (ThreadKey) -> Unit,
     onLoginRequired: (String) -> Unit = {},
     onActiveChange: ((Boolean) -> Unit)? = null,
+    onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
@@ -114,6 +116,13 @@ fun HomeComposerBar(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isFocused, showExpanded, showAttachMenu) {
+        onInputFocusChanged(isFocused || showExpanded || showAttachMenu)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     // Auto-focus on first composition so the parent's `isComposerActive`
     // flag stays true (it's derived from internal isFocused/text/etc.). Without

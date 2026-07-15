@@ -25,12 +25,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -54,14 +56,19 @@ fun ThreadSearchBar(
     isExpanded: Boolean,
     onQueryChange: (String) -> Unit,
     onExpandChange: (Boolean) -> Unit,
+    focusRequest: Int = 0,
+    onFocusChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(isExpanded) {
+    LaunchedEffect(isExpanded, focusRequest) {
         if (isExpanded) {
             focusRequester.requestFocus()
         }
+    }
+    DisposableEffect(Unit) {
+        onDispose { onFocusChanged(false) }
     }
 
     Row(
@@ -114,7 +121,8 @@ fun ThreadSearchBar(
                     onValueChange = onQueryChange,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .focusRequester(focusRequester),
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { onFocusChanged(it.isFocused) },
                     textStyle = TextStyle(
                         color = RemoraTheme.textPrimary,
                         fontSize = RemoraTextStyle.code.scaled,

@@ -54,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -129,6 +130,8 @@ fun HomeDashboardScreen(
     onStartVoice: (() -> Unit)? = null,
     onOpenSavedApp: ((String) -> Unit)? = null,
     onOpenTerminal: (() -> Unit)? = null,
+    focusSearchRequest: Int = 0,
+    onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
@@ -224,6 +227,9 @@ fun HomeDashboardScreen(
     // scope so the two paths stay aligned.
     var replyTargetSession by remember { mutableStateOf<AppSessionSummary?>(null) }
     var isComposerActive by remember { mutableStateOf(false) }
+    var isComposerInputFocused by remember { mutableStateOf(false) }
+    var isSearchInputFocused by remember { mutableStateOf(false) }
+    var isModelSheetOpen by remember { mutableStateOf(false) }
     // When the user taps a composer chip (model / project), a modal sheet
     // opens and the IME dismisses — which would otherwise cascade through
     // `HomeComposerBar.onActiveChange(false)` and collapse the composer
@@ -249,6 +255,32 @@ fun HomeDashboardScreen(
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
     var topChromeHeight by remember { mutableStateOf(0.dp) }
+
+    LaunchedEffect(focusSearchRequest) {
+        if (focusSearchRequest > 0) isSearchExpanded = true
+    }
+    LaunchedEffect(
+        isComposerInputFocused,
+        isSearchInputFocused,
+        isModelSheetOpen,
+        replyTargetSession,
+        confirmAction,
+        renameTarget,
+        showTipJar,
+    ) {
+        onInputFocusChanged(
+            isComposerInputFocused ||
+                isSearchInputFocused ||
+                isModelSheetOpen ||
+                replyTargetSession != null ||
+                confirmAction != null ||
+                renameTarget != null ||
+                showTipJar,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     fun zoomIconFor(level: Int): ImageVector = when (level) {
         // Matches iOS semantics: 1 = most compact (scan), 4 = most detail (deep).
@@ -727,6 +759,8 @@ fun HomeDashboardScreen(
                                     selectedSearchRuntimeKind = null
                                 }
                             },
+                            focusRequest = focusSearchRequest,
+                            onFocusChanged = { isSearchInputFocused = it },
                         )
                     }
                     androidx.compose.material3.IconButton(
@@ -847,6 +881,7 @@ fun HomeDashboardScreen(
                                 serverId = serverForModels,
                                 disabled = serverForModels.isNullOrBlank(),
                                 onSheetStateChange = { open ->
+                                    isModelSheetOpen = open
                                     suppressComposerCollapse = open
                                 },
                             )
@@ -882,10 +917,11 @@ fun HomeDashboardScreen(
                             onActiveChange = { active ->
                                 if (active) {
                                     isComposerActive = true
-                                } else if (!suppressComposerCollapse) {
+                                } else if (!suppressComposerCollapse && !isModelSheetOpen) {
                                     isComposerActive = false
                                 }
                             },
+                            onInputFocusChanged = { isComposerInputFocused = it },
                         )
                     }
                     else -> {
