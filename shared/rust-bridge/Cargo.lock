@@ -3018,6 +3018,7 @@ dependencies = [
  "hex",
  "iroh",
  "jni 0.21.1",
+ "libc",
  "linkify",
  "lru 0.12.5",
  "ndk-context",

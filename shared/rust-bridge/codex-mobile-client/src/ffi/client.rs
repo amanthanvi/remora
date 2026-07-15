@@ -812,6 +812,33 @@ impl AppClient {
         })
     }
 
+    /// Shape the current thread's trusted file-change and turn-diff items into
+    /// one bounded, row-oriented review model. Native callers never provide a
+    /// raw patch, cwd, or file identity.
+    pub async fn diff_review(
+        &self,
+        thread_key: types::ThreadKey,
+    ) -> crate::source_review::DiffReviewResult {
+        crate::source_review::diff_review_for_thread(self.inner.as_ref(), thread_key).await
+    }
+
+    /// Resolve a thread's authoritative workspace in Rust and request a
+    /// bounded read of one workspace-relative path. This currently returns a
+    /// typed capability-unavailable result because the connected app-server's
+    /// absolute-path filesystem method cannot enforce root confinement.
+    pub async fn source_preview(
+        &self,
+        thread_key: types::ThreadKey,
+        relative_path: String,
+    ) -> crate::source_review::SourcePreviewResult {
+        crate::source_review::source_preview_for_thread(
+            self.inner.as_ref(),
+            thread_key,
+            relative_path,
+        )
+        .await
+    }
+
     // ── Models & features ────────────────────────────────────────────────
 
     pub async fn refresh_models(
