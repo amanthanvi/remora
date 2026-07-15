@@ -66,9 +66,9 @@ keys, package names, and symbols use Remora naming.
 The minimum cross-platform gate is:
 
 ```bash
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rebuild-bindings
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rust-test
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make ios-sim-fast
+make rebuild-bindings
+make rust-test
+make ios-sim-fast
 cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
