@@ -12,6 +12,7 @@ mod discovery;
 mod errors;
 mod parser;
 mod reconnect;
+mod remote_host_pairing;
 mod remote_path;
 pub(crate) mod shared;
 mod ssh;
@@ -30,6 +31,7 @@ pub use discovery::{
 pub use errors::ClientError;
 pub use parser::MessageParser;
 pub use reconnect::{ReconnectController, ReconnectShutdownOutcome};
+pub use remote_host_pairing::RemoteHostPairingInspector;
 pub use remote_path::RemotePath;
 pub use ssh::{AppSshBridgeConnectResult, AppSshConnectionResult, AppSshSessionResult, SshBridge};
 pub use terminal::{
@@ -43,4 +45,11 @@ pub use terminal::{
 pub use crate::reconnect::{
     ReconnectOutcome, ReconnectResult, SavedServerRecord, SlingshotCredentialProvider,
     SlingshotCredentialRecord, SshAuthMethodRecord, SshCredentialProvider, SshCredentialRecord,
+};
+pub use crate::remote_host_pairing::types::{
+    HostCredentialRevocationStatus, RemoteForgetOutcome, RemoteHostId, RemoteHostPairingError,
+    RemotePairingAcceptance, RemotePairingCode, RemotePairingCodeInspection, RemotePairingOffer,
+    RemotePairingOfferDisposition, RemotePairingOfferId, RemotePairingOutcome,
+    RemotePairingProtocol, RemotePairingRepairReason, RemoteRePairReason, RemoteReconnectOutcome,
+    RemoteRevokeOutcome, RemoteRuntimeOffer,
 };
