@@ -1146,14 +1146,20 @@ fn format_todo_value(value: &serde_json::Value) -> String {
 
 fn convert_file_change(change: &FileUpdateChange) -> HydratedFileChangeEntryData {
     let (additions, deletions) = diff_stats(&change.diff);
-    let kind = match &change.kind {
-        PatchChangeKind::Add => "add",
-        PatchChangeKind::Delete => "delete",
-        PatchChangeKind::Update { .. } => "update",
+    let (kind, move_path) = match &change.kind {
+        PatchChangeKind::Add => ("add", None),
+        PatchChangeKind::Delete => ("delete", None),
+        PatchChangeKind::Update { move_path } => (
+            "update",
+            move_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+        ),
     };
     HydratedFileChangeEntryData {
         path: change.path.clone(),
         kind: kind.to_string(),
+        move_path,
         diff: change.diff.clone(),
         additions,
         deletions,

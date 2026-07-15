@@ -17,6 +17,7 @@ use crate::MobileClient;
 use crate::conversation_uniffi::HydratedConversationItemContent;
 use crate::types::ThreadKey;
 use sha1::{Digest, Sha1};
+use std::collections::{HashMap, HashSet};
 
 /// Maximum source bytes returned through UniFFI.
 pub const MAX_SOURCE_PREVIEW_BYTES: usize = 1024 * 1024;
@@ -27,6 +28,7 @@ pub const MAX_DIFF_REVIEW_BYTES: usize = 1024 * 1024;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_DISPLAY_PATH_BYTES: usize = 512;
 const MAX_DIFF_FILES: usize = 2048;
+const MAX_DIFF_HUNKS: usize = 10_000;
 const MAX_DIFF_ROWS: usize = 50_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -112,6 +114,7 @@ pub enum DiffFileChangeKind {
     Renamed,
     Modified,
     Binary,
+    Unsupported,
     Unknown,
 }
 
@@ -119,14 +122,19 @@ pub enum DiffFileChangeKind {
 pub struct DiffReviewFile {
     pub id: String,
     pub display_path: String,
+    /// Canonical portable path that can be passed to `source_preview`.
+    /// This is absent when trusted diff metadata is absolute but outside the
+    /// authoritative workspace, malformed, or not portable across hosts.
+    pub relative_path: Option<String>,
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub change_kind: DiffFileChangeKind,
     pub additions: u32,
     pub deletions: u32,
     pub hunks: Vec<DiffReviewHunk>,
-    /// Retained for explicit copy/export. The aggregate raw-patch payload is
-    /// bounded by `MAX_DIFF_REVIEW_BYTES` before parsing.
+    /// Retained for explicit copy/export. For upstream add/delete items this
+    /// is the authoritative raw file content rather than a synthesized patch.
+    /// The aggregate payload is bounded by `MAX_DIFF_REVIEW_BYTES`.
     pub raw_patch: String,
 }
 
@@ -213,8 +221,9 @@ fn prepare_source_preview(
 ) -> Result<PreparedSourcePreview, SourcePreviewUnsupportedReason> {
     let relative_path = WorkspaceRelativePath::parse(relative_path)?;
     let snapshot = client
-        .snapshot_thread(thread_key)
-        .map_err(|_| SourcePreviewUnsupportedReason::ThreadUnavailable)?;
+        .app_store
+        .thread_snapshot(thread_key)
+        .ok_or(SourcePreviewUnsupportedReason::ThreadUnavailable)?;
     let cwd = snapshot
         .info
         .cwd
@@ -244,8 +253,10 @@ fn remote_path_is_absolute(path: &str) -> bool {
 /// Resolve the authoritative workspace from Rust thread state and fail closed
 /// until a host adapter can enforce the same root throughout lookup and read.
 ///
-/// This future does not detach work into `spawn_blocking`; when a safe remote
-/// adapter is added its I/O future can be cancelled by dropping this call.
+/// The unavailable path performs no host I/O and completes after one yield.
+/// Enabling a remote adapter also requires an explicit request-cancellation
+/// protocol: current UniFFI platform wrappers do not propagate native task
+/// cancellation into an already-started Rust future.
 pub async fn source_preview_for_thread(
     client: &MobileClient,
     thread_key: ThreadKey,
@@ -283,9 +294,9 @@ pub async fn diff_review_for_thread(
     thread_key: ThreadKey,
 ) -> DiffReviewResult {
     tokio::task::yield_now().await;
-    let snapshot = match client.snapshot_thread(&thread_key) {
-        Ok(snapshot) => snapshot,
-        Err(_) => {
+    let snapshot = match client.app_store.thread_snapshot(&thread_key) {
+        Some(snapshot) => snapshot,
+        None => {
             return DiffReviewResult::Unsupported {
                 thread_key,
                 reason: DiffReviewUnavailableReason::ThreadUnavailable,
@@ -293,23 +304,89 @@ pub async fn diff_review_for_thread(
         }
     };
 
+    let workspace_root = snapshot
+        .info
+        .cwd
+        .as_deref()
+        .and_then(crate::remote_path::normalize_thread_cwd)
+        .filter(|cwd| remote_path_is_absolute(cwd));
+    // A TurnDiff is the cumulative authoritative aggregate for its turn. The
+    // same changes also exist as individual FileChange items, so collecting
+    // both would duplicate rows and counts.
+    let aggregate_turns = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match &item.content {
+            HydratedConversationItemContent::TurnDiff(data)
+                if bounded_has_non_whitespace(&data.diff) =>
+            {
+                Some(item.source_turn_id.as_deref())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
     let mut inputs = Vec::new();
     for item in &snapshot.items {
         match &item.content {
             HydratedConversationItemContent::FileChange(data) => {
+                // Only completed fallback items describe applied workspace
+                // state. Pending/in-progress are proposals, while failed and
+                // declined patches must never appear as committed review data.
+                if data.status != crate::types::AppOperationStatus::Completed {
+                    continue;
+                }
+                let has_aggregate = aggregate_turns.contains(&item.source_turn_id.as_deref());
                 for change in &data.changes {
-                    if !change.diff.trim().is_empty() {
+                    let path_hint =
+                        normalize_file_change_hint(workspace_root.as_deref(), &change.path);
+                    let has_move = change.move_path.is_some();
+                    let new_path_hint = change.move_path.as_deref().and_then(|path| {
+                        normalize_file_change_hint(workspace_root.as_deref(), path)
+                    });
+                    if has_aggregate {
+                        // TurnDiff includes applied content changes but core
+                        // intentionally omits pure renames. Preserve only the
+                        // typed move identity here, without duplicating hunks.
+                        if has_move {
+                            inputs.push(DiffInput {
+                                path_hint,
+                                new_path_hint,
+                                private_path_identity: Some(stable_id(&change.path)),
+                                workspace_root: workspace_root.clone(),
+                                patch: "",
+                                kind: DiffInputKind::RenameMetadata,
+                            });
+                        }
+                        continue;
+                    }
+                    let kind = if has_move && !bounded_has_non_whitespace(&change.diff) {
+                        DiffInputKind::RenameMetadata
+                    } else {
+                        DiffInputKind::from_hydrated_kind(&change.kind)
+                    };
+                    if kind.accepts_empty_content() || bounded_has_non_whitespace(&change.diff) {
                         inputs.push(DiffInput {
-                            path_hint: Some(change.path.as_str()),
+                            path_hint,
+                            new_path_hint,
+                            private_path_identity: Some(stable_id(&change.path)),
+                            workspace_root: workspace_root.clone(),
                             patch: change.diff.as_str(),
+                            kind,
                         });
                     }
                 }
             }
-            HydratedConversationItemContent::TurnDiff(data) if !data.diff.trim().is_empty() => {
+            HydratedConversationItemContent::TurnDiff(data)
+                if bounded_has_non_whitespace(&data.diff) =>
+            {
                 inputs.push(DiffInput {
                     path_hint: None,
+                    new_path_hint: None,
+                    private_path_identity: None,
+                    workspace_root: workspace_root.clone(),
                     patch: data.diff.as_str(),
+                    kind: DiffInputKind::Unified,
                 });
             }
             _ => {}
@@ -325,10 +402,41 @@ pub async fn diff_review_for_thread(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffInputKind {
+    Unified,
+    AddedContent,
+    DeletedContent,
+    UpdatedPatch,
+    RenameMetadata,
+}
+
+impl DiffInputKind {
+    fn from_hydrated_kind(value: &str) -> Self {
+        match value {
+            "add" => Self::AddedContent,
+            "delete" => Self::DeletedContent,
+            "update" => Self::UpdatedPatch,
+            _ => Self::Unified,
+        }
+    }
+
+    fn accepts_empty_content(self) -> bool {
+        matches!(
+            self,
+            Self::AddedContent | Self::DeletedContent | Self::RenameMetadata
+        )
+    }
+}
+
+#[derive(Clone)]
 struct DiffInput<'a> {
-    path_hint: Option<&'a str>,
+    path_hint: Option<String>,
+    new_path_hint: Option<String>,
+    private_path_identity: Option<String>,
+    workspace_root: Option<String>,
     patch: &'a str,
+    kind: DiffInputKind,
 }
 
 fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> DiffReview {
@@ -338,37 +446,79 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
     let mut remaining = MAX_DIFF_REVIEW_BYTES;
     let mut truncated = source_byte_length > MAX_DIFF_REVIEW_BYTES as u64;
     let mut files = Vec::new();
+    let mut hunks_seen = 0_usize;
     let mut rows_seen = 0_usize;
     let mut occurrence = 0_usize;
 
     for input in inputs {
-        if remaining == 0 || files.len() >= MAX_DIFF_FILES || rows_seen >= MAX_DIFF_ROWS {
+        if remaining == 0
+            || files.len() >= MAX_DIFF_FILES
+            || hunks_seen >= MAX_DIFF_HUNKS
+            || rows_seen >= MAX_DIFF_ROWS
+        {
             truncated = true;
             break;
         }
-        let bounded = utf8_prefix(input.patch, remaining);
+        let bounded_prefix = utf8_prefix(input.patch, remaining);
+        let bounded = if bounded_prefix.len() < input.patch.len() {
+            complete_line_prefix(bounded_prefix)
+        } else {
+            bounded_prefix
+        };
         remaining = remaining.saturating_sub(bounded.len());
-        if bounded.len() < input.patch.len() {
+        if bounded_prefix.len() < input.patch.len() {
             truncated = true;
         }
 
-        for chunk in split_diff_chunks(bounded) {
-            if files.len() >= MAX_DIFF_FILES || rows_seen >= MAX_DIFF_ROWS {
-                truncated = true;
-                break;
-            }
-            if chunk.trim().is_empty() {
-                continue;
-            }
-            let (file, file_rows, file_truncated) = parse_diff_file(
+        if matches!(
+            input.kind,
+            DiffInputKind::AddedContent | DiffInputKind::DeletedContent
+        ) {
+            let (file, file_rows, file_hunks, file_truncated) = parse_raw_file_content(
                 &thread_key,
-                input.path_hint,
-                chunk,
+                input.path_hint.as_deref(),
+                input.private_path_identity.as_deref(),
+                bounded,
+                input.kind,
                 occurrence,
                 MAX_DIFF_ROWS.saturating_sub(rows_seen),
             );
             occurrence += 1;
             rows_seen = rows_seen.saturating_add(file_rows);
+            hunks_seen = hunks_seen.saturating_add(file_hunks);
+            truncated |= file_truncated;
+            merge_diff_file(&mut files, file);
+            continue;
+        }
+
+        for chunk in split_diff_chunks(bounded) {
+            if files.len() >= MAX_DIFF_FILES
+                || hunks_seen >= MAX_DIFF_HUNKS
+                || rows_seen >= MAX_DIFF_ROWS
+            {
+                truncated = true;
+                break;
+            }
+            if chunk.trim().is_empty() {
+                if !matches!(input.kind, DiffInputKind::RenameMetadata) {
+                    continue;
+                }
+            }
+            let (file, file_rows, file_hunks, file_truncated) = parse_diff_file(
+                &thread_key,
+                input.path_hint.as_deref(),
+                input.new_path_hint.as_deref(),
+                input.private_path_identity.as_deref(),
+                input.workspace_root.as_deref(),
+                chunk,
+                input.kind,
+                occurrence,
+                MAX_DIFF_ROWS.saturating_sub(rows_seen),
+                MAX_DIFF_HUNKS.saturating_sub(hunks_seen),
+            );
+            occurrence += 1;
+            rows_seen = rows_seen.saturating_add(file_rows);
+            hunks_seen = hunks_seen.saturating_add(file_hunks);
             truncated |= file_truncated;
             merge_diff_file(&mut files, file);
         }
@@ -391,24 +541,129 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
     }
 }
 
+fn bounded_has_non_whitespace(value: &str) -> bool {
+    !utf8_prefix(value, MAX_DIFF_REVIEW_BYTES).trim().is_empty()
+}
+
+fn complete_line_prefix(value: &str) -> &str {
+    value
+        .rfind('\n')
+        .map(|index| &value[..=index])
+        .unwrap_or_default()
+}
+
+/// Convert trusted server file metadata into the same portable relative path
+/// grammar accepted by source preview. Absolute paths are retained only when
+/// they are component-boundary descendants of the authoritative workspace.
+fn normalize_file_change_hint(workspace_root: Option<&str>, value: &str) -> Option<String> {
+    let candidate = value.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    let relative = if remote_path_is_absolute(candidate) {
+        let root = workspace_root?;
+        strip_remote_workspace_root(root, candidate)?
+    } else {
+        candidate.replace('\\', "/")
+    };
+    WorkspaceRelativePath::parse(&relative)
+        .ok()
+        .map(|path| path.normalized)
+}
+
+fn strip_remote_workspace_root(root: &str, candidate: &str) -> Option<String> {
+    let root_is_windows = crate::remote_path::RemotePath::parse(root).is_windows();
+    let candidate_is_windows = crate::remote_path::RemotePath::parse(candidate).is_windows();
+    if root_is_windows != candidate_is_windows {
+        return None;
+    }
+
+    if root_is_windows {
+        let root = root.replace('/', "\\");
+        let candidate = candidate.replace('/', "\\");
+        let root = root.trim_end_matches('\\');
+        let prefix = candidate.get(..root.len())?;
+        if !prefix.eq_ignore_ascii_case(root) {
+            return None;
+        }
+        let remainder = candidate.get(root.len()..)?;
+        if remainder.is_empty() {
+            return None;
+        }
+        let remainder = remainder.strip_prefix('\\')?;
+        Some(remainder.replace('\\', "/"))
+    } else if root == "/" {
+        Some(candidate.strip_prefix('/')?.to_string())
+    } else {
+        let root = root.trim_end_matches('/');
+        let remainder = candidate.strip_prefix(root)?;
+        let remainder = remainder.strip_prefix('/')?;
+        Some(remainder.to_string())
+    }
+}
+
 fn split_diff_chunks(patch: &str) -> Vec<&str> {
-    let mut starts = patch
-        .match_indices("diff --git ")
-        .filter_map(|(index, _)| {
-            if index == 0 || patch.as_bytes().get(index.wrapping_sub(1)) == Some(&b'\n') {
-                Some(index)
-            } else {
-                None
-            }
+    let mut lines = Vec::new();
+    let mut offset = 0_usize;
+    for raw_line in patch.split_inclusive('\n') {
+        lines.push((offset, raw_line.trim_end_matches(['\r', '\n'])));
+        offset = offset.saturating_add(raw_line.len());
+    }
+    if offset < patch.len() {
+        lines.push((offset, &patch[offset..]));
+    }
+
+    let mut starts = lines
+        .iter()
+        .filter_map(|(offset, line)| {
+            (line.starts_with("diff --git ")
+                || line.starts_with("diff --cc ")
+                || line.starts_with("diff --combined "))
+            .then_some(*offset)
         })
         .collect::<Vec<_>>();
+
+    if starts.is_empty() {
+        let mut old_remaining = 0_u32;
+        let mut new_remaining = 0_u32;
+        let mut in_hunk = false;
+        for (index, (offset, line)) in lines.iter().enumerate() {
+            if let Some(header) = parse_hunk_header(line) {
+                old_remaining = header.old_count;
+                new_remaining = header.new_count;
+                in_hunk = true;
+                continue;
+            }
+            if in_hunk {
+                if old_remaining == 0 && new_remaining == 0 {
+                    if line.starts_with("\\ No newline at end of file") {
+                        continue;
+                    }
+                    in_hunk = false;
+                } else {
+                    consume_declared_hunk_line(line, &mut old_remaining, &mut new_remaining);
+                    continue;
+                }
+            }
+            if line.starts_with("--- ")
+                && lines
+                    .get(index + 1)
+                    .is_some_and(|(_, next)| next.starts_with("+++ "))
+            {
+                starts.push(*offset);
+            }
+        }
+    }
 
     if starts.is_empty() {
         return vec![patch];
     }
     if starts[0] != 0 && !patch[..starts[0]].trim().is_empty() {
-        starts.insert(0, 0);
+        starts[0] = 0;
     }
+    starts.sort_unstable();
+    starts.dedup();
     starts
         .iter()
         .enumerate()
@@ -419,12 +674,31 @@ fn split_diff_chunks(patch: &str) -> Vec<&str> {
         .collect()
 }
 
+fn consume_declared_hunk_line(line: &str, old_remaining: &mut u32, new_remaining: &mut u32) {
+    if line.starts_with('+') && *new_remaining > 0 {
+        *new_remaining -= 1;
+    } else if line.starts_with('-') && *old_remaining > 0 {
+        *old_remaining -= 1;
+    } else if line.starts_with(' ') && *old_remaining > 0 && *new_remaining > 0 {
+        *old_remaining -= 1;
+        *new_remaining -= 1;
+    }
+}
+
 #[derive(Debug)]
 struct ParsedHunkHeader {
     old_start: u32,
     old_count: u32,
     new_start: u32,
     new_count: u32,
+}
+
+struct InProgressHunk {
+    hunk: DiffReviewHunk,
+    old_line: u32,
+    new_line: u32,
+    old_remaining: u32,
+    new_remaining: u32,
 }
 
 fn parse_hunk_header(line: &str) -> Option<ParsedHunkHeader> {
@@ -447,22 +721,152 @@ fn parse_hunk_range(value: &str, prefix: char) -> Option<(u32, u32)> {
     Some((start.parse().ok()?, count.parse().ok()?))
 }
 
+fn parse_raw_file_content(
+    thread_key: &ThreadKey,
+    path_hint: Option<&str>,
+    private_path_identity: Option<&str>,
+    content: &str,
+    input_kind: DiffInputKind,
+    occurrence: usize,
+    row_budget: usize,
+) -> (DiffReviewFile, usize, usize, bool) {
+    let (change_kind, row_kind) = match input_kind {
+        DiffInputKind::AddedContent => (DiffFileChangeKind::Added, DiffReviewRowKind::Addition),
+        DiffInputKind::DeletedContent => (DiffFileChangeKind::Deleted, DiffReviewRowKind::Deletion),
+        _ => unreachable!("raw content parser requires add/delete input"),
+    };
+    let relative_path = path_hint.and_then(|path| {
+        WorkspaceRelativePath::parse(path)
+            .ok()
+            .map(|path| path.normalized)
+    });
+    let full_identity = relative_path
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "raw:{}:{}",
+                private_path_identity.unwrap_or("unknown"),
+                stable_id(content)
+            )
+        });
+    let display_path = relative_path
+        .as_deref()
+        .map(bounded_display_path)
+        .unwrap_or_else(|| format!("Patch {}", occurrence + 1));
+    let id = stable_id(&format!(
+        "{}\0{}\0file\0{}",
+        thread_key.server_id, thread_key.thread_id, full_identity
+    ));
+    let line_count = content.lines().count();
+    let line_count_u32 = u32::try_from(line_count).unwrap_or(u32::MAX);
+    let has_no_newline_marker = !content.is_empty() && !content.ends_with('\n');
+    let total_rows = line_count.saturating_add(usize::from(has_no_newline_marker));
+    let mut rows = Vec::with_capacity(total_rows.min(row_budget));
+
+    for (index, text) in content.lines().take(row_budget).enumerate() {
+        let line_number = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+        let (old_line_number, new_line_number) = match row_kind {
+            DiffReviewRowKind::Addition => (None, Some(line_number)),
+            DiffReviewRowKind::Deletion => (Some(line_number), None),
+            _ => unreachable!(),
+        };
+        rows.push(DiffReviewRow {
+            id: String::new(),
+            kind: row_kind,
+            old_line_number,
+            new_line_number,
+            text: text.to_string(),
+        });
+    }
+    if has_no_newline_marker && rows.len() < row_budget {
+        rows.push(DiffReviewRow {
+            id: String::new(),
+            kind: DiffReviewRowKind::NoNewlineMarker,
+            old_line_number: None,
+            new_line_number: None,
+            text: "\\ No newline at end of file".to_string(),
+        });
+    }
+
+    let hunks = if content.is_empty() {
+        Vec::new()
+    } else {
+        let (old_start, old_count, new_start, new_count) = match input_kind {
+            DiffInputKind::AddedContent => (0, 0, 1, line_count_u32),
+            DiffInputKind::DeletedContent => (1, line_count_u32, 0, 0),
+            _ => unreachable!(),
+        };
+        let header = format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@");
+        vec![DiffReviewHunk {
+            id: String::new(),
+            header,
+            old_start,
+            old_count,
+            new_start,
+            new_count,
+            rows,
+        }]
+    };
+    let (old_path, new_path) = match input_kind {
+        DiffInputKind::AddedContent => (None, relative_path.clone()),
+        DiffInputKind::DeletedContent => (relative_path.clone(), None),
+        _ => unreachable!(),
+    };
+
+    let mut file = DiffReviewFile {
+        id,
+        display_path,
+        relative_path,
+        old_path,
+        new_path,
+        change_kind,
+        additions: if matches!(input_kind, DiffInputKind::AddedContent) {
+            line_count_u32
+        } else {
+            0
+        },
+        deletions: if matches!(input_kind, DiffInputKind::DeletedContent) {
+            line_count_u32
+        } else {
+            0
+        },
+        hunks,
+        raw_patch: content.to_string(),
+    };
+    assign_stable_child_ids(&mut file);
+    (
+        file,
+        total_rows.min(row_budget),
+        usize::from(!content.is_empty()),
+        total_rows > row_budget,
+    )
+}
+
 fn parse_diff_file(
     thread_key: &ThreadKey,
     path_hint: Option<&str>,
+    new_path_hint: Option<&str>,
+    private_path_identity: Option<&str>,
+    workspace_root: Option<&str>,
     patch: &str,
+    input_kind: DiffInputKind,
     occurrence: usize,
     row_budget: usize,
-) -> (DiffReviewFile, usize, bool) {
-    let mut old_path = None;
-    let mut new_path = None;
-    let mut rename_from = None;
-    let mut rename_to = None;
+    hunk_budget: usize,
+) -> (DiffReviewFile, usize, usize, bool) {
+    let hint = path_hint.and_then(canonical_decoded_path);
+    let hinted_new_path = new_path_hint.and_then(canonical_decoded_path);
+    let mut old_path = hinted_new_path.as_ref().and(hint.clone());
+    let mut new_path = hinted_new_path;
+    let mut rename_from: Option<CanonicalDiffPath> = None;
+    let mut rename_to: Option<CanonicalDiffPath> = None;
     let mut marked_added = false;
     let mut marked_deleted = false;
     let mut marked_binary = false;
+    let mut marked_unsupported = false;
     let mut hunks = Vec::new();
-    let mut current_hunk: Option<(DiffReviewHunk, u32, u32)> = None;
+    let mut current_hunk: Option<InProgressHunk> = None;
     let mut additions = 0_u32;
     let mut deletions = 0_u32;
     let mut row_count = 0_usize;
@@ -470,21 +874,16 @@ fn parse_diff_file(
 
     for line in patch.lines() {
         if let Some(header) = parse_hunk_header(line) {
-            if let Some((hunk, _, _)) = current_hunk.take() {
-                hunks.push(hunk);
+            if let Some(current) = current_hunk.take() {
+                hunks.push(current.hunk);
             }
-            let hunk_index = hunks.len();
-            current_hunk = Some((
-                DiffReviewHunk {
-                    id: stable_id(&format!(
-                        "{}\0{}\0hunk\0{}\0{}\0{}\0{}",
-                        thread_key.server_id,
-                        thread_key.thread_id,
-                        occurrence,
-                        hunk_index,
-                        header.old_start,
-                        header.new_start
-                    )),
+            if hunks.len() >= hunk_budget {
+                truncated = true;
+                break;
+            }
+            current_hunk = Some(InProgressHunk {
+                hunk: DiffReviewHunk {
+                    id: String::new(),
                     header: line.to_string(),
                     old_start: header.old_start,
                     old_count: header.old_count,
@@ -492,32 +891,69 @@ fn parse_diff_file(
                     new_count: header.new_count,
                     rows: Vec::new(),
                 },
-                header.old_start,
-                header.new_start,
-            ));
+                old_line: header.old_start,
+                new_line: header.new_start,
+                old_remaining: header.old_count,
+                new_remaining: header.new_count,
+            });
             continue;
         }
 
-        if let Some((hunk, old_line, new_line)) = current_hunk.as_mut() {
-            if row_count >= row_budget {
-                truncated = true;
+        if current_hunk
+            .as_ref()
+            .is_some_and(|current| current.old_remaining == 0 && current.new_remaining == 0)
+        {
+            if line.starts_with("\\ No newline at end of file") {
+                let current = current_hunk.as_mut().expect("checked above");
+                if row_count >= row_budget {
+                    truncated = true;
+                } else {
+                    current.hunk.rows.push(DiffReviewRow {
+                        id: String::new(),
+                        kind: DiffReviewRowKind::NoNewlineMarker,
+                        old_line_number: None,
+                        new_line_number: None,
+                        text: line.to_string(),
+                    });
+                    row_count += 1;
+                }
                 continue;
             }
-            let (kind, old_number, new_number, text) = if let Some(text) = line.strip_prefix('+') {
+            hunks.push(current_hunk.take().expect("checked above").hunk);
+        }
+
+        if let Some(current) = current_hunk.as_mut() {
+            let hunk = &mut current.hunk;
+            let old_line = &mut current.old_line;
+            let new_line = &mut current.new_line;
+            if row_count >= row_budget {
+                truncated = true;
+            }
+            let (kind, old_number, new_number, text) = if let Some(text) =
+                line.strip_prefix('+').filter(|_| current.new_remaining > 0)
+            {
                 let number = *new_line;
                 *new_line = new_line.saturating_add(1);
+                current.new_remaining -= 1;
                 additions = additions.saturating_add(1);
                 (DiffReviewRowKind::Addition, None, Some(number), text)
-            } else if let Some(text) = line.strip_prefix('-') {
+            } else if let Some(text) = line.strip_prefix('-').filter(|_| current.old_remaining > 0)
+            {
                 let number = *old_line;
                 *old_line = old_line.saturating_add(1);
+                current.old_remaining -= 1;
                 deletions = deletions.saturating_add(1);
                 (DiffReviewRowKind::Deletion, Some(number), None, text)
-            } else if let Some(text) = line.strip_prefix(' ') {
+            } else if let Some(text) = line
+                .strip_prefix(' ')
+                .filter(|_| current.old_remaining > 0 && current.new_remaining > 0)
+            {
                 let old_number = *old_line;
                 let new_number = *new_line;
                 *old_line = old_line.saturating_add(1);
                 *new_line = new_line.saturating_add(1);
+                current.old_remaining -= 1;
+                current.new_remaining -= 1;
                 (
                     DiffReviewRowKind::Context,
                     Some(old_number),
@@ -529,38 +965,42 @@ fn parse_diff_file(
             } else {
                 (DiffReviewRowKind::Metadata, None, None, line)
             };
-            let row_index = hunk.rows.len();
-            hunk.rows.push(DiffReviewRow {
-                id: stable_id(&format!(
-                    "{}\0row\0{}\0{:?}\0{}\0{}",
-                    hunk.id,
-                    row_index,
+            if row_count < row_budget {
+                hunk.rows.push(DiffReviewRow {
+                    id: String::new(),
                     kind,
-                    old_number.unwrap_or(0),
-                    new_number.unwrap_or(0)
-                )),
-                kind,
-                old_line_number: old_number,
-                new_line_number: new_number,
-                text: text.to_string(),
-            });
-            row_count += 1;
+                    old_line_number: old_number,
+                    new_line_number: new_number,
+                    text: text.to_string(),
+                });
+                row_count += 1;
+            }
             continue;
         }
 
         if let Some(paths) = line.strip_prefix("diff --git ") {
             if let Some((old, new)) = parse_diff_git_paths(paths) {
-                old_path = normalize_diff_path(&old);
-                new_path = normalize_diff_path(&new);
+                old_path = normalize_diff_path(&old, true, workspace_root);
+                new_path = normalize_diff_path(&new, true, workspace_root);
             }
+        } else if let Some(path) = line
+            .strip_prefix("diff --cc ")
+            .or_else(|| line.strip_prefix("diff --combined "))
+        {
+            let path = normalize_diff_path(path, false, workspace_root);
+            old_path = path.clone();
+            new_path = path;
+            marked_unsupported = true;
+        } else if line.starts_with("@@@ ") {
+            marked_unsupported = true;
         } else if let Some(path) = line.strip_prefix("--- ") {
-            old_path = normalize_diff_path(path_field(path));
+            old_path = normalize_diff_path(path_field(path), true, workspace_root);
         } else if let Some(path) = line.strip_prefix("+++ ") {
-            new_path = normalize_diff_path(path_field(path));
+            new_path = normalize_diff_path(path_field(path), true, workspace_root);
         } else if let Some(path) = line.strip_prefix("rename from ") {
-            rename_from = normalize_diff_path(path);
+            rename_from = normalize_diff_path(path, false, workspace_root);
         } else if let Some(path) = line.strip_prefix("rename to ") {
-            rename_to = normalize_diff_path(path);
+            rename_to = normalize_diff_path(path, false, workspace_root);
         } else if line.starts_with("new file mode ") {
             marked_added = true;
         } else if line.starts_with("deleted file mode ") {
@@ -570,8 +1010,12 @@ fn parse_diff_file(
         }
     }
 
-    if let Some((hunk, _, _)) = current_hunk {
-        hunks.push(hunk);
+    if let Some(current) = current_hunk {
+        if hunks.len() < hunk_budget {
+            hunks.push(current.hunk);
+        } else {
+            truncated = true;
+        }
     }
     if rename_from.is_some() {
         old_path = rename_from;
@@ -580,83 +1024,238 @@ fn parse_diff_file(
         new_path = rename_to;
     }
 
-    let hint = path_hint
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| bounded_display_path(path.trim()));
-    let display_path = new_path
-        .as_ref()
-        .or(old_path.as_ref())
-        .or(hint.as_ref())
-        .cloned()
+    // An authoritative diff may still mention a path outside the thread's
+    // workspace. Preserve only a redacted identity for that entry: returning
+    // its hunks or raw patch would turn trusted server output into a read-like
+    // escape around the source-preview confinement contract.
+    let outside_workspace = old_path
+        .iter()
+        .chain(new_path.iter())
+        .any(|path| path.identity.starts_with("outside-workspace:"));
+    if outside_workspace {
+        marked_unsupported = true;
+        additions = 0;
+        deletions = 0;
+        hunks.clear();
+        row_count = 0;
+    }
+
+    let selected_path = new_path.as_ref().or(old_path.as_ref()).or(hint.as_ref());
+    let display_path = selected_path
+        .map(|path| path.display.clone())
         .unwrap_or_else(|| format!("Patch {}", occurrence + 1));
-    let change_kind = if marked_binary {
+    let relative_path = selected_path.and_then(|path| path.relative_path.clone());
+    let change_kind = if matches!(input_kind, DiffInputKind::RenameMetadata) {
+        DiffFileChangeKind::Renamed
+    } else if marked_unsupported {
+        DiffFileChangeKind::Unsupported
+    } else if marked_binary {
         DiffFileChangeKind::Binary
     } else if old_path.is_none() && new_path.is_some() || marked_added {
         DiffFileChangeKind::Added
     } else if new_path.is_none() && old_path.is_some() || marked_deleted {
         DiffFileChangeKind::Deleted
-    } else if old_path.is_some() && new_path.is_some() && old_path != new_path {
+    } else if old_path.is_some()
+        && new_path.is_some()
+        && old_path.as_ref().map(|path| &path.identity)
+            != new_path.as_ref().map(|path| &path.identity)
+    {
         DiffFileChangeKind::Renamed
     } else if !hunks.is_empty() {
+        DiffFileChangeKind::Modified
+    } else if matches!(input_kind, DiffInputKind::UpdatedPatch) {
         DiffFileChangeKind::Modified
     } else {
         DiffFileChangeKind::Unknown
     };
+    let full_identity = selected_path
+        .map(|path| path.identity.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "patch:{}:{}",
+                private_path_identity.unwrap_or("unknown"),
+                stable_id(patch)
+            )
+        });
     let id = stable_id(&format!(
-        "{}\0{}\0file\0{}\0{}",
-        thread_key.server_id, thread_key.thread_id, display_path, occurrence
+        "{}\0{}\0file\0{}",
+        thread_key.server_id, thread_key.thread_id, full_identity
     ));
+    let old_path = old_path.map(|path| path.display);
+    let new_path = new_path.map(|path| path.display);
 
-    (
-        DiffReviewFile {
-            id,
-            display_path,
-            old_path,
-            new_path,
-            change_kind,
-            additions,
-            deletions,
-            hunks,
-            raw_patch: patch.to_string(),
+    let mut file = DiffReviewFile {
+        id,
+        display_path,
+        relative_path,
+        old_path,
+        new_path,
+        change_kind,
+        additions,
+        deletions,
+        hunks,
+        raw_patch: if outside_workspace {
+            String::new()
+        } else {
+            patch.to_string()
         },
-        row_count,
-        truncated,
-    )
+    };
+    assign_stable_child_ids(&mut file);
+    let hunk_count = file.hunks.len();
+    (file, row_count, hunk_count, truncated)
 }
 
 fn parse_diff_git_paths(value: &str) -> Option<(String, String)> {
     // Git's common unquoted form is `a/path b/path`. Splitting at the final
-    // ` b/` preserves spaces in the old path. Quoted paths are retained as a
-    // display-safe best effort; authoritative source reads never consume
-    // paths parsed from patches.
-    if let Some(split) = value.rfind(" b/") {
-        return Some((value[..split].to_string(), value[split + 1..].to_string()));
+    // ` b/` preserves spaces in the old path. When core.quotePath applies,
+    // retain each complete C-quoted token for the decoder below.
+    if value.trim_start().starts_with('"') {
+        let value = value.trim_start();
+        let (first, remainder) = take_git_path_token(value)?;
+        let (second, trailing) = take_git_path_token(remainder.trim_start())?;
+        return trailing
+            .trim()
+            .is_empty()
+            .then(|| (first.to_string(), second.to_string()));
     }
-    let fields = shlex::split(value)?;
-    (fields.len() == 2).then(|| (fields[0].clone(), fields[1].clone()))
+    value
+        .rfind(" b/")
+        .map(|split| (value[..split].to_string(), value[split + 1..].to_string()))
 }
 
 fn path_field(value: &str) -> &str {
+    let value = value.trim();
+    if value.starts_with('"') {
+        return take_git_path_token(value)
+            .map(|(token, _)| token)
+            .unwrap_or(value);
+    }
     value.split('\t').next().unwrap_or(value).trim()
 }
 
-fn normalize_diff_path(value: &str) -> Option<String> {
-    let value = value.trim().trim_matches('"');
-    if value.is_empty() || value == "/dev/null" {
+fn take_git_path_token(value: &str) -> Option<(&str, &str)> {
+    if !value.starts_with('"') {
+        let end = value.find(char::is_whitespace).unwrap_or(value.len());
+        return Some((&value[..end], &value[end..]));
+    }
+
+    let bytes = value.as_bytes();
+    let mut escaped = false;
+    for index in 1..bytes.len() {
+        match (escaped, bytes[index]) {
+            (true, _) => escaped = false,
+            (false, b'\\') => escaped = true,
+            (false, b'"') => return Some((&value[..=index], &value[index + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn decode_git_path(value: &str) -> Option<String> {
+    let value = value.trim();
+    if !value.starts_with('"') {
+        return Some(value.to_string());
+    }
+    if value.len() < 2 || !value.ends_with('"') {
         return None;
     }
-    let value = value
-        .strip_prefix("a/")
-        .or_else(|| value.strip_prefix("b/"))
-        .unwrap_or(value);
-    Some(bounded_display_path(value))
+
+    let bytes = &value.as_bytes()[1..value.len() - 1];
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let escaped = *bytes.get(index)?;
+        index += 1;
+        match escaped {
+            b'a' => decoded.push(0x07),
+            b'b' => decoded.push(0x08),
+            b't' => decoded.push(b'\t'),
+            b'n' => decoded.push(b'\n'),
+            b'v' => decoded.push(0x0b),
+            b'f' => decoded.push(0x0c),
+            b'r' => decoded.push(b'\r'),
+            b'\\' => decoded.push(b'\\'),
+            b'"' => decoded.push(b'"'),
+            b'0'..=b'7' => {
+                let mut octal = u16::from(escaped - b'0');
+                let mut digits = 1;
+                while digits < 3 {
+                    let Some(next @ b'0'..=b'7') = bytes.get(index).copied() else {
+                        break;
+                    };
+                    octal = octal.saturating_mul(8) + u16::from(next - b'0');
+                    index += 1;
+                    digits += 1;
+                }
+                decoded.push(u8::try_from(octal).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalDiffPath {
+    identity: String,
+    display: String,
+    relative_path: Option<String>,
+}
+
+fn canonical_decoded_path(value: &str) -> Option<CanonicalDiffPath> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let relative_path = WorkspaceRelativePath::parse(value)
+        .ok()
+        .map(|path| path.normalized);
+    Some(CanonicalDiffPath {
+        identity: value.to_string(),
+        display: bounded_display_path(value),
+        relative_path,
+    })
+}
+
+fn normalize_diff_path(
+    value: &str,
+    strip_git_prefix: bool,
+    workspace_root: Option<&str>,
+) -> Option<CanonicalDiffPath> {
+    let decoded = decode_git_path(value)?;
+    if decoded.is_empty() || decoded == "/dev/null" {
+        return None;
+    }
+    let path = if strip_git_prefix {
+        decoded
+            .strip_prefix("a/")
+            .or_else(|| decoded.strip_prefix("b/"))
+            .unwrap_or(&decoded)
+    } else {
+        &decoded
+    };
+    if remote_path_is_absolute(path) {
+        if let Some(relative) = normalize_file_change_hint(workspace_root, path) {
+            return canonical_decoded_path(&relative);
+        }
+        return Some(CanonicalDiffPath {
+            identity: format!("outside-workspace:{}", stable_id(path)),
+            display: "Outside workspace".to_string(),
+            relative_path: None,
+        });
+    }
+    canonical_decoded_path(path)
 }
 
 fn merge_diff_file(files: &mut Vec<DiffReviewFile>, mut incoming: DiffReviewFile) {
-    let Some(existing) = files
-        .iter_mut()
-        .find(|file| file.display_path == incoming.display_path)
-    else {
+    let Some(existing) = files.iter_mut().find(|file| file.id == incoming.id) else {
         files.push(incoming);
         return;
     };
@@ -670,19 +1269,75 @@ fn merge_diff_file(files: &mut Vec<DiffReviewFile>, mut incoming: DiffReviewFile
     if incoming.new_path.is_some() {
         existing.new_path = incoming.new_path.take();
     }
+    if existing.relative_path.is_none() {
+        existing.relative_path = incoming.relative_path.take();
+    }
     existing.hunks.append(&mut incoming.hunks);
     // Chunks already retain their trailing newline. Avoid inserting merge
     // separators so the aggregate copy/export payload cannot exceed the
     // global input-byte cap.
     existing.raw_patch.push_str(&incoming.raw_patch);
+    assign_stable_child_ids(existing);
+}
+
+fn assign_stable_child_ids(file: &mut DiffReviewFile) {
+    let mut hunk_occurrences = HashMap::<String, usize>::new();
+    let mut row_occurrences = HashMap::<String, usize>::new();
+    for hunk in &mut file.hunks {
+        let semantic = format!(
+            "{}\0hunk\0{}\0{}\0{}",
+            file.id,
+            hunk.old_start,
+            hunk.new_start,
+            hunk_context(&hunk.header)
+        );
+        let base_id = stable_id(&semantic);
+        let occurrence = hunk_occurrences.entry(base_id.clone()).or_default();
+        hunk.id = if *occurrence == 0 {
+            base_id
+        } else {
+            stable_id(&format!("{base_id}\0duplicate\0{occurrence}"))
+        };
+        *occurrence += 1;
+
+        for row in &mut hunk.rows {
+            let row_semantic = format!(
+                "{}\0row\0{:?}\0{}\0{}\0{}",
+                semantic,
+                row.kind,
+                row.old_line_number.unwrap_or(0),
+                row.new_line_number.unwrap_or(0),
+                row.text
+            );
+            let base_id = stable_id(&row_semantic);
+            let occurrence = row_occurrences.entry(base_id.clone()).or_default();
+            row.id = if *occurrence == 0 {
+                base_id
+            } else {
+                stable_id(&format!("{base_id}\0duplicate\0{occurrence}"))
+            };
+            *occurrence += 1;
+        }
+    }
+}
+
+fn hunk_context(header: &str) -> &str {
+    let Some(after_ranges) = header.get(2..) else {
+        return "";
+    };
+    let Some(end) = after_ranges.find("@@") else {
+        return "";
+    };
+    after_ranges[end + 2..].trim()
 }
 
 fn merge_change_kind(
     existing: DiffFileChangeKind,
     incoming: DiffFileChangeKind,
 ) -> DiffFileChangeKind {
-    use DiffFileChangeKind::{Added, Binary, Deleted, Modified, Renamed, Unknown};
+    use DiffFileChangeKind::{Added, Binary, Deleted, Modified, Renamed, Unknown, Unsupported};
     match (existing, incoming) {
+        (Unsupported, _) | (_, Unsupported) => Unsupported,
         (Binary, _) | (_, Binary) => Binary,
         (kind, Unknown) | (Unknown, kind) => kind,
         (left, right) if left == right => left,
@@ -710,31 +1365,38 @@ fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
 }
 
 fn bounded_display_path(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    utf8_prefix(&sanitized, MAX_DISPLAY_PATH_BYTES).to_string()
+    let mut sanitized = String::with_capacity(value.len().min(MAX_DISPLAY_PATH_BYTES));
+    for character in value.chars() {
+        let character = if character.is_control() {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if sanitized.len().saturating_add(character.len_utf8()) > MAX_DISPLAY_PATH_BYTES {
+            break;
+        }
+        sanitized.push(character);
+    }
+    sanitized
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation_uniffi::{HydratedConversationItem, HydratedTurnDiffData};
+    use crate::conversation_uniffi::{
+        HydratedConversationItem, HydratedFileChangeData, HydratedFileChangeEntryData,
+        HydratedTurnDiffData,
+    };
     use crate::store::ThreadSnapshot;
-    use crate::types::{ThreadInfo, ThreadSummaryStatus};
+    use crate::types::{AppOperationStatus, ThreadInfo, ThreadSummaryStatus};
     #[cfg(unix)]
     use std::ffi::CString;
     use std::fs::File;
     use std::io::{Read, Write};
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd};
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     #[cfg(unix)]
     use std::path::Path;
 
@@ -774,6 +1436,17 @@ mod tests {
                 thread_info(Some(cwd.into())),
             ));
         client
+    }
+
+    fn unified_input(patch: &str) -> DiffInput<'_> {
+        DiffInput {
+            path_hint: None,
+            new_path_hint: None,
+            private_path_identity: None,
+            workspace_root: None,
+            patch,
+            kind: DiffInputKind::Unified,
+        }
     }
 
     #[test]
@@ -865,13 +1538,7 @@ rename to after.rs
 diff --git a/picture.png b/picture.png
 Binary files a/picture.png and b/picture.png differ
 "#;
-        let review = normalize_trusted_diffs(
-            key(),
-            &[DiffInput {
-                path_hint: None,
-                patch,
-            }],
-        );
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
         assert_eq!(review.files.len(), 4);
         assert_eq!(review.files[0].change_kind, DiffFileChangeKind::Added);
         assert_eq!(review.files[0].additions, 2);
@@ -887,10 +1554,7 @@ Binary files a/picture.png and b/picture.png differ
     #[test]
     fn hunk_rows_have_stable_ids_and_correct_line_numbers() {
         let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,3 +20,3 @@ fn x()\n keep\n-old\n+new\n tail\n";
-        let input = [DiffInput {
-            path_hint: None,
-            patch,
-        }];
+        let input = [unified_input(patch)];
         let first = normalize_trusted_diffs(key(), &input);
         let second = normalize_trusted_diffs(key(), &input);
         assert_eq!(first, second);
@@ -916,13 +1580,7 @@ Binary files a/picture.png and b/picture.png differ
     #[test]
     fn quoted_git_paths_with_spaces_keep_file_identity() {
         let patch = "diff --git \"a/old name.rs\" \"b/new name.rs\"\n--- \"a/old name.rs\"\n+++ \"b/new name.rs\"\n@@ -1 +1 @@\n-old\n+new\n";
-        let review = normalize_trusted_diffs(
-            key(),
-            &[DiffInput {
-                path_hint: None,
-                patch,
-            }],
-        );
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
         assert_eq!(review.files.len(), 1);
         assert_eq!(review.files[0].old_path.as_deref(), Some("old name.rs"));
         assert_eq!(review.files[0].new_path.as_deref(), Some("new name.rs"));
@@ -934,8 +1592,8 @@ Binary files a/picture.png and b/picture.png differ
         let review = normalize_trusted_diffs(
             key(),
             &[DiffInput {
-                path_hint: Some("odd.patch"),
-                patch: "not a unified diff\n+or - maybe malformed\n@@ nonsense @@\n",
+                path_hint: Some("odd.patch".to_string()),
+                ..unified_input("not a unified diff\n+or - maybe malformed\n@@ nonsense @@\n")
             }],
         );
         assert_eq!(review.files.len(), 1);
@@ -954,13 +1612,7 @@ Binary files a/picture.png and b/picture.png differ
         while patch.len() <= MAX_DIFF_REVIEW_BYTES + 1024 {
             patch.push_str("+ocean-\u{1f41f}\n");
         }
-        let review = normalize_trusted_diffs(
-            key(),
-            &[DiffInput {
-                path_hint: None,
-                patch: &patch,
-            }],
-        );
+        let review = normalize_trusted_diffs(key(), &[unified_input(&patch)]);
         assert!(review.truncated);
         assert_eq!(review.source_byte_length, patch.len() as u64);
         assert!(
@@ -998,15 +1650,475 @@ Binary files a/picture.png and b/picture.png differ
         assert_eq!(review.deletions, 1);
     }
 
+    #[tokio::test]
+    async fn production_add_delete_file_changes_shape_raw_content() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "file-change".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![
+                    HydratedFileChangeEntryData {
+                        path: "/repo/new.txt".to_string(),
+                        kind: "add".to_string(),
+                        move_path: None,
+                        diff: "new line\nsecond".to_string(),
+                        // These are zero in the current upstream hydration for
+                        // raw add/delete content; review derives the true count.
+                        additions: 0,
+                        deletions: 0,
+                    },
+                    HydratedFileChangeEntryData {
+                        path: "/repo/old.txt".to_string(),
+                        kind: "delete".to_string(),
+                        move_path: None,
+                        diff: "gone\n".to_string(),
+                        additions: 0,
+                        deletions: 0,
+                    },
+                ],
+            }),
+            source_turn_id: Some("turn-without-aggregate".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 2);
+        assert_eq!(review.additions, 2);
+        assert_eq!(review.deletions, 1);
+        assert_eq!(review.files[0].change_kind, DiffFileChangeKind::Added);
+        assert_eq!(review.files[0].relative_path.as_deref(), Some("new.txt"));
+        assert_eq!(review.files[0].hunks[0].rows.len(), 3);
+        assert_eq!(review.files[0].hunks[0].rows[0].new_line_number, Some(1));
+        assert_eq!(review.files[1].change_kind, DiffFileChangeKind::Deleted);
+        assert_eq!(review.files[1].relative_path.as_deref(), Some("old.txt"));
+    }
+
+    #[tokio::test]
+    async fn turn_diff_replaces_overlapping_file_change_for_the_same_turn() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "file-change".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![HydratedFileChangeEntryData {
+                    path: "/repo/a.txt".to_string(),
+                    kind: "update".to_string(),
+                    move_path: None,
+                    diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+                    additions: 1,
+                    deletions: 1,
+                }],
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        snapshot.items.push(HydratedConversationItem {
+            id: "turn-diff".to_string(),
+            content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                diff: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 1);
+        assert_eq!((review.additions, review.deletions), (1, 1));
+        assert_eq!(review.files[0].hunks.len(), 1);
+        assert_eq!(review.files[0].hunks[0].rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn incomplete_failed_and_declined_file_changes_are_not_reviewed() {
+        for status in [
+            AppOperationStatus::Pending,
+            AppOperationStatus::InProgress,
+            AppOperationStatus::Failed,
+            AppOperationStatus::Declined,
+        ] {
+            let client = client_with_thread("/repo");
+            let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+            snapshot.items.push(HydratedConversationItem {
+                id: format!("file-change-{status:?}"),
+                content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                    status,
+                    changes: vec![HydratedFileChangeEntryData {
+                        path: "/repo/a.txt".to_string(),
+                        kind: "update".to_string(),
+                        move_path: None,
+                        diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+                        additions: 1,
+                        deletions: 1,
+                    }],
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(0),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            });
+            client.app_store.upsert_thread_snapshot(snapshot);
+
+            assert_eq!(
+                diff_review_for_thread(&client, key()).await,
+                DiffReviewResult::Empty { thread_key: key() }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_pure_rename_survives_empty_patch_hydration() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "rename".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![HydratedFileChangeEntryData {
+                    path: "/repo/old.rs".to_string(),
+                    kind: "update".to_string(),
+                    move_path: Some("/repo/new.rs".to_string()),
+                    diff: String::new(),
+                    additions: 0,
+                    deletions: 0,
+                }],
+            }),
+            source_turn_id: Some("rename-turn".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 1);
+        let file = &review.files[0];
+        assert_eq!(file.change_kind, DiffFileChangeKind::Renamed);
+        assert_eq!(file.old_path.as_deref(), Some("old.rs"));
+        assert_eq!(file.new_path.as_deref(), Some("new.rs"));
+        assert_eq!(file.relative_path.as_deref(), Some("new.rs"));
+        assert_eq!(file.display_path, "new.rs");
+        assert!(file.hunks.is_empty());
+        assert_eq!((review.additions, review.deletions), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn aggregate_turn_diff_keeps_pure_rename_without_duplicate_content() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.push(HydratedConversationItem {
+            id: "file-change".to_string(),
+            content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                status: AppOperationStatus::Completed,
+                changes: vec![
+                    HydratedFileChangeEntryData {
+                        path: "/repo/a.txt".to_string(),
+                        kind: "update".to_string(),
+                        move_path: None,
+                        diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+                        additions: 1,
+                        deletions: 1,
+                    },
+                    HydratedFileChangeEntryData {
+                        path: "/repo/old.rs".to_string(),
+                        kind: "update".to_string(),
+                        move_path: Some("/repo/new.rs".to_string()),
+                        diff: String::new(),
+                        additions: 0,
+                        deletions: 0,
+                    },
+                ],
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        snapshot.items.push(HydratedConversationItem {
+            id: "turn-diff".to_string(),
+            content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                diff: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: false,
+        });
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 2);
+        assert_eq!((review.additions, review.deletions), (1, 1));
+        assert_eq!(
+            review
+                .files
+                .iter()
+                .filter(|file| file.relative_path.as_deref() == Some("a.txt"))
+                .count(),
+            1
+        );
+        let rename = review
+            .files
+            .iter()
+            .find(|file| file.relative_path.as_deref() == Some("new.rs"))
+            .expect("rename retained");
+        assert_eq!(rename.change_kind, DiffFileChangeKind::Renamed);
+        assert!(rename.hunks.is_empty());
+    }
+
+    #[test]
+    fn absolute_turn_diff_paths_are_relativized_or_redacted() {
+        let inside = "diff --git /repo/src/a.rs /repo/src/a.rs\n--- /repo/src/a.rs\n+++ /repo/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let outside = "diff --git /secret/a.rs /secret/a.rs\n--- /secret/a.rs\n+++ /secret/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let inputs = [
+            DiffInput {
+                workspace_root: Some("/repo".to_string()),
+                ..unified_input(inside)
+            },
+            DiffInput {
+                workspace_root: Some("/repo".to_string()),
+                ..unified_input(outside)
+            },
+        ];
+        let review = normalize_trusted_diffs(key(), &inputs);
+        assert_eq!(review.files.len(), 2);
+        assert_eq!(review.files[0].relative_path.as_deref(), Some("src/a.rs"));
+        assert_eq!(review.files[0].display_path, "src/a.rs");
+        let redacted = &review.files[1];
+        assert_eq!(redacted.display_path, "Outside workspace");
+        assert!(redacted.relative_path.is_none());
+        assert_eq!(redacted.old_path.as_deref(), Some("Outside workspace"));
+        assert_eq!(redacted.new_path.as_deref(), Some("Outside workspace"));
+        assert!(!format!("{redacted:?}").contains("/secret"));
+    }
+
+    #[test]
+    fn hunk_parser_enforces_declared_ranges() {
+        let patch =
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n-extra\n+extra\n";
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        let file = &review.files[0];
+        assert_eq!((file.additions, file.deletions), (1, 1));
+        assert_eq!(file.hunks[0].rows.len(), 2);
+        assert!(file.hunks[0].rows.iter().all(|row| row.text != "extra"));
+    }
+
+    #[test]
+    fn plain_multi_file_unified_diff_splits_without_git_headers() {
+        let patch = "--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-left\n+right\n";
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        assert_eq!(review.files.len(), 2);
+        assert_eq!((review.additions, review.deletions), (2, 2));
+        assert_eq!(review.files[0].relative_path.as_deref(), Some("one.rs"));
+        assert_eq!(review.files[1].relative_path.as_deref(), Some("two.rs"));
+    }
+
+    #[test]
+    fn combined_diff_is_explicitly_unsupported() {
+        let patch = "diff --cc merge.rs\nindex aaa,bbb..ccc\n--- a/merge.rs\n+++ b/merge.rs\n@@@ -1,1 -1,1 +1,1 @@@\n--left\n -right\n++merged\n";
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        assert_eq!(review.files.len(), 1);
+        assert_eq!(review.files[0].change_kind, DiffFileChangeKind::Unsupported);
+        assert_eq!(review.files[0].raw_patch, patch);
+        assert_eq!((review.additions, review.deletions), (0, 0));
+    }
+
+    #[test]
+    fn paths_named_with_git_prefixes_are_not_stripped_from_rename_metadata() {
+        let patch = "diff --git a/a/foo b/b/foo\nsimilarity index 100%\nrename from a/foo\nrename to b/foo\n";
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        let file = &review.files[0];
+        assert_eq!(file.change_kind, DiffFileChangeKind::Renamed);
+        assert_eq!(file.old_path.as_deref(), Some("a/foo"));
+        assert_eq!(file.new_path.as_deref(), Some("b/foo"));
+    }
+
+    #[test]
+    fn quoted_git_path_can_contain_the_unquoted_split_delimiter() {
+        let patch = "diff --git \"a/name b/part.bin\" \"b/name b/part.bin\"\nBinary files \"a/name b/part.bin\" and \"b/name b/part.bin\" differ\n";
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        assert_eq!(review.files.len(), 1);
+        assert_eq!(review.files[0].display_path, "name b/part.bin");
+        assert_eq!(review.files[0].change_kind, DiffFileChangeKind::Binary);
+    }
+
+    #[test]
+    fn existing_row_and_hunk_ids_survive_an_expanded_hunk() {
+        let original = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let expanded = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1,2 @@\n-old\n+new\n+later\n";
+        let first = normalize_trusted_diffs(key(), &[unified_input(original)]);
+        let second = normalize_trusted_diffs(key(), &[unified_input(expanded)]);
+        assert_eq!(first.files[0].hunks[0].id, second.files[0].hunks[0].id);
+        let first_new = first.files[0].hunks[0]
+            .rows
+            .iter()
+            .find(|row| row.text == "new")
+            .expect("original row");
+        let second_new = second.files[0].hunks[0]
+            .rows
+            .iter()
+            .find(|row| row.text == "new")
+            .expect("expanded row");
+        assert_eq!(first_new.id, second_new.id);
+    }
+
+    #[test]
+    fn pathless_identical_patches_do_not_merge_across_private_identities() {
+        let inputs = [
+            DiffInput {
+                private_path_identity: Some("first".to_string()),
+                ..unified_input("@@ -1 +1 @@\n-old\n+new\n")
+            },
+            DiffInput {
+                private_path_identity: Some("second".to_string()),
+                ..unified_input("@@ -1 +1 @@\n-old\n+new\n")
+            },
+        ];
+        let review = normalize_trusted_diffs(key(), &inputs);
+        assert_eq!(review.files.len(), 2);
+        assert_ne!(review.files[0].id, review.files[1].id);
+    }
+
+    #[test]
+    fn absolute_file_change_hints_are_workspace_relative_or_omitted() {
+        assert_eq!(
+            normalize_file_change_hint(Some("/repo"), "/repo/src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            normalize_file_change_hint(Some("C:\\Repo"), "c:/repo/src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            normalize_file_change_hint(Some("/repo"), "/repository/secret"),
+            None
+        );
+        assert_eq!(
+            normalize_file_change_hint(Some("/repo"), "/outside/secret"),
+            None
+        );
+    }
+
+    #[test]
+    fn stable_row_ids_survive_unrelated_prepended_files() {
+        let unchanged =
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let prepended = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-left\n+right\n{unchanged}"
+        );
+        let first = normalize_trusted_diffs(key(), &[unified_input(unchanged)]);
+        let second = normalize_trusted_diffs(key(), &[unified_input(&prepended)]);
+        let first_file = first
+            .files
+            .iter()
+            .find(|file| file.relative_path.as_deref() == Some("b.rs"))
+            .expect("b file");
+        let second_file = second
+            .files
+            .iter()
+            .find(|file| file.relative_path.as_deref() == Some("b.rs"))
+            .expect("b file");
+        assert_eq!(first_file.id, second_file.id);
+        assert_eq!(first_file.hunks[0].id, second_file.hunks[0].id);
+        assert_eq!(
+            first_file.hunks[0]
+                .rows
+                .iter()
+                .map(|row| &row.id)
+                .collect::<Vec<_>>(),
+            second_file.hunks[0]
+                .rows
+                .iter()
+                .map(|row| &row.id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn full_path_identity_prevents_truncated_label_collisions() {
+        let prefix = "x".repeat(MAX_DISPLAY_PATH_BYTES);
+        let first_path = format!("{prefix}/a.rs");
+        let second_path = format!("{prefix}/b.rs");
+        let patch = format!(
+            "diff --git a/{first_path} b/{first_path}\n--- a/{first_path}\n+++ b/{first_path}\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/{second_path} b/{second_path}\n--- a/{second_path}\n+++ b/{second_path}\n@@ -1 +1 @@\n-left\n+right\n"
+        );
+        let review = normalize_trusted_diffs(key(), &[unified_input(&patch)]);
+        assert_eq!(review.files.len(), 2);
+        assert_eq!(review.files[0].display_path, review.files[1].display_path);
+        assert_ne!(review.files[0].id, review.files[1].id);
+        assert_ne!(review.files[0].relative_path, review.files[1].relative_path);
+    }
+
+    #[test]
+    fn git_c_quoted_paths_decode_octal_and_standard_escapes() {
+        assert_eq!(
+            decode_git_path(r#""a/\303\251\tquote\"slash\\name""#).as_deref(),
+            Some("a/\u{e9}\tquote\"slash\\name")
+        );
+        let patch = r#"diff --git "a/\303\251 file.rs" "b/\303\251 file.rs"
+--- "a/\303\251 file.rs"
++++ "b/\303\251 file.rs"
+@@ -1 +1 @@
+-old
++new
+"#;
+        let review = normalize_trusted_diffs(key(), &[unified_input(patch)]);
+        assert_eq!(review.files.len(), 1);
+        assert_eq!(review.files[0].display_path, "\u{e9} file.rs");
+        assert_eq!(
+            review.files[0].relative_path.as_deref(),
+            Some("\u{e9} file.rs")
+        );
+    }
+
     /// Test-only adapter proving the host-side contract. It walks every path
     /// segment relative to an already-open root descriptor and sets
     /// `O_NOFOLLOW` at each hop, so traversal, symlink swaps, and non-files do
     /// not turn into broader reads. Production mobile code does not use this
     /// adapter; Remora Link must provide equivalent enforcement remotely.
     #[cfg(unix)]
-    fn open_confined(root: &Path, path: &WorkspaceRelativePath) -> std::io::Result<File> {
-        let root = File::open(root)?;
-        let mut directory = root;
+    fn open_root_capability(root: &Path) -> std::io::Result<File> {
+        let path = CString::new(root.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: path is NUL-terminated and open returns a new descriptor.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is freshly returned and ownership transfers once.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    #[cfg(unix)]
+    fn open_confined(root: &File, path: &WorkspaceRelativePath) -> std::io::Result<File> {
+        let mut directory = root.try_clone()?;
         for (index, component) in path.components.iter().enumerate() {
             let name = CString::new(component.as_bytes()).expect("validated NUL-free component");
             let is_last = index + 1 == path.components.len();
@@ -1139,11 +2251,12 @@ Binary files a/picture.png and b/picture.png differ
         std::fs::create_dir_all(&outside).expect("outside");
         std::fs::write(outside.join("secret"), "secret").expect("secret");
         symlink(&outside, root.join("escape")).expect("symlink");
+        let root_capability = open_root_capability(&root).expect("root capability");
 
         let escape = WorkspaceRelativePath::parse("escape/secret").expect("valid syntax");
-        assert!(open_confined(&root, &escape).is_err());
+        assert!(open_confined(&root_capability, &escape).is_err());
         let directory = WorkspaceRelativePath::parse("directory").expect("valid syntax");
-        assert!(open_confined(&root, &directory).is_err());
+        assert!(open_confined(&root_capability, &directory).is_err());
     }
 
     #[test]
@@ -1159,7 +2272,8 @@ Binary files a/picture.png and b/picture.png differ
         std::fs::write(root.join("file"), "inside").expect("inside");
         std::fs::write(outside.join("file"), "outside").expect("outside file");
         let relative = WorkspaceRelativePath::parse("file").expect("path");
-        let mut opened = open_confined(&root, &relative).expect("confined open");
+        let root_capability = open_root_capability(&root).expect("root capability");
+        let mut opened = open_confined(&root_capability, &relative).expect("confined open");
 
         std::fs::rename(root.join("file"), root.join("original")).expect("rename");
         symlink(outside.join("file"), root.join("file")).expect("swap to symlink");
@@ -1168,7 +2282,32 @@ Binary files a/picture.png and b/picture.png differ
             .read_to_string(&mut contents)
             .expect("read pinned fd");
         assert_eq!(contents, "inside");
-        assert!(open_confined(&root, &relative).is_err());
+        assert!(open_confined(&root_capability, &relative).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_root_capability_is_pinned_across_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        let moved_root = temp.path().join("moved-root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(root.join("file"), "inside").expect("inside");
+        std::fs::write(outside.join("file"), "outside").expect("outside file");
+        let root_capability = open_root_capability(&root).expect("root capability");
+
+        std::fs::rename(&root, &moved_root).expect("move root");
+        symlink(&outside, &root).expect("replace root path with symlink");
+        let relative = WorkspaceRelativePath::parse("file").expect("path");
+        let mut opened = open_confined(&root_capability, &relative).expect("pinned root read");
+        let mut contents = String::new();
+        opened.read_to_string(&mut contents).expect("read");
+        assert_eq!(contents, "inside");
+        assert!(open_root_capability(&root).is_err());
     }
 
     #[test]
@@ -1184,10 +2323,11 @@ Binary files a/picture.png and b/picture.png differ
         large
             .write_all(&vec![b'x'; MAX_SOURCE_PREVIEW_BYTES + 1])
             .expect("write large");
+        let root_capability = open_root_capability(root).expect("root capability");
 
         let preview = |name: &str| {
             let relative = WorkspaceRelativePath::parse(name).expect("path");
-            let file = open_confined(root, &relative).expect("open");
+            let file = open_confined(&root_capability, &relative).expect("open");
             classify_open_file(key(), name, file)
         };
         assert!(matches!(

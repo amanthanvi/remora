@@ -250,6 +250,7 @@ mod tests {
                 changes: vec![HydratedFileChangeEntryData {
                     path: "src/lib.rs".to_string(),
                     kind: "update".to_string(),
+                    move_path: None,
                     diff: "@@ -1 +1\n-old\n+new\n".to_string(),
                     additions: 1,
                     deletions: 1,
