@@ -1,0 +1,86 @@
+name: Relay CI
+
+on:
+  pull_request:
+    paths:
+      - "services/remora-relay/**"
+      - ".github/workflows/relay-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/remora-relay/**"
+      - ".github/workflows/relay-ci.yml"
+
+concurrency:
+  group: relay-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REMORA_RELAY_TEST_DATABASE_URL: postgres://remora:remora-ci@127.0.0.1:5432/remora_relay_test
+      SCCACHE_BUCKET: rust-cache
+      SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+      SCCACHE_REGION: auto
+      SCCACHE_S3_USE_SSL: "true"
+      SCCACHE_S3_KEY_PREFIX: ci/remora-relay
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    defaults:
+      run:
+        working-directory: services/remora-relay
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: remora_relay_test
+          POSTGRES_USER: remora
+          POSTGRES_PASSWORD: remora-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U remora -d remora_relay_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Configure sccache
+        run: |
+          if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            {
+              echo "SCCACHE_BUCKET="
+              echo "SCCACHE_ENDPOINT="
+              echo "SCCACHE_S3_KEY_PREFIX="
+              echo "AWS_ACCESS_KEY_ID="
+              echo "AWS_SECRET_ACCESS_KEY="
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup sccache
+        if: env.SCCACHE_ENDPOINT != '' && env.AWS_ACCESS_KEY_ID != '' && env.AWS_SECRET_ACCESS_KEY != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test with PostgreSQL 17 contract
+        run: cargo test --locked --all-targets --features required-postgres-tests
+
+      - name: Build release
+        run: cargo build --locked --release

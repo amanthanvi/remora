@@ -72,11 +72,13 @@ jobs:
           if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
             echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           else
-            echo "SCCACHE_BUCKET=" >> "$GITHUB_ENV"
-            echo "SCCACHE_ENDPOINT=" >> "$GITHUB_ENV"
-            echo "SCCACHE_S3_KEY_PREFIX=" >> "$GITHUB_ENV"
-            echo "AWS_ACCESS_KEY_ID=" >> "$GITHUB_ENV"
-            echo "AWS_SECRET_ACCESS_KEY=" >> "$GITHUB_ENV"
+            {
+              echo "SCCACHE_BUCKET="
+              echo "SCCACHE_ENDPOINT="
+              echo "SCCACHE_S3_KEY_PREFIX="
+              echo "AWS_ACCESS_KEY_ID="
+              echo "AWS_SECRET_ACCESS_KEY="
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Setup sccache
@@ -101,6 +103,9 @@ jobs:
         run: |
           cd shared/rust-bridge
           ./generate-bindings.sh
+
+      - name: Test shared Rust host library
+        run: make rust-test
 
       - name: Package shared mobile sources
         run: |
@@ -179,11 +184,13 @@ jobs:
           if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
             echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           else
-            echo "SCCACHE_BUCKET=" >> "$GITHUB_ENV"
-            echo "SCCACHE_ENDPOINT=" >> "$GITHUB_ENV"
-            echo "SCCACHE_S3_KEY_PREFIX=" >> "$GITHUB_ENV"
-            echo "AWS_ACCESS_KEY_ID=" >> "$GITHUB_ENV"
-            echo "AWS_SECRET_ACCESS_KEY=" >> "$GITHUB_ENV"
+            {
+              echo "SCCACHE_BUCKET="
+              echo "SCCACHE_ENDPOINT="
+              echo "SCCACHE_S3_KEY_PREFIX="
+              echo "AWS_ACCESS_KEY_ID="
+              echo "AWS_SECRET_ACCESS_KEY="
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Setup sccache
@@ -220,8 +227,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Assemble debug
-        run: apps/android/gradlew -p apps/android :app:assembleDebug
+      - name: Test and assemble debug
+        run: |
+          apps/android/gradlew -p apps/android \
+            :app:testDebugUnitTest \
+            :app:assembleDebug
 
   ios:
     needs: shared-prep
@@ -267,11 +277,13 @@ jobs:
           if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
             echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           else
-            echo "SCCACHE_BUCKET=" >> "$GITHUB_ENV"
-            echo "SCCACHE_ENDPOINT=" >> "$GITHUB_ENV"
-            echo "SCCACHE_S3_KEY_PREFIX=" >> "$GITHUB_ENV"
-            echo "AWS_ACCESS_KEY_ID=" >> "$GITHUB_ENV"
-            echo "AWS_SECRET_ACCESS_KEY=" >> "$GITHUB_ENV"
+            {
+              echo "SCCACHE_BUCKET="
+              echo "SCCACHE_ENDPOINT="
+              echo "SCCACHE_S3_KEY_PREFIX="
+              echo "AWS_ACCESS_KEY_ID="
+              echo "AWS_SECRET_ACCESS_KEY="
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Setup sccache
@@ -325,7 +337,7 @@ jobs:
           fi
           echo "IOS_SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
 
-      - name: Build (Remora)
+      - name: Build and test (Remora)
         run: |
           xcodebuild \
             -project apps/ios/Remora.xcodeproj \
@@ -334,4 +346,4 @@ jobs:
             -destination "id=$IOS_SIMULATOR_UDID" \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
-            build
+            test
