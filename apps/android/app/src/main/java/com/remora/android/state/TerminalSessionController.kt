@@ -8,10 +8,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.AppStore
 import uniffi.codex_mobile_client.TerminalBackendKind
-import uniffi.codex_mobile_client.TerminalOutputListener
+import uniffi.codex_mobile_client.TerminalOutputEventListener
+import uniffi.codex_mobile_client.TerminalOutputSnapshot
+import uniffi.codex_mobile_client.TerminalOutputStreamEvent
+import uniffi.codex_mobile_client.TerminalOutputSubscription
 import uniffi.codex_mobile_client.TerminalSession
 import uniffi.codex_mobile_client.TerminalSize
 import uniffi.codex_mobile_client.TerminalSshTrustStore
+
+sealed interface TerminalRenderUpdate {
+    data class Replace(val bytes: ByteArray) : TerminalRenderUpdate
+
+    data class Append(val bytes: ByteArray) : TerminalRenderUpdate
+}
 
 class TerminalSessionController(
     private val scope: CoroutineScope,
@@ -45,9 +54,15 @@ class TerminalSessionController(
 
     var sessionId: String? = null
         private set
-    private var listener: TerminalOutputListener? = null
+    private var listener: TerminalOutputEventListener? = null
+    private var outputSubscription: TerminalOutputSubscription? = null
     @Volatile
-    private var outputByteSink: ((ByteArray) -> Unit)? = null
+    private var outputSink: ((TerminalRenderUpdate) -> Unit)? = null
+    private var outputBytes = ByteArray(0)
+    private var expectedSequence: ULong? = null
+    private val eventLock = Any()
+    private val pendingEvents = ArrayDeque<TerminalOutputStreamEvent>()
+    private var eventDrainScheduled = false
     @Volatile
     private var eventGeneration: Int = 0
     private var terminalCols: UShort = 80u
@@ -85,31 +100,26 @@ class TerminalSessionController(
                     phase = Phase.FAILED
                     return@launch
                 }
-                val outputListener = object : TerminalOutputListener {
-                    override fun onBytes(data: ByteArray) {
-                        if (generation != eventGeneration) return
-                        val sink = outputByteSink
-                        if (sink != null) {
-                            sink(data.copyOf())
-                            return
-                        }
-                        scope.launch(Dispatchers.Main.immediate) {
+                val outputListener = object : TerminalOutputEventListener {
+                    override fun onEvent(event: TerminalOutputStreamEvent) {
+                        var scheduleDrain = false
+                        synchronized(eventLock) {
                             if (generation == eventGeneration) {
-                                appendOutput(data)
+                                pendingEvents.addLast(event)
+                                if (!eventDrainScheduled) {
+                                    eventDrainScheduled = true
+                                    scheduleDrain = true
+                                }
                             }
                         }
-                    }
-
-                    override fun onExit(code: Int) {
-                        scope.launch(Dispatchers.Main.immediate) {
-                            if (generation == eventGeneration) {
-                                exitCode = code
-                                phase = Phase.EXITED
+                        if (scheduleDrain) {
+                            scope.launch(Dispatchers.Main.immediate) {
+                                drainOutputEvents(generation)
                             }
                         }
                     }
                 }
-                opened.subscribeOutput(outputListener)
+                outputSubscription = opened.subscribeOutputEvents(outputListener)
                 listener = outputListener
                 phase = Phase.RUNNING
             } catch (error: Exception) {
@@ -141,7 +151,7 @@ class TerminalSessionController(
 
     fun switchBackend(backend: TerminalBackendKind) {
         close()
-        output = ""
+        replaceOutput(byteArrayOf())
         open(backend)
     }
 
@@ -168,11 +178,19 @@ class TerminalSessionController(
     }
 
     fun clearOutput() {
-        output = ""
+        replaceOutput(byteArrayOf())
     }
 
-    fun setOutputByteSink(sink: ((ByteArray) -> Unit)?) {
-        outputByteSink = sink
+    fun setOutputSink(sink: ((TerminalRenderUpdate) -> Unit)?) {
+        outputSink = sink
+        if (sink == null) {
+            output = outputBytes.toString(Charsets.UTF_8)
+        }
+        sink?.invoke(TerminalRenderUpdate.Replace(outputBytes.copyOf()))
+    }
+
+    fun replayOutputToSink() {
+        outputSink?.invoke(TerminalRenderUpdate.Replace(outputBytes.copyOf()))
     }
 
     private fun sshHostTrustChallenge(
@@ -219,27 +237,104 @@ class TerminalSessionController(
 
     fun close() {
         eventGeneration += 1
+        outputSubscription?.cancel()
+        outputSubscription = null
+        listener = null
+        synchronized(eventLock) {
+            pendingEvents.clear()
+            eventDrainScheduled = false
+        }
         val id = sessionId ?: return
         sessionId = null
-        listener = null
         phase = Phase.IDLE
         scope.launch {
             runCatching { appStore.closeTerminalSession(id) }
         }
     }
 
-    private fun appendOutput(data: ByteArray) {
-        val sink = outputByteSink
-        sink?.invoke(data.copyOf())
-        if (sink != null) return
-        output += data.toString(Charsets.UTF_8)
-        trimOutputIfNeeded()
+    private fun drainOutputEvents(generation: Int) {
+        val events = synchronized(eventLock) {
+            val drained = pendingEvents.toList()
+            pendingEvents.clear()
+            eventDrainScheduled = false
+            drained
+        }
+        if (generation != eventGeneration) return
+        events.forEach(::applyOutputEvent)
     }
 
-    private fun trimOutputIfNeeded() {
-        val maxCount = 64_000
-        if (output.length > maxCount) {
-            output = output.takeLast(maxCount)
+    private fun applyOutputEvent(event: TerminalOutputStreamEvent) {
+        when (event) {
+            is TerminalOutputStreamEvent.Snapshot -> applySnapshot(event.snapshot)
+            is TerminalOutputStreamEvent.Reset -> applySnapshot(event.snapshot)
+            is TerminalOutputStreamEvent.Output -> applyOutput(event.sequence, event.data)
+            is TerminalOutputStreamEvent.Exited -> {
+                val expected = expectedSequence
+                if (expected == null || event.sequence >= expected) {
+                    expectedSequence = event.sequence + 1u
+                    exitCode = event.code
+                    phase = Phase.EXITED
+                }
+            }
+        }
+    }
+
+    private fun applySnapshot(snapshot: TerminalOutputSnapshot) {
+        expectedSequence = snapshot.latestSequence?.plus(1u) ?: snapshot.baseSequence
+        replaceOutput(snapshot.bytes)
+        snapshot.exitCode?.let { code ->
+            exitCode = code
+            phase = Phase.EXITED
+        }
+    }
+
+    private fun applyOutput(sequence: ULong, data: ByteArray) {
+        val expected = expectedSequence
+        if (expected != null) {
+            if (sequence < expected) return
+            if (sequence > expected) {
+                activeSession()?.let { applySnapshot(it.outputSnapshot()) }
+                return
+            }
+        }
+        expectedSequence = sequence + 1u
+        appendOutput(data)
+    }
+
+    private fun replaceOutput(data: ByteArray) {
+        outputBytes = boundedOutput(data)
+        output = outputBytes.toString(Charsets.UTF_8)
+        outputSink?.invoke(TerminalRenderUpdate.Replace(outputBytes.copyOf()))
+    }
+
+    private fun appendOutput(data: ByteArray) {
+        if (data.isEmpty()) return
+        outputBytes = boundedOutput(outputBytes, data)
+        if (outputSink == null) {
+            output = outputBytes.toString(Charsets.UTF_8)
+        }
+        outputSink?.invoke(TerminalRenderUpdate.Append(data.copyOf()))
+    }
+
+    private fun boundedOutput(data: ByteArray): ByteArray {
+        val limit = 64 * 1024
+        if (data.size <= limit) return data.copyOf()
+        return data.copyOfRange(data.size - limit, data.size)
+    }
+
+    private fun boundedOutput(existing: ByteArray, appended: ByteArray): ByteArray {
+        val limit = 64 * 1024
+        if (appended.size >= limit) {
+            return appended.copyOfRange(appended.size - limit, appended.size)
+        }
+        val existingCount = minOf(existing.size, limit - appended.size)
+        return ByteArray(existingCount + appended.size).also { combined ->
+            existing.copyInto(
+                destination = combined,
+                destinationOffset = 0,
+                startIndex = existing.size - existingCount,
+            )
+            appended.copyInto(combined, destinationOffset = existingCount)
         }
     }
 }

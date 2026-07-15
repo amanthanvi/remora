@@ -1,6 +1,11 @@
 import Foundation
 import Observation
 
+enum TerminalRenderUpdate: Sendable {
+    case replace(Data)
+    case append(Data)
+}
+
 @MainActor
 @Observable
 final class TerminalSessionController {
@@ -26,7 +31,10 @@ final class TerminalSessionController {
 
     @ObservationIgnored private let appStore: AppStore
     @ObservationIgnored private var outputListener: TerminalOutputRelay?
-    @ObservationIgnored private var outputSink: ((Data) -> Void)?
+    @ObservationIgnored private var outputSubscription: TerminalOutputSubscription?
+    @ObservationIgnored private var outputSink: ((TerminalRenderUpdate) -> Void)?
+    @ObservationIgnored private var outputBytes = Data()
+    @ObservationIgnored private var expectedSequence: UInt64?
     @ObservationIgnored private var eventGeneration = 0
     @ObservationIgnored private var terminalSize = TerminalSize(cols: 80, rows: 24)
 
@@ -68,8 +76,7 @@ final class TerminalSessionController {
                 return
             }
             let listener = TerminalOutputRelay(owner: self, generation: generation)
-            listener.setOutputSink(outputSink)
-            session.subscribeOutput(listener: listener)
+            outputSubscription = session.subscribeOutputEvents(listener: listener)
             outputListener = listener
             phase = .running
         } catch {
@@ -102,7 +109,7 @@ final class TerminalSessionController {
 
     func switchBackend(_ backend: TerminalBackendKind) async {
         close()
-        output = ""
+        replaceOutput(Data())
         await open(backend: backend)
     }
 
@@ -125,12 +132,15 @@ final class TerminalSessionController {
     }
 
     func clearOutput() {
-        output = ""
+        replaceOutput(Data())
     }
 
-    func setOutputSink(_ sink: ((Data) -> Void)?) {
+    func setOutputSink(_ sink: ((TerminalRenderUpdate) -> Void)?) {
         outputSink = sink
-        outputListener?.setOutputSink(sink)
+        if sink == nil {
+            output = String(decoding: outputBytes, as: UTF8.self)
+        }
+        sink?(.replace(outputBytes))
     }
 
     private static func sshHostTrustChallenge(
@@ -183,10 +193,12 @@ final class TerminalSessionController {
 
     func close() {
         eventGeneration &+= 1
-        guard let id = sessionId else { return }
-        sessionId = nil
+        outputSubscription?.cancel()
+        outputSubscription = nil
         outputListener?.deactivate()
         outputListener = nil
+        guard let id = sessionId else { return }
+        sessionId = nil
         if appStore.activeTerminalId() == id {
             appStore.setActiveTerminalId(id: nil)
         }
@@ -196,33 +208,76 @@ final class TerminalSessionController {
         }
     }
 
-    fileprivate func appendOutput(_ data: Data, generation: Int) {
+    fileprivate func applyOutputEvents(
+        _ events: [TerminalOutputStreamEvent],
+        generation: Int
+    ) {
         guard generation == eventGeneration else { return }
-        if let outputSink {
-            outputSink(data)
-            return
+        for event in events {
+            switch event {
+            case let .snapshot(snapshot), let .reset(snapshot):
+                applySnapshot(snapshot)
+            case let .output(sequence, data):
+                applyOutput(sequence: sequence, data: data)
+            case let .exited(sequence, code):
+                if let expectedSequence, sequence < expectedSequence { continue }
+                expectedSequence = sequence &+ 1
+                phase = .exited(code)
+            }
         }
-        output += String(decoding: data, as: UTF8.self)
-        trimOutputIfNeeded()
     }
 
-    fileprivate func markExited(_ code: Int32, generation: Int) {
-        guard generation == eventGeneration else { return }
-        phase = .exited(code)
+    private func applySnapshot(_ snapshot: TerminalOutputSnapshot) {
+        expectedSequence = snapshot.latestSequence.map { $0 &+ 1 } ?? snapshot.baseSequence
+        replaceOutput(snapshot.bytes)
+        if let exitCode = snapshot.exitCode {
+            phase = .exited(exitCode)
+        }
     }
 
-    private func trimOutputIfNeeded() {
-        let maxCount = 64_000
-        guard output.count > maxCount else { return }
-        output = String(output.suffix(maxCount))
+    private func applyOutput(sequence: UInt64, data: Data) {
+        if let expectedSequence {
+            if sequence < expectedSequence { return }
+            if sequence > expectedSequence,
+               let id = sessionId,
+               let session = appStore.terminalSessionHandle(id: id) {
+                applySnapshot(session.outputSnapshot())
+                return
+            }
+        }
+        expectedSequence = sequence &+ 1
+        appendOutput(data)
+    }
+
+    private func replaceOutput(_ data: Data) {
+        outputBytes = boundedOutput(data)
+        output = String(decoding: outputBytes, as: UTF8.self)
+        outputSink?(.replace(outputBytes))
+    }
+
+    private func appendOutput(_ data: Data) {
+        guard !data.isEmpty else { return }
+        outputBytes.append(data)
+        outputBytes = boundedOutput(outputBytes)
+        if outputSink == nil {
+            output = String(decoding: outputBytes, as: UTF8.self)
+        }
+        outputSink?(.append(data))
+    }
+
+    private func boundedOutput(_ data: Data) -> Data {
+        let maxCount = 64 * 1024
+        guard data.count > maxCount else { return data }
+        return Data(data.suffix(maxCount))
     }
 }
 
-private final class TerminalOutputRelay: TerminalOutputListener, @unchecked Sendable {
+private final class TerminalOutputRelay: TerminalOutputEventListener, @unchecked Sendable {
     private weak var owner: TerminalSessionController?
     private let generation: Int
     private let lock = NSLock()
-    private var outputSink: ((Data) -> Void)?
+    private var pendingEvents: [TerminalOutputStreamEvent] = []
+    private var drainScheduled = false
     private var active = true
 
     init(owner: TerminalSessionController, generation: Int) {
@@ -230,39 +285,40 @@ private final class TerminalOutputRelay: TerminalOutputListener, @unchecked Send
         self.generation = generation
     }
 
-    func setOutputSink(_ sink: ((Data) -> Void)?) {
-        lock.lock()
-        outputSink = sink
-        lock.unlock()
-    }
-
     func deactivate() {
         lock.lock()
         active = false
-        outputSink = nil
+        pendingEvents.removeAll()
         lock.unlock()
     }
 
-    func onBytes(data: Data) {
+    func onEvent(event: TerminalOutputStreamEvent) {
+        var shouldSchedule = false
         lock.lock()
-        let isActive = active
-        let sink = outputSink
+        if active {
+            pendingEvents.append(event)
+            if !drainScheduled {
+                drainScheduled = true
+                shouldSchedule = true
+            }
+        }
         lock.unlock()
 
-        guard isActive else { return }
-        if let sink {
-            sink(data)
-            return
-        }
-
-        Task { @MainActor [weak owner, generation] in
-            owner?.appendOutput(data, generation: generation)
+        if shouldSchedule {
+            Task { @MainActor [weak self] in
+                self?.drain()
+            }
         }
     }
 
-    func onExit(code: Int32) {
-        Task { @MainActor [weak owner, generation] in
-            owner?.markExited(code, generation: generation)
-        }
+    @MainActor
+    private func drain() {
+        lock.lock()
+        let events = active ? pendingEvents : []
+        pendingEvents.removeAll(keepingCapacity: true)
+        drainScheduled = false
+        lock.unlock()
+        guard !events.isEmpty else { return }
+        owner?.applyOutputEvents(events, generation: generation)
     }
 }

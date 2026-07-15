@@ -5,7 +5,7 @@ use crate::ffi::shared::shared_runtime;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 const OUTPUT_CHANNEL_CAPACITY: usize = 1024;
 const SESSION_REPLAY_LIMIT_BYTES: usize = 64 * 1024;
@@ -77,6 +77,29 @@ pub enum TerminalOutputStreamEvent {
 #[uniffi::export(callback_interface)]
 pub trait TerminalOutputEventListener: Send + Sync {
     fn on_event(&self, event: TerminalOutputStreamEvent);
+}
+
+/// Lifetime handle for one cursor-bearing output subscription.
+///
+/// Dropping or explicitly cancelling the handle releases the callback even
+/// while the terminal session itself remains alive. This lets native views
+/// reattach without accumulating duplicate listeners.
+#[derive(uniffi::Object)]
+pub struct TerminalOutputSubscription {
+    cancel_tx: watch::Sender<bool>,
+}
+
+#[uniffi::export]
+impl TerminalOutputSubscription {
+    pub fn cancel(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
+}
+
+impl Drop for TerminalOutputSubscription {
+    fn drop(&mut self) {
+        let _ = self.cancel_tx.send(true);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +218,7 @@ pub struct TerminalSession {
     backend: Arc<dyn TerminalBackend>,
     output_tx: broadcast::Sender<TerminalOutputEnvelope>,
     output_history: Arc<Mutex<TerminalOutputHistory>>,
+    retained_output_subscriptions: Mutex<Vec<Arc<TerminalOutputSubscription>>>,
     closed: Arc<AtomicBool>,
     rt: Arc<tokio::runtime::Runtime>,
 }
@@ -236,20 +260,18 @@ impl TerminalSession {
     }
 
     pub fn subscribe_output(&self, listener: Box<dyn TerminalOutputListener>) {
-        self.subscribe_output_events(Box::new(LegacyTerminalOutputAdapter { listener }));
+        self.subscribe_output_events_retained(Box::new(LegacyTerminalOutputAdapter { listener }));
     }
 
     /// Subscribe to a cursor-bearing snapshot-plus-tail stream. Subscription
     /// happens before the history snapshot is read, closing the attach race.
     /// A lagged receiver is repaired from retained history or receives an
     /// explicit `Reset` snapshot when the missing range has been truncated.
-    pub fn subscribe_output_events(&self, listener: Box<dyn TerminalOutputEventListener>) {
-        let rx = self.output_tx.subscribe();
-        let snapshot = self.output_history.lock().unwrap().snapshot();
-        let listener: Arc<dyn TerminalOutputEventListener> = Arc::from(listener);
-        let history = Arc::clone(&self.output_history);
-        self.rt
-            .spawn(stream_terminal_output(rx, snapshot, listener, history));
+    pub fn subscribe_output_events(
+        &self,
+        listener: Box<dyn TerminalOutputEventListener>,
+    ) -> Arc<TerminalOutputSubscription> {
+        self.start_output_event_subscription(listener)
     }
 
     pub fn output_snapshot(&self) -> TerminalOutputSnapshot {
@@ -265,6 +287,37 @@ impl TerminalSession {
 }
 
 impl TerminalSession {
+    pub(crate) fn subscribe_output_events_retained(
+        &self,
+        listener: Box<dyn TerminalOutputEventListener>,
+    ) {
+        let subscription = self.start_output_event_subscription(listener);
+        self.retained_output_subscriptions
+            .lock()
+            .unwrap()
+            .push(subscription);
+    }
+
+    fn start_output_event_subscription(
+        &self,
+        listener: Box<dyn TerminalOutputEventListener>,
+    ) -> Arc<TerminalOutputSubscription> {
+        let rx = self.output_tx.subscribe();
+        let snapshot = self.output_history.lock().unwrap().snapshot();
+        let listener: Arc<dyn TerminalOutputEventListener> = Arc::from(listener);
+        let history = Arc::clone(&self.output_history);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let subscription = Arc::new(TerminalOutputSubscription { cancel_tx });
+        self.rt.spawn(stream_terminal_output(
+            rx,
+            snapshot,
+            listener,
+            history,
+            Some(cancel_rx),
+        ));
+        subscription
+    }
+
     fn from_open_backend(
         backend: Arc<dyn TerminalBackend>,
         mut output_rx: tokio::sync::mpsc::Receiver<TerminalBackendEvent>,
@@ -306,6 +359,7 @@ impl TerminalSession {
             backend,
             output_tx,
             output_history,
+            retained_output_subscriptions: Mutex::new(Vec::new()),
             closed: Arc::new(AtomicBool::new(false)),
             rt,
         }
@@ -325,6 +379,7 @@ async fn stream_terminal_output(
     snapshot: TerminalOutputSnapshot,
     listener: Arc<dyn TerminalOutputEventListener>,
     history: Arc<Mutex<TerminalOutputHistory>>,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
 ) {
     let mut expected_sequence = snapshot
         .latest_sequence
@@ -337,7 +392,11 @@ async fn stream_terminal_output(
     }
 
     loop {
-        match rx.recv().await {
+        let next = tokio::select! {
+            _ = wait_for_terminal_output_cancellation(&mut cancel_rx) => break,
+            next = rx.recv() => next,
+        };
+        match next {
             Ok(envelope) if envelope.sequence < expected_sequence => {}
             Ok(envelope) => {
                 if envelope.sequence > expected_sequence
@@ -359,6 +418,21 @@ async fn stream_terminal_output(
                 }
             }
             Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn wait_for_terminal_output_cancellation(cancel_rx: &mut Option<watch::Receiver<bool>>) {
+    let Some(cancel_rx) = cancel_rx else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if *cancel_rx.borrow() {
+        return;
+    }
+    loop {
+        if cancel_rx.changed().await.is_err() || *cancel_rx.borrow() {
+            return;
         }
     }
 }
@@ -487,6 +561,14 @@ mod tests {
         }
     }
 
+    struct SharedCapturingEventListener(Arc<CapturingEventListener>);
+
+    impl TerminalOutputEventListener for SharedCapturingEventListener {
+        fn on_event(&self, event: TerminalOutputStreamEvent) {
+            self.0.on_event(event);
+        }
+    }
+
     impl TerminalOutputListener for CapturingListener {
         fn on_bytes(&self, data: Vec<u8>) {
             self.bytes.lock().unwrap().push(data);
@@ -607,6 +689,38 @@ mod tests {
         assert_eq!(exits.lock().unwrap().as_slice(), &[7]);
     }
 
+    #[tokio::test]
+    async fn cancelling_subscription_stops_future_output_callbacks() {
+        let backend = Arc::new(FakeBackend::default());
+        let (tx, rx) = mpsc::channel(8);
+        let session = TerminalSession::from_open_backend(backend, rx, shared_runtime());
+        let listener = Arc::new(CapturingEventListener::default());
+        let subscription = session.subscribe_output_events(Box::new(SharedCapturingEventListener(
+            Arc::clone(&listener),
+        )));
+
+        wait_for_condition(
+            || !listener.events.lock().unwrap().is_empty(),
+            "subscriber did not receive its initial snapshot",
+        )
+        .await;
+        subscription.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        tx.send(TerminalBackendEvent::Bytes(b"ignored".to_vec()))
+            .await
+            .unwrap();
+        wait_for_latest_sequence(&session, 0).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(matches!(
+            listener.events.lock().unwrap().as_slice(),
+            [TerminalOutputStreamEvent::Snapshot { .. }]
+        ));
+    }
+
     #[test]
     fn history_repairs_retained_sequences_exactly_once() {
         let mut history = TerminalOutputHistory::default();
@@ -662,6 +776,7 @@ mod tests {
                 snapshot,
                 listener_dyn,
                 Arc::clone(&session.output_history),
+                None,
             ),
         )
         .await
@@ -719,6 +834,7 @@ mod tests {
                 snapshot,
                 listener_dyn,
                 Arc::clone(&session.output_history),
+                None,
             ),
         )
         .await
@@ -771,6 +887,7 @@ mod tests {
                 snapshot,
                 listener_dyn,
                 Arc::clone(&session.output_history),
+                None,
             ),
         )
         .await
@@ -828,6 +945,7 @@ mod tests {
                 snapshot,
                 listener_dyn,
                 Arc::clone(&session.output_history),
+                None,
             ),
         )
         .await

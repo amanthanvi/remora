@@ -319,6 +319,14 @@ impl TerminalRenderer {
         }
     }
 
+    /// Clear byte-derived semantic state before a renderer applies an
+    /// authoritative output snapshot. The platform remains responsible for
+    /// resetting its Ghostty surface and then feeding the replacement bytes.
+    pub fn reset_output_state(&self) {
+        self.inner.osc.lock().unwrap().reset();
+        *self.inner.links.lock().unwrap() = LinksCache::default();
+    }
+
     /// Subscribe to bell events. Listeners are invoked synchronously from
     /// the byte-feed thread; the platform should hop to the UI thread
     /// before touching haptics / sound APIs.

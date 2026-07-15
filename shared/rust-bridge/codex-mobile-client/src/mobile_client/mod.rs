@@ -2584,13 +2584,13 @@ impl MobileClient {
         let id_for_listener = id.clone();
         let strong = Arc::clone(&session);
         let sessions = Arc::clone(&self.terminal_sessions);
-        let listener: Box<dyn crate::terminal::TerminalOutputListener> =
+        let listener: Box<dyn crate::terminal::TerminalOutputEventListener> =
             Box::new(TerminalRingListener {
                 reducer,
                 id: id_for_listener,
                 sessions,
             });
-        strong.subscribe_output(listener);
+        strong.subscribe_output_events_retained(listener);
         Ok(id)
     }
 
@@ -2754,11 +2754,29 @@ struct TerminalRingListener {
     sessions: Arc<StdMutex<HashMap<String, Arc<crate::terminal::TerminalSession>>>>,
 }
 
-impl crate::terminal::TerminalOutputListener for TerminalRingListener {
-    fn on_bytes(&self, data: Vec<u8>) {
-        self.reducer.append_terminal_output(&self.id, &data);
+impl crate::terminal::TerminalOutputEventListener for TerminalRingListener {
+    fn on_event(&self, event: crate::terminal::TerminalOutputStreamEvent) {
+        match event {
+            crate::terminal::TerminalOutputStreamEvent::Snapshot { snapshot }
+            | crate::terminal::TerminalOutputStreamEvent::Reset { snapshot } => {
+                self.reducer
+                    .replace_terminal_output(&self.id, &snapshot.bytes);
+                if let Some(code) = snapshot.exit_code {
+                    self.mark_exited(code);
+                }
+            }
+            crate::terminal::TerminalOutputStreamEvent::Output { data, .. } => {
+                self.reducer.append_terminal_output(&self.id, &data);
+            }
+            crate::terminal::TerminalOutputStreamEvent::Exited { code, .. } => {
+                self.mark_exited(code);
+            }
+        }
     }
-    fn on_exit(&self, code: i32) {
+}
+
+impl TerminalRingListener {
+    fn mark_exited(&self, code: i32) {
         self.reducer.mark_terminal_exited(&self.id, code);
         self.sessions
             .lock()

@@ -64,6 +64,7 @@ import com.remora.android.core.bridge.GhosttyRendererBridge
 import com.remora.android.core.bridge.GhosttyRendererStatus
 import com.remora.android.core.bridge.GhosttyWakeupListener
 import com.remora.android.state.ActiveTerminalRegistry
+import com.remora.android.state.TerminalRenderUpdate
 import com.remora.android.state.TerminalSessionController
 import com.remora.android.ui.RemoraTheme
 import java.io.ByteArrayOutputStream
@@ -107,6 +108,7 @@ internal fun GhosttyTerminalSurface(
                     inputCallback = GhosttyInputCallback { bytes -> controller.sendBytes(bytes) },
                     onFontSizeChanged = onFontSizeChanged,
                 ).also { view ->
+                    view.onRendererReady = controller::replayOutputToSink
                     viewRef.view = view
                     view.onSelectionRangeChanged = { range ->
                         selectionState.value = range
@@ -123,6 +125,7 @@ internal fun GhosttyTerminalSurface(
                 view.fontSize = with(density) { TerminalConfigPrefs.fontSize.toSp().value }
                 view.inputCallback = GhosttyInputCallback { bytes -> controller.sendBytes(bytes) }
                 view.onFontSizeChanged = onFontSizeChanged
+                view.onRendererReady = controller::replayOutputToSink
                 viewRef.view = view
                 contentScaleState.value = density.density
             },
@@ -160,11 +163,11 @@ internal fun GhosttyTerminalSurface(
     }
 
     DisposableEffect(controller, viewRef) {
-        controller.setOutputByteSink { bytes ->
-            viewRef.view?.writeTerminalBytes(bytes)
+        controller.setOutputSink { update ->
+            viewRef.view?.applyTerminalUpdate(update)
         }
         onDispose {
-            controller.setOutputByteSink(null)
+            controller.setOutputSink(null)
             viewRef.view?.inputCallback = null
             viewRef.view?.onSelectionRangeChanged = null
             viewRef.view?.onMetricsChanged = null
@@ -358,6 +361,9 @@ private class GhosttyAndroidSurfaceView(
     /// the Compose selection overlay so its math stays in lockstep.
     @Volatile
     var onMetricsChanged: ((TerminalCellMetrics?) -> Unit)? = null
+
+    @Volatile
+    var onRendererReady: (() -> Unit)? = null
 
     private var lastBellAt: Long = 0L
     private var selectionAnchor: TerminalCellPosition? = null
@@ -623,7 +629,43 @@ private class GhosttyAndroidSurfaceView(
         didSetConfigDir = false
     }
 
-    fun writeTerminalBytes(bytes: ByteArray) {
+    fun applyTerminalUpdate(update: TerminalRenderUpdate) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            post { applyTerminalUpdate(update) }
+            return
+        }
+        when (update) {
+            is TerminalRenderUpdate.Replace -> replaceTerminalBytes(update.bytes)
+            is TerminalRenderUpdate.Append -> writeTerminalBytes(update.bytes)
+        }
+    }
+
+    private fun replaceTerminalBytes(bytes: ByteArray) {
+        removeCallbacks(outputFlushRunnable)
+        synchronized(outputLock) {
+            outputBuffer.reset()
+            outputFlushScheduled = false
+        }
+        pendingBytes.clear()
+        terminalRenderer?.resetOutputState()
+        val activeRenderer = rendererSurface
+        if (activeRenderer == null) {
+            if (bytes.isNotEmpty()) {
+                pendingBytes.addLast(bytes.copyOf())
+            }
+            return
+        }
+
+        invalidateSelectionSnapshot()
+        activeRenderer.write(byteArrayOf(0x1B, 0x63))
+        if (bytes.isNotEmpty()) {
+            terminalRenderer?.feedOutput(bytes)
+            activeRenderer.write(bytes)
+        }
+        markSurfaceSnapshotDirtyAndScheduleRefresh()
+    }
+
+    private fun writeTerminalBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         var shouldSchedule = false
         synchronized(outputLock) {
@@ -709,6 +751,7 @@ private class GhosttyAndroidSurfaceView(
         renderer.subscribeBell(bellListener)
         bellListenerRef = bellListener
 
+        onRendererReady?.invoke()
         var wrotePendingOutput = false
         while (pendingBytes.isNotEmpty()) {
             val bytes = pendingBytes.removeFirst()

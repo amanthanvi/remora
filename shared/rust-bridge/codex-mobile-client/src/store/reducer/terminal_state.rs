@@ -133,6 +133,20 @@ impl AppStoreReducer {
         // changes only.
     }
 
+    /// Replace the projected output tail from an authoritative terminal
+    /// snapshot. This is used for initial attach and explicit reset recovery;
+    /// appending the snapshot would duplicate bytes already represented by the
+    /// live stream.
+    pub fn replace_terminal_output(&self, id: &str, bytes: &[u8]) {
+        let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+        let Some(session) = snapshot.terminal_sessions.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        session.output_tail.clear();
+        push_ring(&mut session.output_tail, bytes, TERMINAL_OUTPUT_TAIL_LIMIT);
+        session.last_activity_ts_ms = now_ms();
+    }
+
     /// Update the session's row/col dimensions after a successful resize.
     pub fn update_terminal_size(&self, id: &str, cols: u16, rows: u16) {
         let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
@@ -376,5 +390,33 @@ mod tests {
             reducer.resolve_thread_terminal_context(&foreign, Some("terminal")),
             Err(ThreadTerminalContextError::ContextMismatch)
         ));
+    }
+
+    #[test]
+    fn authoritative_output_snapshot_replaces_instead_of_duplicating_tail() {
+        let reducer = AppStoreReducer::new();
+        reducer.open_terminal_session_record(
+            "terminal".to_string(),
+            TerminalBackendKind::RemoteAlleycat {
+                node_id: "node".to_string(),
+                token: "token".to_string(),
+                relay: None,
+                shell: None,
+            },
+            80,
+            24,
+        );
+
+        reducer.append_terminal_output("terminal", b"old prefix");
+        reducer.replace_terminal_output("terminal", b"authoritative");
+        reducer.append_terminal_output("terminal", b" tail");
+
+        assert_eq!(
+            reducer
+                .terminal_session_snapshot("terminal")
+                .unwrap()
+                .output_tail,
+            b"authoritative tail"
+        );
     }
 }

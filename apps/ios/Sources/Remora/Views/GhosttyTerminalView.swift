@@ -107,12 +107,21 @@ final class GhosttyTerminalRenderer {
         enqueueOutput(data)
     }
 
-    func makeOutputSink() -> (Data) -> Void {
-        let batcher = GhosttyTerminalOutputBatcher { [weak self] data in
-            self?.write(data)
+    func makeOutputSink() -> (TerminalRenderUpdate) -> Void {
+        let batcher = GhosttyTerminalOutputBatcher { [weak self] update in
+            self?.apply(update)
         }
-        return { data in
-            batcher.append(data)
+        return { update in
+            batcher.append(update)
+        }
+    }
+
+    private func apply(_ update: TerminalRenderUpdate) {
+        switch update {
+        case let .replace(data):
+            replaceOutput(data)
+        case let .append(data):
+            write(data)
         }
     }
 
@@ -297,16 +306,28 @@ final class GhosttyTerminalRenderer {
     }
 
     func clearScreen() {
+        replaceOutput(Data())
+    }
+
+    private func replaceOutput(_ data: Data) {
+        guard !isInvalidated else { return }
+        invalidateSelectionSnapshot()
+        pendingOutput.removeAll()
+        pendingWriteBuffer.removeAll(keepingCapacity: true)
+        outputFlushScheduled = false
+        renderer?.resetOutputState()
         guard let terminal else {
-            pendingOutput.removeAll()
+            if !data.isEmpty {
+                pendingOutput.append(data)
+            }
             setNativeOutputVisible(false)
             return
         }
-        invalidateSelectionSnapshot()
         terminal.writeOutput(Data([0x1B, 0x63]))
+        if !data.isEmpty {
+            enqueueOutput(data)
+        }
         markSurfaceSnapshotDirtyAndScheduleRefresh()
-        pendingWriteBuffer.removeAll(keepingCapacity: true)
-        outputFlushScheduled = false
         setNativeOutputVisible(false)
     }
 
@@ -413,18 +434,24 @@ final class GhosttyTerminalRenderer {
 private final class GhosttyTerminalOutputBatcher: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
+    private var replacesOutput = false
     private var scheduled = false
-    private let flush: @MainActor (Data) -> Void
+    private let flush: @MainActor (TerminalRenderUpdate) -> Void
 
-    init(flush: @escaping @MainActor (Data) -> Void) {
+    init(flush: @escaping @MainActor (TerminalRenderUpdate) -> Void) {
         self.flush = flush
     }
 
-    func append(_ data: Data) {
-        guard !data.isEmpty else { return }
+    func append(_ update: TerminalRenderUpdate) {
         var shouldSchedule = false
         lock.lock()
-        buffer.append(data)
+        switch update {
+        case let .replace(data):
+            buffer = data
+            replacesOutput = true
+        case let .append(data):
+            buffer.append(data)
+        }
         if !scheduled {
             scheduled = true
             shouldSchedule = true
@@ -433,22 +460,25 @@ private final class GhosttyTerminalOutputBatcher: @unchecked Sendable {
 
         if shouldSchedule {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) { [weak self] in
-                self?.flushNow()
+                Task { @MainActor in
+                    self?.flushNow()
+                }
             }
         }
     }
 
+    @MainActor
     private func flushNow() {
         lock.lock()
         let data = buffer
+        let replace = replacesOutput
         buffer.removeAll(keepingCapacity: true)
+        replacesOutput = false
         scheduled = false
         lock.unlock()
 
-        guard !data.isEmpty else { return }
-        Task { @MainActor [flush] in
-            flush(data)
-        }
+        guard replace || !data.isEmpty else { return }
+        flush(replace ? .replace(data) : .append(data))
     }
 }
 
