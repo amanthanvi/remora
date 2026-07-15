@@ -16,6 +16,7 @@ pub mod shell_preflight;
 
 pub mod alleycat;
 pub mod ambient_suggestions;
+pub(crate) mod background_relay;
 pub mod capability;
 pub mod cloud_sync;
 pub mod conversation;
