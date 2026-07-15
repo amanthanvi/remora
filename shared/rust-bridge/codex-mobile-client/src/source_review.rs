@@ -390,21 +390,18 @@ fn project_diff_inputs(snapshot: &crate::store::ThreadSnapshot) -> DiffInputProj
                     let has_unconfined_path =
                         path_hint.is_none() || (has_move && new_path_hint.is_none());
                     if has_unconfined_path {
-                        // A same-turn aggregate will independently describe a
-                        // normal content change. For move-only metadata, or
-                        // when no aggregate exists, retain a typed redacted
-                        // entry without exposing the FileChange payload.
-                        if (!has_aggregate || has_move)
-                            && !projection.push(
-                                &mut remaining_bytes,
-                                path_hint,
-                                new_path_hint,
-                                Some(bounded_private_identity(&change.path)),
-                                workspace_root.clone(),
-                                &change.diff,
-                                DiffInputKind::RedactedPath,
-                            )
-                        {
+                        // The aggregate can be unrelated or omit empty files.
+                        // Always retain a typed entry, without exposing the
+                        // unconfined FileChange payload.
+                        if !projection.push(
+                            &mut remaining_bytes,
+                            path_hint,
+                            new_path_hint,
+                            Some(bounded_private_identity(&change.path)),
+                            workspace_root.clone(),
+                            &change.diff,
+                            DiffInputKind::RedactedPath,
+                        ) {
                             break 'items;
                         }
                         continue;
@@ -562,7 +559,23 @@ impl DiffInputProjection {
         patch: &str,
         kind: DiffInputKind,
     ) -> bool {
-        if self.inputs.len() >= MAX_DIFF_INPUTS || (*remaining_bytes == 0 && !patch.is_empty()) {
+        if self.inputs.len() >= MAX_DIFF_INPUTS {
+            self.truncated = true;
+            return false;
+        }
+        if matches!(kind, DiffInputKind::RedactedPath) {
+            self.inputs.push(OwnedDiffInput {
+                path_hint,
+                new_path_hint,
+                private_path_identity,
+                workspace_root,
+                patch: String::new(),
+                source_byte_length: patch.len() as u64,
+                kind,
+            });
+            return true;
+        }
+        if *remaining_bytes == 0 && !patch.is_empty() {
             self.truncated = true;
             return false;
         }
@@ -593,10 +606,17 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
     let source_byte_length = inputs.iter().fold(0_u64, |total, input| {
         total.saturating_add(input.source_byte_length)
     });
+    let payload_source_byte_length = inputs
+        .iter()
+        .filter(|input| !matches!(input.kind, DiffInputKind::RedactedPath))
+        .fold(0_u64, |total, input| {
+            total.saturating_add(input.source_byte_length)
+        });
     let mut remaining = MAX_DIFF_REVIEW_BYTES;
-    let mut truncated = source_byte_length > MAX_DIFF_REVIEW_BYTES as u64
+    let mut truncated = payload_source_byte_length > MAX_DIFF_REVIEW_BYTES as u64
         || inputs
             .iter()
+            .filter(|input| !matches!(input.kind, DiffInputKind::RedactedPath))
             .any(|input| input.source_byte_length > input.patch.len() as u64);
     let mut files = Vec::new();
     let mut hunks_seen = 0_usize;
@@ -604,10 +624,12 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
     let mut occurrence = 0_usize;
 
     for input in inputs {
-        if remaining == 0
-            || files.len() >= MAX_DIFF_FILES
+        if files.len() >= MAX_DIFF_FILES
             || hunks_seen >= MAX_DIFF_HUNKS
             || rows_seen >= MAX_DIFF_ROWS
+            || (remaining == 0
+                && !input.patch.is_empty()
+                && !matches!(input.kind, DiffInputKind::RedactedPath))
         {
             truncated = true;
             break;
@@ -1335,7 +1357,15 @@ fn line_has_absolute_path_metadata(line: &str) -> bool {
     {
         return git_path_is_absolute(path);
     }
-    for prefix in ["--- ", "+++ ", "rename from ", "rename to ", "Moved to: "] {
+    for prefix in [
+        "--- ",
+        "+++ ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+        "Moved to: ",
+    ] {
         if let Some(path) = line.strip_prefix(prefix) {
             return git_path_is_absolute(path_field(path));
         }
@@ -2372,6 +2402,186 @@ Binary files a/picture.png and b/picture.png differ
         assert!(!format!("{review:?}").contains("/secret"));
     }
 
+    #[tokio::test]
+    async fn empty_unconfined_change_survives_an_unrelated_same_turn_aggregate() {
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.extend([
+            HydratedConversationItem {
+                id: "empty-outside-file-change".to_string(),
+                content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                    status: AppOperationStatus::Completed,
+                    changes: vec![HydratedFileChangeEntryData {
+                        path: "/secret/empty.txt".to_string(),
+                        kind: "add".to_string(),
+                        move_path: None,
+                        diff: String::new(),
+                        additions: 0,
+                        deletions: 0,
+                    }],
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(0),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+            HydratedConversationItem {
+                id: "unrelated-aggregate".to_string(),
+                content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                    diff: "diff --git a/safe.txt b/safe.txt\n--- a/safe.txt\n+++ b/safe.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(1),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+        ]);
+        client.app_store.upsert_thread_snapshot(snapshot);
+
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 2);
+        assert!(review.files.iter().any(|file| {
+            file.display_path == "Outside workspace"
+                && file.change_kind == DiffFileChangeKind::Unsupported
+                && file.raw_patch.is_empty()
+        }));
+        assert!(review
+            .files
+            .iter()
+            .any(|file| file.relative_path.as_deref() == Some("safe.txt")));
+        assert!(!format!("{review:?}").contains("/secret"));
+    }
+
+    #[tokio::test]
+    async fn redacted_payload_does_not_spend_the_safe_diff_byte_budget() {
+        let private_payload = "private".repeat(MAX_DIFF_REVIEW_BYTES / 4);
+        let safe_patch = "diff --git a/safe.txt b/safe.txt\n--- a/safe.txt\n+++ b/safe.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.extend([
+            HydratedConversationItem {
+                id: "large-outside-file-change".to_string(),
+                content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                    status: AppOperationStatus::Completed,
+                    changes: vec![HydratedFileChangeEntryData {
+                        path: "/secret/large.txt".to_string(),
+                        kind: "update".to_string(),
+                        move_path: None,
+                        diff: private_payload.clone(),
+                        additions: 0,
+                        deletions: 0,
+                    }],
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(0),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+            HydratedConversationItem {
+                id: "safe-aggregate".to_string(),
+                content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                    diff: safe_patch.to_string(),
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(1),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+        ]);
+
+        let projection = project_diff_inputs(&snapshot);
+        assert!(!projection.truncated);
+        assert_eq!(projection.inputs.len(), 2);
+        assert!(projection.inputs[0].patch.is_empty());
+        assert_eq!(
+            projection.inputs[0].source_byte_length,
+            private_payload.len() as u64
+        );
+        assert_eq!(projection.inputs[1].patch, safe_patch);
+
+        client.app_store.upsert_thread_snapshot(snapshot);
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert!(!review.truncated);
+        assert!(review
+            .files
+            .iter()
+            .any(|file| file.relative_path.as_deref() == Some("safe.txt")));
+        assert!(review.files.iter().any(|file| {
+            file.display_path == "Outside workspace"
+                && file.change_kind == DiffFileChangeKind::Unsupported
+                && file.raw_patch.is_empty()
+        }));
+        let public_value = format!("{review:?}");
+        assert!(!public_value.contains("/secret"));
+        assert!(!public_value.contains("privateprivate"));
+    }
+
+    #[tokio::test]
+    async fn redacted_metadata_normalizes_after_an_aggregate_exhausts_the_byte_budget() {
+        let header = "diff --git a/safe.txt b/safe.txt\n";
+        let mut full_budget_patch = header.to_string();
+        full_budget_patch.push_str(&"x".repeat(MAX_DIFF_REVIEW_BYTES - header.len() - 1));
+        full_budget_patch.push('\n');
+        assert_eq!(full_budget_patch.len(), MAX_DIFF_REVIEW_BYTES);
+
+        let client = client_with_thread("/repo");
+        let mut snapshot = client.app_store.thread_snapshot(&key()).expect("thread");
+        snapshot.items.extend([
+            HydratedConversationItem {
+                id: "full-budget-aggregate".to_string(),
+                content: HydratedConversationItemContent::TurnDiff(HydratedTurnDiffData {
+                    diff: full_budget_patch,
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(0),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+            HydratedConversationItem {
+                id: "empty-outside-file-change".to_string(),
+                content: HydratedConversationItemContent::FileChange(HydratedFileChangeData {
+                    status: AppOperationStatus::Completed,
+                    changes: vec![HydratedFileChangeEntryData {
+                        path: "/secret/empty.txt".to_string(),
+                        kind: "add".to_string(),
+                        move_path: None,
+                        diff: String::new(),
+                        additions: 0,
+                        deletions: 0,
+                    }],
+                }),
+                source_turn_id: Some("turn".to_string()),
+                source_turn_index: Some(1),
+                timestamp: None,
+                is_from_user_turn_boundary: false,
+            },
+        ]);
+
+        let projection = project_diff_inputs(&snapshot);
+        assert_eq!(projection.inputs.len(), 2);
+        assert_eq!(projection.inputs[0].patch.len(), MAX_DIFF_REVIEW_BYTES);
+        assert!(projection.inputs[1].patch.is_empty());
+
+        client.app_store.upsert_thread_snapshot(snapshot);
+        let DiffReviewResult::Ready { review } = diff_review_for_thread(&client, key()).await
+        else {
+            panic!("expected ready review");
+        };
+        assert_eq!(review.files.len(), 2);
+        assert!(review.files.iter().any(|file| {
+            file.display_path == "Outside workspace"
+                && file.change_kind == DiffFileChangeKind::Unsupported
+                && file.raw_patch.is_empty()
+        }));
+        assert!(!format!("{review:?}").contains("/secret"));
+    }
+
     #[test]
     fn normalized_absolute_metadata_is_omitted_from_raw_export() {
         let patch = "diff --git /repo/src/a.rs /repo/src/a.rs\n--- /repo/src/a.rs\n+++ /repo/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -2409,6 +2619,22 @@ Binary files a/picture.png and b/picture.png differ
             assert!(file.raw_patch.is_empty());
             assert!(!format!("{file:?}").contains("/repo"));
         }
+    }
+
+    #[test]
+    fn absolute_copy_metadata_is_omitted_from_raw_export() {
+        let patch = "diff --git a/new.rs b/new.rs\nsimilarity index 100%\ncopy from /repo/old.rs\ncopy to /repo/new.rs\n";
+        let review = normalize_trusted_diffs(
+            key(),
+            &[DiffInput {
+                workspace_root: Some("/repo".to_string()),
+                ..unified_input(patch)
+            }],
+        );
+        assert_eq!(review.files.len(), 1);
+        let file = &review.files[0];
+        assert!(file.raw_patch.is_empty());
+        assert!(!format!("{file:?}").contains("/repo"));
     }
 
     #[tokio::test]
@@ -2477,6 +2703,8 @@ Binary files a/picture.png and b/picture.png differ
             "Moved to: /repo/private",
             "--- /repo/private",
             "+++ /repo/private",
+            "copy from /repo/private",
+            "copy to /repo/private",
         ] {
             let patch =
                 format!("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n{metadata}\n");
