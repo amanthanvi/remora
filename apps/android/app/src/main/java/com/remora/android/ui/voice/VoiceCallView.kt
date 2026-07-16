@@ -115,7 +115,10 @@ fun VoiceCallView(
             )
             Spacer(Modifier.width(8.dp))
 
-            IconButton(onClick = { /* TODO: toggle speaker route */ }, modifier = Modifier.size(32.dp)) {
+            IconButton(
+                onClick = { /* TODO: toggle speaker route */ },
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+            ) {
                 Icon(Icons.Default.VolumeUp, "Speaker", tint = RemoraTheme.textSecondary)
             }
         }

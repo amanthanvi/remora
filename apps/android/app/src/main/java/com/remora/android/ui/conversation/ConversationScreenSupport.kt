@@ -136,7 +136,7 @@ internal fun MinigameLaunchButton(onClick: () -> Unit) {
         color = RemoraTheme.surface.copy(alpha = 0.9f),
         border = BorderStroke(0.5.dp, RemoraTheme.accent.copy(alpha = 0.3f)),
         shadowElevation = 2.dp,
-        modifier = Modifier.size(36.dp),
+        modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(

@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -33,6 +35,7 @@ import uniffi.codex_mobile_client.ThreadKey
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -228,6 +231,10 @@ private fun RuntimeFilterPill(
                 if (isActive) RemoraTheme.accent else RemoraTheme.border.copy(alpha = 0.7f),
                 RoundedCornerShape(percent = 50),
             )
+            .sizeIn(
+                minWidth = RemoraTheme.minimumTouchTarget,
+                minHeight = RemoraTheme.minimumTouchTarget,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -255,6 +262,7 @@ private fun ThreadSearchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = RemoraTheme.minimumTouchTarget)
             .clickable(onClick = onToggle)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -276,18 +284,18 @@ private fun ThreadSearchRow(
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     text = session.serverDisplayName,
-                    color = RemoraTheme.accent.copy(alpha = 0.7f),
+                    color = RemoraTheme.accent,
                     fontSize = 10f.scaled,
                     fontFamily = FontFamily.Monospace,
                 )
                 Text(
                     text = "\u00b7",
-                    color = RemoraTheme.textMuted.copy(alpha = 0.5f),
+                    color = RemoraTheme.textMuted,
                     fontSize = 10f.scaled,
                 )
                 Text(
                     text = HomeDashboardSupport.workspaceLabel(session.cwd),
-                    color = RemoraTheme.textSecondary.copy(alpha = 0.8f),
+                    color = RemoraTheme.textSecondary,
                     fontSize = 10f.scaled,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -295,12 +303,12 @@ private fun ThreadSearchRow(
                 if (relative.isNotEmpty()) {
                     Text(
                         text = "\u00b7",
-                        color = RemoraTheme.textMuted.copy(alpha = 0.5f),
+                        color = RemoraTheme.textMuted,
                         fontSize = 10f.scaled,
                     )
                     Text(
                         text = relative,
-                        color = RemoraTheme.textMuted.copy(alpha = 0.8f),
+                        color = RemoraTheme.textMuted,
                         fontSize = 10f.scaled,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -366,6 +374,7 @@ private fun ThreadSearchClusterRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = RemoraTheme.minimumTouchTarget)
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -384,18 +393,18 @@ private fun ThreadSearchClusterRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         text = head.serverDisplayName,
-                        color = RemoraTheme.accent.copy(alpha = 0.7f),
+                        color = RemoraTheme.accent,
                         fontSize = 10f.scaled,
                         fontFamily = FontFamily.Monospace,
                     )
                     Text(
                         text = "·",
-                        color = RemoraTheme.textMuted.copy(alpha = 0.5f),
+                        color = RemoraTheme.textMuted,
                         fontSize = 10f.scaled,
                     )
                     Text(
                         text = HomeDashboardSupport.workspaceLabel(head.cwd),
-                        color = RemoraTheme.textSecondary.copy(alpha = 0.8f),
+                        color = RemoraTheme.textSecondary,
                         fontSize = 10f.scaled,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -403,12 +412,12 @@ private fun ThreadSearchClusterRow(
                     if (relative.isNotEmpty()) {
                         Text(
                             text = "·",
-                            color = RemoraTheme.textMuted.copy(alpha = 0.5f),
+                            color = RemoraTheme.textMuted,
                             fontSize = 10f.scaled,
                         )
                         Text(
                             text = relative,
-                            color = RemoraTheme.textMuted.copy(alpha = 0.8f),
+                            color = RemoraTheme.textMuted,
                             fontSize = 10f.scaled,
                             fontFamily = FontFamily.Monospace,
                         )
@@ -421,6 +430,10 @@ private fun ThreadSearchClusterRow(
                     .clip(RoundedCornerShape(percent = 50))
                     .background(
                         RemoraTheme.accent.copy(alpha = if (isExpanded) 0.18f else 0.12f),
+                    )
+                    .sizeIn(
+                        minWidth = RemoraTheme.minimumTouchTarget,
+                        minHeight = RemoraTheme.minimumTouchTarget,
                     )
                     .clickable(onClick = onToggleExpanded)
                     .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -443,16 +456,19 @@ private fun ThreadSearchClusterRow(
                 )
             }
             Spacer(Modifier.size(6.dp))
-            Icon(
-                imageVector = if (headPinned) Icons.Default.CheckCircle else Icons.Default.Add,
-                contentDescription = null,
-                tint = if (headPinned) RemoraTheme.accent else RemoraTheme.textPrimary,
-                modifier = Modifier
-                    .size(20.dp)
-                    .clickable {
-                        if (headPinned) onUnpin(head) else onPin(head)
-                    },
-            )
+            IconButton(
+                onClick = {
+                    if (headPinned) onUnpin(head) else onPin(head)
+                },
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+            ) {
+                Icon(
+                    imageVector = if (headPinned) Icons.Default.CheckCircle else Icons.Default.Add,
+                    contentDescription = if (headPinned) "Unpin thread" else "Pin thread",
+                    tint = if (headPinned) RemoraTheme.accent else RemoraTheme.textPrimary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
         AnimatedVisibility(visible = isExpanded) {
             Column {

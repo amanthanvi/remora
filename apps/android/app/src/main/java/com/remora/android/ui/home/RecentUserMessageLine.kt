@@ -39,12 +39,12 @@ fun RecentUserMessageLine(
     ) {
         Text(
             text = ">",
-            color = RemoraTheme.accent.copy(alpha = 0.7f),
+            color = RemoraTheme.accent,
             fontSize = RemoraTextStyle.body.scaled,
         )
         FormattedText(
             text = message,
-            color = RemoraTheme.textSecondary.copy(alpha = 0.9f),
+            color = RemoraTheme.textSecondary,
             fontSize = RemoraTextStyle.body.scaled,
             maxLines = 1,
         )

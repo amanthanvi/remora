@@ -243,7 +243,7 @@ fun WallpaperSelectionScreen(
                 .background(RemoraTheme.surface.copy(alpha = 0.85f))
                 .padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
-            IconButton(onClick = onBack, modifier = Modifier.size(32.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back",
@@ -285,7 +285,10 @@ fun WallpaperSelectionScreen(
                         .background(RemoraTheme.textMuted.copy(alpha = 0.5f)),
                 )
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { sheetMinimized = !sheetMinimized }, modifier = Modifier.size(32.dp)) {
+                IconButton(
+                    onClick = { sheetMinimized = !sheetMinimized },
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                ) {
                     Icon(
                         imageVector = if (sheetMinimized) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (sheetMinimized) "Expand controls" else "Minimize controls",

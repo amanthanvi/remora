@@ -669,7 +669,7 @@ fun ConversationScreen(
                                         }
                                         Text(
                                             text = metricsText,
-                                            color = RemoraTheme.textMuted.copy(alpha = 0.6f),
+                                            color = RemoraTheme.textMuted,
                                             fontSize = 10f.scaled,
                                             fontFamily = com.remora.android.ui.BerkeleyMono,
                                             modifier = Modifier.padding(top = 2.dp, start = 4.dp),

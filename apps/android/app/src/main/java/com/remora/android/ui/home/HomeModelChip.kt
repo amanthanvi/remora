@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -92,6 +93,7 @@ fun HomeModelChip(
             .clip(RoundedCornerShape(20.dp))
             .background(RemoraTheme.surface.copy(alpha = 0.9f))
             .border(0.8.dp, RemoraTheme.textMuted.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+            .heightIn(min = RemoraTheme.minimumTouchTarget)
             .clickable(enabled = !disabled) { showSheet = true }
             .padding(horizontal = 10.dp, vertical = 5.dp)
             .alpha(if (disabled) 0.5f else 1f),
@@ -116,7 +118,7 @@ fun HomeModelChip(
         if (effortLabel.isNotEmpty()) {
             Text(
                 text = effortLabel,
-                color = RemoraTheme.textSecondary.copy(alpha = 0.85f),
+                color = RemoraTheme.textSecondary,
                 fontSize = RemoraTextStyle.caption2.scaled,
                 fontFamily = RemoraTheme.monoFont,
                 maxLines = 1,

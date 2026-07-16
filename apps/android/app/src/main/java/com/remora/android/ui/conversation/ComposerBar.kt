@@ -83,8 +83,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.sp
 import com.remora.android.state.AppModel
 import com.remora.android.state.ComposerImageAttachment
@@ -518,15 +516,21 @@ fun ComposerBar(
                         onClick = { attachedImage = null },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .size(22.dp)
-                            .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+                            .size(RemoraTheme.minimumTouchTarget),
                     ) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Remove attachment",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp),
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Remove attachment",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.weight(1f))
@@ -720,15 +724,17 @@ fun ComposerBar(
                         fontWeight = FontWeight.SemiBold,
                     )
                     if (onDismissPendingUserInput != null) {
-                        Text(
-                            text = "✕",
-                            color = RemoraTheme.textMuted,
-                            fontSize = RemoraTextStyle.body.scaled,
-                            modifier = Modifier
-                                .clickable { onDismissPendingUserInput() }
-                                .padding(4.dp)
-                                .semantics { contentDescription = "Dismiss input request" },
-                        )
+                        IconButton(
+                            onClick = onDismissPendingUserInput,
+                            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Dismiss input request",
+                                tint = RemoraTheme.textMuted,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
                     }
                 }
                 for (question in pendingUserInput.questions) {
@@ -857,7 +863,7 @@ fun ComposerBar(
             if (!isRecording && !isTranscribing && !isThinking) {
                 IconButton(
                     onClick = { showAttachMenu = true },
-                    modifier = Modifier.size(36.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         Icons.Default.Add,
@@ -952,7 +958,7 @@ fun ComposerBar(
                                     }
                                 }
                             },
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                         ) {
                             Icon(
                                 Icons.Default.Stop,
@@ -999,7 +1005,7 @@ fun ComposerBar(
                                         voiceController.stopActiveVoiceSession(appModel)
                                     }
                                 },
-                                modifier = Modifier.size(32.dp),
+                                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                             )
                         } else {
                             Spacer(Modifier.width(8.dp))
@@ -1011,7 +1017,7 @@ fun ComposerBar(
                                         micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                                     }
                                 },
-                                modifier = Modifier.size(32.dp),
+                                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                             ) {
                                 Icon(
                                     Icons.Default.Mic,
@@ -1031,7 +1037,7 @@ fun ComposerBar(
                     onClick = sendCurrent,
                     enabled = !isRecording && !isTranscribing,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(RemoraTheme.minimumTouchTarget)
                         .clip(CircleShape)
                         .background(
                             if (!isRecording && !isTranscribing) {
@@ -1318,7 +1324,7 @@ private fun QueuedFollowUpCard(
 
         IconButton(
             onClick = { onDelete(preview) },
-            modifier = Modifier.size(30.dp),
+            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
         ) {
             Icon(
                 Icons.Default.Close,
@@ -1585,7 +1591,7 @@ private fun ComposerFileAttachmentRow(
         }
         IconButton(
             onClick = onRemove,
-            modifier = Modifier.size(28.dp),
+            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
         ) {
             Icon(
                 Icons.Default.Close,
@@ -1881,7 +1887,7 @@ private fun GoalPanel(
             Box {
                 IconButton(
                     onClick = { showMenu = true },
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         imageVector = Icons.Default.MoreHoriz,
@@ -2005,7 +2011,7 @@ private fun GoalPanel(
                 if (goal.tokensUsed > 0 && goal.timeUsedSeconds > 0) {
                     Text(
                         text = "·",
-                        color = RemoraTheme.textMuted.copy(alpha = 0.6f),
+                        color = RemoraTheme.textMuted,
                         fontSize = 10f.scaled,
                         fontFamily = BerkeleyMono,
                     )

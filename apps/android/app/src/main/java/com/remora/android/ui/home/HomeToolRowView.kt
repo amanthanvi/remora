@@ -50,7 +50,7 @@ fun HomeToolRowView(
         }
         Text(
             text = entry.detail,
-            color = RemoraTheme.textSecondary.copy(alpha = 0.8f),
+            color = RemoraTheme.textSecondary,
             fontSize = TOOL_LOG_FONT_SP.scaled,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

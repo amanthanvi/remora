@@ -66,7 +66,7 @@ internal fun ComposerTextInputChrome(
                 // so wrapped lines and the field width do not jump as it appears.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(end = 24.dp)
+                    .padding(end = RemoraTheme.minimumTouchTarget)
                     .then(textFieldModifier),
             )
 
@@ -75,7 +75,7 @@ internal fun ComposerTextInputChrome(
                     onClick = onExpand,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .size(20.dp),
+                        .size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         imageVector = Icons.Default.OpenInFull,

@@ -27,10 +27,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.remora.android.R
 
 object RemoraTheme {
+    /** Minimum interactive target required by the Android accessibility contract. */
+    val minimumTouchTarget = 48.dp
+
     private val activeTheme: RemoraResolvedTheme
         get() = RemoraThemeManager.activeTheme
 

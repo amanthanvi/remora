@@ -95,7 +95,7 @@ internal fun ServerSettingsRow(
             }
             IconButton(
                 onClick = { showMenu = true },
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
             ) {
                 Icon(
                     Icons.Default.MoreVert,

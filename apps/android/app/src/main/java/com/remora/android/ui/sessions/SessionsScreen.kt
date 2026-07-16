@@ -305,7 +305,7 @@ fun SessionsScreen(
             IconButton(
                 onClick = { scope.launch { loadSessions(force = true) } },
                 enabled = !isLoading && connectedServerIds.isNotEmpty(),
-                modifier = Modifier.size(32.dp),
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
             ) {
                 if (isLoading && hasLoadedInitialSessions) {
                     CircularProgressIndicator(
@@ -327,7 +327,7 @@ fun SessionsScreen(
                 }
             }
             if (onInfo != null) {
-                IconButton(onClick = onInfo, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onInfo, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                     Icon(
                         Icons.Outlined.Info,
                         contentDescription = "Server Info",
@@ -570,19 +570,11 @@ private fun SessionNodeRow(
                 .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(18.dp)
-                    .let { modifier ->
-                        if (hasChildren) {
-                            modifier.clickable(onClick = onToggleCollapse)
-                        } else {
-                            modifier
-                        }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                if (hasChildren) {
+            if (hasChildren) {
+                IconButton(
+                    onClick = onToggleCollapse,
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                ) {
                     Icon(
                         if (isCollapsed) Icons.Default.ChevronRight else Icons.Default.ExpandMore,
                         contentDescription = if (isCollapsed) "Expand session children" else "Collapse session children",
@@ -590,6 +582,8 @@ private fun SessionNodeRow(
                         modifier = Modifier.size(14.dp),
                     )
                 }
+            } else {
+                Spacer(Modifier.size(RemoraTheme.minimumTouchTarget))
             }
             Spacer(Modifier.width(6.dp))
 
