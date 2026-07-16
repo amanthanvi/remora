@@ -953,7 +953,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).expect("conf body");
         assert!(contents.contains("font-size = 14"));
         assert!(contents.contains("cursor-style = block"));
-        assert!(contents.contains("foreground = #00FF9C"));
+        assert!(contents.contains("foreground = #EAFBFF"));
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
         renderer.detach();
