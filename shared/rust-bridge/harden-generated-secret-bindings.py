@@ -6,15 +6,36 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
 
 def replace_once(source: str, old: str, new: str, label: str) -> str:
-    count = source.count(old)
-    if count != 1:
+    """Apply one hardening transform or accept its exact prior application."""
+    old_count = source.count(old)
+    new_count = source.count(new)
+    if new_count == 1:
+        # Some hardened replacements intentionally retain the original text as
+        # a prefix.  Accept only the occurrences contained by the one complete
+        # hardened replacement; an additional raw occurrence is still drift.
+        expected_old_count = new.count(old)
+        if old_count != expected_old_count:
+            raise SystemExit(
+                f"error: generated binding drift for {label}: found the "
+                f"hardened replacement plus {old_count - expected_old_count} "
+                "unexpected raw matches"
+            )
+        return source
+    if new_count != 0:
         raise SystemExit(
-            f"error: generated binding drift for {label}: expected 1 match, found {count}"
+            f"error: generated binding drift for {label}: "
+            f"expected at most 1 hardened match, found {new_count}"
+        )
+    if old_count != 1:
+        raise SystemExit(
+            f"error: generated binding drift for {label}: "
+            f"expected 1 raw match, found {old_count}"
         )
     return source.replace(old, new, 1)
 
@@ -28,8 +49,7 @@ def require_exact(source: str, needle: str, expected: int, label: str) -> None:
         )
 
 
-def harden_swift(path: Path) -> None:
-    source = path.read_text()
+def harden_swift_source(source: str) -> str:
     source = replace_once(
         source,
         "import Foundation\n",
@@ -434,6 +454,11 @@ public final class AppRelaySecretValue: @unchecked Sendable {
         1,
         "Swift read-result completion wipe",
     )
+    return source
+
+
+def harden_swift(path: Path) -> None:
+    source = harden_swift_source(path.read_text())
     path.write_text(source)
 
 
@@ -511,8 +536,129 @@ print("Swift relay-secret carrier runtime verification passed")
         print(run_result.stdout.strip())
 
 
-def harden_kotlin(path: Path) -> None:
-    source = path.read_text()
+KOTLIN_SECRET_BACKEND_HEADER = (
+    "internal object uniffiCallbackInterfaceAppRelaySecretBackend {"
+)
+KOTLIN_SECRET_CALLBACK_METHODS = (
+    "read",
+    "write",
+    "createIfAbsent",
+    "revision",
+    "compareAndSwap",
+    "compareAndTombstone",
+    "delete",
+)
+KOTLIN_SECRET_VALUE_METHODS = ("write", "createIfAbsent", "compareAndSwap")
+
+
+def kotlin_secret_backend_method_span(source: str, method: str) -> tuple[int, int]:
+    require_exact(
+        source,
+        KOTLIN_SECRET_BACKEND_HEADER,
+        1,
+        "Kotlin relay-secret backend callback object",
+    )
+    backend_start = source.index(KOTLIN_SECRET_BACKEND_HEADER)
+    backend_methods_end = source.find(
+        "\n    internal object uniffiFree:", backend_start
+    )
+    if backend_methods_end < 0:
+        raise SystemExit(
+            "error: generated binding drift for Kotlin relay-secret backend: "
+            "missing uniffiFree boundary"
+        )
+    backend_methods = source[backend_start:backend_methods_end]
+    method_marker = f"    internal object `{method}`:"
+    require_exact(
+        backend_methods,
+        method_marker,
+        1,
+        f"Kotlin {method} secret callback method",
+    )
+    method_start = backend_start + backend_methods.index(method_marker)
+    next_method = source.find(
+        "\n    internal object `", method_start + len(method_marker)
+    )
+    if next_method < 0 or next_method > backend_methods_end:
+        method_end = backend_methods_end
+    else:
+        method_end = next_method
+    return method_start, method_end
+
+
+def kotlin_secret_backend_method(source: str, method: str) -> str:
+    start, end = kotlin_secret_backend_method_span(source, method)
+    return source[start:end]
+
+
+def replace_once_in_kotlin_secret_callback(
+    source: str,
+    method: str,
+    old: str,
+    new: str,
+    label: str,
+) -> str:
+    start, end = kotlin_secret_backend_method_span(source, method)
+    method_source = replace_once(source[start:end], old, new, label)
+    return source[:start] + method_source + source[end:]
+
+
+def verify_kotlin_secret_callback_hardening(source: str) -> None:
+    backend_start = source.index(KOTLIN_SECRET_BACKEND_HEADER)
+    backend_methods_end = source.index(
+        "\n    internal object uniffiFree:", backend_start
+    )
+    methods = tuple(
+        re.findall(
+            r"^    internal object `([^`]+)`:.*$",
+            source[backend_start:backend_methods_end],
+            flags=re.MULTILINE,
+        )
+    )
+    if methods != KOTLIN_SECRET_CALLBACK_METHODS:
+        raise SystemExit(
+            "error: generated binding drift for Kotlin relay-secret callbacks: "
+            f"expected {KOTLIN_SECRET_CALLBACK_METHODS}, found {methods}"
+        )
+
+    for method in KOTLIN_SECRET_VALUE_METHODS:
+        method_source = kotlin_secret_backend_method(source, method)
+        require_exact(
+            method_source,
+            "val secretValue = FfiConverterTypeAppRelaySecretValue.lift(`value`)",
+            1,
+            f"Kotlin {method} lifted secret",
+        )
+        require_exact(
+            method_source,
+            "secretValue.fill(0)",
+            2,
+            f"Kotlin {method} secret cleanup",
+        )
+        require_exact(
+            method_source,
+            "{ secretValue.fill(0) },",
+            1,
+            f"Kotlin {method} completion cleanup",
+        )
+
+    for method in ("read", "revision", "compareAndTombstone", "delete"):
+        require_exact(
+            kotlin_secret_backend_method(source, method),
+            "secretValue",
+            0,
+            f"Kotlin {method} absence of nonexistent secret cleanup",
+        )
+
+    require_exact(
+        kotlin_secret_backend_method(source, "read"),
+        "returnValue.fill(0)",
+        1,
+        "Kotlin read-result completion wipe",
+    )
+
+
+def harden_kotlin_source(source: str) -> str:
     source = replace_once(
         source,
         """public typealias AppRelaySecretValue = kotlin.ByteArray
@@ -606,8 +752,9 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
 """,
         "Kotlin async callback completion hook",
     )
-    source = replace_once(
+    source = replace_once_in_kotlin_secret_callback(
         source,
+        "read",
         """            val uniffiHandleSuccess = { returnValue: AppRelaySecretValue ->
                 val uniffiResult = UniffiForeignFutureResultRustBuffer.UniffiByValue(
                     FfiConverterTypeAppRelaySecretValue.lower(returnValue),
@@ -633,8 +780,9 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
         "Kotlin read secret success callback",
     )
     for method in ("write", "createIfAbsent"):
-        source = replace_once(
+        source = replace_once_in_kotlin_secret_callback(
             source,
+            method,
             f"""            val uniffiObj = FfiConverterTypeAppRelaySecretBackend.handleMap.get(uniffiHandle)
             val makeCall = suspend {{ ->
                 uniffiObj.`{method}`(
@@ -659,32 +807,29 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
 """,
             f"Kotlin {method} secret callback",
         )
-        next_method = "createIfAbsent" if method == "write" else "revision"
-        source = replace_once(
+        source = replace_once_in_kotlin_secret_callback(
             source,
-            f"""            uniffiTraitInterfaceCallAsync(
+            method,
+            """            uniffiTraitInterfaceCallAsync(
                 makeCall,
                 uniffiHandleSuccess,
                 uniffiHandleError,
                 uniffiOutDroppedCallback
             )
-        }}
-    }}
-    internal object `{next_method}`:""",
-            f"""            uniffiTraitInterfaceCallAsync(
+""",
+            """            uniffiTraitInterfaceCallAsync(
                 makeCall,
                 uniffiHandleSuccess,
                 uniffiHandleError,
                 uniffiOutDroppedCallback,
-                {{ secretValue.fill(0) }},
+                { secretValue.fill(0) },
             )
-        }}
-    }}
-    internal object `{next_method}`:""",
+""",
             f"Kotlin {method} secret completion hook",
         )
-    source = replace_once(
+    source = replace_once_in_kotlin_secret_callback(
         source,
+        "compareAndSwap",
         """            val uniffiObj = FfiConverterTypeAppRelaySecretBackend.handleMap.get(uniffiHandle)
             val makeCall = suspend { ->
                 uniffiObj.`compareAndSwap`(
@@ -713,17 +858,16 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
 """,
         "Kotlin compareAndSwap secret callback",
     )
-    source = replace_once(
+    source = replace_once_in_kotlin_secret_callback(
         source,
+        "compareAndSwap",
         """            uniffiTraitInterfaceCallAsync(
                 makeCall,
                 uniffiHandleSuccess,
                 uniffiHandleError,
                 uniffiOutDroppedCallback
             )
-        }
-    }
-    internal object `delete`:""",
+""",
         """            uniffiTraitInterfaceCallAsync(
                 makeCall,
                 uniffiHandleSuccess,
@@ -731,9 +875,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
                 uniffiOutDroppedCallback,
                 { secretValue.fill(0) },
             )
-        }
-    }
-    internal object `delete`:""",
+""",
         "Kotlin compareAndSwap secret completion hook",
     )
     require_exact(
@@ -754,6 +896,12 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithEr
         2,
         "Kotlin direct enrollment manage-capability argument",
     )
+    verify_kotlin_secret_callback_hardening(source)
+    return source
+
+
+def harden_kotlin(path: Path) -> None:
+    source = harden_kotlin_source(path.read_text())
     path.write_text(source)
 
 

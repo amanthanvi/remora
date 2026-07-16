@@ -196,7 +196,7 @@ $(shell mkdir -p $(STAMPS))
 	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-test rust-host-dev rust-shellcheck \
 	ghostty-ios ghostty-android \
 	update-remora-link \
-	bindings bindings-swift bindings-kotlin \
+	bindings bindings-swift bindings-kotlin bindings-hardener-test \
 	sync patch unpatch sync-ghostty unpatch-ghostty xcgen \
 	ios-build ios-build-sim ios-build-sim-fast ios-build-device ios-build-device-fast \
 	test test-rust test-ios test-android \
@@ -450,7 +450,8 @@ help:
 		'make android-emulator-run  fast emulator build + install + launch on emulator; saves logcat under artifacts/android-emulator-run' \
 		'make android-device-run    fast Android dev build + install + launch with saved logcat under artifacts/android-device-run (override ANDROID_DEVICE_SERIAL; auto-uninstalls on versionCode downgrade; set ANDROID_REINSTALL_ON_SIGNATURE_MISMATCH=1 to also uninstall on signature mismatch)' \
 		'make rust-check         host cargo check for shared crates' \
-		'make rust-test          host cargo test for shared crates'
+		'make rust-test          host cargo test for shared crates' \
+		'make bindings-hardener-test  generated secret-binding hardener regression tests'
 
 sync: $(STAMP_SYNC)
 $(STAMP_SYNC):
@@ -481,6 +482,10 @@ unpatch-ghostty:
 	@rm -f $(STAMPS)/sync-ghostty-* $(STAMPS)/ghostty-ios-* $(STAMPS)/ghostty-android-*
 
 bindings: bindings-swift bindings-kotlin
+
+bindings-hardener-test:
+	@echo "==> Testing generated secret-binding hardener..."
+	@python3 -m unittest discover -s $(RUST_DIR) -p 'test_harden_generated_secret_bindings.py' -v
 
 bindings-swift: $(STAMP_BINDINGS_S)
 $(STAMP_BINDINGS_S): $(STAMP_SYNC) $(BOUNDARY_SOURCES)
@@ -591,7 +596,7 @@ android-emulator-install: android-emulator-fast
 	if [ -z "$$EMU" ]; then echo "ERROR: no emulator found"; exit 1; fi && \
 	adb -s "$$EMU" install -r $(ANDROID_APK)
 
-test: test-rust test-ios test-android
+test: bindings-hardener-test test-rust test-ios test-android
 
 test-rust: patch rust-shellcheck
 	@echo "==> Running Rust tests..."
