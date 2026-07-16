@@ -5,9 +5,88 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import uniffi.codex_mobile_client.TerminalConfig
 import uniffi.codex_mobile_client.TerminalCursorStyle
 import uniffi.codex_mobile_client.TerminalThemePreset
+import uniffi.codex_mobile_client.themePalette
+
+internal data class TerminalPaletteVisuals(
+    val background: Color,
+    val fallbackForeground: Color,
+    val statusForeground: Color,
+)
+
+internal object TerminalVisualDefaults {
+    /** Terminal chrome intentionally stays on Remora's canonical dark canvas. */
+    val chromeTheme = TerminalThemeChoice.REMORA_DARK
+
+    val chromeBackground = Color(0xFF02082C)
+    val chromeForeground = Color(0xFFEAFBFF)
+    val chromeAccent = Color(0xFF0DD5F0)
+    val chromeDanger = Color(0xFFFF5C57)
+    val chromeWarning = Color(0xFFF3F99D)
+
+    // These are the opaque secondary surface/text roles from the canonical
+    // Remora dark theme. Keeping them here prevents terminal chrome from
+    // changing contrast when the rest of the app uses a light/custom theme.
+    val chromeSurface = Color(0xFF011B44)
+    val chromeSecondary = Color(0xFFA8DCEB)
+    val chromeMuted = Color(0xFF83AFC2)
+    val chromeOnAccent: Color
+        get() = chromeBackground
+
+    /**
+     * Ghostty's Android font backend discovers installed fonts through
+     * fontconfig; Android resource fonts are not registered there. Compose
+     * chrome uses the bundled Berkeley Mono through `RemoraTheme.monoFont`,
+     * while the native grid requests Android's guaranteed monospace family.
+     * Never claim Apple's SF Mono on Android.
+     */
+    const val nativeGridFontFamily = "monospace"
+}
+
+private fun parseTerminalColor(hex: String): Color {
+    require(hex.length == 7 && hex[0] == '#') { "expected #RRGGBB terminal color" }
+    return Color(0xFF000000L or hex.substring(1).toLong(16))
+}
+
+/**
+ * Compose-side colors for the selected Ghostty palette. Plain-text fallback
+ * output keeps the preset foreground. Lightweight status copy uses ANSI black
+ * on light canvases, matching the shared Rust contrast contract.
+ */
+internal fun terminalPaletteVisuals(theme: TerminalThemePreset): TerminalPaletteVisuals {
+    val palette = themePalette(theme)
+    return terminalPaletteVisuals(
+        backgroundHex = palette.background,
+        foregroundHex = palette.foreground,
+        ansiBlackHex = palette.ansi.firstOrNull(),
+    )
+}
+
+internal fun terminalPaletteVisuals(
+    backgroundHex: String,
+    foregroundHex: String,
+    ansiBlackHex: String?,
+): TerminalPaletteVisuals {
+    val background = parseTerminalColor(backgroundHex)
+    val fallbackForeground = parseTerminalColor(foregroundHex)
+    val statusForeground = if (background.luminance() > 0.5f) {
+        parseTerminalColor(ansiBlackHex ?: foregroundHex)
+    } else {
+        fallbackForeground
+    }
+    return TerminalPaletteVisuals(
+        background = background,
+        fallbackForeground = fallbackForeground,
+        statusForeground = statusForeground,
+    )
+}
+
+internal fun terminalCanvasColor(theme: TerminalThemePreset): Color =
+    terminalPaletteVisuals(theme).background
 
 enum class TerminalThemeChoice(val id: String, val title: String) {
     REMORA_DARK("remora-dark", "Remora Dark"),
@@ -80,7 +159,7 @@ object TerminalConfigPrefs {
 
     fun currentConfig(): TerminalConfig = TerminalConfig(
         theme = theme.toPreset(),
-        fontFamily = "monospace",
+        fontFamily = TerminalVisualDefaults.nativeGridFontFamily,
         fontSizePt = fontSize,
         cursorStyle = TerminalCursorStyle.BAR,
         cursorBlink = cursorBlink,

@@ -132,9 +132,9 @@ pub fn theme_palette(preset: TerminalThemePreset) -> TerminalPalette {
 
 fn remora_dark_palette() -> TerminalPalette {
     TerminalPalette {
-        background: "#000000".into(),
-        foreground: "#00FF9C".into(),
-        cursor: "#00FF9C".into(),
+        background: "#02082C".into(),
+        foreground: "#EAFBFF".into(),
+        cursor: "#0DD5F0".into(),
         ansi: vec![
             "#000000".into(),
             "#FF5C57".into(),
@@ -228,6 +228,49 @@ fn solarized_palette(dark: bool) -> TerminalPalette {
 mod tests {
     use super::*;
 
+    fn rgb(hex: &str) -> [f64; 3] {
+        let rgb = hex.strip_prefix('#').expect("palette colors use #RRGGBB");
+        assert_eq!(rgb.len(), 6);
+        [0, 2, 4]
+            .map(|offset| u8::from_str_radix(&rgb[offset..offset + 2], 16).unwrap() as f64 / 255.0)
+    }
+
+    fn relative_luminance_rgb(rgb: [f64; 3]) -> f64 {
+        let channel = |value: f64| {
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+    }
+
+    fn relative_luminance(hex: &str) -> f64 {
+        relative_luminance_rgb(rgb(hex))
+    }
+
+    fn contrast_ratio(foreground: &str, background: &str) -> f64 {
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    fn contrast_ratio_on_tinted_background(
+        foreground: &str,
+        background: &str,
+        tint_alpha: f64,
+    ) -> f64 {
+        let foreground_rgb = rgb(foreground);
+        let background_rgb = rgb(background);
+        let tinted_background = [0, 1, 2].map(|index| {
+            foreground_rgb[index] * tint_alpha + background_rgb[index] * (1.0 - tint_alpha)
+        });
+        let foreground = relative_luminance_rgb(foreground_rgb);
+        let background = relative_luminance_rgb(tinted_background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
     fn cfg() -> TerminalConfig {
         TerminalConfig {
             theme: TerminalThemePreset::RemoraDark,
@@ -247,11 +290,81 @@ mod tests {
         assert!(out.contains("cursor-style = bar"));
         assert!(out.contains("cursor-style-blink = true"));
         assert!(out.contains("scrollback-limit = 10000"));
-        assert!(out.contains("background = #000000"));
-        assert!(out.contains("foreground = #00FF9C"));
-        assert!(out.contains("cursor-color = #00FF9C"));
+        assert!(out.contains("background = #02082C"));
+        assert!(out.contains("foreground = #EAFBFF"));
+        assert!(out.contains("cursor-color = #0DD5F0"));
         assert!(out.contains("palette = 0=#000000"));
+        assert!(out.contains("palette = 2=#00FF9C"));
+        assert!(out.contains("palette = 10=#5AF78E"));
         assert!(out.contains("palette = 15=#FFFFFF"));
+    }
+
+    #[test]
+    fn remora_dark_uses_ocean_identity_without_repurposing_ansi_green() {
+        let palette = theme_palette(TerminalThemePreset::RemoraDark);
+
+        assert_eq!(palette.background, "#02082C");
+        assert_eq!(palette.foreground, "#EAFBFF");
+        assert_eq!(palette.cursor, "#0DD5F0");
+        assert_eq!(palette.ansi[2], "#00FF9C");
+        assert_eq!(palette.bright[2], "#5AF78E");
+    }
+
+    #[test]
+    fn platform_status_foregrounds_meet_wcag_aa_on_every_surface() {
+        let cases = [
+            ("remora-dark", TerminalThemePreset::RemoraDark, false),
+            (
+                "catppuccin-frappe",
+                TerminalThemePreset::CatppuccinFrappe,
+                false,
+            ),
+            (
+                "catppuccin-frappe-light",
+                TerminalThemePreset::CatppuccinFrappeLight,
+                true,
+            ),
+            (
+                "solarized-dark",
+                TerminalThemePreset::Solarized { dark: true },
+                false,
+            ),
+            (
+                "solarized-light",
+                TerminalThemePreset::Solarized { dark: false },
+                true,
+            ),
+        ];
+
+        for (name, preset, uses_ansi_black) in cases {
+            let palette = theme_palette(preset);
+            let foreground = if uses_ansi_black {
+                palette.ansi.first().unwrap_or(&palette.foreground)
+            } else {
+                &palette.foreground
+            };
+            let ratio = contrast_ratio(foreground, &palette.background);
+            assert!(
+                ratio >= 4.5,
+                "{name} status foreground {foreground} on {} has contrast {ratio:.2}",
+                palette.background
+            );
+        }
+
+        let chrome = theme_palette(TerminalThemePreset::RemoraDark);
+        let chip_roles = [
+            ("neutral", chrome.foreground.as_str()),
+            ("running", chrome.cursor.as_str()),
+            ("failed", chrome.ansi[1].as_str()),
+        ];
+        for (name, foreground) in chip_roles {
+            let ratio = contrast_ratio_on_tinted_background(foreground, &chrome.background, 0.12);
+            assert!(
+                ratio >= 4.5,
+                "{name} phase-chip foreground {foreground} on tinted {} has contrast {ratio:.2}",
+                chrome.background
+            );
+        }
     }
 
     #[test]
@@ -287,7 +400,7 @@ mod tests {
         };
         let out = render_ghostty_conf(c);
         // Base palette still rendered (from RemoraDark fallback).
-        assert!(out.contains("foreground = #00FF9C"));
+        assert!(out.contains("foreground = #EAFBFF"));
         // Custom block follows.
         let base = out.find("# --- custom ghostty.conf overrides ---").unwrap();
         let custom = out.find("font-feature = +liga").unwrap();

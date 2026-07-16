@@ -34,7 +34,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -105,6 +107,9 @@ fun TerminalScreen(
     ) {
         TerminalConfigPrefs.currentConfig()
     }
+    val terminalVisuals = remember(currentTerminalConfig.theme) {
+        terminalPaletteVisuals(currentTerminalConfig.theme)
+    }
 
     LaunchedEffect(backendOptions, preferredAlleycatNodeId) {
         if (backendOptions.none { it.id == selectedBackendId }) {
@@ -123,7 +128,7 @@ fun TerminalScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(TerminalVisualDefaults.chromeBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding(),
@@ -143,7 +148,7 @@ fun TerminalScreen(
         controller.errorMessage?.let { message ->
             Text(
                 text = message,
-                color = RemoraTheme.danger,
+                color = TerminalVisualDefaults.chromeDanger,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 12.sp,
                 modifier = Modifier
@@ -161,12 +166,12 @@ fun TerminalScreen(
             ) {
                 Text(
                     text = "Trust ${challenge.fingerprint}",
-                    color = Color.Black,
+                    color = TerminalVisualDefaults.chromeOnAccent,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 12.sp,
                     maxLines = 1,
                     modifier = Modifier
-                        .background(RemoraTheme.accent, RoundedCornerShape(8.dp))
+                        .background(TerminalVisualDefaults.chromeAccent, RoundedCornerShape(8.dp))
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 )
             }
@@ -184,7 +189,8 @@ fun TerminalScreen(
             terminalConfig = currentTerminalConfig,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .weight(1f)
+                .background(terminalVisuals.background),
         )
 
         val appSnapshot by AppModel.shared.snapshot.collectAsState()
@@ -235,8 +241,8 @@ private fun TerminalConfigSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color.Black,
-        contentColor = RemoraTheme.textPrimary,
+        containerColor = TerminalVisualDefaults.chromeBackground,
+        contentColor = TerminalVisualDefaults.chromeForeground,
     ) {
         Column(
             modifier = Modifier
@@ -246,7 +252,7 @@ private fun TerminalConfigSheet(
         ) {
             Text(
                 text = "Terminal",
-                color = RemoraTheme.textPrimary,
+                color = TerminalVisualDefaults.chromeForeground,
                 fontFamily = RemoraTheme.monoFont,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
@@ -256,14 +262,14 @@ private fun TerminalConfigSheet(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "Font size",
-                        color = RemoraTheme.textSecondary,
+                        color = TerminalVisualDefaults.chromeSecondary,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = 13.sp,
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
                         text = "${draftFontSize.toInt()} pt",
-                        color = RemoraTheme.textMuted,
+                        color = TerminalVisualDefaults.chromeMuted,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = 13.sp,
                     )
@@ -276,13 +282,20 @@ private fun TerminalConfigSheet(
                     },
                     valueRange = 10f..24f,
                     steps = 13,
+                    colors = SliderDefaults.colors(
+                        thumbColor = TerminalVisualDefaults.chromeAccent,
+                        activeTrackColor = TerminalVisualDefaults.chromeAccent,
+                        inactiveTrackColor = TerminalVisualDefaults.chromeMuted,
+                        activeTickColor = TerminalVisualDefaults.chromeBackground,
+                        inactiveTickColor = TerminalVisualDefaults.chromeForeground,
+                    ),
                 )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "Theme",
-                    color = RemoraTheme.textSecondary,
+                    color = TerminalVisualDefaults.chromeSecondary,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 13.sp,
                 )
@@ -295,7 +308,11 @@ private fun TerminalConfigSheet(
                     ) {
                         Text(
                             text = choice.title,
-                            color = if (selected) RemoraTheme.accent else RemoraTheme.textPrimary,
+                            color = if (selected) {
+                                TerminalVisualDefaults.chromeAccent
+                            } else {
+                                TerminalVisualDefaults.chromeForeground
+                            },
                             fontFamily = RemoraTheme.monoFont,
                             fontSize = 13.sp,
                             modifier = Modifier.weight(1f),
@@ -303,7 +320,7 @@ private fun TerminalConfigSheet(
                         if (selected) {
                             Text(
                                 text = "•",
-                                color = RemoraTheme.accent,
+                                color = TerminalVisualDefaults.chromeAccent,
                                 fontFamily = RemoraTheme.monoFont,
                                 fontSize = 16.sp,
                             )
@@ -318,7 +335,7 @@ private fun TerminalConfigSheet(
             ) {
                 Text(
                     text = "Cursor blink",
-                    color = RemoraTheme.textPrimary,
+                    color = TerminalVisualDefaults.chromeForeground,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 13.sp,
                 )
@@ -326,6 +343,13 @@ private fun TerminalConfigSheet(
                 Switch(
                     checked = TerminalConfigPrefs.cursorBlink,
                     onCheckedChange = { TerminalConfigPrefs.setCursorBlink(context, it) },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = TerminalVisualDefaults.chromeBackground,
+                        checkedTrackColor = TerminalVisualDefaults.chromeAccent,
+                        uncheckedThumbColor = TerminalVisualDefaults.chromeSecondary,
+                        uncheckedTrackColor = TerminalVisualDefaults.chromeSurface,
+                        uncheckedBorderColor = TerminalVisualDefaults.chromeMuted,
+                    ),
                 )
             }
         }
@@ -346,6 +370,11 @@ private fun TerminalOutputPane(
     modifier: Modifier = Modifier,
 ) {
     val outputScroll = rememberScrollState()
+    val paletteVisuals = remember(terminalConfig?.theme) {
+        terminalPaletteVisuals(
+            terminalConfig?.theme ?: TerminalThemeChoice.DEFAULT.toPreset(),
+        )
+    }
     LaunchedEffect(controller.output.length) {
         outputScroll.scrollTo(outputScroll.maxValue)
     }
@@ -373,7 +402,7 @@ private fun TerminalOutputPane(
         if (selectedBackend == null) {
             Text(
                 text = terminalEmptyMessage(),
-                color = RemoraTheme.textSecondary,
+                color = paletteVisuals.statusForeground,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -414,7 +443,7 @@ private fun TerminalOutputPane(
                         text = controller.output.ifEmpty {
                             ""
                         },
-                        color = RemoraTheme.accent,
+                        color = paletteVisuals.fallbackForeground,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = TerminalConfigPrefs.fontSize.sp,
                         lineHeight = (TerminalConfigPrefs.fontSize * 1.31f).sp,
@@ -480,6 +509,7 @@ private fun TerminalHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(TerminalVisualDefaults.chromeBackground)
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -487,12 +517,12 @@ private fun TerminalHeader(
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
-                tint = RemoraTheme.textPrimary,
+                tint = TerminalVisualDefaults.chromeForeground,
             )
         }
         Text(
             text = "Terminal",
-            color = RemoraTheme.textPrimary,
+            color = TerminalVisualDefaults.chromeForeground,
             fontFamily = RemoraTheme.monoFont,
             fontWeight = FontWeight.SemiBold,
             fontSize = 16.sp,
@@ -508,12 +538,12 @@ private fun TerminalHeader(
             Icon(
                 selectedBackend?.icon ?: Icons.Outlined.Storage,
                 contentDescription = null,
-                tint = RemoraTheme.accent,
+                tint = TerminalVisualDefaults.chromeAccent,
                 modifier = Modifier.size(16.dp),
             )
             Text(
                 text = selectedBackend?.title ?: "No backend",
-                color = RemoraTheme.accent,
+                color = TerminalVisualDefaults.chromeAccent,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(start = 6.dp),
@@ -522,19 +552,24 @@ private fun TerminalHeader(
         DropdownMenu(
             expanded = backendMenuExpanded,
             onDismissRequest = { backendMenuExpanded = false },
+            modifier = Modifier.background(TerminalVisualDefaults.chromeSurface),
         ) {
             backendOptions.forEach { option ->
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = option.title,
-                            color = RemoraTheme.textPrimary,
+                            color = TerminalVisualDefaults.chromeForeground,
                             fontFamily = RemoraTheme.monoFont,
                             fontSize = 13.sp,
                         )
                     },
                     leadingIcon = {
-                        Icon(option.icon, contentDescription = null, tint = RemoraTheme.accent)
+                        Icon(
+                            option.icon,
+                            contentDescription = null,
+                            tint = TerminalVisualDefaults.chromeAccent,
+                        )
                     },
                     onClick = {
                         backendMenuExpanded = false
@@ -553,7 +588,7 @@ private fun TerminalHeader(
         ) {
             Text(
                 text = "Aa",
-                color = RemoraTheme.accent,
+                color = TerminalVisualDefaults.chromeAccent,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 13.sp,
             )
@@ -582,7 +617,7 @@ private fun TerminalAccessoryRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.96f))
+            .background(TerminalVisualDefaults.chromeBackground)
             .horizontalScroll(scroll)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -618,7 +653,11 @@ private fun TerminalKey(
     ) {
         Text(
             text = label,
-            color = if (enabled) RemoraTheme.textSecondary else RemoraTheme.textMuted,
+            color = if (enabled) {
+                TerminalVisualDefaults.chromeSecondary
+            } else {
+                TerminalVisualDefaults.chromeMuted
+            },
             fontFamily = RemoraTheme.monoFont,
             fontSize = 12.sp,
         )
@@ -637,12 +676,12 @@ private fun phaseLabel(
     TerminalSessionController.Phase.FAILED -> "failed"
 }
 
-private fun phaseColor(phase: TerminalSessionController.Phase): Color = when (phase) {
-    TerminalSessionController.Phase.IDLE -> RemoraTheme.textMuted
-    TerminalSessionController.Phase.CONNECTING -> RemoraTheme.warning
-    TerminalSessionController.Phase.RUNNING -> RemoraTheme.accent
-    TerminalSessionController.Phase.EXITED -> RemoraTheme.textMuted
-    TerminalSessionController.Phase.FAILED -> RemoraTheme.danger
+internal fun phaseColor(phase: TerminalSessionController.Phase): Color = when (phase) {
+    TerminalSessionController.Phase.IDLE -> TerminalVisualDefaults.chromeForeground
+    TerminalSessionController.Phase.CONNECTING -> TerminalVisualDefaults.chromeWarning
+    TerminalSessionController.Phase.RUNNING -> TerminalVisualDefaults.chromeAccent
+    TerminalSessionController.Phase.EXITED -> TerminalVisualDefaults.chromeForeground
+    TerminalSessionController.Phase.FAILED -> TerminalVisualDefaults.chromeDanger
 }
 
 private data class TerminalBackendOption(

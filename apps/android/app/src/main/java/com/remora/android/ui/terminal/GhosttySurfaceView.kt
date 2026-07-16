@@ -49,7 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -117,6 +117,7 @@ internal fun GhosttyTerminalSurface(
                     view.onMetricsChanged = { metrics ->
                         metricsState.value = metrics
                     }
+                    config?.let(view::applyConfig)
                     contentScaleState.value = density.density
                 }
             },
@@ -205,8 +206,8 @@ private fun SelectionOverlay(
     contentScale: Float,
 ) {
     if (range == null || metrics == null || metrics.cols == 0u || contentScale <= 0f) return
-    val highlight = ComposeColor(0xFF1F6FEB).copy(alpha = 0.30f)
-    val handle = ComposeColor(0xFF1F6FEB)
+    val highlight = TerminalVisualDefaults.chromeAccent.copy(alpha = 0.30f)
+    val handle = TerminalVisualDefaults.chromeAccent
     val normalized = normalizeRange(range)
     val cellW = metrics.cellWidthPx.toFloat() / contentScale
     val cellH = metrics.cellHeightPx.toFloat() / contentScale
@@ -271,7 +272,7 @@ private fun SelectionActionMenu(
         modifier = Modifier
             .offset(x = xOffsetDp, y = yOffsetDp)
             .clip(RoundedCornerShape(10.dp))
-            .background(ComposeColor(0xFF1F1F1F)),
+            .background(TerminalVisualDefaults.chromeSurface),
     ) {
         androidx.compose.foundation.layout.Row {
             ActionMenuItem("Copy", onCopy)
@@ -286,7 +287,7 @@ private fun SelectionActionMenu(
 private fun ActionMenuItem(label: String, onClick: () -> Unit) {
     Text(
         text = label,
-        color = RemoraTheme.textPrimary,
+        color = TerminalVisualDefaults.chromeForeground,
         fontFamily = RemoraTheme.monoFont,
         fontSize = 13.sp,
         modifier = Modifier
@@ -307,6 +308,32 @@ private fun normalizeRange(range: TerminalCellRange): TerminalCellRange {
 
 private class GhosttySurfaceHolder {
     var view: GhosttyAndroidSurfaceView? = null
+}
+
+internal fun interface TerminalConfigTarget {
+    fun apply(config: TerminalConfig)
+}
+
+/** Retains the latest config and binds it to each renderer lifecycle. */
+internal class TerminalConfigReplayState {
+    private var latestConfig: TerminalConfig? = null
+    private var activeTarget: TerminalConfigTarget? = null
+
+    fun update(config: TerminalConfig) {
+        latestConfig = config
+        activeTarget?.apply(config)
+    }
+
+    fun rendererCreated(target: TerminalConfigTarget) {
+        activeTarget = target
+        latestConfig?.let(target::apply)
+    }
+
+    fun rendererDestroyed(target: TerminalConfigTarget) {
+        if (activeTarget === target) {
+            activeTarget = null
+        }
+    }
 }
 
 internal class GhosttySnapshotRefreshGate {
@@ -345,7 +372,8 @@ private class GhosttyAndroidSurfaceView(
     private var frameScheduled = false
     private var rendererUnavailableReported = false
     private var didSetConfigDir = false
-    private var pendingConfig: TerminalConfig? = null
+    private val configReplayState = TerminalConfigReplayState()
+    private val configTarget = TerminalConfigTarget(::applyConfigToRenderer)
     private val surfaceSnapshotGate = GhosttySnapshotRefreshGate()
     @Volatile
     private var outputFlushScheduled = false
@@ -479,7 +507,7 @@ private class GhosttyAndroidSurfaceView(
     )
 
     init {
-        setBackgroundColor(Color.BLACK)
+        setBackgroundColor(TerminalVisualDefaults.chromeBackground.toArgb())
         holder.addCallback(this)
         isFocusable = true
         isFocusableInTouchMode = true
@@ -612,6 +640,7 @@ private class GhosttyAndroidSurfaceView(
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stopFrameLoop()
+        configReplayState.rendererDestroyed(configTarget)
         removeCallbacks(outputFlushRunnable)
         removeCallbacks(viewportRefreshRunnable)
         synchronized(outputLock) {
@@ -763,10 +792,7 @@ private class GhosttyAndroidSurfaceView(
         if (wrotePendingOutput) {
             markSurfaceSnapshotDirtyAndScheduleRefresh()
         }
-        pendingConfig?.let { config ->
-            pendingConfig = null
-            applyConfig(config)
-        }
+        configReplayState.rendererCreated(configTarget)
         // Paint the first frame; subsequent frames are scheduled on demand
         // via `wakeupListener` or `setOccluded(false)`.
         scheduleFrame()
@@ -782,10 +808,13 @@ private class GhosttyAndroidSurfaceView(
     }
 
     fun applyConfig(config: TerminalConfig) {
+        setBackgroundColor(terminalCanvasColor(config.theme).toArgb())
+        configReplayState.update(config)
+    }
+
+    private fun applyConfigToRenderer(config: TerminalConfig) {
         val renderer = terminalRenderer
         if (renderer == null) {
-            // Surface not created yet — replay once the renderer is attached.
-            pendingConfig = config
             return
         }
         ensureConfigDir(renderer)

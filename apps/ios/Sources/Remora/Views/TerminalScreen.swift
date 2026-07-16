@@ -1,6 +1,32 @@
 import SwiftUI
 import UIKit
 
+private var remoraTerminalChromePalette: TerminalPalette {
+    themePalette(preset: .remoraDark)
+}
+
+private var remoraTerminalChromeBackground: Color {
+    Color(hex: remoraTerminalChromePalette.background)
+}
+
+private var remoraTerminalAccent: Color {
+    Color(hex: remoraTerminalChromePalette.cursor)
+}
+
+private var remoraTerminalChromeForeground: Color {
+    Color(hex: remoraTerminalChromePalette.foreground)
+}
+
+private var remoraTerminalFailure: Color {
+    let palette = remoraTerminalChromePalette
+    return Color(hex: palette.ansi.count > 1 ? palette.ansi[1] : palette.foreground)
+}
+
+private var remoraTerminalSecondaryText: Color {
+    let palette = remoraTerminalChromePalette
+    return Color(hex: palette.ansi.last ?? palette.foreground)
+}
+
 /// Full-screen terminal. The Ghostty surface fills the entire body —
 /// keystrokes go straight to the PTY via the hidden first-responder text
 /// field, and the Esc/Ctrl/Tab/arrows row docks above the system keyboard
@@ -27,7 +53,7 @@ struct TerminalScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    private var accent: Color { RemoraTheme.accentStrong }
+    private var accent: Color { remoraTerminalAccent }
     private let alleycatServerIdPrefix = "alleycat:"
 
     var body: some View {
@@ -43,9 +69,9 @@ struct TerminalScreen: View {
                 )
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
-            .background(Color.black)
+            .background(remoraTerminalChromeBackground)
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(remoraTerminalChromeBackground.ignoresSafeArea())
         .ignoresSafeArea(.container, edges: [.top, .bottom, .horizontal])
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .toolbar(.hidden, for: .navigationBar)
@@ -123,7 +149,7 @@ struct TerminalScreen: View {
         .padding(.horizontal, 14)
         .padding(.top, topInset + 8)
         .frame(height: topInset + 86)
-        .background(Color.black)
+        .background(remoraTerminalChromeBackground)
     }
 
     private func terminalHorizontalInsets(for geometry: GeometryProxy) -> (leading: CGFloat, trailing: CGFloat) {
@@ -187,7 +213,7 @@ struct TerminalScreen: View {
 
             Text(selectedBackend?.subtitle ?? "Add remote terminal credentials")
                 .font(.custom("SFMono-Regular", size: 11))
-                .foregroundColor(.white.opacity(0.48))
+                .foregroundColor(remoraTerminalSecondaryText)
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -209,7 +235,7 @@ struct TerminalScreen: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
-        .background(Color.black)
+        .background(remoraTerminalChromeBackground)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Color.white.opacity(0.08))
@@ -240,10 +266,10 @@ struct TerminalScreen: View {
                 .font(.custom("SFMono-Regular", size: 11))
                 .lineLimit(1)
         }
-        .foregroundColor(phaseColor)
+        .foregroundColor(phaseChipForeground)
         .padding(.horizontal, 8)
         .frame(height: 22)
-        .background(phaseColor.opacity(0.12))
+        .background(phaseChipForeground.opacity(0.12))
         .clipShape(Capsule())
     }
 
@@ -304,7 +330,7 @@ struct TerminalScreen: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(displayText)
                                 .font(.custom("SFMono-Regular", size: storedFontSize))
-                                .foregroundColor(phaseColor)
+                                .foregroundColor(terminalOverlayStatusForeground)
                                 .textSelection(.enabled)
                             if let challenge = controller.sshTrustChallenge {
                                 Button {
@@ -312,7 +338,7 @@ struct TerminalScreen: View {
                                 } label: {
                                     Label("Trust \(challenge.fingerprint)", systemImage: "key.fill")
                                         .font(.custom("SFMono-Regular", size: 12))
-                                        .foregroundColor(.black)
+                                        .foregroundColor(remoraTerminalChromeBackground)
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                         .padding(.horizontal, 10)
@@ -364,10 +390,21 @@ struct TerminalScreen: View {
     }
 
     private var terminalSurfaceBackground: Color {
-        if storedThemeId == TerminalThemeChoice.remoraDark.rawValue {
-            return Color(hex: "#282C34")
-        }
         return Color(hex: themePalette(preset: TerminalThemeChoice.preset(forId: storedThemeId)).background)
+    }
+
+    /// Opaque palette text keeps transient status copy at WCAG AA contrast.
+    /// Light presets use ANSI black; dark presets use their canonical
+    /// foreground. Opacity is reserved for the chip decoration, not text.
+    private var terminalOverlayStatusForeground: Color {
+        let choice = TerminalThemeChoice(rawValue: storedThemeId) ?? .remoraDark
+        let palette = themePalette(preset: choice.preset)
+        switch choice {
+        case .catppuccinFrappeLight, .solarizedLight:
+            return Color(hex: palette.ansi.first ?? palette.foreground)
+        case .remoraDark, .catppuccinFrappe, .solarizedDark:
+            return Color(hex: palette.foreground)
+        }
     }
 
     private var displayText: String {
@@ -409,12 +446,15 @@ struct TerminalScreen: View {
         }
     }
 
-    private var phaseColor: Color {
+    /// The phase chip always sits on Remora's navy chrome, independently of
+    /// the selected terminal canvas. Each opaque role remains AA-readable on
+    /// the chip's matching 12% tint.
+    private var phaseChipForeground: Color {
         switch controller.phase {
-        case .idle, .connecting: return .white.opacity(0.45)
+        case .idle, .connecting: return remoraTerminalChromeForeground
         case .running: return accent
-        case .exited: return .white.opacity(0.5)
-        case .failed: return .red
+        case .exited: return remoraTerminalChromeForeground
+        case .failed: return remoraTerminalFailure
         }
     }
 
@@ -744,6 +784,8 @@ private struct TerminalConfigSheet: View {
                         .onChange(of: draftCursorBlink) { _, _ in applyDraft() }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(remoraTerminalChromeBackground.ignoresSafeArea())
             .navigationTitle("Terminal")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -761,6 +803,7 @@ private struct TerminalConfigSheet: View {
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     private func applyDraft() {

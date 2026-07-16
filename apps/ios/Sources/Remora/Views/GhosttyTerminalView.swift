@@ -790,7 +790,9 @@ final class RemoraTerminalAccessoryBar: UIView {
     }
 
     private func configure() {
-        backgroundColor = UIColor.black.withAlphaComponent(0.96)
+        backgroundColor = UIColor(
+            hex: themePalette(preset: .remoraDark).background
+        ).withAlphaComponent(0.96)
         translatesAutoresizingMaskIntoConstraints = false
         autoresizingMask = [.flexibleWidth]
         frame = CGRect(x: 0, y: 0, width: 320, height: 44)
