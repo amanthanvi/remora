@@ -212,11 +212,8 @@ fn test_profile_init_adds_common_node_manager_bins() {
 }
 
 #[test]
-fn test_posix_resolver_probes_package_manager_bins() {
+fn test_posix_resolver_preserves_path_precedence_without_package_manager_probes() {
     let script = resolve_codex_binary_script_posix();
-    assert!(script.contains("npm config get prefix"));
-    assert!(script.contains("pnpm bin -g"));
-    assert!(script.contains("bun pm bin -g"));
     assert!(script.contains("packages/standalone/current/codex"));
     assert!(script.contains("${BUN_INSTALL:-$HOME/.bun}/bin/codex"));
     assert!(script.contains("PNPM_HOME"));
@@ -228,20 +225,28 @@ fn test_posix_resolver_probes_package_manager_bins() {
     assert!(script.contains("/usr/local/bin/codex"));
     assert!(script.contains("/usr/bin/codex"));
     assert!(
-        script.find("_remora_consider_path_candidates codex codex") < script.find("pnpm bin -g")
+        script.find("_remora_consider_path_candidates codex codex")
+            < script.find("packages/standalone/current/codex")
     );
-    assert!(script.contains("_remora_best_path"));
+    assert!(script.contains("_remora_first_path"));
+    assert!(!script.contains("npm config get prefix"));
+    assert!(!script.contains("pnpm bin -g"));
+    assert!(!script.contains("bun pm bin -g"));
+    assert!(!script.contains("--version"));
     assert!(!script.contains("codex-app-server"));
 }
 
 #[test]
-fn test_powershell_resolver_prefers_latest_version() {
+fn test_powershell_resolver_preserves_command_precedence_without_probes() {
     let script = resolve_codex_binary_script_powershell();
-    assert!(script.contains("Get-Command codex -All"));
+    assert!(script.contains("Get-Command codex"));
     assert!(script.contains("packages\\standalone\\current\\codex.exe"));
     assert!(script.contains("AppData\\Roaming\\npm\\codex.cmd"));
-    assert!(script.contains("$bestVersion"));
-    assert!(script.contains("CompareTo"));
+    assert!(!script.contains("Get-Command codex -All"));
+    assert!(!script.contains("$bestVersion"));
+    assert!(!script.contains("CompareTo"));
+    assert!(!script.contains("--version"));
+    assert!(!script.contains("npm "));
 }
 
 #[test]

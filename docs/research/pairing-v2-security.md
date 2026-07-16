@@ -1,17 +1,17 @@
 # Pairing v2 security architecture
 
 Date: 2026-07-15
-Status: research and protocol recommendation; no production changes are authorized by this document
+Status: research record plus implementation guide for the pinned v2 host contract
 
 ## Decision
 
 Replace the current persistent, host-wide bearer token with a two-stage design:
 
-1. **Enrollment uses a short-lived, single-use invitation.** The default invitation is a self-contained QR/copy payload containing the pinned host Iroh `EndpointId`, route hints, a random invite ID, and at least 128 bits of random secret. It expires after 5–10 minutes, is consumed by at most one device, and never becomes a runtime credential.
-2. **Routine access uses a per-host, per-installation signing credential.** The phone creates a non-exportable P-256 key in Secure Enclave or Android Keystore before enrollment. The host stores its public key, exact scopes, the client's authenticated Iroh identity, lifecycle state, and an authorization epoch. Every new connection proves possession against a fresh server nonce. There is no long-lived bearer secret to copy from a QR, mobile database, or host grant database.
-3. **Interactive host confirmation is the default.** Both phone and host show the same transcript-derived short authentication string (SAS), the device label, and the requested scopes. The host commits the grant only after approval. An explicitly unattended invite may omit approval only when it is deliberately created with narrow scopes; the CLI must make that weaker policy conspicuous.
-4. **Manual codes are a separate ingress, not a compressed QR.** On the same LAN, mDNS/NSD supplies the route and host identity. An 8-character base-20 code identifies the pending invitation. The immediately shippable flow treats this code only as a locator and requires bilateral SAS comparison plus host confirmation. A future headless flow may use RFC 9382 SPAKE2, but only after a reviewed implementation, independent test vectors, and interop testing are available. OPAQUE is not justified for ephemeral host-generated invitations.
-5. **Pairing v2 gets a separate ALPN and authorization path.** Use `remora-link/2`; retain the Alleycat name only for the existing `alleycat/1` compatibility lane. Do not negotiate v2 inside `alleycat/1`, do not silently fall back, and do not let a v1 bearer token mint a v2 credential without a local host approval.
+1. **Enrollment uses a short-lived, single-use invitation.** The default invitation is a self-contained QR/copy payload containing the pinned host Iroh `EndpointId`, route hints, a random invite ID, and exactly 32 random secret bytes. The pinned contract caps interactive invitations at 300 seconds and unattended invitations at 60 seconds. An invitation is consumed by at most one device and never becomes a runtime credential.
+2. **Routine access uses a per-host, per-installation signing credential.** The phone creates a non-exportable P-256 key in Secure Enclave or Android Keystore before enrollment. The host stores its public key, exact scopes, the client's authenticated Iroh identity, lifecycle state, and an authorization epoch. Every privileged operation proves possession against fresh host and client nonces. There is no long-lived bearer secret to copy from a QR, mobile database, or host authorization database.
+3. **Interactive host confirmation is the default.** Both phone and host show the same transcript-derived short authentication string (SAS), the device label, and the requested scopes. The host commits its authoritative device record only after approval. An explicitly unattended invite may omit approval only when it is deliberately created with narrow scopes; the CLI must make that weaker policy conspicuous.
+4. **QR and paste are equal encodings of the same invitation.** Neither path compresses or weakens the v2 envelope. Short locator codes, PAKE, and hosted rendezvous are explicitly deferred beyond this wire version.
+5. **Pairing v2 gets a separate ALPN and authorization path.** Use `remora-link/2`; retain only the existing `alleycat/1` compatibility lane. Do not negotiate v2 inside `alleycat/1`, do not silently fall back, and do not let a v1 bearer token mint a v2 credential without a local host approval.
 
 This keeps Iroh's authenticated encrypted transport and routing, while moving application authorization from “whoever knows the global token” to “this approved device proves possession of this scoped key.” Iroh itself documents its endpoint public key as the peer identity and provides mutual endpoint authentication; authorization remains an application responsibility ([Iroh key types](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh-base/src/key.rs#L58-L70), [Iroh authenticated encryption](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/lib.rs#L81-L95), [accepted peer identity](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/endpoint/connection.rs#L1063-L1079)).
 
@@ -21,20 +21,23 @@ Pairing v2 is successful only if all of these are true:
 
 - A photographed or copied invitation stops working after its short expiry or first claim and grants no routine access by itself.
 - A network recording cannot be replayed to enroll a second device or authenticate a later connection.
-- A compromised relay cannot impersonate the pinned host, recover a manual code offline, or authorize a device. It may still observe routing metadata, delay traffic, or deny service.
+- A compromised relay cannot impersonate the pinned host, recover invitation secrets, or authorize a device. It may still observe routing metadata, delay traffic, or deny service.
 - Compromise or revocation of one device does not revoke every other device and does not expose credentials accepted by another host.
-- The host can narrow scopes, revoke one grant, and terminate that grant's active streams without rotating every credential.
+- The host can narrow scopes, revoke one device record, and terminate that device's active streams without rotating every credential.
 - A copied mobile application database or backup is insufficient to authenticate because the signing private key is non-exportable and device-bound.
 - iOS and Android follow one Rust-owned protocol and state machine. Swift and Kotlin only create/use platform keys, obtain permissions, capture ingress, and render typed state.
 - The protocol works on a direct LAN with no Remora service and works through existing Iroh relays without trusting the relay for identity or authorization.
-- A Rust host uses the same canonical protocol implementation as the Rust mobile core. A future Node host can interoperate from the same byte-level test vectors without redefining the protocol.
+- The Rust host and Rust mobile adapter match the same pinned byte-level contract and golden vectors without either platform redefining the protocol.
 - Migration invalidates the old bearer path on a stated schedule and never creates a permanent, implicit dual authorization system.
 
 ## Threat model and trust boundaries
 
 ### Protected assets
 
-The protected capability is not merely “connect to a host.” A successful Alleycat connection can enumerate agent runtimes, restart a runtime, and attach a bidirectional stream to it; the current request enum and host dispatcher show those operations ([Remora request shapes](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L301-L320), [Alleycat host dispatch](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L163)). A pairing credential therefore protects terminal, repository, account, and agent-session authority available through those runtimes.
+The protected capability is not merely “connect to a host.” In the **historical
+v1 baseline**, a successful legacy pairing session could enumerate agent runtimes,
+restart a runtime, and attach a bidirectional stream to it; the historical
+request enum and host dispatcher show those operations ([Remora request shapes](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L301-L320), [legacy v1 dispatch](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L163)). A pairing credential therefore protects terminal, repository, account, and agent-session authority available through those runtimes.
 
 ### In-scope attackers
 
@@ -49,12 +52,19 @@ The protected capability is not merely “connect to a host.” A successful All
 
 ### Explicit limits
 
-- A live compromise of the host account that can read host memory, invoke the host signing/Iroh key, or replace the daemon can authorize itself. Cryptography cannot protect the daemon from its own execution principal.
+- A live compromise of the host account that can read host memory, invoke the host Iroh identity, mutate authoritative device records, or replace the daemon can authorize itself. Cryptography cannot protect the daemon from its own execution principal.
 - A fully compromised unlocked phone may be able to invoke its non-exportable key even if it cannot extract it. Revocation is the containment mechanism.
 - Relay confidentiality does not hide that two endpoints communicate. Iroh's relay/address material is routing information, not an authorization credential ([`EndpointAddr` definition](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh-base/src/endpoint_addr.rs#L17-L62)).
 - Physical observation of an invitation before the legitimate user claims it creates a race. Default host confirmation turns that race into a visible, rejectable attempt; an unattended invite knowingly accepts this risk.
 
-## Current v1 baseline
+## Historical v1 baseline
+
+The `3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f` references in this section are
+immutable evidence for the legacy `alleycat/1` bearer design. They do not
+describe the pinned Remora Link host. The current host is pinned at
+[`0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37)
+and implements [the v2 wire contract](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/docs/remora-link-v2-wire.md)
+with [golden vectors](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2).
 
 The current implementation is transport-secure but authorization-shallow:
 
@@ -62,8 +72,13 @@ The current implementation is transport-secure but authorization-shallow:
 - Alleycat emits that same schema from one stable host Iroh public key and one host configuration token ([v1 schema](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/protocol.rs#L3-L15), [payload construction](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L238-L249)). The token is 32 OS-random bytes encoded as hex and stored in a mode-0600 host config file ([generation and persistence](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L305-L365)). High entropy prevents guessing; it does not make a copied bearer revocable per device.
 - Every list, restart, and connect request repeats the same token ([Remora requests](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L301-L320), [connect request](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L524-L578)). The host extracts the mutually authenticated Iroh `remote_id`, but authorization only compares the request token with the host-global value ([connection identity](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L86-L105), [token check](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L142), [comparison](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L271-L288)). The Iroh identity currently keys resumable session behavior, not a scoped authorization grant.
 - iOS stores the bearer token per host as a `WhenUnlockedThisDeviceOnly` Keychain item, but stores the raw 32-byte app-wide Iroh secret as another exportable generic-password item ([iOS token storage](../../apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift#L21-L84), [iOS Iroh key storage](../../apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift#L86-L149)). Android stores both values in encrypted preferences ([Android credential store](../../apps/android/app/src/main/java/com/remora/android/state/AlleycatCredentialStore.kt#L6-L44)).
-- The same Iroh endpoint key is loaded once and reused for every Alleycat host ([Rust endpoint construction](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L608-L666), [iOS lifecycle](../../apps/ios/Sources/Remora/Models/AppRuntimeController.swift#L22-L55), [Android lifecycle](../../apps/android/app/src/main/java/com/remora/android/state/AppModel.kt#L151-L170)). It is useful as a second identity signal, but it is not currently per-host, non-exportable, or used by the host authorization decision.
-- Remora pins Alleycat commit `3c6dfe2c...` and Iroh `0.98.1` ([workspace dependencies](../../shared/rust-bridge/Cargo.toml#L28-L31), [mobile Iroh dependency](../../shared/rust-bridge/codex-mobile-client/Cargo.toml#L11-L16)). Alleycat at that commit accepts only `alleycat/1` ([host endpoint configuration](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L18-L43)). A v2 deployment therefore requires coordinated host and mobile changes, not just a new QR parser.
+- The same Iroh endpoint key is loaded once and reused for every legacy v1 host ([Rust endpoint construction](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L608-L666), [iOS lifecycle](../../apps/ios/Sources/Remora/Models/AppRuntimeController.swift#L22-L55), [Android lifecycle](../../apps/android/app/src/main/java/com/remora/android/state/AppModel.kt#L151-L170)). It is useful as a second identity signal, but it is not currently per-host, non-exportable, or used by the host authorization decision.
+- The historical v1 mobile lane pinned `3c6dfe2c...` and Iroh `0.98.1`. The
+  current host pin is `0e625bece349a2ce53b7926cac7fc6a81121ca37`; it advertises
+  isolated `remora-link/2` and `alleycat/1` lanes. V2 uses bounded 64 KiB
+  frames, opaque credential IDs, fresh P-256 proof, host-confirmed scoped
+  runtime grants, and durable idempotency. A v2 client must consume the host
+  vectors and never downgrade to v1 after a v2 error.
 
 Consequences of v1 are direct: any valid QR remains a host-wide access bearer until rotation; the host cannot identify which scanned copy is using it; rotation is global; active sessions need not disappear merely because the persisted token changes; and a token holder can repeatedly create new Iroh connections. These are application authorization properties, not failures of Iroh's encrypted channel.
 
@@ -182,434 +197,250 @@ RFC 8628 uses the same governing calculation for device user codes and gives an 
 
 A representative compact v1 JSON payload measured 232 bytes and a representative v2 JSON envelope measured 312 bytes. This is only an encoding-size sanity check, not a QR scan-quality or QR-version proof. Final QR encoding should be measured with actual host IDs, route hints, error correction, camera distance, and both platform decoders.
 
-## Proposed pairing v2 protocol
+## Implemented pairing v2 contract
 
-### Cryptographic choices
+This section is the mobile implementation guide for the exact host contract
+pinned at
+[`0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37).
+The byte-level authority is the pinned
+[v2 wire contract](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/docs/remora-link-v2-wire.md)
+and its committed
+[golden vectors](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2/golden-vectors.json).
+If this summary and those artifacts differ, the pinned artifacts win and the
+mobile adapter must fail conformance until reviewed together.
 
-| Purpose | Choice | Reason |
-| --- | --- | --- |
-| Host transport identity | Existing Iroh Ed25519 `EndpointId` | Already authenticated by Iroh and already present in v1 payloads |
-| Invitation secret | 32 random bytes; 16 bytes is the minimum | Simple, non-guessable, compact, no password KDF required |
-| Invitation ID / redemption ID | Independent 16 random bytes each | Non-enumerable lookup and idempotency keys |
-| Device credential | P-256 ECDSA / ES256, one key per host per app installation | Native non-exportable support on Apple Secure Enclave and Android Keystore; direct Rust and Node support |
-| Transcript representation | Versioned deterministic binary structure; COSE Sign1/ES256 for signatures | Avoids JSON canonicalization and algorithm ambiguity; COSE defines protected signature structure ([RFC 9052](https://www.rfc-editor.org/rfc/rfc9052.html), [ES256](https://www.rfc-editor.org/rfc/rfc9053.html#section-2.1)) |
-| Freshness | 32-byte server nonce plus 16-byte client nonce | Makes every proof unique and replay-detectable |
-| SAS | Truncated hash/HMAC of the complete confirmed transcript | Human check covers host, device key, transport identity, and exact scopes |
+V2 deliberately does not include short manual locator codes, SPAKE2, portable
+authorization objects, peer administration, device-key rotation, recovery, or
+delegation. Those remain separate future protocol questions and must not be
+inferred from the research comparisons above.
 
-The DPoP standard is not adopted as a wire protocol, but its core pattern is relevant: a public key is bound to an authorization grant, and each proof covers method/context plus a fresh value so a copied proof cannot be replayed elsewhere ([RFC 9449 proof contents and replay protection](https://www.rfc-editor.org/rfc/rfc9449.html#section-4.2)).
+### Transport, framing, and invitation
 
-### Invitation envelope
+- Connect to the invitation's pinned Iroh `node_id` with the exact ALPN
+  `remora-link/2`. `relay` and `host_name` are optional route/display
+  hints, never identity or authority.
+- Wait for the full Iroh handshake. Never send enrollment or a privileged
+  operation as replayable early data.
+- Frame each UTF-8 JSON control message as `u32be(length) || JSON`, with a
+  65,536-byte frame limit enforced before allocation. Request and proof types
+  reject unknown fields.
+- Parse only
+  `remora-link:v2:<base64url-no-pad(JSON PairingInvitation)>`, with a
+  4,096-byte encoded-segment limit. The closed invitation fields are `v`,
+  `node_id`, `invitation_id`, `secret`, `expires_at`,
+  `max_runtime_ids`, `max_scopes`, `confirmation_mode`, and optional
+  `host_name` and `relay`.
+- Require version 2; a 22-character invitation ID derived from 16 random bytes;
+  exactly 32 random secret bytes encoded as 43 base64url characters; at most 16
+  canonical runtime IDs; and only the four closed scopes below.
+- Validate the envelope timestamp's type but do not reject it against the
+  phone's clock. Proof-bound host inspection is authoritative for expiry and
+  policy. Interactive invitations are capped at 300 seconds; unattended
+  invitations at 60 seconds.
+- Treat the secret, label, and envelope policy as untrusted until inspection.
+  Raw invitation secret bytes never enter logs, snapshots, errors, or crash
+  metadata.
 
-The camera/clipboard input is opaque to Swift and Kotlin. Rust decodes a versioned envelope equivalent to:
+The only v2 scopes, in canonical order, are
+`inspect_runtimes`, `connect_runtime`, `restart_runtime`, and
+`self_revoke`. Runtime IDs are case-sensitive, 1–64 ASCII bytes from
+`[A-Za-z0-9._/-]`, sorted, deduplicated, and bounded to 16. Every usable
+authorization record has at least one runtime plus `connect_runtime` and
+`self_revoke`. Unattended mode is limited to one runtime and exactly
+`inspect_runtimes`, `connect_runtime`, and `self_revoke`.
 
-```text
-InviteV2 {
-  protocol = 2
-  host_id = Iroh EndpointId
-  route_hints = [relay URL and/or direct socket addresses]
-  invite_id = 128 random bits
-  invite_secret = 256 random bits
-  expires_at = informational host timestamp
-  offered_scopes = typed bounded set
-  confirmation = required | explicit_unattended
-  host_label = untrusted display string
-}
-```
+### Request, challenge, proof, and response
 
-Security rules:
-
-- `host_id`, not a relay URL or display name, is the identity pinned in `Endpoint::connect` ([Iroh endpoint connect API](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/endpoint.rs#L958-L999)).
-- Route hints are mutable performance hints. A relay substitution may cause failure but must not change the pinned host.
-- The host enforces expiry from its own record. The timestamp in the envelope is only UI information.
-- The host stores `SHA-256(invite_secret)` and never logs the raw secret. The client sends the secret only inside the fully authenticated Iroh channel. Hash storage is safe because the secret is high entropy; it would not be safe for a short code.
-- The invitation record precommits the maximum scopes. A claim may request a subset, never an expansion.
-- QR rendering and copy output are ephemeral. The host stops showing them immediately after claim, expiry, cancellation, or daemon restart.
-- A route-only manual code is a different type and parser. It must not be accepted in `invite_secret`.
-
-### Enrollment sequence
-
-```text
-Phone                                  Host
-  |                                     |
-  |-- Iroh connect: pinned host_id ---->|
-  |<==== full mutual TLS handshake =====>|
-  |<-- PairChallenge(server_nonce,       |
-  |                  policy, host_id) ---|
-  |                                     |
-  | generate per-host P-256 key          |
-  |-- PairClaim(invite_id, secret,       |
-  |     redemption_id, client_nonce,     |
-  |     client_iroh_id, public_key,      |
-  |     requested_scopes, device_info) ->|
-  |                                     | atomically ISSUED -> CLAIMED
-  |-- ES256 proof over full transcript ->|
-  |<-- pending confirmation + SAS ------>|
-  | phone confirms SAS                  | host confirms SAS/device/scopes
-  |                                     | atomically CLAIMED -> COMMITTED
-  |<-- credential_id, granted_scopes,    |
-  |    auth_epoch, receipt --------------|
-```
-
-`client_iroh_id` above is the identity the host obtains from the authenticated connection, not an untrusted client assertion. If it is serialized in the client message, the host must require exact equality with `connection.remote_id()`.
-
-Enrollment must wait for the full handshake. QUIC 0-RTT data is replayable by design, so a single-use state transition must never be accepted in early data ([QUIC 0-RTT replay considerations](https://www.rfc-editor.org/rfc/rfc9001.html#section-9.2)). Remora's current client awaits `Endpoint::connect` before opening a stream, which is the safe baseline to preserve ([current connection path](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L668-L692)).
-
-### Signed enrollment transcript
-
-The exact deterministic transcript must include, in order and with length-delimited fields:
+One client-initiated bidirectional stream carries exactly:
 
 ```text
-domain_separator = "remora pairing v2 enrollment"
-wire_version
-ALPN
-host_iroh_endpoint_id
-client_iroh_endpoint_id
-invite_id
-redemption_id
-server_nonce
-client_nonce
-device_public_key
-requested_scopes
-host_policy_digest
-confirmation_mode
+RequestV2 -> ResponseV2 { challenge } -> ProofV2 -> terminal ResponseV2
 ```
 
-The client signs this before approval to prove it controls the key being enrolled. The host's confirmation UI is rendered from the same parsed transcript, not from separate client-supplied labels. Unknown fields, duplicate fields, non-canonical values, out-of-order scopes, and algorithm substitution are rejected before signing or verification.
+For `connect`, the same stream becomes the selected runtime byte stream after
+the `session` response. Every request contains `v: 2` and a fresh 32-byte
+client nonce. The closed operations are:
 
-The SAS derives from the same transcript. In the QR flow it may be `Truncate(HMAC(invite_secret, transcript_hash))`; in the SPAKE2 flow it derives from the confirmed PAKE key; in locator-only mode it derives from the transcript hash plus both connection nonces and is meaningful only when compared on the intended host and phone. These are distinct labeled derivations so a value from one mode cannot confirm another.
+- `inspect_invitation`: invitation ID and secret, proposed 65-byte
+  uncompressed SEC1 P-256 public key, and fresh nonce;
+- `enroll`: invitation material, device label, public key, canonical runtime
+  and scope selections, a durable enrollment idempotency key, and fresh nonce;
+- `list_agents`: opaque credential ID and fresh nonce;
+- `restart_agent`: credential ID, allowed runtime ID, durable idempotency key,
+  next lifetime-monotonic command sequence, and fresh nonce;
+- `connect`: credential ID, allowed runtime ID, optional resume cursor, and
+  fresh nonce;
+- `revoke_self`: credential ID, durable revoke idempotency key, and fresh
+  nonce;
+- `rollback_enrollment`: credential ID, original enrollment key, durable
+  rollback key, and fresh nonce.
 
-### Durable invite state machine
+The host first returns a 30-second challenge with `challenge_id`,
+`credential_id`, `auth_epoch`, `server_nonce`, and `expires_at`. The
+client signs the exact domain-separated proof transcript with ECDSA P-256 and
+SHA-256, returning only the exact challenge ID and an ASN.1 DER signature.
+Neither Swift nor Kotlin constructs, normalizes, hashes, or parses protocol
+transcripts.
+
+The canonical proof, operation-payload, prospective-credential, enrollment,
+policy, and SAS domains are respectively:
 
 ```text
-ISSUED
-  -> CLAIMED(device_key_hash, client_iroh_id, redemption_id, transcript_hash)
-  -> AWAITING_CONFIRMATION
-  -> COMMITTED(credential_id)
-
-ISSUED/CLAIMED/AWAITING_CONFIRMATION
-  -> EXPIRED | CANCELLED | LOCKED | REJECTED
+remora-link/2/proof/v2
+remora-link/2/payload/v2
+remora-link/2/prospective-credential/v2
+remora-link/2/enrollment/v2
+remora-link/2/policy/v2
+remora-link/2/sas/v2
 ```
 
-Required transition behavior:
-
-- State changes are transactional and durable before a success response is sent.
-- The first valid claim reserves the invite. A different device key, Iroh identity, or redemption ID receives one generic terminal rejection and cannot replace the claim.
-- A retry with the same redemption ID, key, identity, and transcript is idempotent and returns the existing status or committed receipt. This handles a lost response without allowing a second enrollment.
-- A rejected/locked claim does not return to `ISSUED`; the operator creates a fresh invite. This avoids ambiguous races after a stolen invitation.
-- Process restart expires all uncommitted invitations unless their durable clock/expiry semantics are explicitly proven. “Expire on restart” is simpler and safer than extending a code after wall-clock rollback.
-- Invitation failure counters and terminal states are persisted. A daemon restart must not reset an online-guess budget.
-- Raw invite secrets are zeroized after verification and never enter tracing, crash reports, analytics, pairing snapshots, or user-visible errors.
-
-### Manual locator mode
-
-For same-LAN pairing:
-
-1. The host advertises a v2 pairing service over existing platform discovery with its Iroh identity and direct route hints.
-2. The user types an 8-character code from an unambiguous 20-symbol alphabet. Formatting separators and case are display-only.
-3. Rust considers discovered hosts without revealing which accepted the code. It caps aggregate probes so one entry cannot become a distributed scan.
-4. A matching host reserves the invite, receives the device key and transcript, and displays the same SAS, device information, and requested scopes as the phone.
-5. Both sides confirm; the host commits the normal v2 grant.
-
-If a hosted locator is later introduced, it receives only an opaque, rate-limited nameplate and mailbox messages. It never receives the invite secret, device private key, grant, recovery code, or authority to choose the confirmed host identity. That service requires its own abuse, privacy, enumeration, retention, and availability review.
-
-### Optional SPAKE2 mode
-
-SPAKE2 may replace the weak-code submission in step 3, but not the rest of the state machine. Its release requirements are:
-
-- RFC 9382 group, serialization, identities, context, and key derivation—not an incompatible draft dialect.
-- Distinct roles and identities; no symmetric “same identity on both sides” shortcut.
-- Context contains protocol/ALPN, host and client Iroh IDs, invite ID, nonces, device public key, and exact scope request.
-- Explicit, role-separated key-confirmation MACs before any enrollment proof is accepted.
-- The PAKE result is fed through a labeled KDF into confirmation and enrollment keys; the raw shared value is not reused.
-- Durable per-invite and aggregate attempt limits remain in force.
-- Published golden vectors for Rust↔Rust and Rust↔Node/Wasm, malformed-element tests, reflection/role-confusion tests, transcript mutation tests, and fuzzing.
-- Independent review of the concrete dependency/version and its integration.
-
-Host confirmation can remain as defense in depth. If product requirements remove it for headless use, the security claim becomes explicitly “at most five online guesses against an 8-base20 code during the invite lifetime,” not “128-bit authentication.”
-
-## Routine device authentication
-
-### Grant record
-
-The host persists one record per paired installation:
-
-```text
-DeviceGrant {
-  credential_id
-  device_public_key_p256
-  bound_client_iroh_id
-  scopes
-  state = active | suspended | revoked
-  auth_epoch
-  created_at
-  approved_by
-  last_seen_at
-  assurance_metadata
-  revocation_reason
-}
-```
-
-`credential_id` is a random public lookup identifier, not a secret. `assurance_metadata` may say whether the key was reported hardware-backed; it must not contain attestation data unless an optional attestation feature is deliberately implemented.
-
-### Connection proof
-
-After each full Iroh handshake:
-
-1. The client sends `credential_id` and a fresh client nonce.
-2. The host loads an active grant, verifies that the connection's `remote_id()` matches the bound Iroh ID, and returns a fresh 32-byte server nonce plus current `auth_epoch`.
-3. The client signs a COSE Sign1 payload containing a domain separator, protocol/ALPN, host Iroh ID, observed client Iroh ID, credential ID, both nonces, authorization epoch, and requested connection purpose.
-4. The host verifies ES256, atomically consumes the challenge, rechecks grant state/scopes, and attaches the principal to that connection.
-5. Each new connection repeats the proof. Privileged operations recheck grant state/epoch; they do not trust a process-lifetime cache after revocation.
-
-The invitation secret is absent. A database thief gets public keys and scopes, not authenticators. A recording gets a signature over a consumed server nonce, not a reusable token. Binding the proof to both Iroh IDs also prevents using a copied application proof over a different transport identity.
-
-### Scope model
-
-Use closed, typed Rust enums or capability records, not arbitrary strings or prefix matching. At minimum separate:
-
-- discover/list approved runtimes;
-- connect to specific runtime IDs or a bounded runtime set;
-- restart a runtime;
-- inspect/manage devices;
-- create invitations;
-- recover/rebind a device.
-
-The default phone grant should have only the runtime access the user selected. It should not inherit device administration, invite minting, or recovery authority. An invite precommits a maximum scope; a device may request less; the host may approve less; no stage may widen it.
-
-## Platform key custody
-
-### iOS
-
-Create a `SecKey` P-256 signing key with Secure Enclave and a `ThisDeviceOnly` accessibility class. The private key must never be exported into Rust or serialized into an app record. Swift receives canonical bytes from Rust and returns the signature. Apple documents Secure Enclave key creation and device-only Keychain accessibility in its primary platform guidance ([Secure Enclave keys](https://developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave), [`WhenUnlockedThisDeviceOnly`](https://developer.apple.com/documentation/security/ksecattraccessiblewhenunlockedthisdeviceonly), [Keychain accessibility](https://developer.apple.com/documentation/security/restricting-keychain-item-accessibility)).
-
-Do not require Face ID/Touch ID for every reconnect unless that UX is an explicit product decision; such a flag would break unattended foreground/background recovery. Simulator/debug builds may use a clearly marked software key and must not report hardware assurance.
-
-### Android
-
-Generate an EC P-256 signing key in Android Keystore. Request hardware backing and use StrongBox opportunistically where available, but do not make StrongBox a compatibility requirement. Query and record the actual security level. Exclude key aliases and paired-host authorization metadata from backup/restore so a restore cannot create a half-valid credential. Android's official Keystore guidance states that key material can remain non-exportable and may be bound to secure hardware ([Android Keystore](https://developer.android.com/privacy-and-security/keystore)).
-
-As on iOS, normal reconnect should not require per-signature user authentication unless the product deliberately chooses that tradeoff. Attestation is optional evidence, not baseline authorization; Android's verification model can require remote trust roots and revocation checks ([Android key attestation](https://developer.android.com/privacy-and-security/security-key-attestation)).
-
-### UniFFI boundary
-
-Rust owns every byte that is signed and verified. Platform adapters expose only operations equivalent to:
-
-```text
-create_per_host_key(host_id) -> public_key + opaque_key_handle
-sign(opaque_key_handle, canonical_bytes) -> signature
-delete_key(opaque_key_handle)
-key_assurance(opaque_key_handle) -> metadata
-```
-
-The opaque handle is local platform metadata, not a credential transferable to the host. Swift/Kotlin must not construct transcripts, parse scopes, choose algorithms, or normalize ECDSA signatures. The Rust adapter converts Apple's/Android's DER ECDSA output to the fixed `r || s` form required by COSE and rejects non-canonical signatures.
-
-## Revocation, rotation, and recovery
-
-### Revocation
-
-Revocation is stateful and immediate:
-
-- Local host CLI/UI can revoke any grant without the device.
-- A device may self-revoke by signing a fresh revocation challenge.
-- A separately scoped admin device may request revocation, preferably with host confirmation for another admin.
-- Revocation changes `state`, increments the authorization epoch, writes an append-only/tombstone audit event, rejects all new proofs, and closes all live Iroh connections and agent streams belonging to that credential.
-- The host rechecks state/epoch at privileged boundaries so a stream opened before revocation cannot create new privileged sub-operations afterward.
-- Revoked credential IDs are not immediately reusable or deleted. A tombstone prevents stale receipts or restored databases from resurrecting them.
-
-RFC 7009's token endpoint is not the proposed protocol, but its security principle applies: revocation may invalidate related authorization material and must be idempotent ([RFC 7009](https://www.rfc-editor.org/rfc/rfc7009.html)).
-
-### Routine key rotation
-
-Device-key rotation is an authenticated grant update, not re-pairing with the old invite:
-
-1. Active old key proves possession on a fresh challenge.
-2. New hardware key proves possession and signs a transcript binding old credential, new public key, host/client Iroh IDs, scopes, nonces, and next epoch.
-3. Host atomically activates the new key and revokes/tombstones the old one.
-4. If either proof or commit response is lost, the same rotation ID is idempotent.
-
-A device that cannot use its old key does not get this path; it must use recovery or pair again.
-
-### Recovery
-
-Recovery must not recreate the global bearer:
-
-- **Primary recovery:** local host administration creates and approves a fresh invite. This works offline and has the smallest trust boundary.
-- **Optional peer-admin recovery:** another explicitly admin-scoped device proposes a new device grant; the host still confirms for high-value scopes.
-- **Optional break-glass code:** a separately generated 128-bit-or-stronger, single-use recovery secret, shown once and stored only as a hash. It is not the short pairing code and cannot authorize routine runtime access directly. It opens a pending recovery that still binds and proves a new device key.
-- **Client loss/reinstall:** because platform keys are device-only and excluded from backup, re-pair. Never export the private key to make restore seamless.
-- **Host identity loss:** the Iroh host key and authorization database form one trust unit. Back them up encrypted together or treat a lost host key as a new host requiring re-pairing. Restoring only one side must fail closed.
-
-NIST's current authenticator guidance distinguishes binding a new authenticator and recovery from ordinary authentication; recovery should not silently weaken the normal authenticator assurance ([NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html)).
-
-## Relay, discovery, and offline properties
-
-Iroh's relay is useful for reachability but unnecessary as a trust anchor. The client already builds an `EndpointAddr` from the QR's host ID and relay hint, then asks Iroh to connect using the pinned ALPN ([current Remora dial path](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L668-L692)). Pairing v2 preserves that model:
-
-- **Remote QR/copy:** self-contained host ID + relay/address hints + high-entropy invite.
-- **Offline LAN QR:** host ID + direct address hints; relay omitted.
-- **Offline LAN manual:** mDNS/NSD returns candidates and direct addresses; manual code selects a pending invite; bilateral SAS identifies the intended terminal.
-- **Remote manual without QR/copy:** not supported by a short code alone unless Remora adds a rendezvous service. The safe fallback is a full copyable URI or high-entropy words plus separately supplied host identity/route.
-
-A malicious relay can deny service and observe metadata. It cannot impersonate the QR-pinned Iroh host, alter the encrypted transcript, validate a SPAKE2 password offline, or produce the enrolled device's hardware signature. Relay hints must never be included as authenticated identity in a way that prevents legitimate route updates; they may be included in a diagnostics hash, but host identity and authorization fields are the security boundary.
-
-## Rust, Alleycat, Iroh, and Node interoperability
-
-### Current compatible path
-
-Keep Iroh 0.98.1 for pairing v2's first implementation and make the host accept both explicit ALPNs during the migration window. Iroh 1.0 introduced breaking changes and has already moved beyond the pinned release; upgrading Iroh while replacing authorization would multiply the test matrix without improving the v2 security model ([Iroh v1.0.0 release](https://github.com/n0-computer/iroh/releases/tag/v1.0.0), [current v1.0.2 release](https://github.com/n0-computer/iroh/releases/tag/v1.0.2)). Upgrade Iroh separately after v2 is proven.
-
-The host endpoint currently advertises a one-item ALPN list, so dual-stack migration needs the host builder and dispatcher to advertise/branch on both `remora-link/2` and `alleycat/1` ([current host ALPN](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L18-L43)). The v2 dispatcher must never pass a v2 connection into the v1 token validator or vice versa.
-
-### Shared Rust core
-
-The canonical invitation codec, state-machine types, transcript encoder, hash/KDF labels, COSE verification, scope evaluator, and test vectors should live in one small Rust pairing crate/module consumable by:
-
-- `codex-mobile-client`, exposed through the existing handwritten `AppClient` and `AppStore` patterns;
-- the Rust Alleycat/Remora Link host daemon; and
-- a future N-API/Wasm wrapper if a true Node host is ever required.
-
-Do not generate a second Swift/Kotlin protocol implementation. Do not let platform code parse wire strings. Hardware signing remains a narrow callback because the private key cannot cross into Rust.
-
-### True Node host compatibility
-
-The baseline v2 protocol deliberately uses common primitives: SHA-256, random bytes, P-256 ECDSA, deterministic byte encoding, and full-handshake Iroh transport. Node's official crypto API supports EC keys, ECDSA verification, and IEEE-P1363 signature encoding ([Node `crypto.verify`](https://nodejs.org/api/crypto.html#cryptoverifyalgorithm-data-key-signature), [ECDSA `dsaEncoding`](https://nodejs.org/api/crypto.html#cryptosignsignprivatekey-outputencoding)). A Node host still needs an Iroh-compatible transport binding or a different explicitly versioned transport, but it does not need a bespoke credential primitive.
-
-SPAKE2 is the exception: Node has no built-in API. If SPAKE2 ships, bind the reviewed Rust implementation rather than maintaining independent Rust and TypeScript cryptographic code. OPAQUE has Rust/Wasm options, but that ecosystem fact does not change the protocol-fit rejection above.
-
-### Required conformance corpus
-
-Publish fixtures for:
-
-- every invitation encoding and malformed-field rejection;
-- canonical transcript bytes for enrollment, confirmation, connection auth, rotation, revocation, and recovery;
-- DER ↔ fixed-width `r || s` ECDSA conversion, including leading-zero edge cases;
-- valid and invalid ES256 COSE Sign1 messages;
-- scope ordering and unknown-scope rejection;
-- SPAKE2 messages/keys/confirmation if that mode is enabled;
-- Rust-mobile ↔ Rust-host and Rust ↔ Node verification in both directions.
-
-No implementation is conformant merely because it can parse the happy-path JSON.
-
-## Migration from v1 plaintext-token QR
-
-Use a time-bounded dual-stack cutover:
-
-### Phase 0 — host capability and storage
-
-- Add the v2 authorization database, durable invite state, revocation/session index, and local confirmation UI/CLI.
-- Advertise both ALPNs, but keep their dispatch and persistence completely separate.
-- Create v2 invites only when the host has durable atomic state and can close a revoked grant's live sessions.
-
-### Phase 1 — v2 clients and v2-by-default output
-
-- Mobile accepts v2 invites and creates hardware-backed per-host keys.
-- Host CLI/QR output emits only v2 by default. Legacy output requires an explicit diagnostic flag and states that it is a global bearer.
-- A client that sees a v2 envelope connects only with `remora-link/2`. Failure must not trigger an automatic `alleycat/1` attempt.
-
-### Phase 2 — existing paired devices
-
-The safest default is **re-pair**. An optional convenience migration may exist only as this explicit local workflow:
-
-1. Legacy token authenticates a temporary v1 connection.
-2. Client generates and proves a v2 device key.
-3. Host shows the device's Iroh ID, key fingerprint, scopes, and migration SAS.
-4. Local operator approves.
-5. Host creates a v2 grant; client verifies the receipt; client deletes the v1 token.
-
-Never auto-upgrade a v1 token holder. A leaked old QR would otherwise convert itself from a global bearer into an apparently legitimate durable device. Existing platform stores already expose token deletion operations, so migration must wire deletion into the successful commit path rather than merely stop reading the item ([iOS deletion API](../../apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift#L79-L84), [Android deletion API](../../apps/android/app/src/main/java/com/remora/android/state/AlleycatCredentialStore.kt#L16-L18)).
-
-### Phase 3 — retire v1
-
-- Publish a removal release/date and expose telemetry locally as counts only: active v2 grants, last v1 connection, and whether v1 remains enabled. Do not log tokens or invite material.
-- Rotate the v1 global token after the migration window, close all v1 sessions, and disable `alleycat/1` by default.
-- A short emergency compatibility extension must be explicit, visible, and have a new removal date. Do not leave permanent silent fallback.
-- Eventually remove v1 payload parsing and token storage after supported clients no longer need migration.
-
-Rollback is protocol-level: operators may temporarily re-enable the v1 listener with a newly rotated token. A v2 client must still never downgrade an invite automatically. This preserves a clear security boundary even during operational rollback.
-
-## Implementation placement
-
-This report does not change code, but the repository architecture constrains the eventual implementation:
-
-- Put invitation decoding, pairing state, transcript construction, reconciliation, and status normalization in `shared/rust-bridge/codex-mobile-client/` or a small Rust crate shared with the host.
-- Expose direct pairing operations on `AppClient`; expose progress/snapshots through `AppStore`. Do not add handwritten orchestration in views or another broad `AppStore` command surface.
-- Keep Swift and Kotlin to QR/camera/clipboard UI, secure-key adapters, permission prompts, and rendering.
-- Keep host grant/invite state in the host daemon and make commit/revoke transactions durable before responding.
-- Add a v2 host protocol beside v1; do not patch the upstream Codex or Ghostty submodules.
-- Preserve the current Iroh host key so existing QR host pinning remains intelligible, but do not preserve the global token as a v2 credential.
-
-## Acceptance tests and release gates
-
-### Enrollment and replay
-
-- Two clients claim one invite concurrently: exactly one `(credential_id, device_key, client_iroh_id)` can commit.
-- A duplicate claim with the same redemption ID and transcript returns the same state/receipt; any changed key, identity, scope, or nonce fails.
-- Replay every captured enrollment frame on a new connection, old connection, restarted host, and different host: no new grant.
-- Expired, cancelled, rejected, locked, used, and unknown invite IDs produce indistinguishable remote errors.
-- Crash the host before/after every durable transition and before/after each response; recovery never returns a consumed invite to another device and never loses a committed grant.
-- Daemon restart does not reset manual-code attempt counts and expires pending invitations according to the declared policy.
-- Enrollment in QUIC 0-RTT/early data is rejected even if a transport API later exposes it.
-
-### Host identity and relay
-
-- Substitute relay URL, direct addresses, display name, and discovery records while preserving the legitimate host ID: connection either reaches the pinned host or fails.
-- Substitute a different host ID: phone and intended host cannot show a matching accepted transcript/SAS.
-- A malicious locator service cannot turn its own endpoint into the approved host through one-sided confirmation.
-- Direct LAN pairing succeeds with relay and external DNS unavailable.
-
-### Manual code and PAKE
-
-- Wrong-code failures consume the durable budget; fifth failure locks the invite; restart does not restore attempts.
-- Per-source controls do not replace an aggregate cap and cannot be bypassed by source rotation.
-- Locator-only mode cannot commit without both confirmations.
-- If SPAKE2 is enabled: passive transcript corpus cannot validate dictionary candidates; every malformed group element fails; role reflection, unknown-key-share, identity/context mutation, missing key confirmation, and cross-invite replay fail.
-
-### Device PoP and scope
-
-- A copied app database with credential ID, public metadata, and host routes cannot authenticate without the platform key.
-- A captured valid signature fails against a new nonce, host, client Iroh ID, ALPN, epoch, scope, or connection purpose.
-- The same mobile installation has independent P-256 keys for two hosts; deleting one does not remove the other.
-- Grant scope cannot exceed invite maximum, client request, or host approval; unknown scope values fail closed.
-- Device key proof is required before host approval and on every new connection.
-- iOS and physical Android tests confirm the private key cannot be exported. Simulator/emulator software keys are labeled and excluded from assurance claims.
-
-### Revocation and recovery
-
-- Revoking one device immediately rejects new proofs and closes every live connection/agent stream for that credential without affecting other devices.
-- A connection authorized under an old epoch cannot perform a new privileged operation after epoch increment.
-- Restoring an old grant database cannot resurrect a tombstoned credential under the current host state.
-- Device-key rotation is atomic and idempotent; at no point are two keys silently active for one credential.
-- Recovery secrets are single-use, at least 128 bits, hash-stored, and cannot directly open a runtime session.
-- Restoring only a host key or only the authorization database fails closed; reinstalling a phone requires re-pairing unless an explicit recovery flow runs.
-
-### Interop and quality
-
-- Rust host ↔ iOS hardware signer and Rust host ↔ Android hardware signer pass the same conformance vectors.
-- Rust and Node verify each other's ES256/COSE fixtures, including all DER/P1363 edge cases.
-- Invitation and protocol decoders are fuzzed for size bounds, duplicate fields, integer overflow, Unicode display confusion, and unknown versions.
-- Logs, crash captures, snapshots, and errors are scanned to prove they omit raw invite secrets, manual codes, recovery codes, signatures, and legacy tokens.
-- Benchmarks show one hardware signature and one verification per new connection; no per-frame signing is added to the agent data path.
-- Security review signs off on the exact PAKE library/version before any confirmation-free manual flow is enabled.
-
-## Residual risks and explicit product choices
-
-- **Unattended invitation policy:** a stolen unattended QR can win the first-use race. The default should require host confirmation; unattended mode is an explicit weaker option with narrow scopes and a shorter TTL.
-- **Hardware-key UX:** requiring user presence for every signature is stronger against an unlocked-device process but conflicts with automatic reconnect. The baseline uses non-exportability without a biometric prompt; a high-assurance opt-in can add user presence.
-- **Per-host Iroh identity:** v2 binds the current app-wide Iroh identity plus a per-host P-256 credential. Generating a distinct Iroh endpoint per host would improve unlinkability but is a larger transport/lifecycle change and is not required to eliminate bearer authorization.
-- **Host database rollback:** tombstones and epochs help only if the current authorization state is itself protected from rollback. A future host master key/monotonic checkpoint can harden backups, but same-account daemon compromise remains out of scope.
-- **Attestation:** Apple/Android attestation may classify assurance but adds online vendor trust, privacy, root rotation, and revocation dependencies. It must remain optional so offline pairing and ordinary devices continue to work.
-- **PAKE readiness:** the protocol recommendation does not authorize shipping an unaudited or draft-incompatible SPAKE2 crate. Locator + bilateral confirmation is the release-safe manual baseline.
+All field lengths and integers use network byte order exactly as specified by
+the pinned contract. The adapter must copy the pinned golden fixture and compare
+raw request JSON, payload hashes, transcript bytes and hashes, prospective
+credential ID, DER signatures, and SAS byte-for-byte. Reconstructing
+pretty-printed JSON is not conformance.
+
+Interactive enrollment returns `pending` until the host approves it, then an
+exact retry returns `enrolled`. Both responses carry the first accepted
+claim's transcript hash and six-character SAS. Before each proof the client
+durably stages all confirmation-transcript inputs. After response loss it
+retains every ambiguous candidate, matches the returned hash to exactly one
+candidate, and recomputes both the hash and SAS before accepting either state.
+
+The host's terminal success fields are closed: `inspection`, `pending`,
+`enrolled`, `agents`, `session`, `restart`, and `revocation`. Closed
+error codes are `pairing_unavailable`, `authorization_required`,
+`invalid_request`, `agent_unavailable`, `outcome_unknown`, and
+`internal`. Enrollment failures remain deliberately coarse.
+
+### Durable lifecycle and retry rules
+
+The host-local device record is authoritative. The client retains only the
+opaque credential ID, non-exportable key handle, pinned host identity,
+display-safe policy, and crash-recovery journal. It never receives a portable
+bearer or authorization object.
+
+The first accepted claim reserves the invitation. Exact enrollment retries use
+the same enrollment idempotency key and request fingerprint but fresh nonces,
+challenges, and proofs. Competing keys, endpoints, operation keys, or
+fingerprints fail generically. Issued and pending invitations survive daemon
+restart with their original host-enforced absolute expiry; restart never
+extends or silently expires them.
+
+Mobile persistence is two-phase:
+
+1. Durably create the per-host key and stage the enrollment operation before
+   sending.
+2. Verify the returned confirmation transcript and SAS.
+3. Durably persist the opaque credential record before reporting success.
+4. If host enrollment committed but local secure persistence fails, retain the
+   original enrollment key and retry `rollback_enrollment` with one stable
+   rollback key until a durable receipt settles.
+
+A revoke or rollback `outcome_unknown` means the host applied the mutation but
+could not prove parent-directory durability. The client retains the credential
+and exact mutation key and retries that same operation until `ok: true`.
+Restart ambiguity is different: a prepared or pruned command at or below the
+durable high watermark returns `outcome_unknown` and is never automatically
+re-executed. A new operator-authorized restart must durably reserve the next
+sequence and a fresh stable idempotency key.
+
+Revocation increments the host authorization epoch and closes only that
+credential's registered sessions. New proofs at an old epoch fail. Connect
+admission and restart dispatch are fenced against revocation. A resume response
+of `drift_reload` requires authoritative state reload rather than local patching.
+
+### Platform key custody and boundary
+
+iOS creates one per-host P-256 signing key in Secure Enclave when available,
+with a device-only Keychain accessibility class. Android creates one per-host
+P-256 key in Android Keystore and uses StrongBox opportunistically. Simulator
+and emulator software fallbacks are explicitly labelled and excluded from
+hardware-assurance claims. Private key material never crosses UniFFI or enters
+backup.
+
+The native callback surface is limited to key creation/public-key retrieval,
+signing Rust-owned bytes exactly once with ECDSA/SHA-256, and deletion after a
+settled rollback, revoke, or forget operation. Rust owns invitation parsing,
+canonical ordering, transcript and hash construction, DER validation, network
+state, durable operation identities, recovery, and typed display-safe results.
+
+### Migration and no-downgrade policy
+
+New pairing writes only Remora Link v2 credential namespaces. Legacy
+`alleycat/1` input is classified as migration-only and tells the user to
+re-pair. The client never imports, converts, or copies a legacy bearer token,
+host key, service state, or session. It never sends a v1 token on
+`remora-link/2` and never retries v1 after any v2 parse, negotiation,
+identity, proof, authorization, or transport failure.
+
+The old `npx kittylitter` string may appear only in explicit installed-service
+detection and re-pair guidance. The new development bootstrap is the pinned
+native Remora Link host.
+
+### Implementation placement
+
+- Put the private wire adapter, exact fixture, lifecycle journal, reconnect
+  policy, and terminal transport in
+  `shared/rust-bridge/codex-mobile-client/`.
+- Expose direct typed operations through `AppClient`; expose observation-only,
+  display-safe lifecycle state through the Rust store.
+- Keep Swift and Kotlin to QR/camera/paste UI, secure-key adapters, platform
+  permissions, and rendering.
+- Preserve one shared Rust behavior for iOS and Android. Platform code must not
+  parse wire strings, infer statuses, or patch canonical state after RPC
+  success.
+- Keep the legacy v1 adapter isolated for read, classify, re-pair, and delete
+  only. No new v1 credential writes or automatic fallback remain.
+
+### Acceptance and release gates
+
+- Copy the exact pinned golden fixture with source SHA attribution and assert
+  every JSON document, domain, payload hash, transcript byte string and hash,
+  prospective credential ID, DER signature, and SAS byte-for-byte.
+- Reject oversized frames/envelopes, padded or malformed base64url, unknown
+  fields/versions/scopes, noncanonical arrays, duplicate runtime IDs, invalid
+  SEC1 keys, malformed DER, stale challenges, identity changes, and any v2-to-v1
+  fallback.
+- Fault-inject process death and response loss around every enrollment,
+  confirmation, secure-store, revoke, rollback, restart, and journal boundary.
+  Exact retries converge without duplicate enrollment or mutation.
+- Prove a copied mobile database cannot authenticate without the platform key;
+  two hosts use independent key handles; deleting one pairing leaves the other.
+- Verify runtime listing, restart sequence behavior, connect/resume,
+  `drift_reload`, terminal byte streaming, revocation closure, and forget vs
+  revoke semantics on both platforms.
+- Run the pinned host conformance suite plus Rust tests, regenerated UniFFI
+  bindings, iOS simulator tests, Android JVM/instrumented tests, and interactive
+  QR and paste smoke tests before release.
+- Scan logs, crash captures, snapshots, errors, and screenshots for invitation
+  secrets, signatures, credential internals, and disallowed legacy branding.
+
+### Deferred research outside v2
+
+Short locator codes, PAKE/SPAKE2, hosted rendezvous, peer administration,
+device-key rotation, recovery secrets, attestation policy, delegated
+authorization, and a true Node host are not implemented by this wire version.
+The earlier comparison sections explain why some may merit later experiments;
+none is an adapter requirement or a fallback. Each future addition requires a
+new explicit protocol version or compatible extension, primary-source review,
+cross-implementation vectors, crash/replay testing, and a separate threat-model
+update.
+
+The accepted product defaults for this version are host-confirmed interactive
+pairing, paste and QR as equal first-class ingress, opaque device authorization,
+no notification approvals, no harness installation, and no security downgrade.
 
 ## Primary source register
 
-### Existing Remora and Alleycat behavior
+### Existing Remora and legacy v1 behavior
 
 - [Remora v1 protocol, payload, parser, and Iroh connection](../../shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L22-L33)
 - [Remora iOS credential storage](../../apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift#L21-L149)
 - [Remora Android credential storage](../../apps/android/app/src/main/java/com/remora/android/state/AlleycatCredentialStore.kt#L6-L44)
-- [Alleycat v1 protocol schema](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/protocol.rs#L3-L15)
-- [Alleycat host identity, token validation, and pair payload](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L86-L105)
-- [Alleycat token generation and atomic mode-0600 persistence](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L305-L365)
+- [Legacy v1 protocol schema](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/protocol.rs#L3-L15)
+- [Legacy v1 token validation and pair payload](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L86-L105)
+- [Legacy v1 token persistence](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L305-L365)
 
 ### Transport and cryptographic protocols
 
@@ -618,8 +449,6 @@ This report does not change code, but the repository architecture constrains the
 - [Iroh 0.98.1 accepted remote identity](https://github.com/n0-computer/iroh/blob/v0.98.1/iroh/src/endpoint/connection.rs#L1063-L1079)
 - [RFC 9382: SPAKE2](https://www.rfc-editor.org/rfc/rfc9382.html)
 - [RFC 9807: OPAQUE](https://www.rfc-editor.org/rfc/rfc9807.html)
-- [RFC 9052: COSE structures](https://www.rfc-editor.org/rfc/rfc9052.html)
-- [RFC 9053: COSE algorithms](https://www.rfc-editor.org/rfc/rfc9053.html)
 - [RFC 9449: proof-of-possession pattern](https://www.rfc-editor.org/rfc/rfc9449.html)
 - [RFC 9001 §9.2: QUIC 0-RTT replay](https://www.rfc-editor.org/rfc/rfc9001.html#section-9.2)
 - [RFC 8628: device code/user code security](https://www.rfc-editor.org/rfc/rfc8628.html#section-6.1)
@@ -639,6 +468,6 @@ This report does not change code, but the repository architecture constrains the
 
 ## Final recommendation
 
-Ship **high-entropy QR/copy enrollment → local host confirmation → per-host hardware-backed ES256 device grant**, bound to the authenticated Iroh client and host identities. Keep Iroh 0.98.1 and add an explicit `remora-link/2` lane for the first rollout. Make revocation stateful and immediate, recovery local-first, and v1 migration approval-gated.
+Ship **high-entropy QR/copy enrollment → local host confirmation → opaque credential ID plus a per-host non-exportable P-256 key**. Each operation proves possession with the pinned v2 DER ECDSA transcript; the host-local device record is the sole authority. Keep Iroh 0.98.1, retain the explicit `remora-link/2` lane, make revocation stateful and immediate, recover local-first, and require re-pairing for v1 migration.
 
-For a typed short code, ship **locator + bilateral SAS + host confirmation** first. Add **SPAKE2** only if headless pairing is important enough to fund a reviewed RFC 9382 implementation and conformance program. Do not use **OPAQUE** for ephemeral invites, do not make a short code a bearer, and do not turn a **12-word high-entropy fallback** into the default experience.
+If a future protocol adds a typed short code, evaluate **locator + bilateral SAS + host confirmation** before any headless mode. Add **SPAKE2** only if that separate feature is important enough to fund a reviewed RFC 9382 implementation and conformance program. None of these ideas is part of v2 or a fallback from it.

@@ -1,6 +1,13 @@
 # Remora Link host packaging and release strategy
 
 Research date: 2026-07-15
+
+> **Historical research notice.** This document records the packaging and v1
+> baseline that motivated the implementation. Its `3c6dfe2c...` and upstream
+> legacy dependency and upstream links are explicitly historical v1 evidence. The implemented host
+> is pinned at [`0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37);
+> see its [v2 wire contract](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/docs/remora-link-v2-wire.md)
+> and [golden vectors](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2).
 Status: implementation recommendation; no production code changed
 
 ## Recommendation
@@ -46,7 +53,12 @@ The package layout borrows napi-rs's proven platform-package distribution patter
 
 ## Current repository and upstream facts
 
-Remora still directs remote users to `npx kittylitter`, while the shared Rust workspace consumes four Alleycat crates from a moving `main` branch ([Remora README](https://github.com/amanthanvi/remora/blob/f7b1420bb3226494c4cad07a0ef761452cccc762/README.md#L64-L68), [Rust dependencies](https://github.com/amanthanvi/remora/blob/f7b1420bb3226494c4cad07a0ef761452cccc762/shared/rust-bridge/Cargo.toml#L28-L31)). The current lockfile resolves them to `3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f`, but `tools/scripts/update-alleycat-main.sh` resolves upstream `main` and mutates the lockfile during ordinary workflows. This is not a release-grade source pin.
+The historical baseline directed users to `npx kittylitter` and consumed a
+moving upstream branch. That is superseded: new pairing uses the exact pinned
+Remora Link host revision `0e625bece349a2ce53b7926cac7fc6a81121ca37` and its
+`remora-link/2` contract. The legacy command survives only for explicit local
+service detection and side-by-side re-pairing; no v1 key, token, or state is
+copied into Remora Link.
 
 Upstream Alleycat already has the right architectural seam: a thin binary supplies an `App` identity while the shared host implements the protocol and harness bridges ([`App` identity](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/lib.rs#L26-L76)). Litter's Kittylitter service is such a wrapper ([wrapper source](https://github.com/dnakov/litter/blob/abee3ace684204a3cbc4ea1e0e903b9f31518dac/services/kittylitter/src/main.rs)).
 
@@ -58,7 +70,11 @@ The current compatibility contract is:
 
 Those details are defined upstream in the [pair/request schema](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/protocol.rs#L3-L15) and [request variants](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/protocol.rs#L144-L180), and mirrored by Remora's parser and dialer ([parser](https://github.com/amanthanvi/remora/blob/f7b1420bb3226494c4cad07a0ef761452cccc762/shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L434-L463), [dialer](https://github.com/amanthanvi/remora/blob/f7b1420bb3226494c4cad07a0ef761452cccc762/shared/rust-bridge/codex-mobile-client/src/alleycat.rs#L668-L692)).
 
-The current bearer token is host-global, durable until rotation, and compared as a string for every new stream. It is not bound to the authenticated client Iroh endpoint and has no per-device revocation ([host authorization](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L271-L288)). Packaging must not make that weakness harder to remove; pairing v2 should remain a separate security workstream.
+The historical v1 bearer token was host-global and non-revocable per device.
+The pinned host supersedes that lane with v2 device records, host-confirmed
+scoped grants, fresh P-256 proof per operation, opaque credential IDs,
+idempotent enrollment, and `self_revoke`. Packaging must preserve those v2
+properties and never import a legacy token or host key.
 
 The primary compatibility rule from `CONTEXT.md` is correct: keep the wire identifiers while they are needed, but do not carry Alleycat or Kittylitter naming into new product paths and copy.
 
@@ -327,7 +343,10 @@ Confirm GPL-3.0 notices, source-offer obligations, Remora's additional distribut
 
 ### Current gap
 
-Upstream exposes an optional relay URL, but the host always builds `Endpoint::builder(presets::N0)`. The configured URL is only copied into the pair payload if no home relay is available ([endpoint construction](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L21-L58), [payload relay](https://github.com/dnakov/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L238-L261)). Advertising a custom URL is not the same as connecting the host endpoint to that relay.
+The historical v1 host treated a relay URL as a payload hint rather than an
+active endpoint configuration. V2 continues to treat direct addresses and
+relay URLs as route hints only: the invitation pins the Iroh endpoint identity,
+and route choice never replaces that identity or its proof-bound authorization.
 
 Implement one typed endpoint-construction path and make status report both desired and active relay configuration:
 

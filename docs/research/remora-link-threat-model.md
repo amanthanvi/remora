@@ -3,7 +3,7 @@
 - Status: design and release-gate threat model
 - Date: 2026-07-15
 - Scope: Remora Link pairing v2, direct and relayed Iroh transport, SSH
-  transport, opaque push wakeups, multi-harness launch, device grants and
+  transport, opaque push wakeups, multi-harness launch, device credential records and
   revocation, secret storage, and remote approvals
 
 ## Executive summary
@@ -20,14 +20,15 @@ after the v2 cutover.
 
 The required v2 security boundary is:
 
-1. The Link host owns a long-lived host identity, is the sole grant issuer, and
-   remains the authoritative source of revocation.
-2. Pairing creates a device key and a host-signed, device-bound, least-privilege
-   grant after explicit confirmation on the host. The invite is a short-lived,
-   single-use bootstrap challenge, not a reusable bearer credential.
-3. Every connection proves possession of the device private key. Every
-   privileged operation is checked against the grant, revocation state, request
-   freshness, harness scope, and current host policy.
+1. The Link host owns a long-lived host identity and the authoritative device,
+   scope, policy-epoch, and revocation records.
+2. Pairing creates a non-exportable device key and returns only an opaque
+   credential ID after explicit confirmation on the host. The invite is a
+   short-lived, single-use bootstrap challenge, not a reusable bearer
+   credential or portable grant.
+3. Every privileged operation carries a fresh DER ECDSA P-256 proof over the
+   exact v2 transcript. The host resolves the opaque credential ID and checks
+   key possession, freshness, scope, policy epoch, and revocation state.
 4. Direct Iroh, relayed Iroh, and SSH are routes to the same authorization
    policy. A relay, push provider, transport fallback, or harness is never an
    identity or authorization authority.
@@ -38,8 +39,8 @@ The required v2 security boundary is:
    It never installs a harness, accepts an arbitrary executable, exposes a
    generic shell capability, or enables permission-bypass flags by default.
 
-The release-blocking risks are pairing-token theft, grant forgery or
-overbreadth, incomplete revocation, approval replay or cross-host confusion,
+The release-blocking risks are invitation theft, device-proof replay or scope
+confusion, incomplete revocation, approval replay or cross-host confusion,
 arbitrary harness launch, and transport-policy drift. The verification
 properties and no-regression requirements below turn those risks into concrete
 implementation gates.
@@ -50,7 +51,7 @@ implementation gates.
 
 - iOS and Android Remora clients, the shared Rust client, and the future Link
   host daemon;
-- enrollment, re-pairing, device grants, local device deletion, host-side
+- enrollment, re-pairing, device credential records, local device deletion, host-side
   revocation, expiry, and key rotation;
 - Iroh direct and relay paths, SSH, and route changes during reconnect;
 - APNs/FCM wake delivery and a future ciphertext-blind routing relay;
@@ -69,11 +70,12 @@ implementation gates.
 - Push carries only an opaque device/host identifier, monotonic sequence,
   event class or collapse key, and expiry. It never carries a prompt,
   transcript, command, path, approval decision, credential, or grant.
-- The Link host owns its long-lived identity and the grant/revocation
-  authority. It signs scoped per-device grants and durably stores revocation.
+- The Link host owns its long-lived identity and the device-record/revocation
+  authority. It durably stores the scoped record keyed by an opaque credential
+  ID and the enrolled P-256 public key.
   It may publish only a hashed or opaque deny hint to the relay.
-- A device may delete its local grant but cannot restore, reissue, widen, or
-  revoke another device's grant. Host confirmation is required for new
+- A device may delete its local credential metadata but cannot restore, reissue,
+  widen, or revoke another device's host record. Host confirmation is required for new
   enrollment.
 - Harness launch authority stays in the local Link daemon. The daemon detects
   and launches only operator-allowlisted installed harnesses, never installs
@@ -94,11 +96,11 @@ implementation gates.
 - QUIC 0-RTT data can be replayed; the application protocol must define what is
   safe in early data. Remora Link must not accept any state-changing request in
   0-RTT. See [RFC 9001, section 9.2](https://www.rfc-editor.org/rfc/rfc9001.html#section-9.2).
-- A signed grant should use a standard signature envelope and deterministic,
-  validated encoding rather than ad hoc JSON signing. Suitable building blocks
-  are [COSE Sign1 in RFC 9052](https://www.rfc-editor.org/rfc/rfc9052.html),
-  [deterministic CBOR in RFC 8949](https://www.rfc-editor.org/rfc/rfc8949.html),
-  and [Ed25519 in RFC 8032](https://www.rfc-editor.org/rfc/rfc8032.html).
+- V2 authorization has no client-carried authority object. The client presents
+  an opaque credential ID and proves possession of its non-exportable P-256 key
+  with a fresh DER ECDSA signature over the exact host-defined transcript.
+  Golden DER transcript fixtures, strict JSON fields, and host-side scope and
+  epoch checks replace client-side claim parsing.
 - Apple says notification payloads should not contain sensitive data, and
   background notifications are low-priority, throttled, and not guaranteed.
   See [Apple's remote-notification payload guidance](https://developer.apple.com/documentation/usernotifications/generating-a-remote-notification),
@@ -131,14 +133,18 @@ the blast radius and recovery story explicit.
 
 ## Current implementation evidence
 
-This table distinguishes controls that exist now from v2 requirements. A future
-design statement is not counted as an implemented mitigation.
+This table distinguishes the deployed legacy mobile v1 lane from the implemented
+host v2 contract. A future mobile-adapter statement is not counted as an
+implemented mitigation. The host contract is pinned at
+[`0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37),
+with its [wire specification](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/docs/remora-link-v2-wire.md)
+and [golden vectors](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2).
 
 | Surface | Repository evidence | Security consequence |
 | --- | --- | --- |
 | Active remote pairing | `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:22-33` fixes protocol v1 and ALPN `alleycat/1`; the parsed payload contains a raw `token`. `alleycat.rs:301-320` sends it on list, restart, and connect. | Iroh authenticates/encrypts the peer route, but authorization is one reusable host-wide bearer secret with no scope, subject key, expiry, or per-device revoke. |
 | Pairing input | iOS accepts QR or clipboard JSON and shows a token-bearing example at `apps/ios/Sources/Remora/Views/RemotePairingSheet.swift:129-221`; Android does the same at `apps/android/app/src/main/java/com/remora/android/ui/discovery/RemotePairingSheet.kt:313-325`. | QR images, clipboard history, screen capture, logs, or a malicious app with clipboard access can disclose full host authority. |
-| Host implementation | The pinned Alleycat host compares one global token before list/restart/connect in [`host.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L123-L225); its pair payload contains that token in [`host.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/host.rs#L238-L249). | Rotating the global token invalidates all future clients, but there is no device-scoped grant or selective revocation. Existing streams are not a durable revocation boundary. |
+| Host implementation | The pinned Remora Link host implements `remora-link/2`: invitation inspection/enrollment, host-confirmed scoped runtime grants, opaque credential IDs, fresh P-256 proof for every operation, durable idempotency, and `self_revoke`. Its `alleycat/1` bearer lane is isolated compatibility only. | A v2 client never receives a portable bearer/grant and must not retry v1 after a v2 failure. The remaining mobile task is to consume the exact v2 contract and vectors rather than continue the legacy parser. |
 | Iroh path | `alleycat.rs:633-692` binds a persisted endpoint key and connects to a known endpoint ID over the selected ALPN; `alleycat.rs:695-744` bounds JSON frames to 1 MiB. | The transport has peer authentication, encryption, and a useful frame bound. The stable app-wide device endpoint can also correlate the same mobile device across hosts. |
 | Dormant proximity pairing | `shared/rust-bridge/codex-mobile-client/src/pair/mod.rs:283-343` binds `0.0.0.0`, publishes Bonjour data, and accepts WebSocket clients. `pair/mod.rs:236-265` returns a `ws://` URL after a hello; `pair/mod.rs:45-71` trusts client-supplied distance. No handwritten Swift/Kotlin caller was found. | This FFI-reachable path is not suitable as a v2 fallback: it lacks channel encryption, peer authentication, replay protection, rate limits, and cryptographic proximity proof. Its text frames and event queue are unbounded. |
 | iOS secret storage | `apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift:50-149` stores the token as `WhenUnlockedThisDeviceOnly` and the Iroh key as `AfterFirstUnlockThisDeviceOnly`. | At-rest protection and non-migrating accessibility classes are good foundations. Token persistence failure is logged but pairing still succeeds at `RemotePairingSheet.swift:449-473`, creating a false-success/recovery inconsistency. |
@@ -148,12 +154,13 @@ design statement is not counted as an implemented mitigation.
 | Remote approvals | `types/server_requests.rs:225-272` knows `server_id`, thread, turn, item, command/path, and grant root. Yet `mobile_client/user_input.rs:300-343`, `mobile_client/event_loop.rs:401-409`, and `store/reducer.rs:1078-1089,1890-1909` resolve or de-duplicate approvals by `request_id` alone. | Identical request IDs from different hosts or harnesses can collide, suppress, or resolve the wrong pending approval. The response is not bound to a connection epoch, harness, challenge nonce, or expiry. |
 | Reconnect retry | `shared/rust-bridge/codex-mobile-client/src/session/connection.rs:1616-1649` clones any JSON-RPC request and retries it after a transport failure. | If the first mutating request reached the host but its reply was lost, reconnect can execute the mutation twice. There is no local read/mutation classification or receipt requirement at this layer. |
 | Remote file content | `ffi/client/remote_content.rs:139-190,301-324` reads a caller-supplied remote path by launching a one-off shell/PowerShell command, with a 20 MB command-output cap but no thread-root confinement in that helper. | Exposing this helper as a Link file-preview primitive would turn a read grant into arbitrary host-file disclosure and shell-dependent policy. A new root-bound typed API is required instead. |
-| Harness policy | The pinned Alleycat host rejects unknown/disabled agent names, but current defaults include broad harness options such as Claude permission bypass and Amp allow-all in [`config.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L107-L168), plus an enabled shell harness in [`config.rs`](https://github.com/amanthanvi/alleycat/blob/3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f/crates/alleycat/src/config.rs#L263-L288). | Name allowlisting is useful but insufficient. Link v2 must not inherit permissive defaults, a generic shell, arbitrary path/arguments/environment, or remote install authority. |
-| Dependency and protocol source | `shared/rust-bridge/Cargo.toml:28-31` pins all four Alleycat crates to commit `3c6dfe…` in Aman's fork. Normal build/check/test lanes consume the pin unchanged (`Makefile:356-378`). Updating is the explicit `make update-remora-link REV=<40-sha>` flow; `tools/scripts/update-remora-link.sh:10-59` validates the revision, refuses dirty Cargo inputs, updates exact packages, and restores manifest/lock on failure. Remora's remote-host wire remains handwritten in `alleycat.rs`, not type-shared with those crates. | Build-time branch drift is mitigated. Residual risk is a reviewed-but-incompatible or compromised pin/host update, plus security semantic drift between the separately implemented host protocol and Remora client adapter. |
+| Harness policy | Remora Link v2 exposes only host-configured runtime offers within the invitation ceiling; the host confirms the selected runtime set and may narrow it. | The mobile UI must preserve that typed, host-authoritative selection. No Link path may install a harness, enable a generic shell, accept arbitrary path/arguments/environment, or turn on bypass flags. |
+| Dependency and protocol source | `shared/rust-bridge/Cargo.toml:28-31` pins all four legacy-named bridge crates to `0e625bece349a2ce53b7926cac7fc6a81121ca37` in Aman's fork. Normal lanes consume the exact pin; `make update-remora-link REV=<40-sha>` validates it and performs rollback-safe manifest and lockfile updates. The v2 wire source of truth is the host's versioned contract and golden vectors, not the bridge crate names. | Build-time branch drift is mitigated. Require joint host/client review and exact-artifact vector tests for every pin change; fail closed on any contract/version mismatch. |
 
-The current Iroh transport is therefore not "insecure transport." The central
-gap is that transport authentication is followed by bearer-token authorization
-rather than device-bound, scoped authorization.
+Iroh itself is not the security gap. The legacy v1 lane follows transport
+authentication with bearer authorization; the pinned v2 host instead requires
+device-bound scoped authorization. Until the mobile adapter completes its
+cutover, v1 remains a migration risk, not a rationale to weaken v2.
 
 ## System model
 
@@ -162,10 +169,10 @@ rather than device-bound, scoped authorization.
 | Component | Security responsibility |
 | --- | --- |
 | Remora iOS/Android UI | Obtain local user intent, display verified host/harness/action context, request platform permissions, and avoid exposing protocol secrets. |
-| Shared Rust mobile client and `AppStore` | Parse opaque ingress, verify host/grants, enforce replay and state-machine rules, reconcile authoritative state, and expose typed display-safe projections. |
-| Platform secure-storage adapters | Protect device keys, grant blobs, SSH credentials, host pins, push tokens, and crash-safe commit markers. |
-| Remora Link daemon | Own host identity, issue grants, enforce revocation and capabilities, select routes, launch allowlisted harnesses, authenticate requests, and audit security events. |
-| Host identity/grant store | Persist the host signing key, grant records, policy epoch, revocation tombstones, and operator configuration. |
+| Shared Rust mobile client and `AppStore` | Parse opaque ingress, bind requests to the pinned host and exact v2 transcript, enforce replay and state-machine rules, reconcile authoritative state, and expose typed display-safe projections. |
+| Platform secure-storage adapters | Protect non-exportable device keys, opaque credential IDs, SSH credentials, host pins, push tokens, and crash-safe commit markers. |
+| Remora Link daemon | Own host identity and authoritative device records, enforce revocation and capabilities, select routes, launch allowlisted harnesses, authenticate fresh device proofs, and audit security events. |
+| Host identity/authorization store | Persist the host endpoint identity, device public keys and opaque credential IDs, scopes, policy epoch, revocation tombstones, and operator configuration. |
 | Harness processes | Execute Codex or other explicitly installed runtimes. They are less trusted than Link and must not define authorization policy. |
 | Iroh direct path and relay | Deliver encrypted QUIC traffic. Endpoint identity is cryptographic; route and relay location are not authorization. |
 | SSH server/client | Provide an alternate encrypted, server-pinned transport and user authentication. |
@@ -177,7 +184,7 @@ rather than device-bound, scoped authorization.
 | ID | Boundary | Required security property |
 | --- | --- | --- |
 | TB-01 | Platform UI/storage adapter ↔ shared Rust | Secrets stay behind an opaque typed seam; native code does not recreate grant, replay, or reconciliation policy. |
-| TB-02 | Mobile device ↔ Link over direct/relayed Iroh | Mutual cryptographic identity, device proof-of-possession, signed grant authorization, freshness, bounded frames, and no route-based trust. |
+| TB-02 | Mobile device ↔ Link over direct/relayed Iroh | Mutual cryptographic identity, opaque credential ID, fresh P-256 DER proof, host-record authorization, bounded frames, and no route-based trust. |
 | TB-03 | Mobile device ↔ SSH server | Pinned host key, authenticated user, encrypted channel, and the same Link authorization policy after transport establishment. |
 | TB-04 | Link/mobile ↔ relay and discovery | End-to-end ciphertext; route records are hints; metadata minimized and rate-limited; no identity downgrade. |
 | TB-05 | Link/relay ↔ APNs/FCM ↔ mobile OS | Opaque, expiring, collapsible wake hints only; authenticated reconciliation before any content or action. |
@@ -224,12 +231,13 @@ flowchart LR
    expiry. The device generates or selects a per-host device key, connects to
    the pinned host, binds the offer and both identities to the handshake, and
    asks to enroll. The host shows the device identity and requested capabilities
-   locally. Only local confirmation consumes the challenge and issues a signed
-   grant.
-2. **Normal connection:** the device authenticates the pinned host, presents the
-   signed grant, and proves possession of the grant's subject key. Link checks
-   expiry, policy epoch, revocation, requested capability, harness scope, and
-   request freshness before admission and again at each privileged operation.
+   locally. Only local confirmation consumes the challenge and commits the
+   host-local device record.
+2. **Normal connection:** the device authenticates the pinned host, presents its
+   opaque credential ID, and proves possession of its non-exportable P-256 key
+   using a fresh DER ECDSA transcript. Link checks policy epoch, revocation,
+   requested capability, harness scope, and request freshness before admission
+   and again at each privileged operation.
 3. **Relayed connection:** the same encrypted authenticated session crosses a
    relay. A direct/relay path change does not change identities or privileges.
 4. **Push wake:** Link or its routing service sends an opaque host/device ID,
@@ -251,9 +259,9 @@ flowchart LR
 
 | Asset | Why it matters | Required protection |
 | --- | --- | --- |
-| Host identity/signing key | Can authenticate the host and issue every device grant. | Host-only, non-exportable where practical, backup/recovery controlled, rotation supported, never logged or sent to relay. |
-| Device private key | Proves the subject of a grant. | Per-host or privacy-preserving derivation, non-exportable where practical, device-only storage, use authorization appropriate to background vs interactive actions. |
-| Signed device grant | Defines remote authority. | Integrity, audience/subject binding, least privilege, expiry, policy version, revocation check, no bearer-only use. |
+| Host identity | Authenticates the pinned host and protects its authoritative device records. | Host-only, backup/recovery controlled, rotation supported, never logged or sent to relay. |
+| Device private key | Proves possession for one host credential record. | Per-host or privacy-preserving derivation, non-exportable where practical, device-only storage, use authorization appropriate to background vs interactive actions. |
+| Host-local device record | Defines remote authority for an opaque credential ID. | Host-only scope/epoch/revocation state, least privilege, no portable or bearer representation. |
 | Revocation registry and policy epoch | Ends device authority. | Durable, atomic, fail-closed, checked on restart and active operations, authoritative only on host. |
 | Pairing challenges and transcripts | Bootstrap trust. | Short-lived, single-use, channel- and identity-bound, race-safe, excluded from clipboard/logs after use. |
 | Sessions, prompts, transcripts, code, paths, files, and images | Confidential user and repository data. | End-to-end encryption, typed bounded parsing, least disclosure, no push payloads, retention controls. |
@@ -279,14 +287,16 @@ flowchart LR
   send, drop, delay, duplicate, reorder, or inspect push payloads.
 - A thief can possess a locked or unlocked paired phone; an installed malicious
   mobile app can seek clipboard, backup, notification, log, or IPC leakage.
-- A paired but malicious device has its own valid key/grant and can exercise,
-  race, replay, or probe every capability in that grant.
+- A paired but malicious device has its own valid key and host-side
+  authorization record and can exercise, race, replay, or probe every allowed
+  capability.
 - A malicious or compromised harness can emit deceptive output and approval
   prompts, consume host resources, exploit its inherited environment, or try to
   confuse Link's session/request mapping.
-- A host compromise can read user data, replace Link/harnesses, issue grants,
-  change revocation, and impersonate the host. The model can reduce persistence
-  and improve detection, but cannot preserve host confidentiality after this.
+- A host compromise can read user data, replace Link/harnesses, create or alter
+  authoritative device records, change revocation, and impersonate the host.
+  The model can reduce persistence and improve detection, but cannot preserve
+  host confidentiality after this.
 - A dependency or build-path compromise can alter code that authenticates
   devices or launches processes.
 
@@ -294,7 +304,7 @@ flowchart LR
 
 - The attacker cannot break standard cryptography or derive private keys from a
   public Iroh endpoint ID.
-- A relay cannot decrypt valid Link ciphertext or mint a host signature.
+- A relay cannot decrypt valid Link ciphertext or mint a valid device proof.
 - A push message is not accepted as proof of host identity or authorization.
 - A revoked device cannot sign as the host or cause the host to reissue a grant
   without a new, locally confirmed enrollment.
@@ -310,7 +320,7 @@ flowchart LR
 | Relay/discovery records | Route, endpoint hint, opaque IDs, relay URL | Treat as untrusted hints; allowlisted schemes; identity pin survives route changes; SSRF/private-address policy where HTTP control planes exist. |
 | Push receiver | Device/host ID, event class, sequence, expiry, collapse key | Exact allowlist schema and maximum size; no content/actions; expiry and sequence checks; rate/collapse; authenticated reconcile only. |
 | SSH address/auth/trust prompt | Host, port, username, key/password, host key, forwarding target | Strict parsing; pinned server key; device-only secret store; no automatic changed-key acceptance; same grant policy beyond tunnel. |
-| Device-grant verifier | Signed bytes, claims, key proof, policy version | Canonical COSE/CBOR validation; algorithm fixed; issuer/audience/subject/scope/time/epoch; revocation; proof-of-possession; reject unknown critical fields. |
+| Device credential verifier | Credential ID, exact transcript, DER proof, device record, policy epoch | Exact v2 JSON validation; fixed P-256 DER ECDSA verification; host-side scope/epoch/revocation checks; proof-of-possession; reject unknown fields. |
 | Revocation API/UI | Grant/device ID, reason, policy epoch | Local host authorization; durable write before success; idempotency; active-session termination; audit. |
 | Harness discovery/launch | Harness ID, executable metadata, cwd, args, env, session count | Typed ID only; operator allowlist; trusted absolute file; ownership/mode/symlink checks; fixed args/env policy; no install/shell; quotas. |
 | Harness protocol/event stream | JSON/JSONL/WebSocket messages, tool calls, output, file paths, request IDs | Bounded typed parser; per-session namespace; backpressure; output treated untrusted; challenge/context binding; protocol-version pin. |
@@ -430,7 +440,7 @@ E2E Link channel can deliver actionable content.
 
 **Break the path:** fail closed on v2 negotiation; use a distinct v2 ALPN and
 no automatic protocol downgrade; pin identities across route changes; require
-the same grant verifier and operation policy over Iroh and SSH; disable
+the same credential-record verifier and operation policy over Iroh and SSH; disable
 cleartext Link traffic in production.
 
 ### AP-09 — Secure-store failure creates a ghost grant
@@ -468,8 +478,8 @@ silent fallback.
 
 | ID | Threat | Affected assets | Preconditions | Impact | Existing controls | Required mitigation | Priority |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| TM-001 | Reusable pairing credential theft or pairing MITM | Host sessions, files, harness access | Attacker obtains v1 JSON/QR/clipboard or races weak pairing | Unauthorized remote host access | Iroh pins/encrypts host endpoint; v1 payload parser validates shape | Non-bearer one-time offer, transcript binding, local host confirmation, device proof key, signed scoped grant, hard v1 cutover | critical |
-| TM-002 | Forged, widened, misbound, or confused-deputy device grant | All remotely authorized operations | Verifier/encoding/key-management defect or grant copied to another device/host | Full remote control within forged scope | None in current bearer model | COSE Sign1 with fixed algorithm; deterministic validated claims; issuer/audience/subject/capability/time/epoch binding; proof-of-possession; negative/fuzz tests | critical |
+| TM-001 | Reusable pairing credential theft or pairing MITM | Host sessions, files, harness access | Attacker obtains v1 JSON/QR/clipboard or races weak pairing | Unauthorized remote host access | Iroh pins/encrypts host endpoint; v1 payload parser validates shape | Non-bearer one-time invite, transcript binding, local host confirmation, non-exportable device key, host-local scoped record, hard v1 cutover | critical |
+| TM-002 | Forged, widened, misbound, or confused-deputy device credential record | All remotely authorized operations | Verifier/encoding/key-management defect or proof copied to another device/host | Full remote control within forged scope | V2 uses a host-local credential record, pinned endpoint, fresh P-256 proof, canonical scopes/runtime lists, and golden-vector coverage | Preserve strict unknown-field rejection, P-256 DER proof verification, host/policy/epoch binding, proof-of-possession, and negative/fuzz tests | critical |
 | TM-003 | Revoked or stolen device remains authorized | Host data, approvals, compute | Existing connection, stale cache, offline relay, incomplete persistence | Continued unauthorized control after revoke | Global token rotation can block future v1 connections | Host-authoritative durable tombstone; per-op checks; active close; expiry/epoch; relay deny hint never authoritative; recovery audit | high |
 | TM-004 | Approval replay, collision, substitution, or stale acceptance | Commands, file changes, credentials | Duplicate request ID, reconnect, malicious harness, captured response | Wrong or repeated high-impact action approved | UI displays some command/path context | Composite opaque key, canonical action digest, challenge nonce, connection epoch, expiry, exact one-time atomic resolution, no 0-RTT/push approvals | critical |
 | TM-005 | Arbitrary executable/shell launch or permissive harness policy | Host account, source, credentials | Broad launch grant, attacker-controlled path/args/env/cwd, unsafe default | Host code execution and persistence | Current host knows a finite agent registry | Explicit per-harness capability; operator allowlist; trusted absolute binary; fixed args/env; no install/shell; bypass flags off; quotas/sandbox | critical |
@@ -498,64 +508,49 @@ silent fallback.
   requested-product context. It is safe if photographed except for metadata and
   a bounded enrollment attempt.
 - Generate at least 128 bits of challenge entropy, expire quickly, cap attempts,
-  and consume atomically only after host confirmation and grant commit.
+  and consume atomically only after host confirmation and device-record commit.
 - Bind the host identity, device public key, offer challenge, transcript hash,
   requested capabilities, and protocol/ALPN into confirmation and issuance.
   If a short authentication string is displayed, derive it from this transcript
   and show it on both endpoints.
 - The host confirmation names the device and requested capabilities. A generic
-  "Allow pairing?" dialog is insufficient when grants can launch or approve.
+  "Allow pairing?" dialog is insufficient when a device record can launch or approve.
 - Proximity, Bonjour, relay, IP address, route, host display name, and push
   identity are discovery hints, not proof.
 
-### 2. Device keys and grants
+### 2. Device keys and host records
 
-The grant must be a signed capability object, not a secret. A minimum claim set
-is:
+V2 does not issue a client-carried authority object. The host stores the sole
+authoritative record for an opaque credential ID: the enrolled P-256 public
+key, host-confirmed runtime/scopes, policy epoch, state, and revocation data.
+The client retains only that opaque ID, its non-exportable key handle, and
+non-secret recovery metadata.
 
-```text
-schema_version
-grant_id
-issuer_host_identity
-audience_product_and_host
-subject_device_public_key
-issued_at / not_before / expires_at
-policy_epoch
-capabilities[]
-harness_ids[]
-constraints { session_limit, approval_modes, terminal_access, ... }
-```
-
-- Sign a domain-separated deterministic representation, for example COSE Sign1
-  over deterministic CBOR with Ed25519. Pin the allowed algorithm; reject
-  duplicate map keys, non-canonical/ambiguous claims, unknown critical fields,
-  invalid time ranges, duplicate capabilities, and oversized values.
-- If the Link signing key and Iroh transport identity are distinct, bind them
-  with a host-identity certificate or signed transport-key record. Route
-  rotation must not silently rotate the pinned host authority.
-- Require a fresh challenge signature or equivalent proof-of-possession from
-  the grant's subject key at connection admission. A copied grant blob alone
-  must be useless.
+- Pin the host Iroh identity from the invitation. Route rotation must not
+  silently rotate the host authority.
+- Require a fresh host challenge and DER ECDSA P-256 proof over the exact v2
+  transcript for every operation. A copied credential ID or recorded proof is
+  useless without the device key and a live challenge.
 - Make capabilities typed and closed. Example distinctions are host metadata
   read, session attach, terminal access, `launch:codex`, `launch:claude`,
   approval read, and approval decide. Do not use a single `control` bit.
-- A device cannot widen or delegate its grant. Delegation, if ever needed,
+- A device cannot widen or delegate its host record. Delegation, if ever needed,
   requires a separately designed host-authorized flow.
 
 ### 3. Revocation and lifecycle
 
-- Link durably records revocation by grant ID and subject key before returning
+- Link durably records revocation by credential ID and subject key before returning
   success. Keep a monotonically increasing policy epoch and tombstones long
   enough to cover all grant lifetimes and restore windows.
-- Check signature, expiry, epoch, and revocation at connection admission and at
+- Check fresh proof, record state, epoch, and revocation at connection admission and at
   every launch, terminal attach, approval decision, credential-sensitive
   operation, and session resume.
 - Revocation closes active connections/process attachments and invalidates
-  outstanding approval challenges for the grant. It must survive Link restart.
+  outstanding approval challenges for the credential. It must survive Link restart.
 - A relay-side opaque deny record is only an early drop optimization. Missing,
   stale, rolled-back, or malicious relay state cannot permit an operation that
   local Link rejects.
-- "Forget this host" deletes local grant/key/routing/push data, but must be
+- "Forget this host" deletes local credential/key/routing/push data, but must be
   labeled as local deletion. It does not claim host revocation. Provide a
   distinct host-authoritative revoke flow and recovery guidance for a lost
   device.
@@ -592,7 +587,7 @@ constraints { session_limit, approval_modes, terminal_access, ... }
 - Launch with a minimal environment, constrained cwd, bounded stdout/stderr and
   protocol frames, per-device/session/process quotas, timeouts, backpressure,
   and child cleanup.
-- Treat a harness as a potentially malicious local principal. Keep device grant
+- Treat a harness as a potentially malicious local principal. Keep device-record
   verification, approval challenge creation/consumption, revocation, and audit
   in Link. Prefer sandboxing, a separate OS account/container, or platform
   controls for high-risk harnesses.
@@ -773,7 +768,7 @@ Treat each item as a release blocker for Remora Link v2.
 
 | Rating | Remora Link meaning |
 | --- | --- |
-| critical | Unauthenticated or cross-device remote host code execution; host grant-signing key compromise; forged/widened grant; remote approval of a different operation; arbitrary harness/shell launch. |
+| critical | Unauthenticated or cross-device remote host code execution; host credential-record compromise; forged/widened device record; remote approval of a different operation; arbitrary harness/shell launch. |
 | high | Stolen valid-device control, incomplete revocation, SSH MITM, extractable device secrets, malicious harness data theft, persistent authorization or supply-chain compromise. |
 | medium | Metadata correlation, denial of service, battery/cost drain, stale non-authoritative UI, or attacks requiring an already paired low-privilege device with bounded impact. |
 | low | Cosmetic identity confusion or low-sensitivity metadata disclosure without authorization, confidentiality, integrity, or material availability impact. |
@@ -785,7 +780,7 @@ control does not lower the current rating.
 
 | Area | Current path(s) | Security work to concentrate there |
 | --- | --- | --- |
-| Link v2 client protocol | `shared/rust-bridge/codex-mobile-client/src/alleycat.rs`, future `src/remote_host_pairing/` or Link module | Version/ALPN cutover, invite bounds, host pin, device proof, grant verifier, replay/idempotency, direct/relay parity. |
+| Link v2 client protocol | The dedicated Remora Link client module and `src/ffi/` boundary | Exact `remora-link/2` vectors, invitation bounds, host pin, device proof, scoped credential lifecycle, replay/idempotency, and direct/relay parity. |
 | Rust-owned state | `shared/rust-bridge/codex-mobile-client/src/store/`, `src/mobile_client/` | Grant/revocation snapshots, authoritative reconcile, approval composite identity, stale-event rejection, parity. |
 | UniFFI boundary | `shared/rust-bridge/codex-mobile-client/src/ffi/` | Opaque handles and display-safe typed records only; no tokens, private keys, relay internals, or platform policy. |
 | iOS storage/UI | `apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift`, `Views/RemotePairingSheet.swift` | Non-exportable/device-only key roles, transactional success/repair UI, verified host/capability confirmation, complete local deletion. |
@@ -793,7 +788,7 @@ control does not lower the current rating.
 | Approval path | `src/types/server_requests.rs`, `src/mobile_client/user_input.rs`, `src/mobile_client/event_loop.rs`, `src/store/reducer.rs` | Composite challenge key, exact action digest, expiry/epoch, atomic one-time response, verified context projection. |
 | Snapshot/terminal boundary | `src/terminal/session.rs`, `src/store/snapshot.rs`, `src/store/boundary.rs` | Remove transport credentials from observable state; use opaque handles; exact context binding and output gap behavior. |
 | Retry and remote content | `src/session/connection.rs`, `src/ffi/client/remote_content.rs` | Method safety classification, mutation receipts/unknown outcomes, and a new workspace-root-bound typed file-read capability without shell fallback. |
-| SSH | `src/terminal/ssh_known_hosts.rs`, `src/terminal/ssh/connect.rs`, platform trust/credential adapters | Preserve fail-closed host pins, unify grant policy, avoid cleartext/tunnel privilege drift, protect credentials. |
+| SSH | `src/terminal/ssh_known_hosts.rs`, `src/terminal/ssh/connect.rs`, platform trust/credential adapters | Preserve fail-closed host pins, unify host-authoritative authorization policy, avoid cleartext/tunnel privilege drift, protect credentials. |
 | Harness/process launch | Future Link daemon plus pinned Alleycat bridge-core/host code | Typed operator allowlist, trusted executable resolution, safe fixed launch policy, no shell/install/bypass, isolation and quotas. |
 | Dependency and protocol update workflow | `shared/rust-bridge/Cargo.toml`, `Cargo.lock`, `Makefile:352-378`, `tools/scripts/update-remora-link.sh`, handwritten `src/alleycat.rs` wire | Preserve the exact pin and rollback-safe explicit updater; add joint host/client review, exact-artifact protocol/security fixtures, provenance, and staged compatibility enforcement. |
 | Hosted relay/push | Not present in repository (`CONTEXT.md:19-21`) | Separate service threat model before implementation: tenant isolation, routing-token lifecycle, metadata retention, abuse/rate limiting, push credential protection, incident response. |
@@ -801,14 +796,15 @@ control does not lower the current rating.
 ## Residual risk and acceptance criteria
 
 - A fully compromised host can read sessions, replace Link/harnesses, revoke or
-  issue grants, and impersonate the host. Hardware-backed identity, audit, and
-  artifact verification improve recovery/detection but do not remove this risk.
+  create device records, and impersonate the host. Hardware-backed identity,
+  audit, and artifact verification improve recovery/detection but do not remove
+  this risk.
 - A malicious harness running as the user's account can often reach whatever
   that account can reach. Approval binding prevents UI confusion but cannot
   replace OS-level isolation. The product must document the containment level of
   each harness.
 - A stolen unlocked or OS-compromised mobile device can act within its current
-  grant until host revocation reaches Link. Short sessions, interactive
+  authorized scope until host revocation reaches Link. Short sessions, interactive
   authorization for high-impact decisions, and a host-side device list reduce
   the window.
 - Relays and push providers retain traffic-analysis and availability power even

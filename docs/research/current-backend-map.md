@@ -1,7 +1,16 @@
 # Current backend map: remote-host pairing
 
 Date: 2026-07-15
-Scope: current Remora QR pairing, generic discovery, Alleycat transport, reconnect, persistence, paired-host terminal, upstream dependencies, and host bootstrap. This is a code-grounded architecture report; it does not change production code.
+Scope: legacy v1 Remora QR pairing, generic discovery, reconnect, persistence,
+paired-host terminal, bridge dependencies, and host bootstrap. This is a
+code-grounded architecture report; it does not change production code.
+
+> **Cutover status (2026-07-15).** The Remora-controlled host is pinned to
+> [`amanthanvi/alleycat` `0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37).
+> It implements `remora-link/2` and its [golden
+> vectors](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2).
+> The `alleycat/1` diagrams and source paths below are a **legacy v1 migration
+> baseline**, not the default for a new Remora Link pairing.
 
 ## Conclusion
 
@@ -11,14 +20,14 @@ That shape conflicts with the repository contract: shared protocol, discovery po
 
 The safest target is a Rust `RemoteHostPairing` module that owns the paired-host lifecycle end to end while injecting one real external seam: platform secure/profile persistence. Generic network discovery should remain a separate module. The existing `RemoteTransport` trait should also remain: it is already a narrow, justified internal seam shared by Alleycat, SSH, and Slingshot (`shared/rust-bridge/codex-mobile-client/src/session/remote_transport.rs:1-80`).
 
-The migration can be made independently revertible by introducing typed domain state behind the existing calls, moving one policy cluster at a time, preserving the external Alleycat wire and existing storage keys initially, and retaining old UniFFI methods only as time-bounded forwarding adapters. Production cutover should still happen on iOS and Android in the same phase.
+The migration can be made independently revertible by introducing typed domain state behind the existing calls, moving one policy cluster at a time, preserving the legacy v1 wire and existing storage keys initially, and retaining old UniFFI methods only as time-bounded forwarding adapters. Production cutover should still happen on iOS and Android in the same phase.
 
 ## Current dependency and ownership map
 
 ```text
-Host machine (outside this repository)
+Legacy host machine (v1 compatibility only)
   npx kittylitter
-    -> Alleycat daemon
+    -> legacy v1 daemon
     -> stable iroh node id + token + optional relay
     -> ALPN alleycat/1
     -> list_agents / restart_agent / connect
@@ -59,7 +68,7 @@ The main ownership points are:
 | --- | --- | --- |
 | Pair-payload validation and host wire | `alleycat.rs` | Handwritten client copy of the host protocol, including compatibility aliases and replay fields (`shared/rust-bridge/codex-mobile-client/src/alleycat.rs:22-33`, `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:291-369`). |
 | Public pairing records and parsing | `ffi/alleycat.rs` | Many records, but the object implements only construction and parsing (`shared/rust-bridge/codex-mobile-client/src/ffi/alleycat.rs:6-38`, `shared/rust-bridge/codex-mobile-client/src/ffi/alleycat.rs:84-102`). |
-| Probe and connect | `ServerBridge` | Alleycat calls sit beside direct, SSH, Slingshot, disconnect, and restart operations (`shared/rust-bridge/codex-mobile-client/src/ffi/discovery.rs:70-80`, `shared/rust-bridge/codex-mobile-client/src/ffi/discovery.rs:288-340`). |
+| Probe and connect | `ServerBridge` | Legacy v1 calls sit beside direct, SSH, Slingshot, disconnect, and restart operations (`shared/rust-bridge/codex-mobile-client/src/ffi/discovery.rs:70-80`, `shared/rust-bridge/codex-mobile-client/src/ffi/discovery.rs:288-340`). |
 | Endpoint identity, agent cache, session construction, restart target | `MobileClient` | Pairing state is mixed into a facade that also owns all sessions, AppStore, discovery, auth, caches, voice-related runtime, and terminals (`shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:66-140`). |
 | Runtime health and hot reconnect | `ServerSession` workers | Each selected runtime has a worker and transport, but all workers write one host health channel (`shared/rust-bridge/codex-mobile-client/src/session/connection.rs:824-903`). |
 | Cold reconnect selection | `reconnect.rs` + `ffi/reconnect.rs` | A generic, stringly `SavedServerRecord` is mirrored from both platforms and planned independently of the live transport worker (`shared/rust-bridge/codex-mobile-client/src/reconnect.rs:17-46`, `shared/rust-bridge/codex-mobile-client/src/ffi/reconnect.rs:64-150`). |
@@ -74,15 +83,37 @@ The main ownership points are:
 
 ### 1. Host bootstrap and dependency resolution
 
-The only in-repository user contract for starting a host is `npx kittylitter` (`README.md:64-68`). That exact command is repeated in the iOS pairing form and scanner, the iOS chooser, the Android pairing sheet, and the Android chooser (`apps/ios/Sources/Remora/Views/RemotePairingSheet.swift:148-153`, `apps/ios/Sources/Remora/Views/RemotePairingSheet.swift:221-228`, `apps/ios/Sources/Remora/Views/RemotePairingSheet.swift:537-542`, `apps/ios/Sources/Remora/Views/DiscoveryView.swift:251-260`, `apps/android/app/src/main/java/com/remora/android/ui/discovery/RemotePairingSheet.kt:611-616`, `apps/android/app/src/main/java/com/remora/android/ui/discovery/DiscoveryScreen.kt:511-519`). The host package and daemon implementation are not in this repository, so the command, payload, ALPN, and host responses are external compatibility contracts.
+New pairing starts the Remora Link host from the reviewed fork:
 
-The Rust workspace pins four Alleycat crates—bridge core, Pi, Claude, and OpenCode bridges—to a reviewed commit from Aman's fork (`shared/rust-bridge/Cargo.toml:28-31`). The current lock resolves those packages and the transitive `alleycat-codex-proto` to commit `3c6dfe2c6b060864d8cb0fcae58f73a6ed1ea10f` (`shared/rust-bridge/Cargo.lock:313-394`). These dependencies do **not** provide Remora's remote-host client protocol: Remora hand-defines that in `alleycat.rs`. The crates are consumed primarily by the SSH multi-agent bridge and shared Codex resolver (`shared/rust-bridge/codex-mobile-client/src/ssh_bridge.rs:10-35`, `shared/rust-bridge/codex-mobile-client/src/local_server/mod.rs:40-79`, `shared/rust-bridge/codex-mobile-client/src/ssh_launcher.rs:7-30`).
+```sh
+git clone https://github.com/amanthanvi/alleycat.git remora-link-host
+cd remora-link-host
+git checkout 0e625bece349a2ce53b7926cac7fc6a81121ca37
+cargo run -p remora-link
+```
 
-Normal Rust build/check/test lanes compile that pin without fetching a newer revision (`Makefile:350-378`, `Makefile:405-408`). Updating it is an explicit `make update-remora-link REV=<40-character-commit>` operation: the script verifies that the SHA exists in Aman's fork, refuses to overwrite dirty manifest/lock changes, backs both files up, updates all four packages precisely, and restores the originals on failure (`Makefile:352-354`, `tools/scripts/update-remora-link.sh:10-59`). This removes build-time dependency drift. One compatibility risk remains: host daemon behavior and Remora's handwritten remote-host wire are not type-shared with the pinned bridge crates, so a reviewed dependency/host update still needs protocol fixtures and migration validation. The repository's deterministic verification gate no longer needs a skip-update environment variable (`CONTEXT.md:64-73`).
+The host implements the exact `remora-link/2` contract: 64 KiB bounded control
+frames, pinned Iroh endpoint identity, fresh P-256 proof for every operation,
+host-authoritative scoped device records, and durable enrollment idempotency.
+`npx kittylitter` is retained only for detecting an already-installed legacy
+service and directing its user through side-by-side re-pairing; it is not a new
+bootstrap path and its token/key/state are never imported.
+
+The Rust workspace pins four legacy-named bridge crates—bridge core, Pi,
+Claude, and OpenCode bridges—to the reviewed fork revision
+`0e625bece349a2ce53b7926cac7fc6a81121ca37` (`shared/rust-bridge/Cargo.toml:28-31`).
+The lock resolves those packages plus transitive `alleycat-codex-proto` to that
+same revision. These dependency names are fork interop, not the product or wire
+identity. The production host contract is Remora Link v2; its mobile adapter
+must validate the host vectors rather than infer wire behavior from these
+bridge crates. The crates remain primarily consumed by the SSH multi-agent
+bridge and shared Codex resolver.
+
+Normal Rust build/check/test lanes compile that pin without fetching a newer revision (`Makefile:350-378`, `Makefile:405-408`). Updating it is an explicit `make update-remora-link REV=<40-character-commit>` operation: the script verifies that the SHA exists in Aman's fork, refuses to overwrite dirty manifest/lock changes, backs both files up, updates all four packages precisely, and restores the originals on failure or interruption (`Makefile:352-354`, `tools/scripts/update-remora-link.sh:10-74`). This removes build-time dependency drift. One compatibility risk remains: host daemon behavior and Remora's handwritten remote-host wire are not type-shared with the pinned bridge crates, so a reviewed dependency/host update still needs protocol fixtures and migration validation. The repository's deterministic verification gate no longer needs a skip-update environment variable (`CONTEXT.md:64-73`).
 
 ### 2. App startup and iroh device identity
 
-`MobileClient` owns one lazily initialized iroh endpoint and one optional 32-byte secret key. The first Alleycat operation captures the current key; setting a key after endpoint initialization cannot change that endpoint (`shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:98-117`, `shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:264-305`). The public `AppClient` therefore exposes four separate lifecycle calls: set key, read key, force endpoint initialization, and shutdown (`shared/rust-bridge/codex-mobile-client/src/ffi/client.rs:266-317`).
+`MobileClient` owns one lazily initialized iroh endpoint and one optional 32-byte secret key. The first legacy-v1 operation captures the current key; setting a key after endpoint initialization cannot change that endpoint (`shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:98-117`, `shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:264-305`). The public `AppClient` therefore exposes four separate lifecycle calls: set key, read key, force endpoint initialization, and shutdown (`shared/rust-bridge/codex-mobile-client/src/ffi/client.rs:266-317`).
 
 iOS starts reachability and then loads the saved key into Rust (`apps/ios/Sources/Remora/Models/AppRuntimeController.swift:14-37`). After a pairing or reconnect operation, callers must remember to read the key back and persist it (`apps/ios/Sources/Remora/Models/AppRuntimeController.swift:39-55`). Catalyst duplicates the same load/save/shutdown/reconnect sequence in a separate implementation (`apps/ios/Sources/Remora/Models/CatalystRuntimeStubs.swift:8-68`).
 
@@ -255,7 +286,7 @@ Repository search found no non-generated Swift or Kotlin callers. Its only activ
 | Pair payload | Keep `v`, `node_id`, `token`, optional `relay`, optional `host_name`, and old host-name aliases (`shared/rust-bridge/codex-mobile-client/src/alleycat.rs:291-299`, `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:434-463`). |
 | Agent compatibility | Keep WebSocket/JSONL values, known alias normalization, unknown-agent pass-through, optional presentation/capabilities, and legacy permission defaults (`shared/rust-bridge/codex-mobile-client/src/alleycat.rs:70-120`, `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:353-430`). |
 | Replay | Keep `_alleycat_seq`, optional `resume.last_seq`, and `fresh` / `resumed` / `drift_reload` response meanings (`shared/rust-bridge/codex-mobile-client/src/alleycat.rs:313-351`, `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:850-858`). |
-| Host bootstrap | Preserve the exact `npx kittylitter` command in README and pairing UI until the upstream distribution contract changes (`CONTEXT.md:34-40`, `README.md:64-68`). Centralize the copy without renaming it. |
+| Host bootstrap | New pairing uses Remora Link and `remora-link/2`. Detect `npx kittylitter` only as an explicit legacy-service migration signal; never create a new v1 pairing or copy its token/key/state. |
 | Stable paired-host identity | Preserve `alleycat:{node_id}` for existing profiles/runtime/thread keys. `ThreadKey` includes server ID, so changing it would fork runtime identity (`CONTEXT.md:49-54`, `shared/rust-bridge/codex-mobile-client/src/mobile_client/mod.rs:680-687`). |
 | Existing profile records | Decode old JSON fields, `rememberedByUser` default, old relay-only records, comma-separated agent strings, wire strings, and SSH-bridge overloading until typed migration is complete (`apps/ios/Sources/Remora/Models/SavedServer.swift:68-121`, `shared/rust-bridge/codex-mobile-client/src/reconnect.rs:19-45`, `shared/rust-bridge/codex-mobile-client/src/reconnect.rs:786-812`). |
 | Existing secure storage | Continue reading `com.alleycat.token`, `com.alleycat.device_key`, and `alleycat_credentials` during a time-bounded migration (`apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift:21-25`, `apps/ios/Sources/Remora/Models/AlleycatCredentialStore.swift:143-147`, `apps/android/app/src/main/java/com/remora/android/state/AlleycatCredentialStore.kt:41-44`). |
@@ -278,8 +309,8 @@ Repository search found no non-generated Swift or Kotlin callers. Its only activ
 
 | Layer | What is covered | Evidence |
 | --- | --- | --- |
-| Alleycat wire | Connect request with/without resume, highest-sequence extraction, payload success/legacy alias/bad ID, runtime aliasing and unknown pass-through, legacy/explicit capabilities, JSONL agent decoding | `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:902-1071` |
-| Reconnect plan | Connection-mode/port resolution, connected skip, remote URL, Alleycat enabled/default wire/disabled fallback, SSH/direct/local, old pairing requiring a scan, SSH bridge | `shared/rust-bridge/codex-mobile-client/src/reconnect.rs:906-1371` |
+| Legacy v1 wire | Connect request with/without resume, highest-sequence extraction, payload success/legacy alias/bad ID, runtime aliasing and unknown pass-through, legacy/explicit capabilities, JSONL agent decoding | `shared/rust-bridge/codex-mobile-client/src/alleycat.rs:902-1071` |
+| Reconnect plan | Connection-mode/port resolution, connected skip, remote URL, legacy-v1 enabled/default wire/disabled fallback, SSH/direct/local, old pairing requiring a scan, SSH bridge | `shared/rust-bridge/codex-mobile-client/src/reconnect.rs:906-1371` |
 | Transport seam | Keepalive replacement/drop ordering and trait object safety | `shared/rust-bridge/codex-mobile-client/src/session/remote_transport.rs:83-175` |
 | Session worker | Fake JSONL stream drop causes reconnect and one request retry | `shared/rust-bridge/codex-mobile-client/src/session/connection.rs:2045-2124` |
 | Runtime selection | Healthy-session short-circuit detects a missing selected runtime and serializes selection | `shared/rust-bridge/codex-mobile-client/src/mobile_client/tests.rs:417-467` |
@@ -476,7 +507,7 @@ Only after the new module has shipped stably:
 2. write Remora-named secure/profile keys while reading both new and legacy keys;
 3. migrate on successful read and verify the new copy before deleting the old one;
 4. retain a documented fallback/removal version;
-5. remove `multi_clanker_and_quic_enabled`, comma-agent policy, raw token fields, native endpoint hooks, Alleycat operations on `ServerBridge`, and the parse-only bridge;
+5. remove `multi_clanker_and_quic_enabled`, comma-agent policy, raw token fields, native endpoint hooks, legacy-v1 operations on `ServerBridge`, and the parse-only bridge;
 6. regenerate both platform bindings; and
 7. independently decide whether to delete the unused proximity-pairing exports and tests.
 

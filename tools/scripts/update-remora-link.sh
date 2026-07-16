@@ -23,7 +23,9 @@ fi
 rm -rf "$VERIFY_DIR"
 
 if ! git -C "$REPO_DIR" diff --quiet -- \
-  shared/rust-bridge/Cargo.toml shared/rust-bridge/Cargo.lock; then
+  shared/rust-bridge/Cargo.toml shared/rust-bridge/Cargo.lock || \
+  ! git -C "$REPO_DIR" diff --cached --quiet -- \
+    shared/rust-bridge/Cargo.toml shared/rust-bridge/Cargo.lock; then
   echo "error: commit or revert local Cargo.toml/Cargo.lock changes before updating the pin" >&2
   exit 1
 fi
@@ -31,15 +33,27 @@ fi
 BACKUP_DIR="$(mktemp -d)"
 cp "$MANIFEST" "$BACKUP_DIR/Cargo.toml"
 cp "$LOCKFILE" "$BACKUP_DIR/Cargo.lock"
+RESTORED=0
 restore() {
-  cp "$BACKUP_DIR/Cargo.toml" "$MANIFEST"
-  cp "$BACKUP_DIR/Cargo.lock" "$LOCKFILE"
-  rm -rf "$BACKUP_DIR"
+  if [[ "$RESTORED" -eq 0 ]]; then
+    cp "$BACKUP_DIR/Cargo.toml" "$MANIFEST"
+    cp "$BACKUP_DIR/Cargo.lock" "$LOCKFILE"
+    rm -rf "$BACKUP_DIR"
+    RESTORED=1
+  fi
 }
-trap restore ERR INT TERM
+abort_with_status() {
+  local status="$1"
+  trap - ERR INT TERM
+  restore
+  exit "$status"
+}
+trap 'abort_with_status $?' ERR
+trap 'abort_with_status 130' INT
+trap 'abort_with_status 143' TERM
 
 perl -0pi -e \
-  's#(https://github\.com/amanthanvi/alleycat\.git", rev = ")[0-9a-f]{40}(" \})#$1'"$REVISION"'$2#g' \
+  's#(https://github\.com/amanthanvi/alleycat\.git", rev = ")[0-9a-f]{40}(" \})#${1}'"$REVISION"'${2}#g' \
   "$MANIFEST"
 
 for package in \
