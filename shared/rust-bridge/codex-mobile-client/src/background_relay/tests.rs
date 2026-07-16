@@ -5,13 +5,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Register(String),
+    TombstoneDevice(String, u64),
     Fetch(String, u64),
     Snapshot(String),
     Repair(String, RelayRepairMode),
@@ -22,21 +23,52 @@ enum Action {
 
 #[derive(Default)]
 struct MemoryJournal {
-    entries: Mutex<BTreeMap<String, RelayBindingEntry>>,
+    entries: Arc<Mutex<BTreeMap<String, RelayBindingEntry>>>,
+    provider_tombstone_fences: Mutex<Vec<RelayProviderTombstoneFence>>,
     actions: Arc<Mutex<Vec<Action>>>,
     list_delay: Mutex<Option<Duration>>,
     load_delay: Mutex<Option<Duration>>,
     cas_failures_before_apply: Mutex<u32>,
+    staged_cas_failures_before_apply: Mutex<u32>,
+    staged_cas_failures_after_apply: Mutex<u32>,
+    staged_cas_gate: Mutex<Option<JournalCasGate>>,
+    token_revision_cas_gate: Mutex<Option<(String, JournalCasGate)>>,
+}
+
+#[derive(Clone, Default)]
+struct JournalCasGate {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+impl JournalCasGate {
+    async fn wait_until_started(&self) {
+        self.started.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn wait_until_completed(&self) {
+        self.completed.notified().await;
+    }
 }
 
 impl MemoryJournal {
     fn with_actions(actions: Arc<Mutex<Vec<Action>>>) -> Self {
         Self {
-            entries: Mutex::new(BTreeMap::new()),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
+            provider_tombstone_fences: Mutex::new(Vec::new()),
             actions,
             list_delay: Mutex::new(None),
             load_delay: Mutex::new(None),
             cas_failures_before_apply: Mutex::new(0),
+            staged_cas_failures_before_apply: Mutex::new(0),
+            staged_cas_failures_after_apply: Mutex::new(0),
+            staged_cas_gate: Mutex::new(None),
+            token_revision_cas_gate: Mutex::new(None),
         }
     }
 
@@ -52,6 +84,44 @@ impl MemoryJournal {
     async fn fail_next_cas_before_apply(&self) {
         *self.cas_failures_before_apply.lock().await += 1;
     }
+
+    async fn fail_next_staged_cas_before_apply(&self) {
+        *self.staged_cas_failures_before_apply.lock().await += 1;
+    }
+
+    async fn fail_next_staged_cas_after_apply(&self) {
+        *self.staged_cas_failures_after_apply.lock().await += 1;
+    }
+
+    async fn gate_next_staged_cas_after_drop(&self) -> JournalCasGate {
+        let gate = JournalCasGate::default();
+        *self.staged_cas_gate.lock().await = Some(gate.clone());
+        gate
+    }
+
+    async fn gate_next_token_revision_cas(&self, host: &str) -> JournalCasGate {
+        let gate = JournalCasGate::default();
+        *self.token_revision_cas_gate.lock().await = Some((host.to_owned(), gate.clone()));
+        gate
+    }
+}
+
+fn advances_token_revision(current: &RelayBindingEntry, replacement: &RelayBindingEntry) -> bool {
+    replacement.registrations.iter().any(|replacement| {
+        let current_revision = current
+            .registrations
+            .iter()
+            .find(|current| {
+                current.provider == replacement.provider
+                    && current.environment == replacement.environment
+            })
+            .and_then(|current| current.token_revision);
+        match (current_revision, replacement.token_revision) {
+            (None, Some(_)) => true,
+            (Some(current), Some(replacement)) => replacement > current,
+            _ => false,
+        }
+    })
 }
 
 #[async_trait]
@@ -91,6 +161,33 @@ impl RelayBindingJournalPort for MemoryJournal {
             .cloned())
     }
 
+    async fn provider_tombstone_fences(
+        &self,
+    ) -> Result<Vec<RelayProviderTombstoneFence>, RelayJournalError> {
+        Ok(self.provider_tombstone_fences.lock().await.clone())
+    }
+
+    async fn advance_provider_tombstone_fence(
+        &self,
+        tombstone: &PushTokenTombstone,
+    ) -> Result<(), RelayJournalError> {
+        let mut fences = self.provider_tombstone_fences.lock().await;
+        if let Some(fence) = fences.iter_mut().find(|fence| {
+            fence.provider == tombstone.provider && fence.environment == tombstone.environment
+        }) {
+            fence.through_local_generation = fence
+                .through_local_generation
+                .max(tombstone.through_local_generation);
+        } else {
+            fences.push(RelayProviderTombstoneFence {
+                provider: tombstone.provider,
+                environment: tombstone.environment,
+                through_local_generation: tombstone.through_local_generation,
+            });
+        }
+        Ok(())
+    }
+
     async fn compare_and_swap(
         &self,
         host_id: &RelayHostId,
@@ -100,8 +197,83 @@ impl RelayBindingJournalPort for MemoryJournal {
         if replacement.host_id != *host_id {
             return Err(RelayJournalError::Conflict);
         }
+        let pauses_token_revision = self
+            .entries
+            .lock()
+            .await
+            .get(&host_id.0)
+            .is_some_and(|current| advances_token_revision(current, &replacement));
+        let token_revision_gate = if pauses_token_revision {
+            let mut gate = self.token_revision_cas_gate.lock().await;
+            if gate
+                .as_ref()
+                .is_some_and(|(gated_host, _)| gated_host == &host_id.0)
+            {
+                gate.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(gate) = token_revision_gate {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
+        let replacement_is_staged = replacement.state == RelayBindingState::Staged;
+        if replacement_is_staged && let Some(gate) = self.staged_cas_gate.lock().await.take() {
+            let entries = Arc::clone(&self.entries);
+            let host_id = host_id.clone();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                gate.started.notify_one();
+                gate.release.notified().await;
+                let mut entries = entries.lock().await;
+                let current = entries.get(&host_id.0);
+                if current.is_some_and(|entry| {
+                    entry.wake.applied_cursor > entry.wake.highest_seen_cursor
+                        || entry
+                            .wake
+                            .remote_ack_ahead_cursor
+                            .is_some_and(|cursor| cursor <= entry.wake.applied_cursor)
+                }) {
+                    let _ = sender.send(Err(RelayJournalError::Unavailable));
+                    gate.completed.notify_one();
+                    return;
+                }
+                let revision_matches = match (expected_revision, current) {
+                    (None, None) => true,
+                    (Some(expected), Some(current)) => current.revision == expected,
+                    _ => false,
+                };
+                if !revision_matches {
+                    let _ = sender.send(Err(RelayJournalError::Conflict));
+                    gate.completed.notify_one();
+                    return;
+                }
+                entries.insert(host_id.0, replacement);
+                let _ = sender.send(Ok(()));
+                gate.completed.notify_one();
+            });
+            return receiver
+                .await
+                .unwrap_or(Err(RelayJournalError::Unavailable));
+        }
         let mut entries = self.entries.lock().await;
         let current = entries.get(&host_id.0);
+        // Match the native opaque-journal adapter's reload behavior. It
+        // decodes the current authenticated blob before a subsequent CAS, so
+        // an invalid intermediate ledger must wedge this in-memory test port
+        // too instead of appearing recoverable only because it stays typed.
+        if current.is_some_and(|entry| {
+            entry.wake.applied_cursor > entry.wake.highest_seen_cursor
+                || entry
+                    .wake
+                    .remote_ack_ahead_cursor
+                    .is_some_and(|cursor| cursor <= entry.wake.applied_cursor)
+        }) {
+            return Err(RelayJournalError::Unavailable);
+        }
         let revision_matches = match (expected_revision, current) {
             (None, None) => true,
             (Some(expected), Some(current)) => current.revision == expected,
@@ -116,6 +288,13 @@ impl RelayBindingJournalPort for MemoryJournal {
             return Err(RelayJournalError::Unavailable);
         }
         drop(failures);
+        if replacement_is_staged {
+            let mut failures = self.staged_cas_failures_before_apply.lock().await;
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(RelayJournalError::Unavailable);
+            }
+        }
         let prior_applied = current.map_or(0, |entry| entry.wake.applied_cursor);
         if replacement.wake.applied_cursor > prior_applied {
             self.actions.lock().await.push(Action::LocalCommit(
@@ -124,33 +303,117 @@ impl RelayBindingJournalPort for MemoryJournal {
             ));
         }
         entries.insert(host_id.0.clone(), replacement);
+        if replacement_is_staged {
+            let mut failures = self.staged_cas_failures_after_apply.lock().await;
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(RelayJournalError::Unavailable);
+            }
+        }
         Ok(())
     }
 }
 
 #[derive(Default)]
 struct MemorySecrets {
-    values: Mutex<HashMap<String, OpaqueRelaySecret>>,
+    values: Arc<Mutex<HashMap<String, MemorySecretRecord>>>,
     write_failures: Mutex<u32>,
     write_delay: Mutex<Option<Duration>>,
-    delete_failures: Mutex<HashMap<String, u32>>,
+    tombstone_failures_before_apply: Mutex<HashMap<String, u32>>,
+    tombstone_failures_after_apply: Mutex<u32>,
+    cas_failures_before_apply: Mutex<u32>,
+    cas_failures_after_apply: Mutex<u32>,
+    cas_delay_once: Mutex<Option<Duration>>,
+    cas_gate: Mutex<Option<SecretCasGate>>,
+    read_gate: Mutex<Option<(String, u32, SecretCasGate)>>,
+}
+
+struct MemorySecretRecord {
+    secret: Option<OpaqueRelaySecret>,
+    revision: u64,
+}
+
+#[derive(Clone, Default)]
+struct SecretCasGate {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+impl SecretCasGate {
+    async fn wait_until_started(&self) {
+        self.started.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn wait_until_completed(&self) {
+        self.completed.notified().await;
+    }
 }
 
 impl MemorySecrets {
     async fn contains(&self, alias: &RelaySecretAlias) -> bool {
-        self.values.lock().await.contains_key(&alias.0)
+        self.values
+            .lock()
+            .await
+            .get(&alias.0)
+            .is_some_and(|record| record.secret.is_some())
     }
 
     async fn count(&self) -> usize {
-        self.values.lock().await.len()
+        self.values
+            .lock()
+            .await
+            .values()
+            .filter(|record| record.secret.is_some())
+            .count()
     }
 
-    async fn fail_next_delete(&self, alias: &RelaySecretAlias) {
-        self.delete_failures.lock().await.insert(alias.0.clone(), 1);
+    async fn fail_next_tombstone_before_apply(&self, alias: &RelaySecretAlias) {
+        self.tombstone_failures_before_apply
+            .lock()
+            .await
+            .insert(alias.0.clone(), 1);
     }
 
-    async fn fail_next_write(&self) {
-        *self.write_failures.lock().await += 1;
+    async fn fail_next_tombstone_after_apply(&self) {
+        *self.tombstone_failures_after_apply.lock().await += 1;
+    }
+
+    async fn fail_next_cas_before_apply(&self) {
+        *self.cas_failures_before_apply.lock().await += 1;
+    }
+
+    async fn fail_second_cas_after_apply(&self) {
+        *self.cas_failures_after_apply.lock().await = 2;
+    }
+
+    async fn fail_next_cas_after_apply(&self) {
+        *self.cas_failures_after_apply.lock().await = 1;
+    }
+
+    async fn delay_next_cas_after_drop(&self, delay: Duration) {
+        *self.cas_delay_once.lock().await = Some(delay);
+    }
+
+    async fn gate_next_cas_after_drop(&self) -> SecretCasGate {
+        let gate = SecretCasGate::default();
+        *self.cas_gate.lock().await = Some(gate.clone());
+        gate
+    }
+
+    async fn gate_read_after(
+        &self,
+        alias: &RelaySecretAlias,
+        skipped_matching_reads: u32,
+    ) -> SecretCasGate {
+        let gate = SecretCasGate::default();
+        *self.read_gate.lock().await =
+            Some((alias.0.clone(), skipped_matching_reads, gate.clone()));
+        gate
     }
 }
 
@@ -160,14 +423,42 @@ impl OpaqueRelaySecretPort for MemorySecrets {
         &self,
         alias: &RelaySecretAlias,
     ) -> Result<Option<OpaqueRelaySecret>, RelaySecretStoreError> {
-        Ok(self.values.lock().await.get(&alias.0).cloned())
+        let gate = {
+            let mut gate = self.read_gate.lock().await;
+            match gate.as_mut() {
+                Some((gated_alias, skipped_matching_reads, _))
+                    if gated_alias == &alias.0 && *skipped_matching_reads > 0 =>
+                {
+                    *skipped_matching_reads -= 1;
+                    None
+                }
+                Some((gated_alias, _, _)) if gated_alias == &alias.0 => {
+                    gate.take().map(|(_, _, gate)| gate)
+                }
+                _ => None,
+            }
+        };
+        if let Some(gate) = gate.as_ref() {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
+        let secret = self
+            .values
+            .lock()
+            .await
+            .get(&alias.0)
+            .and_then(|record| record.secret.clone());
+        if let Some(gate) = gate {
+            gate.completed.notify_one();
+        }
+        Ok(secret)
     }
 
-    async fn write(
+    async fn create_if_absent(
         &self,
         alias: &RelaySecretAlias,
         secret: OpaqueRelaySecret,
-    ) -> Result<(), RelaySecretStoreError> {
+    ) -> Result<RelaySecretCreateOutcome, RelaySecretStoreError> {
         let delay = *self.write_delay.lock().await;
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -178,12 +469,131 @@ impl OpaqueRelaySecretPort for MemorySecrets {
             return Err(RelaySecretStoreError::Unavailable);
         }
         drop(failures);
-        self.values.lock().await.insert(alias.0.clone(), secret);
-        Ok(())
+        let mut values = self.values.lock().await;
+        if values.contains_key(&alias.0) {
+            return Ok(RelaySecretCreateOutcome::AlreadyExists);
+        }
+        values.insert(
+            alias.0.clone(),
+            MemorySecretRecord {
+                secret: Some(secret),
+                revision: 1,
+            },
+        );
+        Ok(RelaySecretCreateOutcome::Created)
     }
 
-    async fn delete(&self, alias: &RelaySecretAlias) -> Result<(), RelaySecretStoreError> {
-        let mut failures = self.delete_failures.lock().await;
+    async fn revision(
+        &self,
+        alias: &RelaySecretAlias,
+    ) -> Result<RelaySecretRevision, RelaySecretStoreError> {
+        Ok(self
+            .values
+            .lock()
+            .await
+            .get(&alias.0)
+            .map_or(RelaySecretRevision::Missing, |record| {
+                RelaySecretRevision::Found(record.revision)
+            }))
+    }
+
+    async fn compare_and_swap(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
+        replacement_revision: u64,
+        secret: OpaqueRelaySecret,
+    ) -> Result<RelaySecretCasOutcome, RelaySecretStoreError> {
+        let mut failures = self.cas_failures_before_apply.lock().await;
+        if *failures > 0 {
+            *failures -= 1;
+            return Err(RelaySecretStoreError::Unavailable);
+        }
+        drop(failures);
+        if let Some(gate) = self.cas_gate.lock().await.take() {
+            let values = Arc::clone(&self.values);
+            let alias = alias.0.clone();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                gate.started.notify_one();
+                gate.release.notified().await;
+                let mut values = values.lock().await;
+                let current_revision = values.get(&alias).map(|record| record.revision);
+                let outcome = if current_revision == expected_revision {
+                    values.insert(
+                        alias,
+                        MemorySecretRecord {
+                            secret: Some(secret),
+                            revision: replacement_revision,
+                        },
+                    );
+                    RelaySecretCasOutcome::Stored
+                } else {
+                    RelaySecretCasOutcome::Conflict
+                };
+                let _ = sender.send(outcome);
+                gate.completed.notify_one();
+            });
+            return receiver
+                .await
+                .map_err(|_| RelaySecretStoreError::Unavailable);
+        }
+        if let Some(delay) = self.cas_delay_once.lock().await.take() {
+            let values = Arc::clone(&self.values);
+            let alias = alias.0.clone();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let mut values = values.lock().await;
+                let current_revision = values.get(&alias).map(|record| record.revision);
+                let outcome = if current_revision == expected_revision {
+                    values.insert(
+                        alias,
+                        MemorySecretRecord {
+                            secret: Some(secret),
+                            revision: replacement_revision,
+                        },
+                    );
+                    RelaySecretCasOutcome::Stored
+                } else {
+                    RelaySecretCasOutcome::Conflict
+                };
+                let _ = sender.send(outcome);
+            });
+            return receiver
+                .await
+                .map_err(|_| RelaySecretStoreError::Unavailable);
+        }
+        let mut values = self.values.lock().await;
+        let current_revision = values.get(&alias.0).map(|record| record.revision);
+        if current_revision != expected_revision {
+            return Ok(RelaySecretCasOutcome::Conflict);
+        }
+        values.insert(
+            alias.0.clone(),
+            MemorySecretRecord {
+                secret: Some(secret),
+                revision: replacement_revision,
+            },
+        );
+        drop(values);
+        let mut failures = self.cas_failures_after_apply.lock().await;
+        if *failures > 0 {
+            *failures -= 1;
+            if *failures == 0 {
+                return Err(RelaySecretStoreError::Unavailable);
+            }
+        }
+        Ok(RelaySecretCasOutcome::Stored)
+    }
+
+    async fn compare_and_tombstone(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
+        replacement_revision: u64,
+    ) -> Result<RelaySecretCasOutcome, RelaySecretStoreError> {
+        let mut failures = self.tombstone_failures_before_apply.lock().await;
         if let Some(remaining) = failures.get_mut(&alias.0)
             && *remaining > 0
         {
@@ -191,8 +601,25 @@ impl OpaqueRelaySecretPort for MemorySecrets {
             return Err(RelaySecretStoreError::Unavailable);
         }
         drop(failures);
-        self.values.lock().await.remove(&alias.0);
-        Ok(())
+        let mut values = self.values.lock().await;
+        let current_revision = values.get(&alias.0).map(|record| record.revision);
+        if current_revision != expected_revision {
+            return Ok(RelaySecretCasOutcome::Conflict);
+        }
+        values.insert(
+            alias.0.clone(),
+            MemorySecretRecord {
+                secret: None,
+                revision: replacement_revision,
+            },
+        );
+        drop(values);
+        let mut failures = self.tombstone_failures_after_apply.lock().await;
+        if *failures > 0 {
+            *failures -= 1;
+            return Err(RelaySecretStoreError::Unavailable);
+        }
+        Ok(RelaySecretCasOutcome::Stored)
     }
 }
 
@@ -359,7 +786,9 @@ impl RelayTransportPort for FakeTransport {
             .await
             .push(Action::Register(installation.clone()));
         let mut counts = self.register_counts.lock().await;
-        *counts.entry(installation.clone()).or_default() += 1;
+        let count = counts.entry(installation.clone()).or_default();
+        *count += 1;
+        let registration_generation = *count;
         drop(counts);
         if let Some(error) = self
             .register_errors
@@ -374,11 +803,13 @@ impl RelayTransportPort for FakeTransport {
         Ok(RelayDeviceRegistrationReceipt {
             schema_version: RELAY_SCHEMA_VERSION,
             installation_id: request.installation_id,
-            registration_id: RelayRegistrationId::parse(format!("registration_{installation}"))
-                .expect("test registration id"),
+            registration_id: RelayRegistrationId::parse(format!(
+                "registration_{installation}_{registration_generation}"
+            ))
+            .expect("test registration id"),
             provider: request.provider,
             environment: request.environment,
-            generation: 1,
+            generation: registration_generation,
             replaced: false,
         })
     }
@@ -389,6 +820,10 @@ impl RelayTransportPort for FakeTransport {
         request: RelayTombstoneDeviceRequest,
     ) -> Result<(), RelayTransportError> {
         self.capture(&context).await;
+        self.actions.lock().await.push(Action::TombstoneDevice(
+            request.installation_id.0.clone(),
+            request.through_generation,
+        ));
         self.tombstone_device_results
             .lock()
             .await
@@ -525,12 +960,16 @@ impl RelayAuthoritativeRepairPort for FakeRepair {
     async fn repair(
         &self,
         host_id: &RelayHostId,
+        generation: u64,
         mode: RelayRepairMode,
         operation: RelayOperationContext,
     ) -> Result<RelayRepairReceipt, RelayRepairError> {
-        if operation.cancellation.is_cancelled() {
+        if generation == 0 || operation.cancellation.is_cancelled() {
             return Err(RelayRepairError::Cancelled);
         }
+        operation
+            .remaining()
+            .map_err(|_| RelayRepairError::DeadlineExceeded)?;
         self.actions
             .lock()
             .await
@@ -586,12 +1025,14 @@ impl TestWorld {
 
     async fn enroll(&self, host: &str, installation: &str) {
         let relay = self.relay();
+        let enrollment = enrollment(host, installation);
+        let command_id = enrollment.command_id.clone();
         relay
-            .stage_enrollment(enrollment(host, installation), operation())
+            .stage_enrollment(enrollment, operation())
             .await
             .expect("stage enrollment");
         relay
-            .commit_enrollment(&RelayHostId(host.to_owned()), operation())
+            .commit_enrollment(&RelayHostId(host.to_owned()), &command_id, operation())
             .await
             .expect("commit enrollment");
     }
@@ -602,21 +1043,39 @@ fn secret(byte: u8) -> OpaqueRelaySecret {
 }
 
 fn enrollment(host: &str, installation: &str) -> RelayEnrollment {
+    enrollment_with_secrets(host, installation, 0x41, 0x42)
+}
+
+fn command_id(installation: &str) -> RelayEnrollmentCommandId {
+    RelayEnrollmentCommandId::parse(format!("command_{installation}")).expect("command id")
+}
+
+fn enrollment_with_secrets(
+    host: &str,
+    installation: &str,
+    read_byte: u8,
+    manage_byte: u8,
+) -> RelayEnrollment {
     RelayEnrollment {
         host_id: RelayHostId(host.to_owned()),
         origin: ValidatedRelayOrigin::parse(&format!("https://{host}.relay.example/"), false)
             .expect("secure origin"),
         installation_id: RelayInstallationId::parse(installation).expect("installation id"),
-        read_capability: secret(0x41),
-        manage_capability: secret(0x42),
+        command_id: command_id(installation),
+        read_capability: secret(read_byte),
+        manage_capability: secret(manage_byte),
     }
 }
 
 fn observation(generation: u64) -> PushTokenObservation {
+    observation_with_byte(generation, 0x77)
+}
+
+fn observation_with_byte(generation: u64, byte: u8) -> PushTokenObservation {
     PushTokenObservation {
         provider: RelayPushProvider::Apns,
         environment: RelayPushEnvironment::Sandbox,
-        token: secret(0x77),
+        token: secret(byte),
         local_generation: generation,
         observed_at_ms: 100,
     }
@@ -764,6 +1223,314 @@ async fn partial_token_fanout_is_durable_and_retries_only_the_pending_host() {
 }
 
 #[tokio::test]
+async fn terminal_token_tombstone_defeats_a_late_native_custody_cas() {
+    let world = TestWorld::new();
+    let host = RelayHostId("late-token-terminal-host".to_owned());
+    let installation = "installation_late_token_terminal_0001";
+    world.enroll(&host.0, installation).await;
+    let gate = world.secrets.gate_next_cas_after_drop().await;
+    let relay = world.relay();
+    let observe = tokio::spawn(async move {
+        relay
+            .observe_push_token(
+                observation(1),
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("provider token enters native custody CAS");
+    let receipt = tokio::time::timeout(Duration::from_secs(1), observe)
+        .await
+        .expect("observation respects its deadline")
+        .expect("observation task joins")
+        .expect("fanout classifies the timed-out host");
+    assert_eq!((receipt.synchronized, receipt.pending_retry), (0, 1));
+
+    let pending = world.journal.entry(&host.0).await;
+    assert_eq!(pending.state, RelayBindingState::Active);
+    assert!(pending.registrations[0].pending_sync);
+    assert_eq!(pending.registrations[0].token_revision, None);
+    let token_alias = pending.registrations[0].token_alias.clone();
+    world
+        .relay()
+        .rollback_enrollment(&host, &command_id(installation), operation())
+        .await
+        .expect("terminal cleanup revision-tombstones the pending token alias");
+
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late provider token CAS completes with a revision conflict");
+    let terminal = world.journal.entry(&host.0).await;
+    assert_eq!(terminal.state, RelayBindingState::Tombstoned);
+    assert!(terminal.registrations.is_empty());
+    assert_eq!(
+        world.secrets.revision(&token_alias).await.unwrap(),
+        RelaySecretRevision::Found(1)
+    );
+    assert!(world.secrets.read(&token_alias).await.unwrap().is_none());
+    assert_eq!(world.transport.register_count(installation).await, 0);
+}
+
+#[tokio::test]
+async fn ambiguous_token_custody_retries_with_a_higher_journaled_revision_after_restart() {
+    let world = TestWorld::new();
+    let host = "ambiguous-token-custody-host";
+    let installation = "installation_ambiguous_token_custody_0001";
+    world.enroll(host, installation).await;
+    world.secrets.fail_next_cas_after_apply().await;
+
+    let interrupted = world
+        .relay()
+        .observe_push_token(observation(1), operation())
+        .await
+        .expect("fanout classifies ambiguous native custody");
+    assert_eq!(
+        (interrupted.synchronized, interrupted.pending_retry),
+        (0, 1)
+    );
+    let pending = world.journal.entry(host).await;
+    assert!(pending.registrations[0].pending_sync);
+    assert_eq!(pending.registrations[0].token_revision, None);
+    let token_alias = pending.registrations[0].token_alias.clone();
+    assert_eq!(
+        world.secrets.revision(&token_alias).await.unwrap(),
+        RelaySecretRevision::Found(1)
+    );
+
+    let recovery = world
+        .relay()
+        .reconcile_all(100, operation())
+        .await
+        .expect("fresh coordinator loads the pending registration");
+    assert!(matches!(
+        recovery.as_slice(),
+        [RelayReconcileOutcome::Failed {
+            host_id,
+            error: RelayError::SecureStorageUnavailable,
+        }] if host_id.0 == host
+    ));
+    assert_eq!(world.transport.register_count(installation).await, 0);
+
+    let retried = world
+        .relay()
+        .observe_push_token(observation(1), operation())
+        .await
+        .expect("re-observation advances ambiguous custody via CAS");
+    assert_eq!((retried.synchronized, retried.pending_retry), (1, 0));
+    let active = world.journal.entry(host).await;
+    assert!(!active.registrations[0].pending_sync);
+    assert_eq!(active.registrations[0].token_alias, token_alias);
+    assert_eq!(active.registrations[0].token_revision, Some(2));
+    assert_eq!(
+        world.secrets.revision(&token_alias).await.unwrap(),
+        RelaySecretRevision::Found(2)
+    );
+    assert_eq!(world.transport.register_count(installation).await, 1);
+}
+
+#[tokio::test]
+async fn exact_token_read_rejects_an_interleaved_cas_and_competing_journal_cas() {
+    let world = TestWorld::new();
+    let host = "exact-token-read-host";
+    let host_id = RelayHostId(host.to_owned());
+    let installation = "installation_exact_token_read_0001";
+    world.enroll(host, installation).await;
+    world
+        .transport
+        .enqueue_register_error(installation, RelayTransportError::Network)
+        .await;
+    let initial = world
+        .relay()
+        .observe_push_token(observation(1), operation())
+        .await
+        .expect("initial observation remains pending after the remote error");
+    assert_eq!((initial.synchronized, initial.pending_retry), (0, 1));
+    let pending = world.journal.entry(host).await;
+    let token_alias = pending.registrations[0].token_alias.clone();
+    assert_eq!(pending.registrations[0].token_revision, Some(1));
+    assert_eq!(world.transport.register_count(installation).await, 1);
+
+    let read_gate = world.secrets.gate_read_after(&token_alias, 1).await;
+    let first_relay = world.relay();
+    let first = tokio::spawn(async move {
+        first_relay
+            .observe_push_token(observation_with_byte(1, 0x88), operation())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), read_gate.wait_until_started())
+        .await
+        .expect("first coordinator pauses between its revision reads");
+    let first_journaled = world.journal.entry(host).await;
+    assert_eq!(first_journaled.registrations[0].token_revision, Some(2));
+
+    let journal_gate = world.journal.gate_next_token_revision_cas(host).await;
+    let second_relay = world.relay();
+    let second = tokio::spawn(async move {
+        second_relay
+            .observe_push_token(observation_with_byte(1, 0x99), operation())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), journal_gate.wait_until_started())
+        .await
+        .expect("second coordinator advances custody before journaling its revision");
+    assert_eq!(
+        world.secrets.revision(&token_alias).await.unwrap(),
+        RelaySecretRevision::Found(3)
+    );
+    assert_eq!(
+        world.journal.entry(host).await.registrations[0].token_revision,
+        Some(2)
+    );
+
+    // Win a separate journal CAS while the second coordinator is paused. Its
+    // revision-3 custody publication must then conflict, leaving a replayable
+    // pending row rather than silently blessing the unjournaled secret.
+    let current = world.journal.entry(host).await;
+    let mut competing = current.clone();
+    competing.revision += 1;
+    world
+        .journal
+        .compare_and_swap(&host_id, Some(current.revision), competing)
+        .await
+        .expect("competing journal CAS wins");
+
+    read_gate.release();
+    let first_receipt = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .expect("first coordinator observes the revision mismatch")
+        .expect("first coordinator joins")
+        .expect("fanout classifies the exact-read failure");
+    assert_eq!(
+        (first_receipt.synchronized, first_receipt.pending_retry),
+        (0, 1)
+    );
+    assert_eq!(world.transport.register_count(installation).await, 1);
+
+    journal_gate.release();
+    let second_receipt = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("second coordinator observes the competing journal CAS")
+        .expect("second coordinator joins")
+        .expect("fanout classifies the journal conflict");
+    assert_eq!(
+        (second_receipt.synchronized, second_receipt.pending_retry),
+        (0, 1)
+    );
+    assert_eq!(world.transport.register_count(installation).await, 1);
+    let still_pending = world.journal.entry(host).await;
+    assert!(still_pending.registrations[0].pending_sync);
+    assert_eq!(still_pending.registrations[0].token_revision, Some(2));
+
+    let converged = world
+        .relay()
+        .observe_push_token(observation_with_byte(1, 0xaa), operation())
+        .await
+        .expect("fresh retry advances, journals, and registers exact custody");
+    assert_eq!((converged.synchronized, converged.pending_retry), (1, 0));
+    let active = world.journal.entry(host).await;
+    assert!(!active.registrations[0].pending_sync);
+    assert_eq!(active.registrations[0].token_revision, Some(4));
+    assert_eq!(
+        world.secrets.revision(&token_alias).await.unwrap(),
+        RelaySecretRevision::Found(4)
+    );
+    assert_eq!(world.transport.register_count(installation).await, 2);
+}
+
+#[tokio::test]
+async fn stale_binding_cannot_send_reenrolled_capability_to_its_old_origin() {
+    let world = TestWorld::new();
+    let host = "stale-capability-host";
+    let host_id = RelayHostId(host.to_owned());
+    let old_installation = "installation_stale_capability_old_0001";
+    let new_installation = "installation_stale_capability_new_0001";
+    world.enroll(host, old_installation).await;
+    let old_binding = world.journal.entry(host).await;
+    assert_eq!(old_binding.read_capability_revision, Some(1));
+
+    let read_gate = world
+        .secrets
+        .gate_read_after(&old_binding.read_capability_alias, 0)
+        .await;
+    let stale_relay = world.relay();
+    let stale_reconcile =
+        tokio::spawn(async move { stale_relay.reconcile_all(100, operation()).await });
+    tokio::time::timeout(Duration::from_secs(1), read_gate.wait_until_started())
+        .await
+        .expect("stale coordinator passes its first revision check");
+
+    world
+        .relay()
+        .rollback_enrollment(&host_id, &command_id(old_installation), operation())
+        .await
+        .expect("old enrollment is durably revoked and cleaned up");
+    let mut replacement = enrollment_with_secrets(host, new_installation, 0xa1, 0xa2);
+    replacement.origin = ValidatedRelayOrigin::parse("https://replacement.relay.example/", false)
+        .expect("replacement origin");
+    let replacement_command = replacement.command_id.clone();
+    world
+        .relay()
+        .stage_enrollment(replacement, operation())
+        .await
+        .expect("replacement reuses the fenced capability slots");
+    world
+        .relay()
+        .commit_enrollment(&host_id, &replacement_command, operation())
+        .await
+        .expect("replacement enrollment activates");
+
+    let active = world.journal.entry(host).await;
+    assert_eq!(active.state, RelayBindingState::Active);
+    assert_eq!(active.installation_id.0, new_installation);
+    assert_eq!(
+        active.read_capability_alias,
+        old_binding.read_capability_alias
+    );
+    assert_eq!(
+        active.manage_capability_alias,
+        old_binding.manage_capability_alias
+    );
+    assert_eq!(active.read_capability_revision, Some(3));
+    assert_eq!(active.manage_capability_revision, Some(3));
+    let contexts_before_stale_resume = world.transport.contexts.lock().await.len();
+    let actions_before_stale_resume = world.actions.lock().await.clone();
+
+    read_gate.release();
+    let stale_outcomes = tokio::time::timeout(Duration::from_secs(1), stale_reconcile)
+        .await
+        .expect("stale coordinator fails closed after its second revision read")
+        .expect("stale coordinator joins")
+        .expect("stale reconciliation returns typed outcomes");
+    assert!(matches!(
+        stale_outcomes.as_slice(),
+        [RelayReconcileOutcome::Failed {
+            host_id,
+            error: RelayError::SecureStorageUnavailable,
+        }] if host_id.0 == host
+    ));
+    assert_eq!(
+        world.transport.contexts.lock().await.len(),
+        contexts_before_stale_resume,
+        "the replacement capability must never be sent to the old origin"
+    );
+    assert_eq!(*world.actions.lock().await, actions_before_stale_resume);
+    assert_eq!(world.journal.entry(host).await, active);
+    assert_eq!(
+        world
+            .secrets
+            .read(&active.read_capability_alias)
+            .await
+            .unwrap()
+            .expect("replacement read capability remains present")
+            .expose_for_adapter(),
+        &[0xa1; 32]
+    );
+}
+
+#[tokio::test]
 async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_cleanup() {
     let world = TestWorld::new();
     let host = "token-rotation-host";
@@ -790,7 +1557,7 @@ async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_clean
     assert_eq!(unchanged.registrations[0].local_generation, 1);
     assert!(unchanged.retired_token_aliases.is_empty());
 
-    world.secrets.fail_next_write().await;
+    world.secrets.fail_next_cas_before_apply().await;
     let failed_write = world
         .relay()
         .observe_push_token(observation(2), operation())
@@ -800,7 +1567,14 @@ async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_clean
     let staged = world.journal.entry(host).await;
     assert_eq!(staged.registrations[0].local_generation, 2);
     assert!(staged.registrations[0].pending_sync);
-    assert_eq!(staged.retired_token_aliases, vec![old_alias.clone()]);
+    assert!(staged.retired_token_aliases.is_empty());
+    let previous = staged.registrations[0]
+        .previous
+        .as_ref()
+        .expect("the known prior receipt remains durable");
+    assert_eq!(previous.token_alias, old_alias);
+    assert!(previous.relay_registration_id.is_some());
+    assert_eq!(previous.relay_generation, Some(1));
     assert!(
         !world
             .secrets
@@ -809,7 +1583,10 @@ async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_clean
     );
     assert!(world.secrets.contains(&old_alias).await);
 
-    world.secrets.fail_next_delete(&old_alias).await;
+    world
+        .secrets
+        .fail_next_tombstone_before_apply(&old_alias)
+        .await;
     let failed_cleanup = world
         .relay()
         .observe_push_token(observation(2), operation())
@@ -818,9 +1595,13 @@ async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_clean
     assert_eq!(failed_cleanup.pending_retry, 1);
     let cleanup_pending = world.journal.entry(host).await;
     assert!(!cleanup_pending.registrations[0].pending_sync);
+    assert!(cleanup_pending.retired_token_aliases.is_empty());
     assert_eq!(
-        cleanup_pending.retired_token_aliases,
-        vec![old_alias.clone()]
+        cleanup_pending.registrations[0]
+            .previous
+            .as_ref()
+            .map(|previous| &previous.token_alias),
+        Some(&old_alias)
     );
     assert!(world.secrets.contains(&old_alias).await);
 
@@ -831,6 +1612,7 @@ async fn token_rotation_reserves_aliases_before_writes_and_retries_retired_clean
         .expect("foreground retry cleans the retired alias");
     let recovered = world.journal.entry(host).await;
     assert!(recovered.retired_token_aliases.is_empty());
+    assert!(recovered.registrations[0].previous.is_none());
     assert!(!world.secrets.contains(&old_alias).await);
     assert!(
         world
@@ -867,7 +1649,14 @@ async fn foreground_reconcile_resumes_a_durable_pending_token_rotation() {
     assert_eq!(interrupted.pending_retry, 1);
     let pending = world.journal.entry(host).await;
     assert!(pending.registrations[0].pending_sync);
-    assert_eq!(pending.retired_token_aliases, vec![old_alias.clone()]);
+    assert!(pending.retired_token_aliases.is_empty());
+    assert_eq!(
+        pending.registrations[0]
+            .previous
+            .as_ref()
+            .map(|previous| &previous.token_alias),
+        Some(&old_alias)
+    );
 
     world
         .relay()
@@ -877,7 +1666,40 @@ async fn foreground_reconcile_resumes_a_durable_pending_token_rotation() {
     let active = world.journal.entry(host).await;
     assert!(!active.registrations[0].pending_sync);
     assert!(active.retired_token_aliases.is_empty());
+    assert!(active.registrations[0].previous.is_none());
     assert!(!world.secrets.contains(&old_alias).await);
+}
+
+#[tokio::test]
+async fn repeated_failed_token_rotations_keep_retired_aliases_bounded() {
+    let world = TestWorld::new();
+    let host = "bounded-token-rotation-host";
+    let installation = "installation_bounded_token_rotation_0001";
+    world.enroll(host, installation).await;
+    world
+        .relay()
+        .observe_push_token(observation(1), operation())
+        .await
+        .expect("initial token");
+
+    for generation in 2..=66 {
+        world
+            .transport
+            .enqueue_register_error(installation, RelayTransportError::Timeout)
+            .await;
+        let receipt = world
+            .relay()
+            .observe_push_token(observation(generation), operation())
+            .await
+            .expect("failed rotation remains a bounded durable retry");
+        assert_eq!(receipt.pending_retry, 1);
+        let reloaded = world.journal.entry(host).await;
+        assert!(reloaded.registrations[0].pending_sync);
+        assert!(reloaded.retired_token_aliases.is_empty());
+        assert!(reloaded.registrations[0].previous.is_some());
+        assert!(reloaded.retired_token_aliases.len() <= MAX_RETIRED_TOKEN_ALIASES);
+        assert!(world.secrets.count().await <= 4);
+    }
 }
 
 #[tokio::test]
@@ -1015,6 +1837,414 @@ async fn provider_tombstone_fans_out_and_removes_only_local_token_secrets_after_
     );
     assert!(!world.secrets.contains(&alias_a).await);
     assert!(!world.secrets.contains(&alias_b).await);
+}
+
+#[tokio::test]
+async fn provider_tombstone_without_registration_fences_stale_observations_across_restarts() {
+    let world = TestWorld::new();
+    let host = "empty-tombstone-host";
+    let installation = "installation_empty_tombstone_0001";
+    world.enroll(host, installation).await;
+
+    let tombstoned = world
+        .relay()
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 3,
+            },
+            operation(),
+        )
+        .await
+        .expect("empty binding still persists a provider fence");
+    assert_eq!((tombstoned.attempted, tombstoned.synchronized), (1, 1));
+    let fenced = world.journal.entry(host).await;
+    assert!(fenced.registrations.is_empty());
+    assert_eq!(
+        fenced.provider_tombstone_fences,
+        vec![RelayProviderTombstoneFence {
+            provider: RelayPushProvider::Apns,
+            environment: RelayPushEnvironment::Sandbox,
+            through_local_generation: 3,
+        }]
+    );
+
+    // Each `relay()` call constructs a fresh coordinator over the same durable
+    // ports, modeling another client process or a restart.
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(3), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+    assert!(world.journal.entry(host).await.registrations.is_empty());
+
+    let newer = world
+        .relay()
+        .observe_push_token(observation(4), operation())
+        .await
+        .expect("a newer generation can establish a replacement");
+    assert_eq!((newer.synchronized, newer.rejected), (1, 0));
+    assert_eq!(
+        world.journal.entry(host).await.registrations[0].local_generation,
+        4
+    );
+}
+
+#[tokio::test]
+async fn device_global_provider_floor_survives_zero_bindings_and_seeds_later_enrollment() {
+    let world = TestWorld::new();
+    let tombstone = PushTokenTombstone {
+        provider: RelayPushProvider::Apns,
+        environment: RelayPushEnvironment::Sandbox,
+        through_local_generation: 7,
+    };
+    let receipt = world
+        .relay()
+        .tombstone_push_token(tombstone, operation())
+        .await
+        .expect("a logout floor persists without any host binding");
+    assert_eq!((receipt.attempted, receipt.synchronized), (0, 0));
+    assert_eq!(
+        world.journal.provider_tombstone_fences().await.unwrap(),
+        vec![RelayProviderTombstoneFence {
+            provider: RelayPushProvider::Apns,
+            environment: RelayPushEnvironment::Sandbox,
+            through_local_generation: 7,
+        }]
+    );
+
+    let host = "post-logout-enrollment-host";
+    let installation = "installation_post_logout_0001";
+    world.enroll(host, installation).await;
+    assert_eq!(
+        world.journal.entry(host).await.provider_tombstone_fences,
+        world.journal.provider_tombstone_fences().await.unwrap()
+    );
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(7), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+    let newer = world
+        .relay()
+        .observe_push_token(observation(8), operation())
+        .await
+        .expect("only a post-logout generation registers");
+    assert_eq!(newer.synchronized, 1);
+}
+
+#[tokio::test]
+async fn device_global_provider_floor_blocks_a_binding_staged_before_logout() {
+    let world = TestWorld::new();
+    let host = RelayHostId("staged-during-logout-host".to_owned());
+    let installation = "installation_staged_during_logout_0001";
+    let enrollment = enrollment(&host.0, installation);
+    let command = enrollment.command_id.clone();
+    world
+        .relay()
+        .stage_enrollment(enrollment, operation())
+        .await
+        .expect("stage before logout");
+    let receipt = world
+        .relay()
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 9,
+            },
+            operation(),
+        )
+        .await
+        .expect("global floor advances while only Staged exists");
+    assert_eq!(receipt.attempted, 0);
+    world
+        .relay()
+        .commit_enrollment(&host, &command, operation())
+        .await
+        .expect("staged enrollment remains valid");
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(9), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+    assert!(world.journal.entry(&host.0).await.registrations.is_empty());
+}
+
+#[tokio::test]
+async fn needs_repair_replacement_inherits_the_device_global_provider_floor() {
+    let world = TestWorld::new();
+    let host = RelayHostId("repair-replacement-floor-host".to_owned());
+    let old_installation = "installation_repair_floor_old_0001";
+    let new_installation = "installation_repair_floor_new_0001";
+    world.enroll(&host.0, old_installation).await;
+    world
+        .transport
+        .enqueue_page(old_installation, 0, Err(RelayTransportError::Unauthorized))
+        .await;
+    assert_eq!(
+        world
+            .relay()
+            .ingest_wake(wake(old_installation, 1), 100, operation())
+            .await,
+        Err(RelayError::RePairRequired)
+    );
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::NeedsRepair
+    );
+    world
+        .relay()
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 11,
+            },
+            operation(),
+        )
+        .await
+        .expect("inactive repair row cannot discard the global logout floor");
+    world
+        .transport
+        .enqueue_installation_tombstone_result(
+            old_installation,
+            Err(RelayTransportError::Unauthorized),
+        )
+        .await;
+    let replacement = enrollment(&host.0, new_installation);
+    let command = replacement.command_id.clone();
+    world
+        .relay()
+        .stage_enrollment(replacement, operation())
+        .await
+        .expect("authenticated replacement inherits the global floor");
+    assert_eq!(
+        world.journal.entry(&host.0).await.provider_tombstone_fences,
+        world.journal.provider_tombstone_fences().await.unwrap()
+    );
+    world
+        .relay()
+        .commit_enrollment(&host, &command, operation())
+        .await
+        .expect("replacement activates across a fresh coordinator");
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(11), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+}
+
+#[tokio::test]
+async fn pending_provider_tombstone_blocks_all_generations_until_remote_cleanup_converges() {
+    let world = TestWorld::new();
+    let host = "pending-provider-tombstone-host";
+    let installation = "installation_pending_provider_tombstone_0001";
+    world.enroll(host, installation).await;
+    world
+        .transport
+        .enqueue_register_error(installation, RelayTransportError::Timeout)
+        .await;
+    let pending_registration = world
+        .relay()
+        .observe_push_token(observation(5), operation())
+        .await
+        .expect("ambiguous registration stays pending");
+    assert_eq!(pending_registration.pending_retry, 1);
+    assert!(
+        world.journal.entry(host).await.registrations[0]
+            .relay_registration_id
+            .is_none()
+    );
+    world
+        .transport
+        .enqueue_device_tombstone_result(installation, Err(RelayTransportError::Timeout))
+        .await;
+
+    let tombstone = PushTokenTombstone {
+        provider: RelayPushProvider::Apns,
+        environment: RelayPushEnvironment::Sandbox,
+        through_local_generation: 5,
+    };
+    let interrupted = world
+        .relay()
+        .tombstone_push_token(tombstone, operation())
+        .await
+        .expect("tombstone intent remains durable after response loss");
+    assert_eq!(interrupted.pending_retry, 1);
+    let pending = world.journal.entry(host).await;
+    assert_eq!(
+        pending.provider_tombstone_fences[0].through_local_generation,
+        5
+    );
+    assert_eq!(
+        pending.registrations[0].disposition,
+        RelayRegistrationDisposition::Tombstone
+    );
+    assert!(pending.registrations[0].relay_registration_id.is_some());
+    assert_eq!(world.transport.register_count(installation).await, 2);
+
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(5), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+    let premature_newer = world
+        .relay()
+        .observe_push_token(observation(6), operation())
+        .await
+        .expect("newer generation waits for pending cleanup");
+    assert_eq!(premature_newer.pending_retry, 1);
+    assert_eq!(world.transport.register_count(installation).await, 2);
+
+    world
+        .relay()
+        .reconcile_all(100, operation())
+        .await
+        .expect("restart convergence resumes the durable tombstone");
+    assert!(world.journal.entry(host).await.registrations.is_empty());
+
+    let converged_newer = world
+        .relay()
+        .observe_push_token(observation(6), operation())
+        .await
+        .expect("newer generation registers after cleanup");
+    assert_eq!(converged_newer.synchronized, 1);
+    assert_eq!(
+        world.journal.entry(host).await.registrations[0].local_generation,
+        6
+    );
+}
+
+#[tokio::test]
+async fn tombstoning_a_pending_rotation_recovers_the_latest_relay_generation_before_revocation() {
+    let world = TestWorld::new();
+    let host = "pending-rotation-tombstone-host";
+    let installation = "installation_pending_rotation_tombstone_0001";
+    world.enroll(host, installation).await;
+    world
+        .relay()
+        .observe_push_token(observation(4), operation())
+        .await
+        .expect("initial registration");
+    world
+        .transport
+        .enqueue_register_error(installation, RelayTransportError::Timeout)
+        .await;
+    world
+        .relay()
+        .observe_push_token(observation(5), operation())
+        .await
+        .expect("ambiguous rotation remains pending");
+    let pending = world.journal.entry(host).await;
+    assert!(pending.registrations[0].pending_sync);
+    assert!(pending.registrations[0].relay_registration_id.is_none());
+    assert_eq!(
+        pending.registrations[0]
+            .previous
+            .as_ref()
+            .and_then(|previous| previous.relay_generation),
+        Some(1)
+    );
+
+    let tombstoned = world
+        .relay()
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 5,
+            },
+            operation(),
+        )
+        .await
+        .expect("pending rotation converges before revocation");
+    assert_eq!(tombstoned.synchronized, 1);
+    assert!(world.journal.entry(host).await.registrations.is_empty());
+    // Initial registration, ambiguous rotation, and the receipt-recovery
+    // replay required before the relay-generation tombstone.
+    assert_eq!(world.transport.register_count(installation).await, 3);
+}
+
+#[tokio::test]
+async fn failed_rotation_write_tombstones_the_known_prior_receipt_before_local_cleanup() {
+    let world = TestWorld::new();
+    let host = "failed-write-logout-host";
+    let installation = "installation_failed_write_logout_0001";
+    world.enroll(host, installation).await;
+    world
+        .relay()
+        .observe_push_token(observation(1), operation())
+        .await
+        .expect("initial remote receipt");
+    let initial = world.journal.entry(host).await;
+    let prior_alias = initial.registrations[0].token_alias.clone();
+    world.secrets.fail_next_cas_before_apply().await;
+    let failed = world
+        .relay()
+        .observe_push_token(observation(2), operation())
+        .await
+        .expect("the failed write leaves a durable pending rotation");
+    assert_eq!(failed.pending_retry, 1);
+    let pending = world.journal.entry(host).await;
+    let current_alias = pending.registrations[0].token_alias.clone();
+    let previous = pending.registrations[0]
+        .previous
+        .as_ref()
+        .expect("known prior receipt is retained separately");
+    assert_eq!(previous.token_alias, prior_alias);
+    assert_eq!(previous.relay_generation, Some(1));
+    assert!(!world.secrets.contains(&current_alias).await);
+    assert!(world.secrets.contains(&prior_alias).await);
+
+    let receipt = world
+        .relay()
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 2,
+            },
+            operation(),
+        )
+        .await
+        .expect("logout revokes the known receipt without inventing a current one");
+    assert_eq!((receipt.synchronized, receipt.pending_retry), (1, 0));
+    assert!(world.journal.entry(host).await.registrations.is_empty());
+    assert!(!world.secrets.contains(&prior_alias).await);
+    assert!(!world.secrets.contains(&current_alias).await);
+    assert_eq!(world.transport.register_count(installation).await, 1);
+    let tombstones = world
+        .actions
+        .lock()
+        .await
+        .iter()
+        .filter_map(|action| match action {
+            Action::TombstoneDevice(candidate, generation) if candidate == installation => {
+                Some(*generation)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tombstones, vec![1]);
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(2), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
 }
 
 #[tokio::test]
@@ -1168,7 +2398,7 @@ async fn failed_ack_preserves_local_commit_and_restart_retries_ack_only() {
 }
 
 #[tokio::test]
-async fn remote_ack_ahead_is_persisted_as_divergence_then_repaired_to_exact_cursor() {
+async fn remote_ack_ahead_survives_reload_then_repairs_and_acks_exact_cursor() {
     let world = TestWorld::new();
     let installation = "installation_ack_ahead_0001";
     world.enroll("ack-ahead-host", installation).await;
@@ -1354,6 +2584,38 @@ async fn snapshot_and_repair_cursor_accounting_never_under_records_applied_state
             .await
             .contains(&Action::Ack(repair_ahead.to_owned(), 2))
     );
+}
+
+#[tokio::test]
+async fn foreground_high_watermark_commit_survives_authenticated_reload_and_ack() {
+    let world = TestWorld::new();
+    let host = "foreground-high-watermark-host";
+    let installation = "installation_foreground_high_watermark_0001";
+    world.enroll(host, installation).await;
+    world
+        .transport
+        .enqueue_page(
+            installation,
+            0,
+            Ok(page(0, 3, vec![event(1), event(2), event(3)])),
+        )
+        .await;
+
+    let outcomes = world
+        .relay()
+        .reconcile_all(100, operation())
+        .await
+        .expect("foreground discovery repairs and acknowledges high watermark");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [RelayReconcileOutcome::Applied(receipt)]
+            if receipt.applied_through_cursor == 3
+                && receipt.acknowledged_through_cursor == 3
+    ));
+    let reloaded = world.journal.entry(host).await;
+    assert_eq!(reloaded.wake.highest_seen_cursor, 3);
+    assert_eq!(reloaded.wake.applied_cursor, 3);
+    assert_eq!(reloaded.wake.pending_ack_cursor, None);
 }
 
 #[tokio::test]
@@ -1814,7 +3076,7 @@ async fn enrollment_is_idempotent_and_rollback_revokes_before_secret_cleanup() {
         .await
         .expect("idempotent restage");
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(installation), operation())
         .await
         .expect("commit");
     let active = world.journal.entry(&host.0).await;
@@ -1822,7 +3084,7 @@ async fn enrollment_is_idempotent_and_rollback_revokes_before_secret_cleanup() {
     let manage_alias = active.manage_capability_alias.clone();
 
     relay
-        .rollback_enrollment(&host, operation())
+        .rollback_enrollment(&host, &command_id(installation), operation())
         .await
         .expect("rollback");
     assert_eq!(
@@ -1846,7 +3108,19 @@ async fn tombstoned_host_can_enroll_a_new_authenticated_installation() {
     world.enroll(&host.0, old_installation).await;
     world
         .relay()
-        .rollback_enrollment(&host, operation())
+        .tombstone_push_token(
+            PushTokenTombstone {
+                provider: RelayPushProvider::Apns,
+                environment: RelayPushEnvironment::Sandbox,
+                through_local_generation: 2,
+            },
+            operation(),
+        )
+        .await
+        .expect("persist provider fence before installation rollback");
+    world
+        .relay()
+        .rollback_enrollment(&host, &command_id(old_installation), operation())
         .await
         .expect("initial rollback");
     assert_eq!(
@@ -1875,12 +3149,24 @@ async fn tombstoned_host_can_enroll_a_new_authenticated_installation() {
         .await
         .expect("authenticated replacement stage");
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(new_installation), operation())
         .await
         .expect("authenticated replacement commit");
     let active = world.journal.entry(&host.0).await;
     assert_eq!(active.state, RelayBindingState::Active);
     assert_eq!(active.installation_id.0, new_installation);
+    assert_eq!(
+        active.provider_tombstone_fences[0].through_local_generation,
+        2
+    );
+    assert_eq!(
+        world
+            .relay()
+            .observe_push_token(observation(2), operation())
+            .await,
+        Err(RelayError::InvalidProviderRegistration)
+    );
+    assert!(world.journal.entry(&host.0).await.registrations.is_empty());
 }
 
 #[tokio::test]
@@ -1924,18 +3210,41 @@ async fn authorization_repair_can_replace_obsolete_local_authority() {
 
     let relay = world.relay();
     relay
-        .stage_enrollment(enrollment(&host.0, new_installation), operation())
+        .stage_enrollment(
+            enrollment_with_secrets(&host.0, new_installation, 0x91, 0x92),
+            operation(),
+        )
         .await
         .expect("new authenticated enrollment supersedes rejected authority");
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(new_installation), operation())
         .await
         .expect("commit replacement");
     let active = world.journal.entry(&host.0).await;
     assert_eq!(active.state, RelayBindingState::Active);
     assert_eq!(active.installation_id.0, new_installation);
-    assert!(!world.secrets.contains(&old_read).await);
-    assert!(!world.secrets.contains(&old_manage).await);
+    assert_eq!(active.read_capability_alias, old_read);
+    assert_eq!(active.manage_capability_alias, old_manage);
+    assert_eq!(
+        world
+            .secrets
+            .read(&active.read_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x91; 32]
+    );
+    assert_eq!(
+        world
+            .secrets
+            .read(&active.manage_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x92; 32]
+    );
     assert!(!world.secrets.contains(&old_token).await);
 }
 
@@ -1971,7 +3280,10 @@ async fn failed_repair_replacement_cas_remains_replayable_and_never_tombstone_st
         RelayBindingState::NeedsRepair
     );
     assert_eq!(
-        world.relay().rollback_enrollment(&host, operation()).await,
+        world
+            .relay()
+            .rollback_enrollment(&host, &command_id(old_installation), operation())
+            .await,
         Err(RelayError::SecureStorageUnavailable)
     );
     assert_eq!(
@@ -1989,7 +3301,7 @@ async fn failed_repair_replacement_cas_remains_replayable_and_never_tombstone_st
         RelayBindingState::Staged
     );
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(new_installation), operation())
         .await
         .expect("replacement commit");
     let active = world.journal.entry(&host.0).await;
@@ -2018,7 +3330,7 @@ async fn needs_repair_rollback_converges_only_with_confirmed_manage_authority() 
     );
     valid
         .relay()
-        .rollback_enrollment(&valid_host, operation())
+        .rollback_enrollment(&valid_host, &command_id(valid_installation), operation())
         .await
         .expect("valid manage authority revokes a repair-corrupt binding");
     assert_eq!(
@@ -2057,7 +3369,11 @@ async fn needs_repair_rollback_converges_only_with_confirmed_manage_authority() 
     assert_eq!(
         rejected
             .relay()
-            .rollback_enrollment(&rejected_host, operation())
+            .rollback_enrollment(
+                &rejected_host,
+                &command_id(rejected_installation),
+                operation(),
+            )
             .await,
         Err(RelayError::RePairRequired)
     );
@@ -2088,15 +3404,15 @@ async fn needs_repair_rollback_converges_only_with_confirmed_manage_authority() 
         .entry(&missing_host.0)
         .await
         .manage_capability_alias;
-    missing
-        .secrets
-        .delete(&manage_alias)
-        .await
-        .expect("remove old manage capability");
+    missing.secrets.values.lock().await.remove(&manage_alias.0);
     assert_eq!(
         missing
             .relay()
-            .rollback_enrollment(&missing_host, operation())
+            .rollback_enrollment(
+                &missing_host,
+                &command_id(missing_installation),
+                operation(),
+            )
             .await,
         Err(RelayError::SecureStorageUnavailable)
     );
@@ -2107,12 +3423,12 @@ async fn needs_repair_rollback_converges_only_with_confirmed_manage_authority() 
 }
 
 #[tokio::test]
-async fn enrollment_secret_failure_leaves_a_durable_staged_transaction_for_retry() {
+async fn enrollment_secret_cas_failure_before_apply_is_retryable() {
     let world = TestWorld::new();
     let host = RelayHostId("staged-enrollment-host".to_owned());
     let installation = "installation_staged_retry_0001";
     let relay = world.relay();
-    world.secrets.fail_next_write().await;
+    world.secrets.fail_next_cas_before_apply().await;
 
     assert_eq!(
         relay
@@ -2120,22 +3436,20 @@ async fn enrollment_secret_failure_leaves_a_durable_staged_transaction_for_retry
             .await,
         Err(RelayError::SecureStorageUnavailable)
     );
-    let staged = world.journal.entry(&host.0).await;
-    assert_eq!(staged.state, RelayBindingState::Staged);
-    assert!(!world.secrets.contains(&staged.read_capability_alias).await);
-    assert!(
-        !world
-            .secrets
-            .contains(&staged.manage_capability_alias)
-            .await
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Preparing
     );
+    assert_eq!(world.secrets.count().await, 0);
 
     relay
         .stage_enrollment(enrollment(&host.0, installation), operation())
         .await
-        .expect("retry fills the reserved aliases");
+        .expect("retry writes both capabilities then publishes Staged");
+    let staged = world.journal.entry(&host.0).await;
+    assert_eq!(staged.state, RelayBindingState::Staged);
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(installation), operation())
         .await
         .expect("complete staged enrollment");
     let active = world.journal.entry(&host.0).await;
@@ -2155,39 +3469,723 @@ async fn enrollment_secret_failure_leaves_a_durable_staged_transaction_for_retry
 }
 
 #[tokio::test]
-async fn interrupted_staged_enrollment_must_be_restaged_before_rollback() {
+async fn enrollment_secret_cas_apply_then_unavailable_reuses_fenced_values() {
     let world = TestWorld::new();
     let host = RelayHostId("staged-rollback-host".to_owned());
     let installation = "installation_staged_rollback_0001";
     let relay = world.relay();
-    world.secrets.fail_next_write().await;
+    world.secrets.fail_second_cas_after_apply().await;
     assert_eq!(
         relay
             .stage_enrollment(enrollment(&host.0, installation), operation())
             .await,
         Err(RelayError::SecureStorageUnavailable)
     );
-
-    assert_eq!(
-        relay.rollback_enrollment(&host, operation()).await,
-        Err(RelayError::SecureStorageUnavailable)
-    );
     assert_eq!(
         world.journal.entry(&host.0).await.state,
-        RelayBindingState::Staged
+        RelayBindingState::Preparing
     );
+    assert_eq!(world.secrets.count().await, 2);
+    relay
+        .stage_enrollment(enrollment(&host.0, installation), operation())
+        .await
+        .expect("retry advances the same fenced capability values");
+    let staged = world.journal.entry(&host.0).await;
+    let values = world.secrets.values.lock().await;
+    assert_eq!(values[&staged.read_capability_alias.0].revision, 2);
+    assert_eq!(values[&staged.manage_capability_alias.0].revision, 2);
+}
+
+#[tokio::test]
+async fn enrollment_cas_failure_before_apply_reuses_bounded_aliases() {
+    let world = TestWorld::new();
+    let host = RelayHostId("staged-cas-before-host".to_owned());
+    let installation = "installation_staged_cas_before_0001";
+    let relay = world.relay();
+
+    for _ in 0..3 {
+        world.journal.fail_next_staged_cas_before_apply().await;
+        assert_eq!(
+            relay
+                .stage_enrollment(enrollment(&host.0, installation), operation())
+                .await,
+            Err(RelayError::JournalUnavailable)
+        );
+        assert_eq!(
+            world.journal.entry(&host.0).await.state,
+            RelayBindingState::Preparing
+        );
+        assert_eq!(world.secrets.count().await, 2);
+    }
 
     relay
         .stage_enrollment(enrollment(&host.0, installation), operation())
         .await
-        .expect("restage fills the reserved capability aliases");
+        .expect("same deterministic aliases remain reusable");
+    assert_eq!(world.secrets.count().await, 2);
+}
+
+#[tokio::test]
+async fn enrollment_cas_apply_then_unavailable_recovers_without_deleting_capabilities() {
+    let world = TestWorld::new();
+    let host = RelayHostId("staged-cas-after-host".to_owned());
+    let installation = "installation_staged_cas_after_0001";
+    let relay = world.relay();
+    world.journal.fail_next_staged_cas_after_apply().await;
+
     relay
-        .rollback_enrollment(&host, operation())
+        .stage_enrollment(enrollment(&host.0, installation), operation())
         .await
-        .expect("rollback proceeds after restage");
+        .expect("authoritative reload observes the committed staged command");
+    let staged = world.journal.entry(&host.0).await;
+    assert_eq!(staged.state, RelayBindingState::Staged);
+    assert!(world.secrets.contains(&staged.read_capability_alias).await);
+    assert!(
+        world
+            .secrets
+            .contains(&staged.manage_capability_alias)
+            .await
+    );
+    assert_eq!(world.secrets.count().await, 2);
+}
+
+#[tokio::test]
+async fn different_enrollment_replaces_crash_before_journal_slots() {
+    let world = TestWorld::new();
+    let host = RelayHostId("staged-replacement-host".to_owned());
+    let first_installation = "installation_staged_replacement_a_0001";
+    let second_installation = "installation_staged_replacement_b_0001";
+    let relay = world.relay();
+    world.journal.fail_next_staged_cas_before_apply().await;
+    assert_eq!(
+        relay
+            .stage_enrollment(
+                enrollment_with_secrets(&host.0, first_installation, 0x51, 0x52),
+                operation(),
+            )
+            .await,
+        Err(RelayError::JournalUnavailable)
+    );
+    assert_eq!(world.secrets.count().await, 2);
+
+    relay
+        .stage_enrollment(
+            enrollment_with_secrets(&host.0, second_installation, 0x61, 0x62),
+            operation(),
+        )
+        .await
+        .expect("a different authenticated command CAS-replaces stale slots");
+    let staged = world.journal.entry(&host.0).await;
+    assert_eq!(staged.installation_id.0, second_installation);
+    assert_eq!(
+        world
+            .secrets
+            .read(&staged.read_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x61; 32]
+    );
+    assert_eq!(
+        world
+            .secrets
+            .read(&staged.manage_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x62; 32]
+    );
+}
+
+#[tokio::test]
+async fn late_old_secret_cas_cannot_overwrite_new_enrollment() {
+    let world = TestWorld::new();
+    let host = RelayHostId("staged-late-cas-host".to_owned());
+    let first_installation = "installation_staged_late_cas_a_0001";
+    let second_installation = "installation_staged_late_cas_b_0001";
+    let relay = world.relay();
+    world
+        .secrets
+        .delay_next_cas_after_drop(Duration::from_millis(50))
+        .await;
+    assert_eq!(
+        relay
+            .stage_enrollment(
+                enrollment_with_secrets(&host.0, first_installation, 0x71, 0x72),
+                RelayOperationContext::with_timeout(Duration::from_millis(10)),
+            )
+            .await,
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    relay
+        .stage_enrollment(
+            enrollment_with_secrets(&host.0, second_installation, 0x81, 0x82),
+            operation(),
+        )
+        .await
+        .expect("new command wins the fenced slot CAS");
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    let staged = world.journal.entry(&host.0).await;
+    assert_eq!(staged.installation_id.0, second_installation);
+    assert_eq!(
+        world
+            .secrets
+            .read(&staged.read_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x81; 32]
+    );
+    assert_eq!(
+        world
+            .secrets
+            .read(&staged.manage_capability_alias)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_for_adapter(),
+        &[0x82; 32]
+    );
+}
+
+async fn assert_staged_command_and_capabilities(
+    world: &TestWorld,
+    host: &RelayHostId,
+    installation: &str,
+    command_id: &RelayEnrollmentCommandId,
+    read_byte: u8,
+    manage_byte: u8,
+) {
+    let staged = world.journal.entry(&host.0).await;
+    assert_eq!(staged.state, RelayBindingState::Staged);
+    assert_eq!(staged.installation_id.0, installation);
+    assert_eq!(&staged.staging_command_id, command_id);
+    let read_revision = staged
+        .read_capability_revision
+        .expect("staged read slot revision");
+    let manage_revision = staged
+        .manage_capability_revision
+        .expect("staged manage slot revision");
+    let values = world.secrets.values.lock().await;
+    assert_eq!(values.len(), 2);
+    let read = &values[&staged.read_capability_alias.0];
+    let manage = &values[&staged.manage_capability_alias.0];
+    assert_eq!(read.revision, read_revision);
+    assert_eq!(manage.revision, manage_revision);
+    assert_eq!(
+        read.secret
+            .as_ref()
+            .expect("staged read capability")
+            .expose_for_adapter(),
+        &[read_byte; 32]
+    );
+    assert_eq!(
+        manage
+            .secret
+            .as_ref()
+            .expect("staged manage capability")
+            .expose_for_adapter(),
+        &[manage_byte; 32]
+    );
+}
+
+#[tokio::test]
+async fn newer_enrollment_wins_before_a_late_staged_journal_cas() {
+    let world = TestWorld::new();
+    let host = RelayHostId("late-journal-b-wins-host".to_owned());
+    let installation = "installation_late_journal_same_0001";
+    let command_a =
+        RelayEnrollmentCommandId::parse("command_late_journal_a_0001").expect("command A");
+    let command_b =
+        RelayEnrollmentCommandId::parse("command_late_journal_b_0001").expect("command B");
+    let mut enrollment_a = enrollment_with_secrets(&host.0, installation, 0xa1, 0xa2);
+    enrollment_a.command_id = command_a.clone();
+    let mut enrollment_b = enrollment_with_secrets(&host.0, installation, 0xb1, 0xb2);
+    enrollment_b.command_id = command_b.clone();
+    let gate = world.journal.gate_next_staged_cas_after_drop().await;
+    let relay_a = world.relay();
+    let task_a = tokio::spawn(async move {
+        relay_a
+            .stage_enrollment(
+                enrollment_a,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("A reached its staged journal CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), task_a)
+            .await
+            .expect("A respects its operation deadline")
+            .expect("A task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    world
+        .relay()
+        .stage_enrollment(enrollment_b.clone(), operation())
+        .await
+        .expect("B supersedes A before the late CAS resumes");
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late A CAS completes with a fenced conflict");
+    assert_staged_command_and_capabilities(&world, &host, installation, &command_b, 0xb1, 0xb2)
+        .await;
+    assert_eq!(
+        world
+            .relay()
+            .commit_enrollment(&host, &command_a, operation())
+            .await,
+        Err(RelayError::InvalidResponse)
+    );
+    let restarted = world.relay();
+    restarted
+        .stage_enrollment(enrollment_b, operation())
+        .await
+        .expect("restart verifies B's exact staged slot revisions");
+    restarted
+        .commit_enrollment(&host, &command_b, operation())
+        .await
+        .expect("only B activates");
+}
+
+#[tokio::test]
+async fn newer_enrollment_supersedes_a_staged_command_that_lands_after_timeout() {
+    let world = TestWorld::new();
+    let host = RelayHostId("late-journal-a-first-host".to_owned());
+    let installation = "installation_late_journal_first_0001";
+    let command_a =
+        RelayEnrollmentCommandId::parse("command_late_journal_first_a_0001").expect("command A");
+    let command_b =
+        RelayEnrollmentCommandId::parse("command_late_journal_first_b_0001").expect("command B");
+    let mut enrollment_a = enrollment_with_secrets(&host.0, installation, 0xc1, 0xc2);
+    enrollment_a.command_id = command_a.clone();
+    let mut enrollment_b = enrollment_with_secrets(&host.0, installation, 0xd1, 0xd2);
+    enrollment_b.command_id = command_b.clone();
+    let gate = world.journal.gate_next_staged_cas_after_drop().await;
+    let relay_a = world.relay();
+    let task_a = tokio::spawn(async move {
+        relay_a
+            .stage_enrollment(
+                enrollment_a,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("A reached its staged journal CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), task_a)
+            .await
+            .expect("A respects its operation deadline")
+            .expect("A task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late A publication lands");
+    assert_staged_command_and_capabilities(&world, &host, installation, &command_a, 0xc1, 0xc2)
+        .await;
+
+    world
+        .relay()
+        .stage_enrollment(enrollment_b, operation())
+        .await
+        .expect("new authenticated B supersedes stale staged A");
+    assert_staged_command_and_capabilities(&world, &host, installation, &command_b, 0xd1, 0xd2)
+        .await;
+    assert_eq!(
+        world
+            .relay()
+            .commit_enrollment(&host, &command_a, operation())
+            .await,
+        Err(RelayError::InvalidResponse)
+    );
+    world
+        .relay()
+        .commit_enrollment(&host, &command_b, operation())
+        .await
+        .expect("B remains activatable across coordinator instances");
+}
+
+#[tokio::test]
+async fn preparing_rollback_fence_defeats_a_late_staged_journal_cas() {
+    let world = TestWorld::new();
+    let host = RelayHostId("rollback-late-journal-fenced-host".to_owned());
+    let installation = "installation_rollback_late_journal_fenced_0001";
+    let command = command_id(installation);
+    let gate = world.journal.gate_next_staged_cas_after_drop().await;
+    let relay = world.relay();
+    let pending_enrollment = enrollment(&host.0, installation);
+    let stage = tokio::spawn(async move {
+        relay
+            .stage_enrollment(
+                pending_enrollment,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("staged publication enters native CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), stage)
+            .await
+            .expect("stage observes its deadline")
+            .expect("stage task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    let preparing = world.journal.entry(&host.0).await;
+    assert_eq!(preparing.state, RelayBindingState::Preparing);
+    let read_alias = preparing.read_capability_alias.clone();
+    let manage_alias = preparing.manage_capability_alias.clone();
+    world
+        .relay()
+        .rollback_enrollment(&host, &command, operation())
+        .await
+        .expect("rollback publishes its fence before slot cleanup");
     assert_eq!(
         world.journal.entry(&host.0).await.state,
         RelayBindingState::Tombstoned
+    );
+
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late staged CAS completes with a revision conflict");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert!(!world.secrets.contains(&read_alias).await);
+    assert!(!world.secrets.contains(&manage_alias).await);
+    assert!(world.actions.lock().await.iter().all(|action| {
+        !matches!(action, Action::TombstoneInstallation(value) if value == installation)
+    }));
+    assert_eq!(
+        world
+            .relay()
+            .commit_enrollment(&host, &command, operation())
+            .await,
+        Err(RelayError::InvalidResponse)
+    );
+}
+
+#[tokio::test]
+async fn rollback_revokes_a_late_staged_journal_cas_that_lands_first() {
+    let world = TestWorld::new();
+    let host = RelayHostId("rollback-late-journal-staged-host".to_owned());
+    let installation = "installation_rollback_late_journal_staged_0001";
+    let command = command_id(installation);
+    let gate = world.journal.gate_next_staged_cas_after_drop().await;
+    let relay = world.relay();
+    let pending_enrollment = enrollment(&host.0, installation);
+    let stage = tokio::spawn(async move {
+        relay
+            .stage_enrollment(
+                pending_enrollment,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("staged publication enters native CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), stage)
+            .await
+            .expect("stage observes its deadline")
+            .expect("stage task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late staged publication lands before rollback");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Staged
+    );
+    world
+        .relay()
+        .rollback_enrollment(&host, &command, operation())
+        .await
+        .expect("published Staged row is remotely revoked before cleanup");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert_eq!(
+        world
+            .actions
+            .lock()
+            .await
+            .iter()
+            .filter(|action| {
+                matches!(action, Action::TombstoneInstallation(value) if value == installation)
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn preparing_rollback_slot_tombstone_defeats_a_late_secret_cas() {
+    let world = TestWorld::new();
+    let host = RelayHostId("rollback-late-secret-cas-host".to_owned());
+    let installation = "installation_rollback_late_secret_cas_0001";
+    let command = command_id(installation);
+    let gate = world.secrets.gate_next_cas_after_drop().await;
+    let relay = world.relay();
+    let pending_enrollment = enrollment(&host.0, installation);
+    let stage = tokio::spawn(async move {
+        relay
+            .stage_enrollment(
+                pending_enrollment,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("first capability enters native CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), stage)
+            .await
+            .expect("stage observes its deadline")
+            .expect("stage task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    let preparing = world.journal.entry(&host.0).await;
+    assert_eq!(preparing.state, RelayBindingState::Preparing);
+    let read_alias = preparing.read_capability_alias.clone();
+    let manage_alias = preparing.manage_capability_alias.clone();
+    world
+        .relay()
+        .rollback_enrollment(&host, &command, operation())
+        .await
+        .expect("rollback fences both capability slots");
+
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("late secret CAS completes with a revision conflict");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert_eq!(
+        world.secrets.revision(&read_alias).await.unwrap(),
+        RelaySecretRevision::Found(1)
+    );
+    assert_eq!(
+        world.secrets.revision(&manage_alias).await.unwrap(),
+        RelaySecretRevision::Found(1)
+    );
+    assert!(world.secrets.read(&read_alias).await.unwrap().is_none());
+    assert!(world.secrets.read(&manage_alias).await.unwrap().is_none());
+
+    let next_installation = "installation_rollback_late_secret_cas_0002";
+    let restarted = world.relay();
+    restarted
+        .stage_enrollment(enrollment(&host.0, next_installation), operation())
+        .await
+        .expect("new authenticated enrollment advances tombstoned slots");
+    restarted
+        .commit_enrollment(&host, &command_id(next_installation), operation())
+        .await
+        .expect("new enrollment activates");
+    let active = world.journal.entry(&host.0).await;
+    assert_eq!(active.state, RelayBindingState::Active);
+    assert_eq!(active.read_capability_revision, Some(2));
+    assert_eq!(active.manage_capability_revision, Some(2));
+}
+
+#[tokio::test]
+async fn terminal_capability_tombstone_defeats_a_superseded_late_secret_cas() {
+    let world = TestWorld::new();
+    let host = RelayHostId("terminal-late-secret-cas-host".to_owned());
+    let first_installation = "installation_terminal_late_secret_cas_0001";
+    let second_installation = "installation_terminal_late_secret_cas_0002";
+    let gate = world.secrets.gate_next_cas_after_drop().await;
+    let relay = world.relay();
+    let pending_enrollment = enrollment_with_secrets(&host.0, first_installation, 0x91, 0x92);
+    let stage = tokio::spawn(async move {
+        relay
+            .stage_enrollment(
+                pending_enrollment,
+                RelayOperationContext::with_timeout(Duration::from_millis(50)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_started())
+        .await
+        .expect("old capability enters native CAS");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), stage)
+            .await
+            .expect("old stage observes its deadline")
+            .expect("old stage task joins"),
+        Err(RelayError::DeadlineExceeded)
+    );
+
+    world
+        .relay()
+        .stage_enrollment(
+            enrollment_with_secrets(&host.0, second_installation, 0xa1, 0xa2),
+            operation(),
+        )
+        .await
+        .expect("new command stages while old callback remains suspended");
+    let staged = world.journal.entry(&host.0).await;
+    let read_alias = staged.read_capability_alias.clone();
+    let manage_alias = staged.manage_capability_alias.clone();
+    world
+        .relay()
+        .rollback_enrollment(&host, &command_id(second_installation), operation())
+        .await
+        .expect("terminal cleanup leaves revision tombstones");
+
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_completed())
+        .await
+        .expect("superseded callback conflicts with terminal tombstone");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert!(!world.secrets.contains(&read_alias).await);
+    assert!(!world.secrets.contains(&manage_alias).await);
+    assert!(matches!(
+        world.secrets.revision(&read_alias).await.unwrap(),
+        RelaySecretRevision::Found(revision) if revision >= 2
+    ));
+    assert!(matches!(
+        world.secrets.revision(&manage_alias).await.unwrap(),
+        RelaySecretRevision::Found(revision) if revision >= 2
+    ));
+}
+
+#[tokio::test]
+async fn preparing_rollback_recovers_an_ambiguous_applied_slot_tombstone() {
+    let world = TestWorld::new();
+    let host = RelayHostId("rollback-ambiguous-tombstone-host".to_owned());
+    let installation = "installation_rollback_ambiguous_tombstone_0001";
+    world.journal.fail_next_staged_cas_before_apply().await;
+    assert_eq!(
+        world
+            .relay()
+            .stage_enrollment(enrollment(&host.0, installation), operation())
+            .await,
+        Err(RelayError::JournalUnavailable)
+    );
+    let preparing = world.journal.entry(&host.0).await;
+    let read_alias = preparing.read_capability_alias.clone();
+    let manage_alias = preparing.manage_capability_alias.clone();
+    world.secrets.fail_next_tombstone_after_apply().await;
+
+    world
+        .relay()
+        .rollback_enrollment(&host, &command_id(installation), operation())
+        .await
+        .expect("authoritative reload observes the applied tombstone");
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert_eq!(
+        world.secrets.revision(&read_alias).await.unwrap(),
+        RelaySecretRevision::Found(2)
+    );
+    assert_eq!(
+        world.secrets.revision(&manage_alias).await.unwrap(),
+        RelaySecretRevision::Found(2)
+    );
+    assert!(!world.secrets.contains(&read_alias).await);
+    assert!(!world.secrets.contains(&manage_alias).await);
+}
+
+#[tokio::test]
+async fn reconcile_resumes_a_durable_preparing_rollback_fence() {
+    let world = TestWorld::new();
+    let host = RelayHostId("rollback-reconcile-fence-host".to_owned());
+    let installation = "installation_rollback_reconcile_fence_0001";
+    world.journal.fail_next_staged_cas_before_apply().await;
+    assert_eq!(
+        world
+            .relay()
+            .stage_enrollment(enrollment(&host.0, installation), operation())
+            .await,
+        Err(RelayError::JournalUnavailable)
+    );
+    let preparing = world.journal.entry(&host.0).await;
+    world
+        .secrets
+        .fail_next_tombstone_before_apply(&preparing.read_capability_alias)
+        .await;
+
+    assert_eq!(
+        world
+            .relay()
+            .rollback_enrollment(&host, &command_id(installation), operation())
+            .await,
+        Err(RelayError::SecureStorageUnavailable)
+    );
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::RollbackPending
+    );
+    assert_eq!(
+        world
+            .relay()
+            .stage_enrollment(
+                enrollment(&host.0, "installation_rollback_reconcile_fence_0002"),
+                operation(),
+            )
+            .await,
+        Err(RelayError::InvalidResponse)
+    );
+
+    let outcomes = world
+        .relay()
+        .reconcile_all(100, operation())
+        .await
+        .expect("foreground reconcile resumes local rollback cleanup");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [RelayReconcileOutcome::CleanupCompleted { host_id }] if host_id == &host
+    ));
+    assert_eq!(
+        world.journal.entry(&host.0).await.state,
+        RelayBindingState::Tombstoned
+    );
+    assert!(
+        world
+            .secrets
+            .read(&preparing.read_capability_alias)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        world
+            .secrets
+            .read(&preparing.manage_capability_alias)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -2211,7 +4209,10 @@ async fn enrollment_stage_and_commit_bound_stalled_secret_and_journal_ports() {
     assert!(!world.journal.entries.lock().await.contains_key(&host.0));
 
     *world.journal.load_delay.lock().await = None;
-    *world.secrets.write_delay.lock().await = Some(Duration::from_millis(50));
+    world
+        .secrets
+        .delay_next_cas_after_drop(Duration::from_millis(50))
+        .await;
     assert_eq!(
         relay
             .stage_enrollment(
@@ -2223,19 +4224,21 @@ async fn enrollment_stage_and_commit_bound_stalled_secret_and_journal_ports() {
     );
     assert_eq!(
         world.journal.entry(&host.0).await.state,
-        RelayBindingState::Staged
+        RelayBindingState::Preparing
     );
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert!(world.secrets.count().await <= 1);
 
-    *world.secrets.write_delay.lock().await = None;
     relay
         .stage_enrollment(enrollment(&host.0, installation), operation())
         .await
-        .expect("resume reserved enrollment");
+        .expect("retry publishes only after both writes complete");
     *world.journal.load_delay.lock().await = Some(Duration::from_millis(50));
     assert_eq!(
         relay
             .commit_enrollment(
                 &host,
+                &command_id(installation),
                 RelayOperationContext::with_timeout(Duration::from_millis(10)),
             )
             .await,
@@ -2247,7 +4250,7 @@ async fn enrollment_stage_and_commit_bound_stalled_secret_and_journal_ports() {
     );
     *world.journal.load_delay.lock().await = None;
     relay
-        .commit_enrollment(&host, operation())
+        .commit_enrollment(&host, &command_id(installation), operation())
         .await
         .expect("bounded commit retry");
     assert_eq!(
@@ -2277,12 +4280,19 @@ async fn cleanup_pending_resumes_after_every_secret_deletion_boundary() {
             1 => &read_alias,
             _ => &manage_alias,
         };
-        world.secrets.fail_next_delete(failing_alias).await;
+        world
+            .secrets
+            .fail_next_tombstone_before_apply(failing_alias)
+            .await;
 
         assert_eq!(
             world
                 .relay()
-                .rollback_enrollment(&RelayHostId(host_name.clone()), operation())
+                .rollback_enrollment(
+                    &RelayHostId(host_name.clone()),
+                    &command_id(&installation),
+                    operation(),
+                )
                 .await,
             Err(RelayError::SecureStorageUnavailable)
         );
@@ -2344,12 +4354,21 @@ async fn terminal_binding_cleanup_deletes_current_and_retired_pending_token_alia
         .expect("pending rotation");
     let pending = world.journal.entry(host).await;
     let current_alias = pending.registrations[0].token_alias.clone();
-    let retired_alias = pending.retired_token_aliases[0].clone();
+    let retired_alias = pending.registrations[0]
+        .previous
+        .as_ref()
+        .expect("prior token alias")
+        .token_alias
+        .clone();
     assert!(pending.registrations[0].pending_sync);
 
     world
         .relay()
-        .rollback_enrollment(&RelayHostId(host.to_owned()), operation())
+        .rollback_enrollment(
+            &RelayHostId(host.to_owned()),
+            &command_id(installation),
+            operation(),
+        )
         .await
         .expect("terminal cleanup");
     assert_eq!(
@@ -2376,7 +4395,10 @@ async fn tombstone_response_loss_then_gone_converges_to_local_cleanup() {
         .await;
 
     assert_eq!(
-        world.relay().rollback_enrollment(&host, operation()).await,
+        world
+            .relay()
+            .rollback_enrollment(&host, &command_id(installation), operation())
+            .await,
         Err(RelayError::DeadlineExceeded)
     );
     assert_eq!(
@@ -2385,7 +4407,7 @@ async fn tombstone_response_loss_then_gone_converges_to_local_cleanup() {
     );
     world
         .relay()
-        .rollback_enrollment(&host, operation())
+        .rollback_enrollment(&host, &command_id(installation), operation())
         .await
         .expect("Gone is success for durable tombstone intent");
     assert_eq!(

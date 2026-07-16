@@ -18,6 +18,8 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 3 * 1_024 * 1_024;
 pub(crate) const DEFAULT_PAGE_LIMIT: u32 = 100;
 pub(crate) const DEFAULT_MAX_FETCH_PAGES: usize = 8;
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const MAX_RETIRED_TOKEN_ALIASES: usize = 64;
+pub(crate) const MAX_PROVIDER_TOMBSTONE_FENCES: usize = 3;
 
 const MIN_OPAQUE_ID_BYTES: usize = 16;
 const MAX_OPAQUE_ID_BYTES: usize = 128;
@@ -40,6 +42,9 @@ pub(crate) struct RelayEventId(pub(crate) String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RelaySecretAlias(pub(crate) String);
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RelayEnrollmentCommandId(pub(crate) String);
+
 impl RelayInstallationId {
     pub(crate) fn parse(value: impl Into<String>) -> Result<Self, RelayError> {
         parse_opaque_id(value.into()).map(Self)
@@ -53,6 +58,12 @@ impl RelayRegistrationId {
 }
 
 impl RelayEventId {
+    pub(crate) fn parse(value: impl Into<String>) -> Result<Self, RelayError> {
+        parse_opaque_id(value.into()).map(Self)
+    }
+}
+
+impl RelayEnrollmentCommandId {
     pub(crate) fn parse(value: impl Into<String>) -> Result<Self, RelayError> {
         parse_opaque_id(value.into()).map(Self)
     }
@@ -82,10 +93,13 @@ impl Drop for RelaySecretBytes {
 
 impl OpaqueRelaySecret {
     pub(crate) fn new(bytes: Vec<u8>) -> Result<Self, RelayError> {
-        if !(MIN_CAPABILITY_BYTES..=MAX_PROVIDER_TOKEN_BYTES).contains(&bytes.len()) {
+        // Wrap first so even rejected inbound FFI values are zeroized when the
+        // validation path returns early.
+        let bytes = RelaySecretBytes(bytes);
+        if !(MIN_CAPABILITY_BYTES..=MAX_PROVIDER_TOKEN_BYTES).contains(&bytes.0.len()) {
             return Err(RelayError::InvalidSecret);
         }
-        Ok(Self(Arc::new(RelaySecretBytes(bytes))))
+        Ok(Self(Arc::new(bytes)))
     }
 
     pub(crate) fn expose_for_adapter(&self) -> &[u8] {
@@ -177,12 +191,20 @@ pub(crate) struct RelayEnrollment {
     pub(crate) host_id: RelayHostId,
     pub(crate) origin: ValidatedRelayOrigin,
     pub(crate) installation_id: RelayInstallationId,
+    /// Stable, non-secret identity supplied by the authenticated pairing
+    /// command. Retries reuse it; a newer command must use a new identity.
+    pub(crate) command_id: RelayEnrollmentCommandId,
     pub(crate) read_capability: OpaqueRelaySecret,
     pub(crate) manage_capability: OpaqueRelaySecret,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayBindingState {
+    Preparing,
+    /// Durable local rollback fence for an unpublished enrollment. Once this
+    /// row is visible, every late Staged publication for the prior Preparing
+    /// revision must conflict while capability-slot tombstones converge.
+    RollbackPending,
     Staged,
     Active,
     TombstonePending,
@@ -203,10 +225,36 @@ pub(crate) struct RelayProviderRegistration {
     pub(crate) environment: RelayPushEnvironment,
     pub(crate) local_generation: u64,
     pub(crate) token_alias: RelaySecretAlias,
+    /// Exact secure-store revision durably journaled before any register RPC.
+    /// `None` is limited to a newly reserved/unwritten alias or a legacy row.
+    pub(crate) token_revision: Option<u64>,
     pub(crate) relay_registration_id: Option<RelayRegistrationId>,
     pub(crate) relay_generation: Option<u64>,
     pub(crate) disposition: RelayRegistrationDisposition,
     pub(crate) pending_sync: bool,
+    /// Receipt and token custody for the registration that preceded a
+    /// journal-reserved rotation. It remains durable until the newer
+    /// registration is known to have superseded it or logout revokes it.
+    pub(crate) previous: Option<RelayPreviousProviderRegistration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelayPreviousProviderRegistration {
+    pub(crate) token_alias: RelaySecretAlias,
+    /// Preserved custody revision for the registration being superseded.
+    /// Legacy journals may decode this as `None`.
+    pub(crate) token_revision: Option<u64>,
+    pub(crate) relay_registration_id: Option<RelayRegistrationId>,
+    pub(crate) relay_generation: Option<u64>,
+}
+
+/// Durable local high-watermark preventing stale native token observations
+/// from recreating a provider registration after logout/revocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelayProviderTombstoneFence {
+    pub(crate) provider: RelayPushProvider,
+    pub(crate) environment: RelayPushEnvironment,
+    pub(crate) through_local_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +275,18 @@ pub(crate) struct RelayWakeLedger {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RelayBindingEntry {
     pub(crate) revision: u64,
+    /// Monotonic per-host generation allocated by a durable Preparing row
+    /// before either capability slot is touched.
+    pub(crate) staging_generation: u64,
+    /// Stable authenticated command identity bound to the staged capability
+    /// revisions and checked again at activation.
+    pub(crate) staging_command_id: RelayEnrollmentCommandId,
+    pub(crate) read_capability_revision: Option<u64>,
+    pub(crate) manage_capability_revision: Option<u64>,
+    /// Durable, authenticated fence allocated before every native repair.
+    /// Native state accepts only a strictly greater generation and verifies
+    /// the same generation again at its authoritative commit point.
+    pub(crate) repair_generation: u64,
     pub(crate) host_id: RelayHostId,
     pub(crate) origin: ValidatedRelayOrigin,
     pub(crate) installation_id: RelayInstallationId,
@@ -234,6 +294,11 @@ pub(crate) struct RelayBindingEntry {
     pub(crate) manage_capability_alias: RelaySecretAlias,
     pub(crate) state: RelayBindingState,
     pub(crate) registrations: Vec<RelayProviderRegistration>,
+    /// One monotonic high-watermark per valid provider/environment pair.
+    /// These survive provider-registration cleanup so restarts and other
+    /// coordinator instances cannot replay an observation at or below a
+    /// completed tombstone generation.
+    pub(crate) provider_tombstone_fences: Vec<RelayProviderTombstoneFence>,
     /// Provider-token aliases retired by a durable rotation. An alias remains
     /// here until secure storage confirms idempotent deletion, so crashes and
     /// ambiguous delete results cannot orphan provider credentials.
@@ -257,7 +322,7 @@ impl OpaqueWakeHint {
         if self.schema_version != RELAY_SCHEMA_VERSION
             || self.cursor == 0
             || self.expires_at_ms <= now_ms
-            || self.expires_at_ms.saturating_sub(now_ms) > MAX_LIFETIME_MS
+            || self.expires_at_ms - now_ms > MAX_LIFETIME_MS
         {
             return Err(RelayError::InvalidWake);
         }
@@ -405,6 +470,23 @@ pub(crate) enum RelayReconcileOutcome {
     },
 }
 
+/// Secret-free operational projection for native lifecycle and diagnostics.
+///
+/// Capability and provider-token aliases deliberately remain private. Native
+/// callers only need to know whether durable work is pending and whether a
+/// binding requires user-visible repair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelayBindingStatus {
+    pub(crate) host_id: RelayHostId,
+    pub(crate) installation_id: RelayInstallationId,
+    pub(crate) state: RelayBindingState,
+    pub(crate) highest_seen_cursor: u64,
+    pub(crate) applied_cursor: u64,
+    pub(crate) pending_ack_cursor: Option<u64>,
+    pub(crate) provider_registration_count: u32,
+    pub(crate) has_pending_provider_sync: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayRetryClass {
     Retry,
@@ -455,10 +537,29 @@ pub(crate) enum RelaySecretStoreError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RelaySecretCreateOutcome {
+    Created,
+    AlreadyExists,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RelaySecretRevision {
+    Missing,
+    Found(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RelaySecretCasOutcome {
+    Stored,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayRepairError {
     Unavailable,
     RePairRequired,
     Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +603,7 @@ impl RelayCancellation {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(&self) {
         if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
             self.inner.notify.notify_waiters();

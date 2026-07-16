@@ -129,6 +129,14 @@ pub struct MobileClient {
     /// session exits or the caller explicitly closes it.
     pub(crate) terminal_sessions:
         Arc<StdMutex<HashMap<String, Arc<crate::terminal::TerminalSession>>>>,
+    /// Optional native persistence/custody ports for the Rust-owned background
+    /// relay. Kept on the shared client so recreating an FFI `AppClient`
+    /// handle cannot silently drop or fork relay state.
+    pub(crate) background_relay:
+        Arc<RwLock<Option<Arc<crate::background_relay::ConfiguredBackgroundRelay>>>>,
+    /// Serializes configuration replacement and clearing across all FFI
+    /// handles, including secure integrity-key bootstrap.
+    pub(crate) background_relay_configuration: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// State for a single in-flight guided SSH connect.
@@ -264,6 +272,8 @@ impl MobileClient {
             ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             alleycat_restart_targets: Arc::new(StdMutex::new(HashMap::new())),
             terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            background_relay: Arc::new(RwLock::new(None)),
+            background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

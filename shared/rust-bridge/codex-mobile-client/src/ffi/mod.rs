@@ -7,6 +7,7 @@
 pub(crate) mod alleycat;
 mod android;
 mod app_store;
+pub(crate) mod background_relay;
 mod client;
 mod discovery;
 mod errors;
@@ -24,6 +25,16 @@ pub use alleycat::{
     AppAlleycatPairPayload,
 };
 pub use app_store::{AppStore, AppStoreSubscription};
+pub use background_relay::{
+    AppRelayBindingState, AppRelayBindingStatus, AppRelayEventClass, AppRelayFailure,
+    AppRelayFanoutReceipt, AppRelayJournalBackend, AppRelayJournalLoad, AppRelayJournalSnapshot,
+    AppRelayJournalWriteOutcome, AppRelayPushEnvironment, AppRelayPushProvider,
+    AppRelayPushTokenObservation, AppRelayPushTokenTombstone, AppRelayReconcileOutcome,
+    AppRelayReconcileReceipt, AppRelayRepairBackend, AppRelayRepairMode, AppRelayRepairResult,
+    AppRelaySecretBackend, AppRelaySecretCasOutcome, AppRelaySecretCreateOutcome,
+    AppRelaySecretReadError, AppRelaySecretRevision, AppRelaySecretValue,
+    AppRelaySecretWriteOutcome, AppRelayStatusSnapshot, AppRelayWakeHint, BackgroundRelayError,
+};
 pub use client::AppClient;
 pub use discovery::{
     AppSlingshotEnvironment, DiscoveryBridge, DiscoveryScanSubscription, ServerBridge,

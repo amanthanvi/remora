@@ -2,6 +2,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::FuturesUnordered};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{ports::*, types::*};
@@ -58,6 +59,19 @@ impl BackgroundRelay {
         observation.validate()?;
         operation.remaining()?;
         let _operation = self.run_step(&operation, self.operations.lock()).await?;
+        let global_fences = self
+            .run_step(&operation, self.journal.provider_tombstone_fences())
+            .await?
+            .map_err(|_| RelayError::JournalUnavailable)?;
+        if provider_tombstone_fence(
+            &global_fences,
+            observation.provider,
+            observation.environment,
+        )
+        .is_some_and(|fence| observation.local_generation <= fence.through_local_generation)
+        {
+            return Err(RelayError::InvalidProviderRegistration);
+        }
         let bindings: Vec<_> = self
             .list_bindings(&operation)
             .await?
@@ -112,18 +126,17 @@ impl BackgroundRelay {
         }
         operation.remaining()?;
         let _operation = self.run_step(&operation, self.operations.lock()).await?;
+        self.run_step(
+            &operation,
+            self.journal.advance_provider_tombstone_fence(&tombstone),
+        )
+        .await?
+        .map_err(|_| RelayError::JournalUnavailable)?;
         let bindings: Vec<_> = self
             .list_bindings(&operation)
             .await?
             .into_iter()
             .filter(|binding| binding.state == RelayBindingState::Active)
-            .filter(|binding| {
-                binding.registrations.iter().any(|registration| {
-                    registration.provider == tombstone.provider
-                        && registration.environment == tombstone.environment
-                        && registration.local_generation <= tombstone.through_local_generation
-                })
-            })
             .collect();
         let mut receipt = PushFanoutReceipt::empty();
         receipt.attempted = u32::try_from(bindings.len()).unwrap_or(u32::MAX);
@@ -208,6 +221,7 @@ impl BackgroundRelay {
             if !matches!(
                 binding.state,
                 RelayBindingState::Active
+                    | RelayBindingState::RollbackPending
                     | RelayBindingState::TombstonePending
                     | RelayBindingState::CleanupPending
             ) {
@@ -217,7 +231,12 @@ impl BackgroundRelay {
             pending.push(async move {
                 let host_id = binding.host_id.clone();
                 let installation_id = binding.installation_id.clone();
-                let outcome = if matches!(
+                let outcome = if binding.state == RelayBindingState::RollbackPending {
+                    match self.resume_preparing_rollback(binding, &operation).await {
+                        Ok(()) => RelayReconcileOutcome::CleanupCompleted { host_id },
+                        Err(error) => RelayReconcileOutcome::Failed { host_id, error },
+                    }
+                } else if matches!(
                     binding.state,
                     RelayBindingState::TombstonePending | RelayBindingState::CleanupPending
                 ) {
@@ -259,24 +278,91 @@ impl BackgroundRelay {
         Ok(receipts.into_iter().map(|(_, outcome)| outcome).collect())
     }
 
+    /// Return a bounded, secret-free view of configured relay bindings.
+    pub(crate) async fn statuses(
+        &self,
+        operation: RelayOperationContext,
+    ) -> Result<Vec<RelayBindingStatus>, RelayError> {
+        operation.remaining()?;
+        let _operation = self.run_step(&operation, self.operations.lock()).await?;
+        let mut statuses = self
+            .list_bindings(&operation)
+            .await?
+            .into_iter()
+            .map(|binding| RelayBindingStatus {
+                host_id: binding.host_id,
+                installation_id: binding.installation_id,
+                state: binding.state,
+                highest_seen_cursor: binding.wake.highest_seen_cursor,
+                applied_cursor: binding.wake.applied_cursor,
+                pending_ack_cursor: binding.wake.pending_ack_cursor,
+                provider_registration_count: u32::try_from(binding.registrations.len())
+                    .unwrap_or(u32::MAX),
+                has_pending_provider_sync: binding
+                    .registrations
+                    .iter()
+                    .any(|registration| registration.pending_sync),
+            })
+            .collect::<Vec<_>>();
+        statuses.sort_by(|left, right| left.host_id.0.cmp(&right.host_id.0));
+        Ok(statuses)
+    }
+
     async fn sync_token_for_binding(
         &self,
         mut binding: RelayBindingEntry,
         observation: &PushTokenObservation,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError> {
-        binding = self
-            .cleanup_retired_token_aliases(binding, &operation)
-            .await?;
+        if provider_tombstone_fence(
+            &binding.provider_tombstone_fences,
+            observation.provider,
+            observation.environment,
+        )
+        .is_some_and(|fence| observation.local_generation <= fence.through_local_generation)
+        {
+            return Err(RelayError::InvalidProviderRegistration);
+        }
         let existing_index = registration_index(
             &binding.registrations,
             observation.provider,
             observation.environment,
         );
+        // A newer local generation is allowed only after the older durable
+        // tombstone has converged and removed its registration. Replacing this
+        // row early would discard the remote cleanup intent.
+        if existing_index.is_some_and(|index| {
+            binding.registrations[index].disposition == RelayRegistrationDisposition::Tombstone
+        }) {
+            return Err(RelayError::Retryable);
+        }
+        let pending_retry = registration_index(
+            &binding.registrations,
+            observation.provider,
+            observation.environment,
+        )
+        .is_some_and(|index| {
+            let registration = &binding.registrations[index];
+            registration.local_generation == observation.local_generation
+                && registration.disposition == RelayRegistrationDisposition::Active
+                && registration.pending_sync
+        });
+        if !pending_retry {
+            // A new generation must retire the prior alias before it reserves
+            // another one. The exact same pending generation is allowed to
+            // rewrite its already-reserved token first, then retries cleanup
+            // after remote synchronization.
+            binding = self
+                .cleanup_retired_token_aliases(binding, &operation)
+                .await?;
+        }
         if let Some(index) = existing_index {
             let existing = &binding.registrations[index];
             if existing.local_generation > observation.local_generation {
                 return Err(RelayError::InvalidProviderRegistration);
+            }
+            if existing.pending_sync && existing.local_generation != observation.local_generation {
+                return Err(RelayError::Retryable);
             }
             if existing.local_generation == observation.local_generation
                 && existing.disposition == RelayRegistrationDisposition::Active
@@ -303,34 +389,73 @@ impl BackgroundRelay {
             environment: observation.environment,
             local_generation: observation.local_generation,
             token_alias: token_alias.clone(),
-            relay_registration_id: existing_index
-                .and_then(|index| binding.registrations[index].relay_registration_id.clone()),
-            relay_generation: existing_index
-                .and_then(|index| binding.registrations[index].relay_generation),
+            token_revision: if old_alias.as_ref() == Some(&token_alias) {
+                existing_index.and_then(|index| binding.registrations[index].token_revision)
+            } else {
+                None
+            },
+            relay_registration_id: if old_alias.as_ref() == Some(&token_alias) {
+                existing_index
+                    .and_then(|index| binding.registrations[index].relay_registration_id.clone())
+            } else {
+                None
+            },
+            relay_generation: if old_alias.as_ref() == Some(&token_alias) {
+                existing_index.and_then(|index| binding.registrations[index].relay_generation)
+            } else {
+                None
+            },
             disposition: RelayRegistrationDisposition::Active,
             pending_sync: true,
+            previous: existing_index.and_then(|index| {
+                let existing = &binding.registrations[index];
+                if existing.token_alias == token_alias {
+                    existing.previous.clone()
+                } else {
+                    Some(RelayPreviousProviderRegistration {
+                        token_alias: existing.token_alias.clone(),
+                        token_revision: existing.token_revision,
+                        relay_registration_id: existing.relay_registration_id.clone(),
+                        relay_generation: existing.relay_generation,
+                    })
+                }
+            }),
         };
         replace_registration(&mut binding.registrations, pending);
-        if let Some(old_alias) = old_alias.as_ref().filter(|alias| *alias != &token_alias)
-            && !binding.retired_token_aliases.contains(old_alias)
-        {
-            binding.retired_token_aliases.push(old_alias.clone());
-        }
-        // Reserve both the active and retired aliases before writing the new
-        // secret. A lost CAS response is recoverable by reloading this entry;
-        // a failed CAS cannot leave an unreferenced provider token.
+        // Reserve the replacement alias and the preceding remote receipt
+        // before writing the new secret. A failed or ambiguous write cannot
+        // erase the last known generation needed by logout.
         binding = self.cas_bounded(binding, &operation, |entry| entry).await?;
-        self.run_step(
-            &operation,
-            self.secrets.write(&token_alias, observation.token.clone()),
+        let token_revision = self
+            .reserve_versioned_secret(&token_alias, observation.token.clone(), &operation)
+            .await?;
+        let index = registration_index(
+            &binding.registrations,
+            observation.provider,
+            observation.environment,
         )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        .ok_or(RelayError::InvalidProviderRegistration)?;
+        if binding.registrations[index].token_alias != token_alias
+            || binding.registrations[index].local_generation != observation.local_generation
+        {
+            return Err(RelayError::InvalidProviderRegistration);
+        }
+        binding.registrations[index].token_revision = Some(token_revision);
+        // Remote registration is forbidden until the exact custody revision
+        // is durable in the journal. A crash before this CAS leaves a pending
+        // alias that logout can still revision-tombstone safely.
+        binding = self.cas_bounded(binding, &operation, |entry| entry).await?;
 
         let authorization = self
-            .read_capability(&binding.manage_capability_alias, &operation)
+            .read_capability(
+                &binding.manage_capability_alias,
+                binding.manage_capability_revision,
+                &operation,
+            )
             .await?;
-        let token = self.read_secret(&token_alias, &operation).await?;
+        let token = self
+            .read_versioned_secret(&token_alias, token_revision, &operation)
+            .await?;
         let response = self
             .run_transport(
                 &operation,
@@ -374,48 +499,48 @@ impl BackgroundRelay {
         tombstone: &PushTokenTombstone,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError> {
-        binding = self
-            .cleanup_retired_token_aliases(binding, &operation)
-            .await?;
-        let index = registration_index(
+        let existing_index = registration_index(
             &binding.registrations,
             tombstone.provider,
             tombstone.environment,
+        );
+        let fence_needs_advance = provider_tombstone_fence(
+            &binding.provider_tombstone_fences,
+            tombstone.provider,
+            tombstone.environment,
         )
-        .ok_or(RelayError::InvalidProviderRegistration)?;
-        let registration_id = binding.registrations[index]
-            .relay_registration_id
-            .clone()
-            .ok_or(RelayError::Retryable)?;
-        let relay_generation = binding.registrations[index]
-            .relay_generation
-            .ok_or(RelayError::Retryable)?;
-        binding.registrations[index].disposition = RelayRegistrationDisposition::Tombstone;
-        binding.registrations[index].pending_sync = true;
-        binding = self.cas_bounded(binding, &operation, |entry| entry).await?;
+        .is_none_or(|fence| fence.through_local_generation < tombstone.through_local_generation);
+        let registration_needs_tombstone = existing_index.is_some_and(|index| {
+            let registration = &binding.registrations[index];
+            registration.local_generation <= tombstone.through_local_generation
+                && registration.disposition != RelayRegistrationDisposition::Tombstone
+        });
+        if fence_needs_advance || registration_needs_tombstone {
+            binding = self
+                .cas_bounded(binding, &operation, |mut entry| {
+                    advance_provider_tombstone_fence(
+                        &mut entry.provider_tombstone_fences,
+                        tombstone,
+                    );
+                    if let Some(index) = registration_index(
+                        &entry.registrations,
+                        tombstone.provider,
+                        tombstone.environment,
+                    ) && entry.registrations[index].local_generation
+                        <= tombstone.through_local_generation
+                    {
+                        entry.registrations[index].disposition =
+                            RelayRegistrationDisposition::Tombstone;
+                        entry.registrations[index].pending_sync = true;
+                    }
+                    entry
+                })
+                .await?;
+        }
 
-        let authorization = self
-            .read_capability(&binding.manage_capability_alias, &operation)
+        let _ = self
+            .resume_pending_provider_mutations(binding, &operation)
             .await?;
-        self.run_idempotent_tombstone(
-            &operation,
-            self.transport.tombstone_device(
-                transport_context(&binding, authorization, operation.clone()),
-                RelayTombstoneDeviceRequest {
-                    installation_id: binding.installation_id.clone(),
-                    registration_id,
-                    through_generation: relay_generation,
-                },
-            ),
-        )
-        .await?;
-
-        let alias = binding.registrations[index].token_alias.clone();
-        self.run_step(&operation, self.secrets.delete(&alias))
-            .await?
-            .map_err(|_| RelayError::SecureStorageUnavailable)?;
-        binding.registrations.remove(index);
-        let _ = self.cas_bounded(binding, &operation, |entry| entry).await?;
         Ok(())
     }
 
@@ -477,7 +602,11 @@ impl BackgroundRelay {
         let starting_cursor = binding.wake.applied_cursor;
         let mut target_cursor = binding.wake.highest_seen_cursor;
         let authorization = self
-            .read_capability(&binding.read_capability_alias, &operation)
+            .read_capability(
+                &binding.read_capability_alias,
+                binding.read_capability_revision,
+                &operation,
+            )
             .await?;
 
         let first_page = if discover_high_watermark || target_cursor > starting_cursor {
@@ -507,10 +636,10 @@ impl BackgroundRelay {
 
         if target_cursor <= starting_cursor {
             if discover_high_watermark {
-                let repair = self
+                let (repair, _) = self
                     .run_repair(
                         &operation,
-                        &binding.host_id,
+                        binding.clone(),
                         RelayRepairMode::Full {
                             through_cursor: starting_cursor,
                         },
@@ -584,17 +713,29 @@ impl BackgroundRelay {
             None => unreachable!("target cursor requires a fetch"),
         };
 
-        let repair = self
-            .run_repair(&operation, &binding.host_id, repair_mode)
-            .await?;
+        let (repair, repaired_binding) = self.run_repair(&operation, binding, repair_mode).await?;
+        binding = repaired_binding;
         if !repair.authoritative || repair.applied_through_cursor != target_cursor {
             return Err(RelayError::RepairFailed);
         }
 
         // This ordering is the central correctness invariant: authoritative
         // repair, then durable local cursor commit, then remote ACK.
+        binding.wake.highest_seen_cursor = binding.wake.highest_seen_cursor.max(target_cursor);
         binding.wake.applied_cursor = target_cursor;
         binding.wake.pending_ack_cursor = Some(target_cursor);
+        // A remote-ahead ACK is only a divergence marker until authoritative
+        // repair reaches that cursor. Clear it in the same durable commit that
+        // advances `applied_cursor`; persisting equal applied/remote-ahead
+        // cursors would make the authenticated journal fail closed before the
+        // follow-up ACK could recover it.
+        if binding
+            .wake
+            .remote_ack_ahead_cursor
+            .is_some_and(|cursor| cursor <= target_cursor)
+        {
+            binding.wake.remote_ack_ahead_cursor = None;
+        }
         binding = self.cas_bounded(binding, &operation, |entry| entry).await?;
         binding = self
             .acknowledge_applied(binding, target_cursor, operation.clone())
@@ -729,7 +870,11 @@ impl BackgroundRelay {
         operation: RelayOperationContext,
     ) -> Result<RelayBindingEntry, RelayError> {
         let authorization = self
-            .read_capability(&binding.read_capability_alias, &operation)
+            .read_capability(
+                &binding.read_capability_alias,
+                binding.read_capability_revision,
+                &operation,
+            )
             .await?;
         let receipt = self
             .run_transport(
@@ -830,19 +975,75 @@ impl BackgroundRelay {
     async fn run_repair(
         &self,
         operation: &RelayOperationContext,
-        host_id: &RelayHostId,
+        mut binding: RelayBindingEntry,
         mode: RelayRepairMode,
-    ) -> Result<RelayRepairReceipt, RelayError> {
+    ) -> Result<(RelayRepairReceipt, RelayBindingEntry), RelayError> {
+        // Allocate the native commit fence in the authenticated journal before
+        // invoking native code. Retrying a journal conflict reloads the latest
+        // per-host generation, so separate AppClient instances and process
+        // restarts share one strictly monotonic sequence.
+        let mut allocated = false;
+        for _ in 0..4 {
+            let generation = binding
+                .repair_generation
+                .checked_add(1)
+                .ok_or(RelayError::JournalUnavailable)?;
+            let mut replacement = binding.clone();
+            replacement.revision = binding
+                .revision
+                .checked_add(1)
+                .ok_or(RelayError::JournalUnavailable)?;
+            replacement.repair_generation = generation;
+            match self
+                .run_step(
+                    operation,
+                    self.journal.compare_and_swap(
+                        &binding.host_id,
+                        Some(binding.revision),
+                        replacement.clone(),
+                    ),
+                )
+                .await?
+            {
+                Ok(()) => {
+                    binding = replacement;
+                    allocated = true;
+                    break;
+                }
+                Err(RelayJournalError::Conflict) => {
+                    binding = self
+                        .run_step(operation, self.journal.load_by_host(&binding.host_id))
+                        .await?
+                        .map_err(|_| RelayError::JournalUnavailable)?
+                        .ok_or(RelayError::UnknownInstallation)?;
+                }
+                Err(RelayJournalError::Unavailable) => {
+                    return Err(RelayError::JournalUnavailable);
+                }
+            }
+        }
+        if !allocated || binding.repair_generation == 0 {
+            return Err(RelayError::JournalUnavailable);
+        }
+        // The repair port owns deadline enforcement because native callbacks
+        // may continue after their Rust future is dropped. Its native request
+        // carries the same deadline plus a commit fence; wrapping it in a
+        // second timeout here could drop the adapter before it establishes
+        // that fence.
         match self
-            .run_request_step(
-                operation,
-                self.repair.repair(host_id, mode, operation.clone()),
+            .repair
+            .repair(
+                &binding.host_id,
+                binding.repair_generation,
+                mode,
+                operation.clone(),
             )
-            .await?
+            .await
         {
-            Ok(receipt) => Ok(receipt),
+            Ok(receipt) => Ok((receipt, binding)),
             Err(RelayRepairError::RePairRequired) => Err(RelayError::RePairRequired),
             Err(RelayRepairError::Cancelled) => Err(RelayError::Cancelled),
+            Err(RelayRepairError::DeadlineExceeded) => Err(RelayError::DeadlineExceeded),
             Err(RelayRepairError::Unavailable) => Err(RelayError::Retryable),
         }
     }
@@ -850,22 +1051,103 @@ impl BackgroundRelay {
     async fn read_capability(
         &self,
         alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
         operation: &RelayOperationContext,
     ) -> Result<OpaqueRelaySecret, RelayError> {
-        let secret = self.read_secret(alias, operation).await?;
+        let expected_revision = expected_revision.ok_or(RelayError::InvalidResponse)?;
+        let secret = self
+            .read_versioned_secret(alias, expected_revision, operation)
+            .await?;
         secret.validate_capability()?;
         Ok(secret)
     }
 
-    async fn read_secret(
+    async fn read_versioned_secret(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: u64,
+        operation: &RelayOperationContext,
+    ) -> Result<OpaqueRelaySecret, RelayError> {
+        self.read_versioned_secret_optional(alias, Some(expected_revision), operation)
+            .await?
+            .ok_or(RelayError::SecureStorageUnavailable)
+    }
+
+    async fn read_versioned_secret_optional(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
+        operation: &RelayOperationContext,
+    ) -> Result<Option<OpaqueRelaySecret>, RelayError> {
+        let expected_revision = expected_revision.map(RelaySecretRevision::Found);
+        if let Some(expected_revision) = expected_revision {
+            let revision_before = self
+                .run_step(operation, self.secrets.revision(alias))
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            if revision_before != expected_revision {
+                return Err(RelayError::SecureStorageUnavailable);
+            }
+        }
+        let secret = self.read_secret_optional(alias, operation).await?;
+        if let Some(expected_revision) = expected_revision {
+            // The native secure-store surface exposes revision and value as
+            // separate callbacks. Re-read the revision after copying the
+            // opaque value so the expected revision is a linearization fence:
+            // a concurrent CAS before, during, or immediately after the read
+            // cannot make an unjournaled replacement eligible for transport.
+            let revision_after = self
+                .run_step(operation, self.secrets.revision(alias))
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            if revision_after != expected_revision {
+                return Err(RelayError::SecureStorageUnavailable);
+            }
+        }
+        Ok(secret)
+    }
+
+    async fn read_secret_optional(
         &self,
         alias: &RelaySecretAlias,
         operation: &RelayOperationContext,
-    ) -> Result<OpaqueRelaySecret, RelayError> {
+    ) -> Result<Option<OpaqueRelaySecret>, RelayError> {
         self.run_step(operation, self.secrets.read(alias))
             .await?
-            .map_err(|_| RelayError::SecureStorageUnavailable)?
-            .ok_or(RelayError::SecureStorageUnavailable)
+            .map_err(|_| RelayError::SecureStorageUnavailable)
+    }
+
+    async fn verify_staged_capability_revisions(
+        &self,
+        binding: &RelayBindingEntry,
+        operation: &RelayOperationContext,
+    ) -> Result<(), RelayError> {
+        if !matches!(
+            binding.state,
+            RelayBindingState::Staged | RelayBindingState::Active
+        ) {
+            return Err(RelayError::InvalidResponse);
+        }
+        for (alias, expected) in [
+            (
+                &binding.read_capability_alias,
+                binding.read_capability_revision,
+            ),
+            (
+                &binding.manage_capability_alias,
+                binding.manage_capability_revision,
+            ),
+        ] {
+            let expected = expected.ok_or(RelayError::InvalidResponse)?;
+            let actual = self
+                .run_step(operation, self.secrets.revision(alias))
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            if actual != RelaySecretRevision::Found(expected) {
+                return Err(RelayError::SecureStorageUnavailable);
+            }
+        }
+        Ok(())
     }
 
     async fn list_bindings(
@@ -884,7 +1166,10 @@ impl BackgroundRelay {
         transform: impl FnOnce(RelayBindingEntry) -> RelayBindingEntry,
     ) -> Result<RelayBindingEntry, RelayError> {
         let mut replacement = transform(current.clone());
-        replacement.revision = current.revision.saturating_add(1);
+        replacement.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(RelayError::JournalUnavailable)?;
         self.run_step(
             operation,
             self.journal.compare_and_swap(
@@ -909,13 +1194,42 @@ impl BackgroundRelay {
         binding: &RelayBindingEntry,
         operation: &RelayOperationContext,
     ) -> Result<(), RelayError> {
-        let manage_capability = self
-            .run_step(
+        let manage_capability_revision = binding
+            .manage_capability_revision
+            .ok_or(RelayError::InvalidResponse)?;
+        let manage_capability = match self
+            .read_versioned_secret_optional(
+                &binding.manage_capability_alias,
+                Some(manage_capability_revision),
                 operation,
-                self.secrets.read(&binding.manage_capability_alias),
             )
-            .await?
-            .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            .await
+        {
+            Ok(capability) => capability,
+            Err(error @ RelayError::SecureStorageUnavailable) => {
+                let minimum_tombstone_revision = manage_capability_revision
+                    .checked_add(1)
+                    .ok_or(RelayError::SecureStorageUnavailable)?;
+                if self
+                    .capability_tombstone_is_authoritative(
+                        &binding.manage_capability_alias,
+                        minimum_tombstone_revision,
+                        operation,
+                    )
+                    .await?
+                {
+                    // A prior authenticated replacement attempt may have
+                    // completed local tombstoning before its journal CAS
+                    // failed. A stable newer tombstone contains no bearer to
+                    // send, so replay may proceed without weakening the exact
+                    // revision check for any present capability.
+                    None
+                } else {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(manage_capability) = manage_capability {
             manage_capability.validate_capability()?;
             if operation.follow_redirects {
@@ -944,27 +1258,20 @@ impl BackgroundRelay {
         }
 
         for registration in &binding.registrations {
-            self.run_step(operation, self.secrets.delete(&registration.token_alias))
-                .await?
-                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            if let Some(previous) = &registration.previous {
+                self.tombstone_versioned_secret(&previous.token_alias, operation)
+                    .await?;
+            }
+            self.tombstone_versioned_secret(&registration.token_alias, operation)
+                .await?;
         }
         for alias in &binding.retired_token_aliases {
-            self.run_step(operation, self.secrets.delete(alias))
-                .await?
-                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            self.tombstone_versioned_secret(alias, operation).await?;
         }
-        self.run_step(
-            operation,
-            self.secrets.delete(&binding.read_capability_alias),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
-        self.run_step(
-            operation,
-            self.secrets.delete(&binding.manage_capability_alias),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        self.tombstone_versioned_secret(&binding.read_capability_alias, operation)
+            .await?;
+        self.tombstone_versioned_secret(&binding.manage_capability_alias, operation)
+            .await?;
         Ok(())
     }
 
@@ -1007,6 +1314,90 @@ impl BackgroundRelay {
             let _ = self.cleanup_binding(updated, operation).await;
         }
     }
+
+    async fn reserve_versioned_secret(
+        &self,
+        alias: &RelaySecretAlias,
+        capability: OpaqueRelaySecret,
+        operation: &RelayOperationContext,
+    ) -> Result<u64, RelayError> {
+        for _ in 0..4 {
+            let current_revision = self
+                .run_step(operation, self.secrets.revision(alias))
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            let (expected_revision, replacement_revision) = match current_revision {
+                RelaySecretRevision::Missing => (None, 1),
+                RelaySecretRevision::Found(revision) => {
+                    // A missing value with a present revision is a rollback
+                    // tombstone. It is intentionally reusable only through a
+                    // newer CAS, so a late pre-rollback value write cannot
+                    // resurrect the old capability.
+                    let existing = self
+                        .run_step(operation, self.secrets.read(alias))
+                        .await?
+                        .map_err(|_| RelayError::SecureStorageUnavailable)?;
+                    // Always advance the persisted revision, even when the
+                    // capability bytes are unchanged. An older queued CAS can
+                    // otherwise still match this revision and overwrite a
+                    // successfully retried enrollment after it resumes.
+                    drop(existing);
+                    (
+                        Some(revision),
+                        revision
+                            .checked_add(1)
+                            .ok_or(RelayError::SecureStorageUnavailable)?,
+                    )
+                }
+            };
+            let outcome = self
+                .run_step(
+                    operation,
+                    self.secrets.compare_and_swap(
+                        alias,
+                        expected_revision,
+                        replacement_revision,
+                        capability.clone(),
+                    ),
+                )
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            match outcome {
+                RelaySecretCasOutcome::Stored => return Ok(replacement_revision),
+                RelaySecretCasOutcome::Conflict => continue,
+            }
+        }
+        Err(RelayError::Retryable)
+    }
+}
+
+fn reserved_staging_aliases(
+    host_id: &RelayHostId,
+    _existing: Option<&RelayBindingEntry>,
+) -> (RelaySecretAlias, RelaySecretAlias) {
+    // The slot CAS revision is the supersession fence. Reusing one
+    // deterministic pair avoids leaving an untracked alternate pair behind,
+    // while a late older write can only win before the replacement advances
+    // the same revision (and otherwise conflicts).
+    staging_alias_pair(host_id, 0)
+}
+
+fn staging_alias_pair(host_id: &RelayHostId, slot: u8) -> (RelaySecretAlias, RelaySecretAlias) {
+    (
+        staging_alias(host_id, slot, b"read"),
+        staging_alias(host_id, slot, b"manage"),
+    )
+}
+
+fn staging_alias(host_id: &RelayHostId, slot: u8, role: &[u8]) -> RelaySecretAlias {
+    let mut digest = Sha256::new();
+    digest.update(b"remora-relay-staging-alias-v1\0");
+    digest.update([slot]);
+    digest.update(role);
+    digest.update(b"\0");
+    digest.update(host_id.0.as_bytes());
+    let suffix = hex::encode(&digest.finalize()[..16]);
+    RelaySecretAlias(format!("relay_capability_{suffix}"))
 }
 
 #[async_trait]
@@ -1020,121 +1411,217 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
         enrollment.manage_capability.validate_capability()?;
         operation.remaining()?;
         let _operation = self.run_step(&operation, self.operations.lock()).await?;
-        let existing = self
-            .run_step(&operation, self.journal.load_by_host(&enrollment.host_id))
+        let global_fences = self
+            .run_step(&operation, self.journal.provider_tombstone_fences())
             .await?
             .map_err(|_| RelayError::JournalUnavailable)?;
-        if let Some(existing) = existing.as_ref() {
-            if existing.installation_id == enrollment.installation_id
-                && existing.origin == enrollment.origin
+
+        // Publish a non-secret Preparing reservation before touching either
+        // deterministic slot. A late reservation CAS can only publish this
+        // inert row. A newer authenticated command first advances the same
+        // per-host generation, invalidating every older late publication CAS.
+        let mut reservation = None;
+        let mut retired_repair_generation = None;
+        for _ in 0..4 {
+            let existing = self
+                .run_step(&operation, self.journal.load_by_host(&enrollment.host_id))
+                .await?
+                .map_err(|_| RelayError::JournalUnavailable)?;
+            if let Some(existing) = existing.as_ref() {
+                let same_command = enrollment_matches(existing, &enrollment);
+                match existing.state {
+                    RelayBindingState::Active => {
+                        return if same_command {
+                            Ok(())
+                        } else {
+                            Err(RelayError::InvalidResponse)
+                        };
+                    }
+                    RelayBindingState::Staged if same_command => {
+                        self.verify_staged_capability_revisions(existing, &operation)
+                            .await?;
+                        return Ok(());
+                    }
+                    RelayBindingState::Preparing if same_command => {
+                        reservation = Some(existing.clone());
+                        break;
+                    }
+                    RelayBindingState::Preparing | RelayBindingState::Staged => {
+                        // A newer authenticated command is allowed to replace
+                        // an uncommitted command, including the same remote
+                        // installation. Its reservation lands before slots.
+                    }
+                    RelayBindingState::Tombstoned | RelayBindingState::NeedsRepair => {
+                        if existing.installation_id == enrollment.installation_id {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                    }
+                    RelayBindingState::RollbackPending
+                    | RelayBindingState::TombstonePending
+                    | RelayBindingState::CleanupPending => {
+                        return Err(RelayError::InvalidResponse);
+                    }
+                }
+            }
+            if existing
+                .as_ref()
+                .is_none_or(|entry| entry.installation_id != enrollment.installation_id)
+                && self
+                    .run_step(
+                        &operation,
+                        self.journal
+                            .load_by_installation(&enrollment.installation_id),
+                    )
+                    .await?
+                    .map_err(|_| RelayError::JournalUnavailable)?
+                    .is_some()
             {
-                if existing.state == RelayBindingState::Active {
-                    return Ok(());
-                }
-                if existing.state == RelayBindingState::Staged {
-                    self.run_step(
-                        &operation,
-                        self.secrets
-                            .write(&existing.read_capability_alias, enrollment.read_capability),
-                    )
-                    .await?
-                    .map_err(|_| RelayError::SecureStorageUnavailable)?;
-                    self.run_step(
-                        &operation,
-                        self.secrets.write(
-                            &existing.manage_capability_alias,
-                            enrollment.manage_capability,
-                        ),
-                    )
-                    .await?
-                    .map_err(|_| RelayError::SecureStorageUnavailable)?;
-                    return Ok(());
-                }
-            }
-            if !matches!(
-                existing.state,
-                RelayBindingState::Tombstoned | RelayBindingState::NeedsRepair
-            ) {
                 return Err(RelayError::InvalidResponse);
             }
-            // This boundary has no relay-side generation/recreation contract.
-            // A terminal remote installation ID is therefore never reused.
-            if existing.installation_id == enrollment.installation_id {
-                return Err(RelayError::InvalidResponse);
+            if let Some(existing) = existing.as_ref()
+                && existing.state == RelayBindingState::NeedsRepair
+                && retired_repair_generation != Some(existing.revision)
+            {
+                self.retire_repair_binding_for_authenticated_replacement(existing, &operation)
+                    .await?;
+                retired_repair_generation = Some(existing.revision);
             }
-        }
-        if existing
-            .as_ref()
-            .is_none_or(|entry| entry.installation_id != enrollment.installation_id)
-            && self
+
+            let (read_alias, manage_alias) =
+                reserved_staging_aliases(&enrollment.host_id, existing.as_ref());
+            let staging_generation = existing.as_ref().map_or(Ok(1), |entry| {
+                entry
+                    .staging_generation
+                    .checked_add(1)
+                    .ok_or(RelayError::JournalUnavailable)
+            })?;
+            let entry = RelayBindingEntry {
+                revision: existing.as_ref().map_or(Ok(1), |entry| {
+                    entry
+                        .revision
+                        .checked_add(1)
+                        .ok_or(RelayError::JournalUnavailable)
+                })?,
+                staging_generation,
+                staging_command_id: enrollment.command_id.clone(),
+                read_capability_revision: None,
+                manage_capability_revision: None,
+                // Preserve the host fence across authenticated replacement so
+                // a late repair for the retired installation cannot become current.
+                repair_generation: existing.as_ref().map_or(0, |entry| entry.repair_generation),
+                host_id: enrollment.host_id.clone(),
+                origin: enrollment.origin.clone(),
+                installation_id: enrollment.installation_id.clone(),
+                read_capability_alias: read_alias,
+                manage_capability_alias: manage_alias,
+                state: RelayBindingState::Preparing,
+                registrations: Vec::new(),
+                provider_tombstone_fences: merged_provider_tombstone_fences(
+                    existing
+                        .as_ref()
+                        .map(|entry| entry.provider_tombstone_fences.as_slice())
+                        .unwrap_or_default(),
+                    &global_fences,
+                ),
+                retired_token_aliases: Vec::new(),
+                wake: RelayWakeLedger::default(),
+            };
+            let expected_revision = existing.as_ref().map(|entry| entry.revision);
+            match self
                 .run_step(
                     &operation,
                     self.journal
-                        .load_by_installation(&enrollment.installation_id),
+                        .compare_and_swap(&entry.host_id, expected_revision, entry.clone()),
                 )
                 .await?
-                .map_err(|_| RelayError::JournalUnavailable)?
-                .is_some()
-        {
-            return Err(RelayError::InvalidResponse);
+            {
+                Ok(()) => {
+                    reservation = Some(entry);
+                    break;
+                }
+                Err(RelayJournalError::Conflict) => continue,
+                Err(RelayJournalError::Unavailable) => {
+                    return Err(RelayError::JournalUnavailable);
+                }
+            }
+        }
+        let reservation = reservation.ok_or(RelayError::Retryable)?;
+
+        let read_revision = self
+            .reserve_versioned_secret(
+                &reservation.read_capability_alias,
+                enrollment.read_capability,
+                &operation,
+            )
+            .await?;
+        let manage_revision = self
+            .reserve_versioned_secret(
+                &reservation.manage_capability_alias,
+                enrollment.manage_capability,
+                &operation,
+            )
+            .await?;
+        let mut staged = reservation.clone();
+        staged.revision = reservation
+            .revision
+            .checked_add(1)
+            .ok_or(RelayError::JournalUnavailable)?;
+        staged.read_capability_revision = Some(read_revision);
+        staged.manage_capability_revision = Some(manage_revision);
+        staged.state = RelayBindingState::Staged;
+
+        let publish_result = self
+            .run_step(
+                &operation,
+                self.journal.compare_and_swap(
+                    &staged.host_id,
+                    Some(reservation.revision),
+                    staged.clone(),
+                ),
+            )
+            .await;
+        match publish_result {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(_)) => {}
+            Err(error) => {
+                // Timeout/cancellation drops the Rust future but cannot stop
+                // an already-entered native CAS callback. An immediate reload
+                // is not a fence: the callback may still commit afterward.
+                // Retain the deterministic bounded aliases for replay.
+                return Err(error);
+            }
         }
 
-        let read_alias = RelaySecretAlias(format!(
-            "relay_capability_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let manage_alias = RelaySecretAlias(format!(
-            "relay_capability_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let entry = RelayBindingEntry {
-            revision: existing
-                .as_ref()
-                .map_or(1, |entry| entry.revision.saturating_add(1)),
-            host_id: enrollment.host_id.clone(),
-            origin: enrollment.origin.clone(),
-            installation_id: enrollment.installation_id.clone(),
-            read_capability_alias: read_alias.clone(),
-            manage_capability_alias: manage_alias.clone(),
-            state: RelayBindingState::Staged,
-            registrations: Vec::new(),
-            retired_token_aliases: Vec::new(),
-            wake: RelayWakeLedger::default(),
-        };
-        if let Some(existing) = existing {
-            if existing.state == RelayBindingState::NeedsRepair {
-                self.retire_repair_binding_for_authenticated_replacement(&existing, &operation)
-                    .await?;
+        // A callback may apply its CAS and still report unavailable. Reload
+        // under a fresh bounded recovery budget before deciding whether the
+        // unpublished aliases are safe to delete.
+        let recovery = RelayOperationContext::with_timeout(self.request_timeout);
+        match self
+            .run_step(&recovery, self.journal.load_by_host(&enrollment.host_id))
+            .await
+        {
+            Ok(Ok(Some(published))) if published == staged => {
+                self.verify_staged_capability_revisions(&published, &recovery)
+                    .await
             }
-            let _ = self.cas_bounded(existing, &operation, |_| entry).await?;
-        } else {
-            self.run_step(
-                &operation,
-                self.journal
-                    .compare_and_swap(&enrollment.host_id, None, entry),
-            )
-            .await?
-            .map_err(|_| RelayError::JournalUnavailable)?;
+            Ok(Ok(_)) => {
+                // Retain the bounded fenced slots. A later enrollment with
+                // different capabilities can CAS-replace them safely.
+                Err(RelayError::JournalUnavailable)
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Ambiguous reload: retain the deterministic aliases. If the
+                // CAS landed, Staged is recoverable; if not, a later attempt
+                // reuses the same bounded slot.
+                Err(RelayError::JournalUnavailable)
+            }
         }
-        self.run_step(
-            &operation,
-            self.secrets.write(&read_alias, enrollment.read_capability),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
-        self.run_step(
-            &operation,
-            self.secrets
-                .write(&manage_alias, enrollment.manage_capability),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
-        Ok(())
     }
 
     async fn commit_enrollment(
         &self,
         host_id: &RelayHostId,
+        command_id: &RelayEnrollmentCommandId,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError> {
         operation.remaining()?;
@@ -1144,16 +1631,31 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
             .await?
             .map_err(|_| RelayError::JournalUnavailable)?
             .ok_or(RelayError::UnknownInstallation)?;
+        if binding.staging_command_id != *command_id {
+            return Err(RelayError::InvalidResponse);
+        }
         if binding.state == RelayBindingState::Active {
+            self.verify_staged_capability_revisions(&binding, &operation)
+                .await?;
             return Ok(());
         }
         if binding.state != RelayBindingState::Staged {
             return Err(RelayError::InvalidResponse);
         }
-        self.read_capability(&binding.read_capability_alias, &operation)
+        self.verify_staged_capability_revisions(&binding, &operation)
             .await?;
-        self.read_capability(&binding.manage_capability_alias, &operation)
-            .await?;
+        self.read_capability(
+            &binding.read_capability_alias,
+            binding.read_capability_revision,
+            &operation,
+        )
+        .await?;
+        self.read_capability(
+            &binding.manage_capability_alias,
+            binding.manage_capability_revision,
+            &operation,
+        )
+        .await?;
         let _ = self
             .cas_bounded(binding, &operation, |mut entry| {
                 entry.state = RelayBindingState::Active;
@@ -1166,6 +1668,7 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
     async fn rollback_enrollment(
         &self,
         host_id: &RelayHostId,
+        command_id: &RelayEnrollmentCommandId,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError> {
         operation.remaining()?;
@@ -1175,6 +1678,9 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
             .await?
             .map_err(|_| RelayError::JournalUnavailable)?
             .ok_or(RelayError::UnknownInstallation)?;
+        if binding.staging_command_id != *command_id {
+            return Err(RelayError::InvalidResponse);
+        }
         if binding.state == RelayBindingState::Tombstoned {
             return Ok(());
         }
@@ -1187,7 +1693,11 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
             // ambiguous failure leaves NeedsRepair unchanged; only confirmed
             // absence advances to local cleanup.
             let authorization = self
-                .read_capability(&binding.manage_capability_alias, &operation)
+                .read_capability(
+                    &binding.manage_capability_alias,
+                    binding.manage_capability_revision,
+                    &operation,
+                )
                 .await?;
             self.run_idempotent_tombstone(
                 &operation,
@@ -1207,16 +1717,38 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
                 .await?;
             return self.cleanup_binding(binding, &operation).await;
         }
+        if binding.state == RelayBindingState::Preparing {
+            // Publish the terminal reservation before touching either slot.
+            // Every late Staged publication still expects the Preparing
+            // revision and therefore conflicts after this CAS commits.
+            binding = self
+                .cas_bounded(binding, &operation, |mut entry| {
+                    entry.state = RelayBindingState::RollbackPending;
+                    entry
+                })
+                .await?;
+            return self.resume_preparing_rollback(binding, &operation).await;
+        }
+        if binding.state == RelayBindingState::RollbackPending {
+            return self.resume_preparing_rollback(binding, &operation).await;
+        }
         if binding.state == RelayBindingState::Staged {
-            // Staging reserves the journal before secret writes. If staging was
-            // interrupted, preserve the Staged transaction so the caller can
-            // replay stage_enrollment with the same capabilities; entering a
-            // tombstone state without the manage capability would be
-            // unrecoverable and could abandon remote authority.
-            self.read_capability(&binding.read_capability_alias, &operation)
+            // Staged is published only after both capabilities are durably in
+            // custody, so rollback can always authenticate remote revocation.
+            self.verify_staged_capability_revisions(&binding, &operation)
                 .await?;
-            self.read_capability(&binding.manage_capability_alias, &operation)
-                .await?;
+            self.read_capability(
+                &binding.read_capability_alias,
+                binding.read_capability_revision,
+                &operation,
+            )
+            .await?;
+            self.read_capability(
+                &binding.manage_capability_alias,
+                binding.manage_capability_revision,
+                &operation,
+            )
+            .await?;
         }
         if binding.state != RelayBindingState::TombstonePending {
             binding.state = RelayBindingState::TombstonePending;
@@ -1227,6 +1759,122 @@ impl RemoteRelayEnrollmentPort for BackgroundRelay {
 }
 
 impl BackgroundRelay {
+    async fn resume_preparing_rollback(
+        &self,
+        binding: RelayBindingEntry,
+        operation: &RelayOperationContext,
+    ) -> Result<(), RelayError> {
+        if binding.state != RelayBindingState::RollbackPending {
+            return Err(RelayError::InvalidResponse);
+        }
+        self.tombstone_versioned_secret(&binding.read_capability_alias, operation)
+            .await?;
+        self.tombstone_versioned_secret(&binding.manage_capability_alias, operation)
+            .await?;
+        let _ = self
+            .cas_bounded(binding, operation, |mut entry| {
+                entry.state = RelayBindingState::Tombstoned;
+                entry
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn tombstone_versioned_secret(
+        &self,
+        alias: &RelaySecretAlias,
+        operation: &RelayOperationContext,
+    ) -> Result<(), RelayError> {
+        for _ in 0..4 {
+            let current_revision = self
+                .run_step(operation, self.secrets.revision(alias))
+                .await?
+                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            let (expected_revision, replacement_revision) = match current_revision {
+                RelaySecretRevision::Missing => (None, 1),
+                RelaySecretRevision::Found(revision) => (
+                    Some(revision),
+                    revision
+                        .checked_add(1)
+                        .ok_or(RelayError::SecureStorageUnavailable)?,
+                ),
+            };
+            let result = self
+                .run_step(
+                    operation,
+                    self.secrets.compare_and_tombstone(
+                        alias,
+                        expected_revision,
+                        replacement_revision,
+                    ),
+                )
+                .await;
+            match result {
+                Ok(Ok(RelaySecretCasOutcome::Conflict)) => continue,
+                Ok(Ok(RelaySecretCasOutcome::Stored)) => {
+                    if self
+                        .capability_tombstone_is_authoritative(
+                            alias,
+                            replacement_revision,
+                            operation,
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                Ok(Err(_)) | Err(_) => {
+                    // A native callback may durably apply and then report an
+                    // error, or may outlive this dropped Rust future. Reload
+                    // through a fresh budget before classifying the result.
+                    let recovery = RelayOperationContext::with_timeout(self.request_timeout);
+                    if self
+                        .capability_tombstone_is_authoritative(
+                            alias,
+                            replacement_revision,
+                            &recovery,
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(Err(_)) => Err(RelayError::SecureStorageUnavailable),
+                        Ok(Ok(_)) => unreachable!(),
+                    };
+                }
+            }
+        }
+        Err(RelayError::Retryable)
+    }
+
+    async fn capability_tombstone_is_authoritative(
+        &self,
+        alias: &RelaySecretAlias,
+        minimum_revision: u64,
+        operation: &RelayOperationContext,
+    ) -> Result<bool, RelayError> {
+        let revision_before = self
+            .run_step(operation, self.secrets.revision(alias))
+            .await?
+            .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        if !matches!(revision_before, RelaySecretRevision::Found(actual) if actual >= minimum_revision)
+        {
+            return Ok(false);
+        }
+        let value = self
+            .run_step(operation, self.secrets.read(alias))
+            .await?
+            .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        let revision_after = self
+            .run_step(operation, self.secrets.revision(alias))
+            .await?
+            .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        Ok(revision_after == revision_before && value.is_none())
+    }
+
     async fn resume_tombstone(
         &self,
         mut binding: RelayBindingEntry,
@@ -1239,7 +1887,11 @@ impl BackgroundRelay {
             return Err(RelayError::InvalidResponse);
         }
         let authorization = self
-            .read_capability(&binding.manage_capability_alias, operation)
+            .read_capability(
+                &binding.manage_capability_alias,
+                binding.manage_capability_revision,
+                operation,
+            )
             .await?;
         self.run_idempotent_tombstone(
             operation,
@@ -1275,12 +1927,19 @@ impl BackgroundRelay {
         {
             let registration = binding.registrations[index].clone();
             let authorization = self
-                .read_capability(&binding.manage_capability_alias, operation)
+                .read_capability(
+                    &binding.manage_capability_alias,
+                    binding.manage_capability_revision,
+                    operation,
+                )
                 .await?;
             match registration.disposition {
                 RelayRegistrationDisposition::Active => {
+                    let token_revision = registration
+                        .token_revision
+                        .ok_or(RelayError::SecureStorageUnavailable)?;
                     let token = self
-                        .read_secret(&registration.token_alias, operation)
+                        .read_versioned_secret(&registration.token_alias, token_revision, operation)
                         .await?;
                     let receipt = self
                         .run_transport(
@@ -1309,12 +1968,184 @@ impl BackgroundRelay {
                     binding = self.cas_bounded(binding, operation, |entry| entry).await?;
                 }
                 RelayRegistrationDisposition::Tombstone => {
-                    let registration_id = registration
-                        .relay_registration_id
-                        .ok_or(RelayError::InvalidProviderRegistration)?;
-                    let relay_generation = registration
-                        .relay_generation
-                        .ok_or(RelayError::InvalidProviderRegistration)?;
+                    if let Some(previous) = registration.previous.clone() {
+                        let (registration_id, relay_generation) =
+                            match (previous.relay_registration_id, previous.relay_generation) {
+                                (Some(registration_id), Some(relay_generation)) => {
+                                    (registration_id, relay_generation)
+                                }
+                                (None, None) => {
+                                    let Some(token) = self
+                                        .read_versioned_secret_optional(
+                                            &previous.token_alias,
+                                            previous.token_revision,
+                                            operation,
+                                        )
+                                        .await?
+                                    else {
+                                        self.tombstone_versioned_secret(
+                                            &previous.token_alias,
+                                            operation,
+                                        )
+                                        .await?;
+                                        binding = self
+                                            .cas_bounded(binding, operation, |mut entry| {
+                                                if let Some(index) = registration_index(
+                                                    &entry.registrations,
+                                                    registration.provider,
+                                                    registration.environment,
+                                                ) {
+                                                    entry.registrations[index].previous = None;
+                                                }
+                                                entry
+                                                    .retired_token_aliases
+                                                    .retain(|alias| alias != &previous.token_alias);
+                                                entry
+                                            })
+                                            .await?;
+                                        continue;
+                                    };
+                                    let receipt = self
+                                        .run_transport(
+                                            operation,
+                                            self.transport.register_device(
+                                                transport_context(
+                                                    &binding,
+                                                    authorization,
+                                                    operation.clone(),
+                                                ),
+                                                RelayRegisterDeviceRequest {
+                                                    installation_id: binding
+                                                        .installation_id
+                                                        .clone(),
+                                                    provider: registration.provider,
+                                                    environment: registration.environment,
+                                                    token,
+                                                },
+                                            ),
+                                        )
+                                        .await?;
+                                    validate_registration_receipt(
+                                        &binding,
+                                        registration.provider,
+                                        registration.environment,
+                                        &receipt,
+                                    )?;
+                                    binding.registrations[index]
+                                        .previous
+                                        .as_mut()
+                                        .ok_or(RelayError::InvalidProviderRegistration)?
+                                        .relay_registration_id = Some(receipt.registration_id);
+                                    binding.registrations[index]
+                                        .previous
+                                        .as_mut()
+                                        .ok_or(RelayError::InvalidProviderRegistration)?
+                                        .relay_generation = Some(receipt.generation);
+                                    binding =
+                                        self.cas_bounded(binding, operation, |entry| entry).await?;
+                                    continue;
+                                }
+                                _ => return Err(RelayError::InvalidProviderRegistration),
+                            };
+                        self.run_idempotent_tombstone(
+                            operation,
+                            self.transport.tombstone_device(
+                                transport_context(&binding, authorization, operation.clone()),
+                                RelayTombstoneDeviceRequest {
+                                    installation_id: binding.installation_id.clone(),
+                                    registration_id,
+                                    through_generation: relay_generation,
+                                },
+                            ),
+                        )
+                        .await?;
+                        self.tombstone_versioned_secret(&previous.token_alias, operation)
+                            .await?;
+                        binding = self
+                            .cas_bounded(binding, operation, |mut entry| {
+                                if let Some(index) = registration_index(
+                                    &entry.registrations,
+                                    registration.provider,
+                                    registration.environment,
+                                ) {
+                                    entry.registrations[index].previous = None;
+                                }
+                                entry
+                                    .retired_token_aliases
+                                    .retain(|alias| alias != &previous.token_alias);
+                                entry
+                            })
+                            .await?;
+                        continue;
+                    }
+                    let (registration_id, relay_generation) = match (
+                        registration.relay_registration_id,
+                        registration.relay_generation,
+                    ) {
+                        (Some(registration_id), Some(relay_generation)) => {
+                            (registration_id, relay_generation)
+                        }
+                        (None, None) => {
+                            // Registration may have committed remotely before
+                            // its receipt was lost. Recover the authoritative
+                            // registration identity without clearing the
+                            // durable tombstone disposition, then loop back to
+                            // revoke it through the returned relay generation.
+                            let Some(token) = self
+                                .read_versioned_secret_optional(
+                                    &registration.token_alias,
+                                    registration.token_revision,
+                                    operation,
+                                )
+                                .await?
+                            else {
+                                // The journal reservation preceded secure
+                                // custody. Fence the alias before clearing the
+                                // row so a still-running native CAS cannot
+                                // recreate token bytes afterward.
+                                self.tombstone_versioned_secret(
+                                    &registration.token_alias,
+                                    operation,
+                                )
+                                .await?;
+                                binding.registrations.remove(index);
+                                binding =
+                                    self.cas_bounded(binding, operation, |entry| entry).await?;
+                                continue;
+                            };
+                            let receipt = self
+                                .run_transport(
+                                    operation,
+                                    self.transport.register_device(
+                                        transport_context(
+                                            &binding,
+                                            authorization,
+                                            operation.clone(),
+                                        ),
+                                        RelayRegisterDeviceRequest {
+                                            installation_id: binding.installation_id.clone(),
+                                            provider: registration.provider,
+                                            environment: registration.environment,
+                                            token,
+                                        },
+                                    ),
+                                )
+                                .await?;
+                            validate_registration_receipt(
+                                &binding,
+                                registration.provider,
+                                registration.environment,
+                                &receipt,
+                            )?;
+                            binding.registrations[index].relay_registration_id =
+                                Some(receipt.registration_id);
+                            binding.registrations[index].relay_generation =
+                                Some(receipt.generation);
+                            binding = self.cas_bounded(binding, operation, |entry| entry).await?;
+                            continue;
+                        }
+                        _ => return Err(RelayError::InvalidProviderRegistration),
+                    };
                     self.run_idempotent_tombstone(
                         operation,
                         self.transport.tombstone_device(
@@ -1327,9 +2158,8 @@ impl BackgroundRelay {
                         ),
                     )
                     .await?;
-                    self.run_step(operation, self.secrets.delete(&registration.token_alias))
-                        .await?
-                        .map_err(|_| RelayError::SecureStorageUnavailable)?;
+                    self.tombstone_versioned_secret(&registration.token_alias, operation)
+                        .await?;
                     binding.registrations.remove(index);
                     binding = self.cas_bounded(binding, operation, |entry| entry).await?;
                 }
@@ -1343,20 +2173,38 @@ impl BackgroundRelay {
         mut binding: RelayBindingEntry,
         operation: &RelayOperationContext,
     ) -> Result<RelayBindingEntry, RelayError> {
-        // The retired alias remains authoritative until its replacement has
-        // been acknowledged by the relay. Never delete rollback authority
-        // while any provider registration is still staged remotely.
-        if binding
-            .registrations
-            .iter()
-            .any(|registration| registration.pending_sync)
+        while let Some((provider, environment, previous)) =
+            binding.registrations.iter().find_map(|registration| {
+                if registration.pending_sync {
+                    None
+                } else {
+                    registration
+                        .previous
+                        .clone()
+                        .map(|previous| (registration.provider, registration.environment, previous))
+                }
+            })
         {
-            return Ok(binding);
+            self.tombstone_versioned_secret(&previous.token_alias, operation)
+                .await?;
+            binding = self
+                .cas_bounded(binding, operation, |mut entry| {
+                    if let Some(index) =
+                        registration_index(&entry.registrations, provider, environment)
+                    {
+                        entry.registrations[index].previous = None;
+                    }
+                    entry
+                        .retired_token_aliases
+                        .retain(|alias| alias != &previous.token_alias);
+                    entry
+                })
+                .await?;
         }
+        // Aliases not associated with a still-pending prior receipt are safe
+        // for idempotent cleanup and remain hard-capped in the journal.
         while let Some(alias) = binding.retired_token_aliases.first().cloned() {
-            self.run_step(operation, self.secrets.delete(&alias))
-                .await?
-                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            self.tombstone_versioned_secret(&alias, operation).await?;
             binding = self
                 .cas_bounded(binding, operation, |mut entry| {
                     if let Some(index) = entry
@@ -1380,29 +2228,26 @@ impl BackgroundRelay {
     ) -> Result<(), RelayError> {
         debug_assert_eq!(binding.state, RelayBindingState::CleanupPending);
         // Installation cleanup is terminal, so both staged/current and retired
-        // provider aliases are deleted regardless of pending provider state.
+        // provider aliases are revision-tombstoned regardless of pending
+        // provider state before journal ownership is cleared.
         for alias in &binding.retired_token_aliases {
-            self.run_step(operation, self.secrets.delete(alias))
-                .await?
-                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            self.tombstone_versioned_secret(alias, operation).await?;
         }
         for registration in &binding.registrations {
-            self.run_step(operation, self.secrets.delete(&registration.token_alias))
-                .await?
-                .map_err(|_| RelayError::SecureStorageUnavailable)?;
+            if let Some(previous) = &registration.previous {
+                self.tombstone_versioned_secret(&previous.token_alias, operation)
+                    .await?;
+            }
+            self.tombstone_versioned_secret(&registration.token_alias, operation)
+                .await?;
         }
-        self.run_step(
-            operation,
-            self.secrets.delete(&binding.read_capability_alias),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
-        self.run_step(
-            operation,
-            self.secrets.delete(&binding.manage_capability_alias),
-        )
-        .await?
-        .map_err(|_| RelayError::SecureStorageUnavailable)?;
+        // Capability slots retain non-secret revision tombstones. Besides the
+        // Preparing rollback case, this also fences a callback from an older
+        // superseded enrollment that outlives a later Staged/Active cleanup.
+        self.tombstone_versioned_secret(&binding.read_capability_alias, operation)
+            .await?;
+        self.tombstone_versioned_secret(&binding.manage_capability_alias, operation)
+            .await?;
         binding = self
             .cas_bounded(binding, operation, |mut entry| {
                 entry.registrations.clear();
@@ -1448,6 +2293,69 @@ fn replace_registration(
     }
 }
 
+fn enrollment_matches(binding: &RelayBindingEntry, enrollment: &RelayEnrollment) -> bool {
+    binding.installation_id == enrollment.installation_id
+        && binding.origin == enrollment.origin
+        && binding.staging_command_id == enrollment.command_id
+}
+
+fn merged_provider_tombstone_fences(
+    binding_fences: &[RelayProviderTombstoneFence],
+    global_fences: &[RelayProviderTombstoneFence],
+) -> Vec<RelayProviderTombstoneFence> {
+    let mut merged = binding_fences.to_vec();
+    for fence in global_fences {
+        if let Some(existing) = merged.iter_mut().find(|existing| {
+            existing.provider == fence.provider && existing.environment == fence.environment
+        }) {
+            existing.through_local_generation = existing
+                .through_local_generation
+                .max(fence.through_local_generation);
+        } else {
+            merged.push(fence.clone());
+        }
+    }
+    merged.sort_by_key(|fence| (provider_sort_key(fence.provider), fence.environment as u8));
+    merged
+}
+
+fn provider_sort_key(provider: RelayPushProvider) -> u8 {
+    match provider {
+        RelayPushProvider::Apns => 0,
+        RelayPushProvider::Fcm => 1,
+    }
+}
+
+fn provider_tombstone_fence(
+    fences: &[RelayProviderTombstoneFence],
+    provider: RelayPushProvider,
+    environment: RelayPushEnvironment,
+) -> Option<&RelayProviderTombstoneFence> {
+    fences
+        .iter()
+        .find(|fence| fence.provider == provider && fence.environment == environment)
+}
+
+fn advance_provider_tombstone_fence(
+    fences: &mut Vec<RelayProviderTombstoneFence>,
+    tombstone: &PushTokenTombstone,
+) {
+    if let Some(fence) = fences.iter_mut().find(|fence| {
+        fence.provider == tombstone.provider && fence.environment == tombstone.environment
+    }) {
+        fence.through_local_generation = fence
+            .through_local_generation
+            .max(tombstone.through_local_generation);
+        return;
+    }
+    debug_assert!(fences.len() < MAX_PROVIDER_TOMBSTONE_FENCES);
+    fences.push(RelayProviderTombstoneFence {
+        provider: tombstone.provider,
+        environment: tombstone.environment,
+        through_local_generation: tombstone.through_local_generation,
+    });
+}
+
 fn validate_registration_receipt(
     binding: &RelayBindingEntry,
     provider: RelayPushProvider,
@@ -1473,6 +2381,13 @@ fn validate_event_page(
     page_limit: u32,
     now_ms: u64,
 ) -> Result<(), RelayError> {
+    let high_watermark_successor = page
+        .high_watermark
+        .checked_add(1)
+        .ok_or(RelayError::InvalidResponse)?;
+    let requested_successor = requested_after
+        .checked_add(1)
+        .ok_or(RelayError::InvalidResponse)?;
     if page.schema_version != RELAY_SCHEMA_VERSION
         || page.requested_after != requested_after
         || page.encoded_bytes > max_response_bytes
@@ -1480,8 +2395,8 @@ fn validate_event_page(
         || page.high_watermark < target_cursor
         || page.next_cursor > page.high_watermark
         || page.replay_floor == 0
-        || page.replay_floor > page.high_watermark.saturating_add(1)
-        || (requested_after.saturating_add(1) < page.replay_floor && !page.reset_required)
+        || page.replay_floor > high_watermark_successor
+        || (requested_successor < page.replay_floor && !page.reset_required)
     {
         return Err(RelayError::InvalidResponse);
     }
@@ -1491,7 +2406,7 @@ fn validate_event_page(
         }
         return Ok(());
     }
-    let mut expected = requested_after.saturating_add(1);
+    let mut expected = requested_successor;
     let mut seen_ids = std::collections::HashSet::new();
     for event in &page.events {
         if event.cursor != expected
@@ -1500,7 +2415,7 @@ fn validate_event_page(
         {
             return Err(RelayError::InvalidResponse);
         }
-        expected = expected.saturating_add(1);
+        expected = expected.checked_add(1).ok_or(RelayError::InvalidResponse)?;
     }
     let actual_next = page
         .events

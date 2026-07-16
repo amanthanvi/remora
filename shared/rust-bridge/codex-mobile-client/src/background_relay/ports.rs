@@ -16,6 +16,16 @@ pub(crate) trait RelayBindingJournalPort: Send + Sync {
         &self,
         installation_id: &RelayInstallationId,
     ) -> Result<Option<RelayBindingEntry>, RelayJournalError>;
+    /// Device-global monotonic floors. They are journal-root state rather than
+    /// properties of any one host binding, so logout is durable even when no
+    /// binding exists or every binding is non-active.
+    async fn provider_tombstone_fences(
+        &self,
+    ) -> Result<Vec<RelayProviderTombstoneFence>, RelayJournalError>;
+    async fn advance_provider_tombstone_fence(
+        &self,
+        tombstone: &PushTokenTombstone,
+    ) -> Result<(), RelayJournalError>;
     async fn compare_and_swap(
         &self,
         host_id: &RelayHostId,
@@ -34,12 +44,39 @@ pub(crate) trait OpaqueRelaySecretPort: Send + Sync {
         &self,
         alias: &RelaySecretAlias,
     ) -> Result<Option<OpaqueRelaySecret>, RelaySecretStoreError>;
-    async fn write(
+    /// Atomically install `secret` only when `alias` is absent. A late
+    /// completion must never overwrite an existing value.
+    async fn create_if_absent(
         &self,
         alias: &RelaySecretAlias,
         secret: OpaqueRelaySecret,
-    ) -> Result<(), RelaySecretStoreError>;
-    async fn delete(&self, alias: &RelaySecretAlias) -> Result<(), RelaySecretStoreError>;
+    ) -> Result<RelaySecretCreateOutcome, RelaySecretStoreError>;
+    /// Return the non-secret revision used to fence a subsequent CAS.
+    async fn revision(
+        &self,
+        alias: &RelaySecretAlias,
+    ) -> Result<RelaySecretRevision, RelaySecretStoreError>;
+    /// Atomically replace `alias` only at `expected_revision` (`None` means
+    /// absent). `replacement_revision` is strictly greater than the matched
+    /// revision (or nonzero for an absent alias). Late callbacks from an older
+    /// attempt must conflict after a newer attempt advances the revision.
+    async fn compare_and_swap(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
+        replacement_revision: u64,
+        secret: OpaqueRelaySecret,
+    ) -> Result<RelaySecretCasOutcome, RelaySecretStoreError>;
+    /// Atomically remove the secret bytes while advancing the alias revision.
+    /// The revision tombstone remains queryable through `revision`, while
+    /// `read` returns missing. This fences a late value CAS that was already
+    /// executing when its Rust future was dropped.
+    async fn compare_and_tombstone(
+        &self,
+        alias: &RelaySecretAlias,
+        expected_revision: Option<u64>,
+        replacement_revision: u64,
+    ) -> Result<RelaySecretCasOutcome, RelaySecretStoreError>;
 }
 
 #[derive(Clone, Debug)]
@@ -132,9 +169,13 @@ pub(crate) trait RelayTransportPort: Send + Sync {
 
 #[async_trait]
 pub(crate) trait RelayAuthoritativeRepairPort: Send + Sync {
+    /// Implementations must consume the supplied absolute operation deadline.
+    /// Native adapters additionally fence their durable commit so a callback
+    /// that outlives the Rust future cannot overwrite a newer repair.
     async fn repair(
         &self,
         host_id: &RelayHostId,
+        generation: u64,
         mode: RelayRepairMode,
         operation: RelayOperationContext,
     ) -> Result<RelayRepairReceipt, RelayRepairError>;
@@ -149,10 +190,9 @@ pub(crate) trait RelayAuthoritativeRepairPort: Send + Sync {
 #[async_trait]
 pub(crate) trait RemoteRelayEnrollmentPort: Send + Sync {
     /// Staging is replayable. If capability persistence is interrupted, the
-    /// binding remains `Staged`; callers must replay this method with the same
-    /// authenticated enrollment before commit or rollback can proceed. A new
-    /// authenticated enrollment may replace `Tombstoned` or `NeedsRepair`;
-    /// retryable retirement failures keep the terminal row authoritative.
+    /// binding remains `Preparing`; callers must replay this method with the
+    /// same authenticated command identity. A newer authenticated command can
+    /// supersede an uncommitted Preparing/Staged row before touching slots.
     async fn stage_enrollment(
         &self,
         enrollment: RelayEnrollment,
@@ -161,11 +201,13 @@ pub(crate) trait RemoteRelayEnrollmentPort: Send + Sync {
     async fn commit_enrollment(
         &self,
         host_id: &RelayHostId,
+        command_id: &RelayEnrollmentCommandId,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError>;
     async fn rollback_enrollment(
         &self,
         host_id: &RelayHostId,
+        command_id: &RelayEnrollmentCommandId,
         operation: RelayOperationContext,
     ) -> Result<(), RelayError>;
 }
