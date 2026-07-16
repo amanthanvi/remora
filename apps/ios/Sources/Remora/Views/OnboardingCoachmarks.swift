@@ -179,7 +179,7 @@ struct OnboardingCoachmarksView: View {
             VStack(alignment: item.labelAlignment, spacing: 2) {
                 Text(item.primary)
                     .remoraMonoFont(size: 12, weight: .semibold)
-                    .foregroundStyle(RemoraTheme.accent)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     .multilineTextAlignment(textAlignment(for: item.labelAlignment))
                     .fixedSize(horizontal: false, vertical: true)
                 if let secondary = item.secondary {

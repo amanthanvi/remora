@@ -13,6 +13,7 @@ import SwiftUI
 /// animates, iOS tracks the glass as it moves so no explicit
 /// `GlassEffectContainer` is needed here.
 struct NewThreadHeroView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let project: AppProject?
     let connectedServers: [HomeDashboardServer]
     let selectedServerId: String?
@@ -28,6 +29,8 @@ struct NewThreadHeroView: View {
     var autoFocus: Bool = true
 
     @State private var isSending = false
+    @State private var pendingThreadKey: ThreadKey?
+    @State private var handoffTask: Task<Void, Never>?
 
     /// Delay between the composer firing `onThreadCreated` and the parent
     /// replacing the route with `.conversation(key)`. Long enough for the
@@ -42,31 +45,28 @@ struct NewThreadHeroView: View {
 
     var body: some View {
         ZStack {
-            RemoraTheme.backgroundGradient.ignoresSafeArea()
+            RemoraTheme.background.ignoresSafeArea()
 
             VStack(spacing: 24) {
                 Spacer(minLength: 0)
 
                 if !isSending {
-                    Text("What should we build in remora?")
-                        .font(.system(size: 22, weight: .medium))
+                    Text("What should we build?")
+                        .remoraFont(.title2, weight: .medium)
                         .foregroundStyle(RemoraTheme.textPrimary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
 
                 HomeComposerView(
                     project: project,
                     transcriptionServerId: project?.serverId ?? selectedServerId,
                     onThreadCreated: { key in
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.85)) {
                             isSending = true
                         }
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: Self.morphSettleSeconds)
-                            onThreadCreated(key)
-                        }
+                        scheduleHandoff(for: key)
                     },
                     autoFocus: autoFocus
                 )
@@ -87,7 +87,10 @@ struct NewThreadHeroView: View {
                 }
             }
             .padding(.vertical, 24)
-            .animation(.spring(response: 0.5, dampingFraction: 0.85), value: isSending)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.85),
+                value: isSending
+            )
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -99,6 +102,41 @@ struct NewThreadHeroView: View {
                 }
             }
         }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            if shouldReduceMotion {
+                finishPendingHandoff()
+            }
+        }
+        .onDisappear {
+            handoffTask?.cancel()
+            handoffTask = nil
+            pendingThreadKey = nil
+        }
+    }
+
+    private func scheduleHandoff(for key: ThreadKey) {
+        handoffTask?.cancel()
+        pendingThreadKey = key
+        guard !reduceMotion else {
+            finishPendingHandoff()
+            return
+        }
+
+        handoffTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.morphSettleSeconds)
+            guard !Task.isCancelled, pendingThreadKey == key else { return }
+            pendingThreadKey = nil
+            handoffTask = nil
+            onThreadCreated(key)
+        }
+    }
+
+    private func finishPendingHandoff() {
+        guard let key = pendingThreadKey else { return }
+        pendingThreadKey = nil
+        handoffTask?.cancel()
+        handoffTask = nil
+        onThreadCreated(key)
     }
 
     // MARK: - Chips
@@ -143,7 +181,7 @@ struct NewThreadHeroView: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
             }
-            .foregroundStyle(server == nil ? RemoraTheme.textMuted : RemoraTheme.accent)
+            .foregroundStyle(server == nil ? RemoraTheme.textMuted : RemoraTheme.accentForegroundOnSurface)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
@@ -154,6 +192,7 @@ struct NewThreadHeroView: View {
                 Capsule(style: .continuous)
                     .stroke(RemoraTheme.textMuted.opacity(0.2), lineWidth: 0.6)
             )
+            .remoraMinimumHitTarget()
         }
         .disabled(launchableServers.isEmpty)
     }
@@ -174,7 +213,7 @@ struct NewThreadHeroView: View {
         "Make local iPhone command failures self-diagnosing",
         "Fix the real home feed item cap",
         "Fix subagent metadata across conversation rows",
-        "Connect your favorite apps to Codex"
+        "Connect another agent runtime"
     ]
 
     private var suggestionsList: some View {

@@ -718,7 +718,7 @@ struct WidgetContainerView: View {
                 Text(slug)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
             }
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(RemoraTheme.surfaceLight.opacity(0.5))

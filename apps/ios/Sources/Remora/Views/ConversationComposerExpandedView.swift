@@ -33,8 +33,8 @@ struct ConversationComposerExpandedView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if inputText.isEmpty {
-                    Text("Message remora...")
-                        .font(RemoraFont.styled(size: 17))
+                    Text("Message your agent…")
+                        .remoraFont(size: 17)
                         .foregroundColor(RemoraTheme.textMuted)
                         .padding(.leading, 24)
                         .padding(.top, 14)
@@ -50,7 +50,7 @@ struct ConversationComposerExpandedView: View {
                         isPresented = false
                     } label: {
                         Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            .font(RemoraFont.styled(size: 15, weight: .semibold))
+                            .remoraControlIconFont(size: 15, weight: .semibold)
                             .foregroundColor(RemoraTheme.textPrimary)
                     }
                     .accessibilityLabel("Collapse composer")
@@ -61,8 +61,8 @@ struct ConversationComposerExpandedView: View {
                         isPresented = false
                     } label: {
                         Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 26))
-                            .foregroundColor(canSend ? RemoraTheme.accent : RemoraTheme.textMuted)
+                            .remoraControlIconFont(size: 26)
+                            .foregroundColor(canSend ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                     }
                     .disabled(!canSend)
                     .accessibilityLabel("Send")

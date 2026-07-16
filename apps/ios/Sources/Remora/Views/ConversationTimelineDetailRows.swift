@@ -87,7 +87,7 @@ struct ConversationTodoListRow: View {
                 HStack(spacing: 8) {
                     Image(systemName: headerIconName)
                         .remoraFont(size: 12, weight: .semibold)
-                        .foregroundColor(headerTint)
+                        .foregroundColor(headerForegroundColor)
                     Text("To Do")
                         .remoraFont(.caption, weight: .semibold)
                         .foregroundColor(RemoraTheme.textPrimary)
@@ -160,10 +160,10 @@ struct ConversationTodoListRow: View {
         return "checklist"
     }
 
-    private var headerTint: Color {
+    private var headerForegroundColor: Color {
         if data.isComplete { return RemoraTheme.success }
         if hasInProgressStep { return RemoraTheme.warning }
-        return RemoraTheme.accent
+        return RemoraTheme.accentForegroundOnSurface
     }
 
     private var summaryText: String {
@@ -214,7 +214,7 @@ struct ConversationProposedPlanRow: View {
                 HStack(spacing: 8) {
                     Image(systemName: "list.bullet.rectangle.portrait.fill")
                         .remoraFont(size: 12, weight: .semibold)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     Text("Plan")
                         .remoraFont(.caption, weight: .semibold)
                         .foregroundColor(RemoraTheme.textPrimary)
@@ -267,7 +267,7 @@ struct ConversationUserInputResponseRow: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .remoraFont(size: 10, weight: .semibold)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(question.header ?? question.question)
                             .remoraFont(.caption, weight: .semibold)

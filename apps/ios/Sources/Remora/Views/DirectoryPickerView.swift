@@ -516,14 +516,14 @@ struct DirectoryPickerView: View {
                         }
                     }
                     .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
 
                 Button {
                     model.showHiddenDirectories.toggle()
                 } label: {
                     Image(systemName: model.showHiddenDirectories ? "eye" : "eye.slash")
-                        .foregroundColor(model.showHiddenDirectories ? RemoraTheme.accent : RemoraTheme.textSecondary)
+                        .foregroundColor(model.showHiddenDirectories ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textSecondary)
                 }
                 .accessibilityLabel(
                     model.showHiddenDirectories ?
@@ -657,12 +657,12 @@ struct DirectoryPickerView: View {
                             )
                         }
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
                     Button(DirectoryPickerStrings.changeServer) {
                         selectNextServer()
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .frame(maxHeight: .infinity)
@@ -683,7 +683,7 @@ struct DirectoryPickerView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "play.fill")
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 .frame(width: 20)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(DirectoryPickerStrings.continueIn((recent.path as NSString).lastPathComponent))
@@ -784,7 +784,7 @@ struct DirectoryPickerView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "folder.fill")
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 .frame(width: 20)
                             Text(entry)
                                 .remoraFont(.subheadline)

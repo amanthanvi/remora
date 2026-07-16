@@ -100,7 +100,7 @@ struct HomeModelChip: View {
                 }
                 Image(systemName: "cpu")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(disabled ? RemoraTheme.textMuted : RemoraTheme.accent)
+                    .foregroundStyle(disabled ? RemoraTheme.textMuted : RemoraTheme.accentForegroundOnSurface)
                 Text(selectedModelLabel)
                     .remoraMonoFont(size: 12, weight: .semibold)
                     .foregroundStyle(disabled ? RemoraTheme.textSecondary : RemoraTheme.textPrimary)
@@ -108,13 +108,13 @@ struct HomeModelChip: View {
                 if !reasoningLabel.isEmpty {
                     Text(reasoningLabel)
                         .remoraMonoFont(size: 11, weight: .regular)
-                        .foregroundStyle(RemoraTheme.textSecondary.opacity(0.85))
+                        .foregroundStyle(RemoraTheme.textSecondary)
                         .lineLimit(1)
                 }
                 if isPlanMode {
                     Text("plan")
                         .remoraMonoFont(size: 10, weight: .bold)
-                        .foregroundStyle(.black)
+                        .foregroundStyle(RemoraTheme.textOnAccent)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(RemoraTheme.accent, in: Capsule())
@@ -131,6 +131,7 @@ struct HomeModelChip: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .contentShape(Capsule())
+            .remoraMinimumHitTarget()
         }
         .buttonStyle(.plain)
         .modifier(GlassCapsuleModifier(interactive: true))

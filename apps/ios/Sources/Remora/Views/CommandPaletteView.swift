@@ -61,7 +61,7 @@ struct CommandPaletteView: View {
             HStack(alignment: .center, spacing: 12) {
                 Image(systemName: item.definition.systemImage)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(item.availability.isEnabled ? RemoraTheme.accent : RemoraTheme.textMuted)
+                    .foregroundStyle(item.availability.isEnabled ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                     .frame(width: 24)
                     .accessibilityHidden(true)
 

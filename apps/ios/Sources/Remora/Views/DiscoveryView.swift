@@ -325,7 +325,7 @@ struct DiscoveryView: View {
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: icon)
                         .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 36, height: 36)
                         .background(
                             Circle()
@@ -341,7 +341,7 @@ struct DiscoveryView: View {
                             if let badge {
                                 Text(badge)
                                     .remoraFont(.caption2, weight: .semibold)
-                                    .foregroundColor(RemoraTheme.accentStrong)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     .tracking(0.5)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -499,7 +499,7 @@ struct DiscoveryView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: serverIconName(for: server))
-                    .foregroundColor(server.hasCodexServer ? RemoraTheme.accent : RemoraTheme.textSecondary)
+                    .foregroundColor(server.hasCodexServer ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textSecondary)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(server.name)
@@ -1180,7 +1180,7 @@ struct DiscoveryView: View {
                                 Button("Retry") {
                                     Task { await loadSlingshotEnvironments() }
                                 }
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 .remoraFont(.footnote, weight: .semibold)
                             }
                         } else if slingshotEnvironments.isEmpty {
@@ -1219,11 +1219,11 @@ struct DiscoveryView: View {
                         Task { await loadSlingshotEnvironments() }
                     }
                     .disabled(slingshotIsLoading)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { showSlingshotHosts = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .task {
@@ -1237,7 +1237,7 @@ struct DiscoveryView: View {
     private func slingshotEnvironmentRow(_ environment: AppSlingshotEnvironment) -> some View {
         HStack(spacing: 12) {
             Image(systemName: slingshotIconName(for: environment))
-                .foregroundColor(environment.online ? RemoraTheme.accent : RemoraTheme.textMuted)
+                .foregroundColor(environment.online ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(environment.displayName)
@@ -1411,7 +1411,7 @@ struct DiscoveryView: View {
                         Button(manualConnectionMode.primaryButtonTitle) {
                             submitManualEntry()
                         }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .remoraFont(.subheadline)
                     }
                     .listRowBackground(RemoraTheme.surface.opacity(0.6))
@@ -1423,7 +1423,7 @@ struct DiscoveryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { showManualEntry = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }

@@ -52,19 +52,19 @@ struct InlineVoiceStatusStrip: View {
 
             Text(session.phase.displayTitle)
                 .font(RemoraFont.monospaced(.caption2, weight: .medium))
-                .foregroundColor(phaseColor(session.phase))
+                .foregroundColor(phaseForegroundColor(session.phase))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .background(RemoraTheme.surface.opacity(0.6))
     }
 
-    private func phaseColor(_ phase: VoiceSessionPhase) -> Color {
+    private func phaseForegroundColor(_ phase: VoiceSessionPhase) -> Color {
         switch phase {
         case .connecting, .thinking, .handoff:
             return RemoraTheme.warning
         case .listening, .speaking:
-            return RemoraTheme.accent
+            return RemoraTheme.accentForegroundOnSurface
         case .error:
             return RemoraTheme.danger
         }

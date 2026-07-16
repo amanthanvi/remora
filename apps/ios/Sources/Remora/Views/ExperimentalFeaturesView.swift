@@ -38,7 +38,7 @@ struct ExperimentalFeaturesView: View {
                     )) {
                         HStack(spacing: 10) {
                             Image(systemName: "ant")
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 .frame(width: 20)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Debug Mode")

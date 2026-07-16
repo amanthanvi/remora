@@ -161,7 +161,7 @@ struct AddServerPill: View {
                 Text("server")
                     .remoraMonoFont(size: 13, weight: .semibold)
             }
-            .foregroundStyle(RemoraTheme.accent)
+            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .contentShape(Capsule())

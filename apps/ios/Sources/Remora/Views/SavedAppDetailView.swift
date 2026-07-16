@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum SavedAppToolbarLayout: Equatable {
+    case inline
+    case stacked
+}
+
 /// Fullscreen host for a single saved app. Loads the widget HTML + persisted
 /// state from Rust on appear, renders through `WidgetWebView` in app-mode so
 /// the `loadAppState` / `saveAppState` JS bridge is wired. State saves flow
@@ -9,6 +14,9 @@ struct SavedAppDetailView: View {
     let appId: String
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var store = SavedAppsStore.shared
     @State private var payload: SavedAppWithPayload?
     @State private var loadAttempted = false
@@ -43,20 +51,16 @@ struct SavedAppDetailView: View {
                         schemaVersion: Int(payload.app.schemaVersion)
                     )
                     .id("\(appId)-\(reloadTick)")
-                    // Keep the initial content below the floating header
-                    // buttons so they don't overlap on load. Users can
-                    // still scroll content up under them — only the
-                    // initial anchor respects the bar.
-                    .safeAreaPadding(.top, 54)
                     .ignoresSafeArea(edges: [.bottom, .horizontal])
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        topBar(for: payload.app)
+                    }
 
                     if isUpdating {
                         shimmerOverlay
                     }
                 }
 
-                topBar(for: payload.app)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else if loadAttempted {
                 brokenAppPlaceholder
             } else {
@@ -76,7 +80,7 @@ struct SavedAppDetailView: View {
                         updateError = nil
                     }
                 )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
 
             if let message = updateSuccessMessage {
@@ -91,7 +95,7 @@ struct SavedAppDetailView: View {
                         .clipShape(Capsule())
                         .padding(.bottom, 28)
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -126,6 +130,22 @@ struct SavedAppDetailView: View {
         }
     }
 
+    static func toolbarLayout(
+        dynamicTypeSize: DynamicTypeSize,
+        horizontalSizeClass: UserInterfaceSizeClass?
+    ) -> SavedAppToolbarLayout {
+        dynamicTypeSize.isAccessibilitySize || horizontalSizeClass == .compact
+            ? .stacked
+            : .inline
+    }
+
+    private var toolbarLayout: SavedAppToolbarLayout {
+        Self.toolbarLayout(
+            dynamicTypeSize: dynamicTypeSize,
+            horizontalSizeClass: horizontalSizeClass
+        )
+    }
+
     /// While a saved-app update is in flight, poll the on-disk HTML
     /// every 500ms. When the model-driven `apply_patch` lands a new
     /// version, reassign `payload` so `WidgetWebView` picks up the
@@ -148,104 +168,166 @@ struct SavedAppDetailView: View {
     }
 
     private func topBar(for app: SavedApp) -> some View {
-        GlassMorphContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .remoraFont(size: 17, weight: .semibold)
-                        .foregroundColor(RemoraTheme.textPrimary)
-                        .frame(width: 38, height: 38)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .modifier(GlassCircleModifier())
-                .accessibilityLabel("Back")
-
-                Button {
-                    renameText = app.title
-                    showRenameSheet = true
-                } label: {
-                    Text(app.title)
-                        .remoraFont(.headline, weight: .semibold)
-                        .foregroundColor(RemoraTheme.textPrimary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .modifier(GlassCapsuleModifier(interactive: true))
-
-                Spacer(minLength: 0)
-
-                Menu {
-                    Button {
-                        renameText = app.title
-                        showRenameSheet = true
-                    } label: {
-                        Label("Rename", systemImage: "pencil")
+        Group {
+            if toolbarLayout == .stacked {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        backButton
+                        titleButton(for: app)
+                        Spacer(minLength: 0)
+                        optionsMenu(for: app)
                     }
-                    Button(role: .destructive) {
-                        showDeleteConfirm = true
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .remoraFont(size: 17, weight: .semibold)
-                        .foregroundColor(RemoraTheme.textPrimary)
-                        .frame(width: 38, height: 38)
-                        .contentShape(Circle())
-                }
-                .modifier(GlassCircleModifier())
-                .accessibilityLabel("App options")
 
-                if let threadId = app.originThreadId, threadExists(threadId) {
-                    Button {
-                        SavedAppsNavigation.shared.requestConversation(threadId: threadId)
-                        dismiss()
-                    } label: {
-                        Image(systemName: "text.bubble.fill")
-                            .remoraFont(size: 15, weight: .semibold)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                            .frame(width: 38, height: 38)
-                            .contentShape(Circle())
+                    HStack(spacing: 8) {
+                        conversationButton(for: app)
+                        Spacer(minLength: 0)
+                        updateButton
                     }
-                    .buttonStyle(.plain)
-                    .modifier(GlassCircleModifier())
-                    .accessibilityLabel("View Conversation")
                 }
-
-                Button {
-                    showUpdateOverlay = true
-                    updateError = nil
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .remoraFont(size: 12, weight: .semibold)
-                        Text("Update")
-                            .remoraFont(size: 13, weight: .semibold)
-                    }
-                    .foregroundColor(RemoraTheme.accent)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .modifier(GlassCapsuleModifier(interactive: true))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(RemoraTheme.accent.opacity(0.45), lineWidth: 0.8)
-                        .allowsHitTesting(false)
-                )
-                .disabled(isUpdating)
-                .opacity(isUpdating ? 0.6 : 1)
+            } else {
+                inlineTopBar(for: app)
             }
         }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(RemoraTheme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(RemoraTheme.border, lineWidth: 1)
+                .allowsHitTesting(false)
+        )
         .padding(.horizontal, 12)
         .padding(.top, 8)
+    }
+
+    private func inlineTopBar(for app: SavedApp) -> some View {
+        HStack(spacing: 8) {
+            backButton
+            titleButton(for: app)
+            Spacer(minLength: 0)
+            optionsMenu(for: app)
+            conversationButton(for: app)
+            updateButton
+        }
+    }
+
+    private var backButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "chevron.left")
+                .remoraControlIconFont(size: 17, weight: .semibold)
+                .foregroundColor(RemoraTheme.textPrimary)
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
+                .background(Circle().fill(RemoraTheme.surfaceLight))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+    }
+
+    private func titleButton(for app: SavedApp) -> some View {
+        Button {
+            renameText = app.title
+            showRenameSheet = true
+        } label: {
+            Text(app.title)
+                .remoraFont(.headline, weight: .semibold)
+                .foregroundColor(RemoraTheme.textPrimary)
+                .lineLimit(toolbarLayout == .stacked ? 2 : 1)
+                .multilineTextAlignment(.leading)
+                .padding(.horizontal, 12)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(RemoraTheme.surfaceLight)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Rename \(app.title)")
+    }
+
+    private func optionsMenu(for app: SavedApp) -> some View {
+        Menu {
+            Button {
+                renameText = app.title
+                showRenameSheet = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                showDeleteConfirm = true
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .remoraControlIconFont(size: 17, weight: .semibold)
+                .foregroundColor(RemoraTheme.textPrimary)
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
+                .background(Circle().fill(RemoraTheme.surfaceLight))
+                .contentShape(Circle())
+        }
+        .accessibilityLabel("App options")
+    }
+
+    @ViewBuilder
+    private func conversationButton(for app: SavedApp) -> some View {
+        if let threadId = app.originThreadId, threadExists(threadId) {
+            Button {
+                SavedAppsNavigation.shared.requestConversation(threadId: threadId)
+                dismiss()
+            } label: {
+                Image(systemName: "text.bubble.fill")
+                    .remoraControlIconFont(size: 15, weight: .semibold)
+                    .foregroundColor(RemoraTheme.textPrimary)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
+                    .background(Circle().fill(RemoraTheme.surfaceLight))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View Conversation")
+        }
+    }
+
+    private var updateButton: some View {
+        Button {
+            showUpdateOverlay = true
+            updateError = nil
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .remoraFont(size: 12, weight: .semibold)
+                Text("Update")
+                    .remoraFont(size: 13, weight: .semibold)
+            }
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
+            .padding(.horizontal, 14)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+            .background(Capsule(style: .continuous).fill(RemoraTheme.surfaceLight))
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(RemoraTheme.accent, lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isUpdating)
+        .opacity(isUpdating ? 0.6 : 1)
+        .accessibilityLabel("Update app")
     }
 
     private func threadExists(_ threadId: String) -> Bool {
@@ -288,7 +370,7 @@ struct SavedAppDetailView: View {
                 Text("Delete App")
                     .remoraFont(.body, weight: .semibold)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                     .background(RemoraTheme.danger.opacity(0.2))
                     .clipShape(Capsule())
                     .foregroundColor(RemoraTheme.danger)
@@ -306,12 +388,14 @@ struct SavedAppDetailView: View {
             TextField("Title", text: $renameText)
                 .remoraFont(size: 15)
                 .padding(10)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                 .background(RemoraTheme.surfaceLight.opacity(0.6))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .foregroundColor(RemoraTheme.textPrimary)
 
             HStack {
                 Button("Cancel") { showRenameSheet = false }
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                     .foregroundColor(RemoraTheme.textSecondary)
                 Spacer()
                 Button("Save") {
@@ -321,7 +405,8 @@ struct SavedAppDetailView: View {
                     showRenameSheet = false
                     reloadPayload()
                 }
-                .foregroundColor(RemoraTheme.accent)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             Spacer()
@@ -393,10 +478,14 @@ struct SavedAppDetailView: View {
             showUpdateOverlay = false
             updateError = nil
             reloadPayload()
-            withAnimation { updateSuccessMessage = "Updated" }
+            withAnimation(RemoraMotionPolicy.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion)) {
+                updateSuccessMessage = "Updated"
+            }
             Task {
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
-                withAnimation { updateSuccessMessage = nil }
+                withAnimation(RemoraMotionPolicy.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion)) {
+                    updateSuccessMessage = nil
+                }
             }
         } catch {
             updateError = error.localizedDescription
@@ -419,25 +508,37 @@ struct SavedAppDetailView: View {
 /// decides when to show/hide it.
 private struct ShimmerStrip: View {
     @State private var phase: CGFloat = -1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
-            LinearGradient(
-                colors: [
-                    RemoraTheme.accent.opacity(0.0),
-                    RemoraTheme.accent.opacity(0.9),
-                    RemoraTheme.accent.opacity(0.0),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: geo.size.width)
-            .offset(x: phase * geo.size.width)
-            .onAppear {
-                withAnimation(
-                    .linear(duration: 1.2).repeatForever(autoreverses: false)
-                ) {
-                    phase = 1
+            if reduceMotion {
+                RemoraTheme.accent.opacity(0.45)
+            } else {
+                LinearGradient(
+                    colors: [
+                        RemoraTheme.accent.opacity(0.0),
+                        RemoraTheme.accent.opacity(0.9),
+                        RemoraTheme.accent.opacity(0.0),
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: geo.size.width)
+                .offset(x: phase * geo.size.width)
+                .task {
+                    var resetTransaction = Transaction()
+                    resetTransaction.disablesAnimations = true
+                    withTransaction(resetTransaction) {
+                        phase = -1
+                    }
+                    await Task.yield()
+                    guard !Task.isCancelled, !reduceMotion else { return }
+                    withAnimation(
+                        .linear(duration: 1.2).repeatForever(autoreverses: false)
+                    ) {
+                        phase = 1
+                    }
                 }
             }
         }

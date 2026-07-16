@@ -61,11 +61,11 @@ struct TipJarView: View {
                     SupportBadgeIcon(name: tier.icon, size: 120)
                     Text("You're a supporter! Thank you.")
                         .remoraFont(.subheadline, weight: .semibold)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 } else {
                     Image(systemName: "heart.fill")
                         .font(.system(size: 28))
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 Text("If you enjoy Remora, consider leaving a tip. Tips help support ongoing development and are entirely optional.")
                     .remoraFont(.caption)
@@ -89,7 +89,7 @@ struct TipJarView: View {
                             .foregroundColor(RemoraTheme.textPrimary)
                         Spacer()
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(RemoraTheme.accent)
+                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     }
                     .padding(.vertical, 4)
                     .listRowBackground(RemoraTheme.surface.opacity(0.6))
@@ -105,7 +105,7 @@ struct TipJarView: View {
                             Spacer()
                             Text(tier.displayPrice)
                                 .remoraFont(.subheadline, weight: .semibold)
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         }
                     }
                     .padding(.vertical, 4)
@@ -138,7 +138,11 @@ struct TipJarView: View {
                         Spacer()
                         Image(systemName: store.isHeaderBadgeSelected(tier) ? "checkmark.circle.fill" : "circle")
                             .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(store.isHeaderBadgeSelected(tier) ? RemoraTheme.accent : RemoraTheme.textMuted)
+                            .foregroundColor(
+                                store.isHeaderBadgeSelected(tier)
+                                    ? RemoraTheme.accentForegroundOnSurface
+                                    : RemoraTheme.textMuted
+                            )
                     }
                 }
                 .buttonStyle(.plain)
@@ -161,7 +165,7 @@ struct TipJarView: View {
             } label: {
                 Text("Restore Purchases")
                     .remoraFont(.subheadline)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .frame(maxWidth: .infinity)
             }
             .disabled(store.purchaseState == .purchasing)
@@ -174,7 +178,7 @@ struct TipJarView: View {
             VStack(spacing: 6) {
                 Text("Thank you!")
                     .remoraFont(.subheadline, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Text("Your support means a lot.")
                     .remoraFont(.caption)
                     .foregroundColor(RemoraTheme.textSecondary)
@@ -195,13 +199,22 @@ struct SupporterBadge: View {
         Button { showTipJar = true } label: {
             if let tier = store.supporterTier {
                 SupportBadgeIcon(name: tier.icon, size: 36)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
             } else {
                 Image(systemName: "heart.fill")
                     .font(.system(size: 14))
                     .foregroundColor(RemoraTheme.textMuted)
-                    .frame(width: 28, height: 28)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
             }
         }
+        .accessibilityLabel("Open tip jar")
+        .accessibilityValue(store.supporterTier?.displayName ?? "No supporter badge")
         .task { await store.loadProducts() }
         .sheet(isPresented: $showTipJar) {
             NavigationStack {
@@ -209,7 +222,7 @@ struct SupporterBadge: View {
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button("Done") { showTipJar = false }
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         }
                     }
             }
@@ -221,8 +234,14 @@ struct SupporterBadge: View {
 /// 2..<4 = higher tiers) next to the home logo. Collapses to nothing for
 /// ranges with no purchased tiers. `loadProducts` is called by the host
 /// screen so this stays a pure read.
+enum SupporterBadgesPresentation {
+    case expanded
+    case compact
+}
+
 struct SupporterBadges: View {
     let tierIndices: Range<Int>
+    var presentation: SupporterBadgesPresentation = .expanded
     @State private var showTipJar = false
 
     var body: some View {
@@ -230,25 +249,66 @@ struct SupporterBadges: View {
         let purchased = store.tiers.enumerated()
             .filter { tierIndices.contains($0.offset) && store.isHeaderBadgeSelected($0.element) }
             .map(\.element)
-        if !purchased.isEmpty {
-            HStack(spacing: 2) {
-                ForEach(purchased, id: \.id) { tier in
-                    Button { showTipJar = true } label: {
-                        SupportBadgeIcon(name: tier.icon, size: 28)
+
+        Group {
+            if !purchased.isEmpty {
+                switch presentation {
+                case .expanded:
+                    HStack(spacing: 2) {
+                        ForEach(purchased, id: \.id) { tier in
+                            Button { showTipJar = true } label: {
+                                SupportBadgeIcon(name: tier.icon, size: 28)
+                                    .frame(
+                                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Open tip jar")
+                            .accessibilityValue(tier.displayName)
+                        }
                     }
-                    .buttonStyle(.plain)
+                case .compact:
+                    if let highestTier = purchased.last {
+                        Button { showTipJar = true } label: {
+                            ZStack(alignment: .bottomTrailing) {
+                                SupportBadgeIcon(name: highestTier.icon, size: 28)
+                                if purchased.count > 1 {
+                                    Text("\(purchased.count)")
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(RemoraTheme.textOnAccent)
+                                        .frame(width: 17, height: 17)
+                                        .background(Circle().fill(RemoraTheme.accent))
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            .frame(
+                                width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                height: RemoraAccessibilityMetrics.minimumHitTarget
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open tip jar")
+                        .accessibilityValue(
+                            purchased.count == 1
+                                ? highestTier.displayName
+                                : "\(purchased.count) selected support badges"
+                        )
+                    }
                 }
             }
-            .sheet(isPresented: $showTipJar) {
-                NavigationStack {
-                    TipJarView()
-                        .toolbar {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                Button("Done") { showTipJar = false }
-                                    .foregroundColor(RemoraTheme.accent)
-                            }
+        }
+        .sheet(isPresented: $showTipJar) {
+            NavigationStack {
+                TipJarView()
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { showTipJar = false }
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         }
-                }
+                    }
             }
         }
     }
@@ -261,7 +321,7 @@ private struct SupportBadgeIcon: View {
     var body: some View {
         Image(systemName: name)
             .font(.system(size: size * 0.46, weight: .semibold))
-            .foregroundStyle(RemoraTheme.accent)
+            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             .frame(width: size * 0.9, height: size * 0.9)
             .frame(width: size, height: size)
             .modifier(GlassCircleModifier())

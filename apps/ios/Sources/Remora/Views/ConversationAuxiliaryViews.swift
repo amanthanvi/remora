@@ -14,35 +14,41 @@ struct RateLimitBadgeView: View, Equatable {
     var body: some View {
         HStack(spacing: 3) {
             Text(label)
-                .font(RemoraFont.monospaced(size: 9.5, weight: .semibold))
+                .remoraMonoFont(size: 9.5, weight: .semibold)
                 .foregroundColor(RemoraTheme.textSecondary)
-            ContextBadgeView(percent: percent, tint: tint)
+                .accessibilityHidden(true)
+            ContextBadgeView(
+                percent: percent,
+                tint: tint,
+                metricLabel: label.isEmpty ? "Rate limit remaining" : "\(label) rate limit remaining"
+            )
         }
     }
 }
 
 struct ConversationLoadingIndicator: View {
     let label: String
-    @State private var shimmerOffset: CGFloat = -1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Text(label)
-            .remoraFont(.body, weight: .medium)
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [
-                        RemoraTheme.textSecondary.opacity(0.4),
-                        RemoraTheme.textSecondary.opacity(0.7),
-                        RemoraTheme.textSecondary.opacity(0.4),
-                    ],
-                    startPoint: UnitPoint(x: shimmerOffset - 0.3, y: 0.5),
-                    endPoint: UnitPoint(x: shimmerOffset + 0.3, y: 0.5)
-                )
-            )
-            .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false), value: shimmerOffset)
-            .onAppear {
-                shimmerOffset = 2
+        HStack(spacing: 8) {
+            if reduceMotion {
+                Circle()
+                    .fill(RemoraTheme.accent)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(RemoraTheme.accent)
+                    .accessibilityHidden(true)
             }
+
+            Text(label)
+                .remoraFont(.body, weight: .medium)
+                .foregroundStyle(RemoraTheme.textSecondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -53,8 +59,11 @@ struct MinigameLaunchButton: View {
         Button(action: action) {
             Image(systemName: "gamecontroller.fill")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(RemoraTheme.accent)
-                .frame(width: 36, height: 36)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
                 .background(
                     Circle()
                         .fill(RemoraTheme.surface.opacity(0.9))
@@ -71,27 +80,28 @@ struct MinigameLaunchButton: View {
 }
 
 struct TypingIndicator: View {
-    @State private var shimmerOffset: CGFloat = -1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Text("Thinking")
-            .remoraFont(.body, weight: .medium)
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [
-                        RemoraTheme.textSecondary.opacity(0.4),
-                        RemoraTheme.accent,
-                        RemoraTheme.textSecondary.opacity(0.4),
-                    ],
-                    startPoint: UnitPoint(x: shimmerOffset - 0.3, y: 0.5),
-                    endPoint: UnitPoint(x: shimmerOffset + 0.3, y: 0.5)
-                )
-            )
-            .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false), value: shimmerOffset)
-            .padding(.leading, 12)
-            .onAppear {
-                shimmerOffset = 2
+        HStack(spacing: 8) {
+            if reduceMotion {
+                Circle()
+                    .fill(RemoraTheme.accent)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(RemoraTheme.accent)
+                    .accessibilityHidden(true)
             }
+
+            Text("Thinking")
+                .remoraFont(.body, weight: .medium)
+                .foregroundStyle(RemoraTheme.textSecondary)
+        }
+        .padding(.leading, 12)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -141,7 +151,8 @@ struct SubagentBreadcrumbBar: View {
                     Text("Parent")
                         .remoraFont(.caption, weight: .medium)
                 }
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
+                .remoraMinimumHitTarget()
             }
             .buttonStyle(.plain)
 
@@ -186,9 +197,12 @@ struct ConversationDebugButton: View {
                 showPopover.toggle()
             } label: {
                 Image(systemName: "ant")
-                    .remoraFont(size: 12, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
-                    .padding(6)
+                    .remoraControlIconFont(size: 12, weight: .semibold)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
                     .background(
                         Circle()
                             .fill(RemoraTheme.surface.opacity(0.85))
@@ -207,7 +221,7 @@ struct ConversationDebugButton: View {
                 if MessageRecorder.shared.isReplaying {
                     Image(systemName: "play.fill")
                         .remoraFont(size: 8, weight: .semibold)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }
@@ -222,12 +236,19 @@ struct ConversationDebugButton: View {
 }
 
 private struct PulseModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pulse = false
     func body(content: Content) -> some View {
         content
-            .opacity(pulse ? 0.3 : 1.0)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
-            .onAppear { pulse = true }
+            .opacity(reduceMotion ? 1 : (pulse ? 0.3 : 1.0))
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 0.8).repeatForever(autoreverses: true),
+                value: pulse
+            )
+            .onAppear { pulse = !reduceMotion }
+            .onChange(of: reduceMotion) { _, shouldReduceMotion in
+                pulse = !shouldReduceMotion
+            }
     }
 }
 
@@ -319,7 +340,7 @@ private struct DebugPopoverContent: View {
                                             .remoraFont(.caption2)
                                             .lineLimit(1)
                                     }
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 }
                                 .buttonStyle(.plain)
 

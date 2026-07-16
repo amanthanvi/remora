@@ -42,7 +42,7 @@ struct ConversationComposerAttachSheet: View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
                 .remoraFont(.body, weight: .medium)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .frame(width: 20)
 
             Text(title)

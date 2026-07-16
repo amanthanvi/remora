@@ -58,7 +58,7 @@ struct PetSettingsView: View {
                                 Spacer()
                                 if server.serverId == selectedServerId {
                                     Image(systemName: "checkmark")
-                                        .foregroundColor(RemoraTheme.accentStrong)
+                                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 }
                             }
                         }
@@ -115,7 +115,7 @@ struct PetSettingsView: View {
                                 } else if controller.selectedPet?.id == pet.id,
                                           controller.selectedPet?.serverId == selectedServerId {
                                     Image(systemName: "checkmark")
-                                        .foregroundColor(RemoraTheme.accentStrong)
+                                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 }
                             }
                         }

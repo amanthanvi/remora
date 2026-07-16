@@ -56,13 +56,21 @@ struct SavedAppUpdateOverlay: View {
                     Image(systemName: "xmark.circle.fill")
                         .remoraFont(size: 18)
                         .foregroundColor(RemoraTheme.textMuted)
+                        .frame(
+                            width: RemoraAccessibilityMetrics.minimumHitTarget,
+                            height: RemoraAccessibilityMetrics.minimumHitTarget
+                        )
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close update")
             }
 
             TextField("e.g. make the buttons bigger", text: $prompt, axis: .vertical)
                 .remoraFont(size: 15)
                 .focused($fieldFocused)
                 .padding(12)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                 .background(RemoraTheme.surfaceLight.opacity(0.6))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .foregroundColor(RemoraTheme.textPrimary)
@@ -83,10 +91,11 @@ struct SavedAppUpdateOverlay: View {
                     }
                     .remoraFont(.subheadline, weight: .semibold)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                     .background(RemoraTheme.accent)
                     .foregroundColor(RemoraTheme.textOnAccent)
                     .clipShape(Capsule())
+                    .contentShape(Capsule())
                 }
                 .disabled(trimmedPrompt.isEmpty)
             }

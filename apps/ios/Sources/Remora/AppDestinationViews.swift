@@ -280,7 +280,7 @@ struct ApprovalPromptView: View {
                                         Image(systemName: "arrow.right")
                                             .remoraFont(size: 9, weight: .semibold)
                                     }
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 }
                                 .buttonStyle(.plain)
 

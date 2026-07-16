@@ -74,7 +74,7 @@ struct RemotePairingSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }
@@ -160,10 +160,10 @@ struct RemotePairingSheet: View {
         } label: {
             HStack {
                 Image(systemName: "qrcode.viewfinder")
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Text(parsedParams == nil ? "Scan Pairing QR" : "Rescan QR")
                     .remoraFont(.subheadline)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             }
         }
 
@@ -205,7 +205,7 @@ struct RemotePairingSheet: View {
                 }
             }
             .remoraFont(.footnote)
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
             Spacer()
 
@@ -213,7 +213,7 @@ struct RemotePairingSheet: View {
                 handleScannedPayload(pasteJSON)
             }
             .remoraFont(.footnote)
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             .disabled(pasteJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
@@ -280,7 +280,7 @@ struct RemotePairingSheet: View {
                             Spacer()
                             if selectedAgentNames.contains(agent.name) {
                                 Image(systemName: "checkmark.square.fill")
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                             } else if !agent.available {
                                 Text("Unavailable")
                                     .remoraFont(.caption)
@@ -307,7 +307,7 @@ struct RemotePairingSheet: View {
                         }
                     }
                     .font(.caption)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
                 .foregroundColor(RemoraTheme.textSecondary)
@@ -339,7 +339,7 @@ struct RemotePairingSheet: View {
                         ProgressView().tint(RemoraTheme.accent)
                     }
                     Text("Connect")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .remoraFont(.subheadline)
                 }
             }

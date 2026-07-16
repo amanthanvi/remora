@@ -16,7 +16,15 @@ enum HomeDashboardChrome {
     case sidebar
 }
 
+enum HomeSupporterBadgeToolbarLayout: Equatable {
+    case logoOnly
+    case compact
+    case expanded
+}
+
 struct HomeDashboardView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var chrome: HomeDashboardChrome = .full
     let recentSessions: [HomeDashboardRecentSession]
     let allSessions: [HomeDashboardRecentSession]
@@ -204,7 +212,9 @@ struct HomeDashboardView: View {
             }
             .onChange(of: requestedInputMode) { _, requestedMode in
                 guard let requestedMode, inputMode != requestedMode else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
+                withAnimation(
+                    RemoraMotionPolicy.animation(.easeOut(duration: 0.2), reduceMotion: reduceMotion)
+                ) {
                     inputMode = requestedMode
                 }
             }
@@ -295,6 +305,20 @@ struct HomeDashboardView: View {
 
     private var sidebarNavBarVisibility: Visibility { .visible }
 
+    static func supporterBadgeToolbarLayout(
+        chrome: HomeDashboardChrome,
+        horizontalSizeClass: UserInterfaceSizeClass?
+    ) -> HomeSupporterBadgeToolbarLayout {
+        switch chrome {
+        case .sidebar:
+            return .logoOnly
+        case .full where horizontalSizeClass == .compact:
+            return .compact
+        case .full:
+            return .expanded
+        }
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
@@ -327,9 +351,21 @@ struct HomeDashboardView: View {
             }
         }
         ToolbarItem(placement: .principal) {
-            if chrome == .sidebar {
+            switch Self.supporterBadgeToolbarLayout(
+                chrome: chrome,
+                horizontalSizeClass: horizontalSizeClass
+            ) {
+            case .logoOnly:
                 AnimatedLogo(size: 44)
-            } else {
+            case .compact:
+                HStack(spacing: 0) {
+                    AnimatedLogo(size: 44)
+                    SupporterBadges(
+                        tierIndices: 0..<4,
+                        presentation: .compact
+                    )
+                }
+            case .expanded:
                 HStack(spacing: 4) {
                     SupporterBadges(tierIndices: 0..<2)
                     AnimatedLogo(size: 64)
@@ -347,7 +383,7 @@ struct HomeDashboardView: View {
                     onNewThread?()
                 } label: {
                     Image(systemName: "square.and.pencil")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForeground)
                 }
                 .accessibilityLabel("New thread")
             }
@@ -368,7 +404,7 @@ struct HomeDashboardView: View {
                 zoomDirection = 1
                 nextIdx = currentIdx + zoomDirection
             }
-            withAnimation(Self.zoomAnimation) {
+            withAnimation(RemoraMotionPolicy.animation(Self.zoomAnimation, reduceMotion: reduceMotion)) {
                 zoomLevel = ladder[max(0, min(ladder.count - 1, nextIdx))]
             }
         } label: {
@@ -410,7 +446,12 @@ struct HomeDashboardView: View {
                         onRefresh: refreshSearchThreads,
                         onAdd: { session in
                             onPinThread(session.key)
-                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                            withAnimation(
+                                RemoraMotionPolicy.animation(
+                                    .spring(response: 0.42, dampingFraction: 0.82),
+                                    reduceMotion: reduceMotion
+                                )
+                            ) {
                                 inputMode = .collapsed
                             }
                             searchQuery = ""
@@ -422,7 +463,7 @@ struct HomeDashboardView: View {
                         contentInsets: EdgeInsets(top: 48, leading: 0, bottom: chrome == .full ? 140 : 80, trailing: 0)
                     )
                 }
-                .transition(.opacity)
+                .transition(reduceMotion ? .identity : .opacity)
             } else {
                 sessionsList
             }
@@ -439,16 +480,19 @@ struct HomeDashboardView: View {
         .overlay {
             if showOnboardingCoachmarks {
                 emptyHomeMascot
-                    .transition(.opacity)
+                    .transition(reduceMotion ? .identity : .opacity)
             }
         }
         .overlayPreferenceValue(CoachmarkAnchorKey.self) { anchors in
             if showOnboardingCoachmarks {
                 OnboardingCoachmarksView(anchors: anchors)
-                    .transition(.opacity)
+                    .transition(reduceMotion ? .identity : .opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showOnboardingCoachmarks)
+        .animation(
+            RemoraMotionPolicy.animation(.easeInOut(duration: 0.25), reduceMotion: reduceMotion),
+            value: showOnboardingCoachmarks
+        )
     }
 
     private func refreshSearchThreads() async {
@@ -537,7 +581,7 @@ struct HomeDashboardView: View {
                     )
                 }
                 .padding(.horizontal, 14)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom)))
             }
 
             HomeBottomBar(
@@ -663,6 +707,7 @@ private enum SessionCanvasLayout {
 // MARK: - Session Canvas Line
 
 struct SessionCanvasLine: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let session: HomeDashboardRecentSession
     let isOpening: Bool
     let isHydrating: Bool
@@ -709,9 +754,7 @@ struct SessionCanvasLine: View {
     /// Keep home-screen tool activity subordinate to assistant/user text.
     /// The home card's response preview uses conversation-body sizing, so
     /// the tool log should step down a tier rather than compete with it.
-    private var toolLogFontSize: CGFloat {
-        max(12, RemoraFont.conversationBodyPointSize - 3)
-    }
+    private let toolLogFontSize: CGFloat = 14
 
     // ────────────────────────────────────────────────────
     // Zoom levels — each must feel distinct:
@@ -758,7 +801,7 @@ struct SessionCanvasLine: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     FormattedText(text: session.sessionTitle, lineLimit: zoomLevel >= 4 ? 4 : 2)
                         .modifier(MarkdownMatchedTitleFont())
-                        .foregroundStyle(isActive ? RemoraTheme.accent : RemoraTheme.textPrimary)
+                        .foregroundStyle(isActive ? RemoraTheme.accentForeground : RemoraTheme.textPrimary)
                         .modifier(SessionShimmerEffect(active: isActive))
                         .fixedSize(horizontal: false, vertical: true)
                     if let lineage = session.lineage, lineage.hasMultipleBranches {
@@ -768,7 +811,7 @@ struct SessionCanvasLine: View {
                     if zoomLevel == 1 {
                         Text(timeAgo)
                             .remoraMonoFont(size: 10, weight: .regular)
-                            .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                            .foregroundStyle(RemoraTheme.textMuted)
                             .fixedSize()
                     }
                 }
@@ -861,7 +904,10 @@ struct SessionCanvasLine: View {
         // wrap every zoomLevel change (including mid-pinch threshold
         // crossings) in an implicit animation and fight the live
         // tracking.
-        .animation(.easeInOut(duration: 0.25), value: isActive)
+        .animation(
+            RemoraMotionPolicy.animation(.easeInOut(duration: 0.25), reduceMotion: reduceMotion),
+            value: isActive
+        )
         .accessibilityIdentifier("home.recentSessionCard")
     }
 
@@ -870,27 +916,27 @@ struct SessionCanvasLine: View {
     private var metaLine: some View {
         HStack(spacing: 4) {
             Text(timeAgo)
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                .foregroundStyle(RemoraTheme.textMuted)
             // Only show the tool label + pulsing dots when a tool call
             // is actually executing. During pure LLM thinking/streaming
             // we fall through to the server + workspace metadata, same
             // as when the turn is idle.
             if isActive && isToolCallRunning {
                 Text("\u{00b7}")
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 toolActivityLabel
                 SessionPulsingDots()
                 statChips
             } else {
                 Text("\u{00b7}")
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 Text(session.serverDisplayName)
-                    .foregroundStyle(RemoraTheme.textSecondary.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textSecondary)
                 if let workspace = HomeDashboardSupport.workspaceLabel(for: session.cwd) {
                     Text("\u{00b7}")
-                        .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                        .foregroundStyle(RemoraTheme.textMuted)
                     Text(workspace)
-                        .foregroundStyle(RemoraTheme.textSecondary.opacity(0.8))
+                        .foregroundStyle(RemoraTheme.textSecondary)
                 }
                 statChips
             }
@@ -905,28 +951,28 @@ struct SessionCanvasLine: View {
     private var statChips: some View {
         if toolCallCount > 0 || turnCount > 0 {
             Text("\u{00b7}")
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                .foregroundStyle(RemoraTheme.textMuted)
         }
         if toolCallCount > 0 {
             Image(systemName: "chevron.left.forwardslash.chevron.right")
                 .remoraFont(size: 8)
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                .foregroundStyle(RemoraTheme.textMuted)
             RollingMetricText("\(toolCallCount)")
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                .foregroundStyle(RemoraTheme.textMuted)
         }
         if turnCount > 0 {
             Image(systemName: "arrow.turn.down.right")
                 .remoraFont(size: 8)
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                .foregroundStyle(RemoraTheme.textMuted)
             RollingMetricText("\(turnCount)")
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                .foregroundStyle(RemoraTheme.textMuted)
         }
         if let tu = session.tokenUsage, let window = tu.contextWindow, window > 0 {
             let pct = Int((Double(tu.totalTokens) / Double(window)) * 100)
             Text("\u{00b7}")
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                .foregroundStyle(RemoraTheme.textMuted)
             RollingMetricText("\(pct)%")
-                .foregroundStyle(pct > 80 ? RemoraTheme.warning.opacity(0.8) : RemoraTheme.textMuted.opacity(0.8))
+                .foregroundStyle(pct > 80 ? RemoraTheme.warning : RemoraTheme.textMuted)
         }
     }
 
@@ -936,16 +982,16 @@ struct SessionCanvasLine: View {
             let parts = toolLabel.split(separator: " ", maxSplits: 1)
             let name = String(parts.first ?? "")
             toolIconView(for: name)
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForeground)
             if parts.count > 1 {
                 Text(String(parts.last ?? ""))
-                    .foregroundStyle(RemoraTheme.textSecondary.opacity(0.8))
+                    .foregroundStyle(RemoraTheme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
         } else {
             Text("thinking")
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForeground)
         }
     }
 
@@ -960,33 +1006,33 @@ struct SessionCanvasLine: View {
     private var modelBadgeLine: some View {
         HStack(spacing: 4) {
             Text(timeAgo)
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                .foregroundStyle(RemoraTheme.textMuted)
             Text("\u{00b7}")
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                .foregroundStyle(RemoraTheme.textMuted)
             Image(systemName: "server.rack")
                 .remoraFont(size: 8)
-                .foregroundStyle(RemoraTheme.accent.opacity(0.5))
+                .foregroundStyle(RemoraTheme.accentForeground)
             Text(session.serverDisplayName)
-                .foregroundStyle(RemoraTheme.accent.opacity(0.6))
+                .foregroundStyle(RemoraTheme.accentForeground)
             let m = session.model.trimmingCharacters(in: .whitespacesAndNewlines)
             if !m.isEmpty {
-                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
                 HomeRuntimeIcon(kind: session.agentRuntimeKind)
                 Text(m)
-                    .foregroundStyle(RemoraTheme.textSecondary.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textSecondary)
             }
             if let lineage = session.lineage, lineage.hasMultipleBranches {
-                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
                 branchChip(lineage: lineage)
             } else if session.isFork {
-                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
                 Text("fork")
-                    .foregroundStyle(RemoraTheme.warning.opacity(0.8))
+                    .foregroundStyle(RemoraTheme.warning)
             }
             if session.isSubagent, let agent = session.agentLabel {
-                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
                 Text(agent)
-                    .foregroundStyle(RemoraTheme.accent.opacity(0.6))
+                    .foregroundStyle(RemoraTheme.accentForeground)
             }
             Spacer(minLength: 0)
         }
@@ -1033,7 +1079,7 @@ struct SessionCanvasLine: View {
                             .remoraFont(size: 8)
                         RollingMetricText("\(turnCount)")
                     }
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 }
                 if toolCallCount > 0 {
                     HStack(spacing: 2) {
@@ -1041,14 +1087,14 @@ struct SessionCanvasLine: View {
                             .remoraFont(size: 8)
                         RollingMetricText("\(toolCallCount)")
                     }
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 }
                 if let stats, hasDiff {
                     HStack(spacing: 5) {
                         RollingMetricText("+\(stats.diffAdditions)")
-                            .foregroundStyle(RemoraTheme.accent.opacity(0.75))
+                            .foregroundStyle(RemoraTheme.accentForeground)
                         RollingMetricText("-\(stats.diffDeletions)")
-                            .foregroundStyle(RemoraTheme.danger.opacity(0.65))
+                            .foregroundStyle(RemoraTheme.danger)
                     }
                 }
                 if let start = session.lastTurnStart {
@@ -1057,7 +1103,7 @@ struct SessionCanvasLine: View {
                 if let tu = session.tokenUsage, let window = tu.contextWindow, window > 0 {
                     let pct = Int((Double(tu.totalTokens) / Double(window)) * 100)
                     RollingMetricText("\(pct)%")
-                        .foregroundStyle(pct > 80 ? RemoraTheme.warning.opacity(0.85) : RemoraTheme.textMuted.opacity(0.75))
+                        .foregroundStyle(pct > 80 ? RemoraTheme.warning : RemoraTheme.textMuted)
                 }
                 Spacer(minLength: 0)
             }
@@ -1175,11 +1221,11 @@ struct SessionCanvasLine: View {
                 Text("GOAL")
                     .remoraMonoFont(size: 9, weight: .semibold)
                     .tracking(1.2)
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.65))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 Text(goalStatusLabel(goal.status))
                     .remoraMonoFont(size: 9, weight: .semibold)
                     .tracking(0.6)
-                    .foregroundStyle(goalStatusTint(goal.status).opacity(0.85))
+                    .foregroundStyle(goalStatusTint(goal.status))
             }
             HStack(alignment: .top, spacing: 8) {
                 Circle()
@@ -1188,7 +1234,7 @@ struct SessionCanvasLine: View {
                     .padding(.top, 5)
                 Text(goal.objective)
                     .remoraMonoFont(size: 12, weight: .regular)
-                    .foregroundStyle(RemoraTheme.textSecondary.opacity(0.95))
+                    .foregroundStyle(RemoraTheme.textSecondary)
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1223,7 +1269,7 @@ struct SessionCanvasLine: View {
                 if let icon {
                     Image(systemName: icon)
                         .remoraFont(size: 10)
-                        .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                        .foregroundStyle(RemoraTheme.textMuted)
                         .frame(width: 14)
                 }
                 if let valuePrefix {
@@ -1233,7 +1279,7 @@ struct SessionCanvasLine: View {
                 RollingMetricText(value)
                     .foregroundStyle(valueColor)
                 Text(label)
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.65))
+                    .foregroundStyle(RemoraTheme.textMuted)
                     .remoraMonoFont(size: 11, weight: .regular)
                 Spacer(minLength: 0)
             }
@@ -1283,7 +1329,7 @@ struct SessionCanvasLine: View {
                     .fill(goalStatusTint(goal.status))
                     .frame(width: 5, height: 5)
                 Text(goal.objective)
-                    .foregroundStyle(RemoraTheme.textSecondary.opacity(0.85))
+                    .foregroundStyle(RemoraTheme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 6)
@@ -1293,7 +1339,7 @@ struct SessionCanvasLine: View {
                             .remoraFont(size: 8)
                         RollingMetricText(formatGoalTokens(goal.tokensUsed))
                     }
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 }
                 if goal.timeUsedSeconds > 0 {
                     HStack(spacing: 2) {
@@ -1301,7 +1347,7 @@ struct SessionCanvasLine: View {
                             .remoraFont(size: 8)
                         RollingMetricText(formatGoalSeconds(goal.timeUsedSeconds))
                     }
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 }
             }
             .remoraMonoFont(size: 10, weight: .regular)
@@ -1353,8 +1399,8 @@ struct SessionCanvasLine: View {
             // between telemetry (above) and the tool log / response
             // preview (below) and visually breaks the two apart.
             FormattedText(text: message, lineLimit: zoomLevel >= 4 ? 3 : 1)
-                .foregroundStyle(RemoraTheme.textSecondary.opacity(0.95))
-                .remoraFont(size: RemoraFont.conversationBodyPointSize)
+                .foregroundStyle(RemoraTheme.textSecondary)
+                .remoraFont(.body)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 5)
                 .padding(.leading, 8)
@@ -1381,7 +1427,7 @@ struct SessionCanvasLine: View {
         Text("RECENT ACTIVITY")
             .remoraMonoFont(size: 9, weight: .semibold)
             .tracking(1.2)
-            .foregroundStyle(RemoraTheme.textMuted.opacity(0.65))
+            .foregroundStyle(RemoraTheme.textMuted)
             .padding(.top, 10)
     }
 
@@ -1396,7 +1442,7 @@ struct SessionCanvasLine: View {
         HStack(spacing: 8) {
             Text(PathDisplay.display(session.cwd, isLocal: session.isLocal))
                 .remoraMonoFont(size: 10, weight: .regular)
-                .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                .foregroundStyle(RemoraTheme.textMuted)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if isActive {
@@ -1406,7 +1452,7 @@ struct SessionCanvasLine: View {
                         .frame(width: 4, height: 4)
                     Text("Working")
                         .remoraMonoFont(size: 9, weight: .semibold)
-                        .foregroundStyle(RemoraTheme.accent.opacity(0.85))
+                        .foregroundStyle(RemoraTheme.accentForeground)
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
@@ -1446,10 +1492,10 @@ struct SessionCanvasLine: View {
     private func toolRowView(_ entry: AppToolLogEntry) -> some View {
         HStack(spacing: 8) {
             toolIconView(for: entry.tool)
-                .foregroundStyle(RemoraTheme.accent.opacity(0.6))
+                .foregroundStyle(RemoraTheme.accentForeground)
                 .frame(minWidth: 20, alignment: .leading)
             Text(formatToolDetail(entry))
-                .foregroundStyle(RemoraTheme.textSecondary.opacity(0.8))
+                .foregroundStyle(RemoraTheme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
@@ -1604,10 +1650,10 @@ struct SessionCanvasLine: View {
         HStack(spacing: 3) {
             Image(systemName: "arrow.triangle.branch")
                 .remoraFont(size: 8, weight: .semibold)
-                .foregroundStyle(RemoraTheme.textSecondary.opacity(0.85))
+                .foregroundStyle(RemoraTheme.textSecondary)
             Text("\(lineage.branchIndex)/\(lineage.branchTotal)")
                 .remoraMonoFont(size: 9, weight: .semibold)
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForeground)
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 1)
@@ -1629,7 +1675,7 @@ struct SessionCanvasLine: View {
                 .remoraFont(size: 7, weight: .semibold)
             Text("branch \(lineage.branchIndex)/\(lineage.branchTotal)")
         }
-        .foregroundStyle(RemoraTheme.accent.opacity(0.85))
+        .foregroundStyle(RemoraTheme.accentForeground)
     }
 
     /// Zoom-4 lineage breadcrumb. Renders ancestors root → ... → parent so
@@ -1642,15 +1688,15 @@ struct SessionCanvasLine: View {
                 ForEach(Array(lineage.ancestors.enumerated()), id: \.offset) { idx, ancestor in
                     if idx > 0 {
                         Text(" › ")
-                            .foregroundStyle(RemoraTheme.textMuted.opacity(0.55))
+                            .foregroundStyle(RemoraTheme.textMuted)
                     }
                     Text(ancestor.title)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .foregroundStyle(RemoraTheme.textMuted.opacity(0.85))
+                        .foregroundStyle(RemoraTheme.textMuted)
                 }
                 Text(" ›")
-                    .foregroundStyle(RemoraTheme.textMuted.opacity(0.55))
+                    .foregroundStyle(RemoraTheme.textMuted)
                 Spacer(minLength: 0)
             }
             .remoraMonoFont(size: 9, weight: .regular)
@@ -1686,7 +1732,7 @@ struct SessionCanvasLine: View {
                 .truncationMode(.tail)
         }
         .remoraFont(size: 10, weight: isCurrent ? .semibold : .regular)
-        .foregroundStyle(isCurrent ? RemoraTheme.accent : RemoraTheme.textSecondary.opacity(0.85))
+        .foregroundStyle(isCurrent ? RemoraTheme.accentForeground : RemoraTheme.textSecondary)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(
@@ -1732,7 +1778,7 @@ private struct TurnStopwatchChip: View {
             // digits freeze that width so the chip can update in-place.
             RollingMetricText(Self.format(seconds))
         }
-        .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+        .foregroundStyle(RemoraTheme.textMuted)
     }
 
     private static func format(_ seconds: TimeInterval) -> String {
@@ -1746,6 +1792,7 @@ private struct TurnStopwatchChip: View {
 
 private struct SessionPulsingDots: View {
     @State private var phase = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 2) {
@@ -1753,11 +1800,17 @@ private struct SessionPulsingDots: View {
                 Circle()
                     .fill(RemoraTheme.accent)
                     .frame(width: 3, height: 3)
-                    .opacity(phase == i ? 1.0 : 0.25)
+                    .opacity(reduceMotion ? 0.65 : (phase == i ? 1.0 : 0.25))
             }
         }
-        .onAppear {
-            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { _ in
+        .task(id: reduceMotion) {
+            guard !reduceMotion else {
+                phase = 0
+                return
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
                 withAnimation(.easeInOut(duration: 0.15)) {
                     phase = (phase + 1) % 3
                 }
@@ -1795,9 +1848,10 @@ private struct MarkdownMatchedTitleFont: ViewModifier {
 
 private struct SessionShimmerEffect: ViewModifier {
     let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        if active {
+        if active && !reduceMotion {
             // `TimelineView(.animation)` drives a time-based phase.
             // Every tick rebuilds the gradient stops — fine here
             // because the overlay is a single SwiftUI.LinearGradient

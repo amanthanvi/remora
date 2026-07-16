@@ -720,7 +720,7 @@ private struct ConversationTimelineItemRow: View, Equatable {
             attributed.append(verbText)
 
             var fileText = AttributedString(filename)
-            fileText.foregroundColor = RemoraTheme.accent
+            fileText.foregroundColor = RemoraTheme.accentForegroundOnSurface
             attributed.append(fileText)
 
             var additionsText = AttributedString(" +\(additions)")

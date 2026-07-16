@@ -37,7 +37,7 @@ struct ToolCallCardView: View {
             HStack(spacing: 8) {
                 Image(systemName: model.kind.iconName)
                     .remoraFont(size: 12, weight: .semibold)
-                    .foregroundColor(kindAccent)
+                    .foregroundColor(kindForeground)
 
                 if let attributedSummary = model.attributedSummary {
                     Text(attributedSummary)
@@ -168,6 +168,19 @@ struct ToolCallCardView: View {
             return RemoraTheme.accent
         case .mcpToolCall, .widget:
             return RemoraTheme.accentStrong
+        case .mcpToolProgress, .imageView:
+            return RemoraTheme.warning
+        case .collaboration:
+            return RemoraTheme.success
+        }
+    }
+
+    private var kindForeground: Color {
+        switch model.kind {
+        case .commandExecution, .commandOutput:
+            return RemoraTheme.warning
+        case .fileChange, .fileDiff, .webSearch, .mcpToolCall, .widget:
+            return RemoraTheme.accentForegroundOnSurface
         case .mcpToolProgress, .imageView:
             return RemoraTheme.warning
         case .collaboration:
@@ -377,7 +390,7 @@ struct ToolCallCardView: View {
             } label: {
                 Text(expandedLongTextIDs.contains(id) ? "Show less" : "Show more")
                     .remoraFont(.caption2, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(expandedLongTextIDs.contains(id) ? "Show less text" : "Show more text")

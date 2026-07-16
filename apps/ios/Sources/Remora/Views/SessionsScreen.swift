@@ -68,7 +68,7 @@ struct SessionsScreen: View {
                             Button(action: onInfo) {
                                 Image(systemName: "info.circle")
                                     .font(.system(size: 15, weight: .medium))
-                                    .foregroundStyle(RemoraTheme.accent)
+                                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                             }
                         }
                         refreshToolbarButton
@@ -388,7 +388,7 @@ struct SessionsScreen: View {
                 } else {
                     Image(systemName: "arrow.clockwise")
                         .remoraFont(.subheadline, weight: .semibold)
-                        .foregroundColor(connectedServers.isEmpty ? RemoraTheme.textMuted : RemoraTheme.accent)
+                        .foregroundColor(connectedServers.isEmpty ? RemoraTheme.textMuted : RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }
@@ -444,11 +444,11 @@ struct SessionsScreen: View {
                 }
                 .accessibilityIdentifier("sessions.connectButton")
                 .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .hoverEffect(.highlight)
             } else {
                 Image(systemName: "server.rack")
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .frame(width: 20)
                 Text("\(connected.count) server\(connected.count == 1 ? "" : "s")")
                     .remoraFont(.footnote)
@@ -460,7 +460,7 @@ struct SessionsScreen: View {
                 }
                 .accessibilityIdentifier("sessions.addServerButton")
                 .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .hoverEffect(.highlight)
                 if let activeThread {
                     Button {
@@ -476,7 +476,7 @@ struct SessionsScreen: View {
                     }
                     .disabled(isForkingActiveThread || (activeThreadEphemeralState?.hasTurnActive ?? activeThread.hasActiveTurn))
                     .remoraFont(.caption)
-                    .foregroundColor((activeThreadEphemeralState?.hasTurnActive ?? activeThread.hasActiveTurn) ? RemoraTheme.textMuted : RemoraTheme.accent)
+                    .foregroundColor((activeThreadEphemeralState?.hasTurnActive ?? activeThread.hasActiveTurn) ? RemoraTheme.textMuted : RemoraTheme.accentForegroundOnSurface)
                     .hoverEffect(.highlight)
                 }
             }
@@ -631,7 +631,7 @@ struct SessionsScreen: View {
                     showOnlyForks = false
                 }
                 .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             }
             Spacer(minLength: 0)
         }
@@ -681,7 +681,7 @@ struct SessionsScreen: View {
 
                 Image(systemName: "folder")
                     .remoraFont(size: 11, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(group.workspaceTitle)
@@ -1004,7 +1004,7 @@ struct SessionsScreen: View {
     private func lineageChip(title: String, count: Int, isInteractive: Bool) -> some View {
         Text("\(title) \(count)")
             .remoraFont(.caption2)
-            .foregroundColor(isInteractive ? RemoraTheme.accent : RemoraTheme.textMuted)
+            .foregroundColor(isInteractive ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .background(RemoraTheme.surface.opacity(0.8))

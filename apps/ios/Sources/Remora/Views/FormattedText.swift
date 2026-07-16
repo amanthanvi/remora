@@ -93,9 +93,9 @@ struct PluginPill: View {
         HStack(spacing: 4) {
             Image(systemName: iconName)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             Text(displayName)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .lineLimit(1)
         }
         .padding(.horizontal, 7)

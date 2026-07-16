@@ -47,6 +47,11 @@ struct PendingUserInputPromptView: View {
                     Image(systemName: "xmark.circle.fill")
                         .remoraFont(.body)
                         .foregroundColor(RemoraTheme.textMuted)
+                        .frame(
+                            width: RemoraAccessibilityMetrics.minimumHitTarget,
+                            height: RemoraAccessibilityMetrics.minimumHitTarget
+                        )
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss input request")
@@ -91,13 +96,17 @@ struct PendingUserInputPromptView: View {
                                     } label: {
                                         Text(option.label)
                                             .remoraFont(.caption2, weight: .semibold)
-                                            .foregroundColor(isSelected ? Color.black : RemoraTheme.textPrimary)
+                                            .foregroundColor(
+                                                isSelected ? RemoraTheme.textOnAccent : RemoraTheme.textPrimary
+                                            )
                                             .padding(.horizontal, 10)
-                                            .padding(.vertical, 6)
+                                            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                                             .background(isSelected ? RemoraTheme.accent : RemoraTheme.surface.opacity(0.8))
                                             .clipShape(Capsule())
+                                            .contentShape(Capsule())
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                                 }
                                 ViewThatFits(in: .horizontal) {
                                     HStack(spacing: 8) { optionButtons }
@@ -114,6 +123,7 @@ struct PendingUserInputPromptView: View {
                                 .foregroundColor(RemoraTheme.textPrimary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 8)
+                                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                                 .background(RemoraTheme.surface.opacity(0.8))
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
@@ -123,20 +133,25 @@ struct PendingUserInputPromptView: View {
             }
 
             if canSubmit {
-                Button("Submit") {
+                Button {
                     let answers = request.questions.reduce(into: [String: [String]]()) { result, question in
                         let answer = resolvedAnswer(for: question)
                         guard !answer.isEmpty else { return }
                         result[question.id] = [answer]
                     }
                     onSubmit(answers)
+                } label: {
+                    Text("Submit")
+                        .remoraFont(.caption, weight: .semibold)
+                        .foregroundColor(RemoraTheme.textOnAccent)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                        .background(RemoraTheme.accent)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .remoraFont(.caption, weight: .semibold)
-                .foregroundColor(Color.black)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(RemoraTheme.accent)
-                .clipShape(Capsule())
+                .buttonStyle(.plain)
+                .accessibilityLabel("Submit answers")
             }
         }
         .padding(.horizontal, 14)
@@ -176,7 +191,7 @@ struct PlanImplementationPromptView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "list.bullet.clipboard.fill")
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Text("Implement Plan")
                     .remoraFont(.caption, weight: .semibold)
                     .foregroundColor(RemoraTheme.textPrimary)
@@ -187,37 +202,50 @@ struct PlanImplementationPromptView: View {
                 .remoraFont(.caption)
                 .foregroundColor(RemoraTheme.textSecondary)
 
-            HStack(spacing: 8) {
-                Button {
-                    onImplement()
-                } label: {
-                    Text("Implement")
-                        .remoraFont(.caption2, weight: .semibold)
-                        .foregroundColor(Color.black)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(RemoraTheme.accent)
-                        .clipShape(Capsule())
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    implementButton
+                    stayInPlanButton
                 }
-                .buttonStyle(.plain)
-
-                Button {
-                    onDismiss()
-                } label: {
-                    Text("Stay in Plan")
-                        .remoraFont(.caption2, weight: .semibold)
-                        .foregroundColor(RemoraTheme.textPrimary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(RemoraTheme.surface.opacity(0.8))
-                        .clipShape(Capsule())
+                VStack(alignment: .leading, spacing: 8) {
+                    implementButton
+                    stayInPlanButton
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .modifier(GlassRectModifier(cornerRadius: 14))
+    }
+
+    private var implementButton: some View {
+        Button(action: onImplement) {
+            Text("Implement")
+                .remoraFont(.caption2, weight: .semibold)
+                .foregroundColor(RemoraTheme.textOnAccent)
+                .padding(.horizontal, 10)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                .background(RemoraTheme.accent)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Implement plan")
+    }
+
+    private var stayInPlanButton: some View {
+        Button(action: onDismiss) {
+            Text("Stay in Plan")
+                .remoraFont(.caption2, weight: .semibold)
+                .foregroundColor(RemoraTheme.textPrimary)
+                .padding(.horizontal, 10)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                .background(RemoraTheme.surface.opacity(0.8))
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stay in plan mode")
     }
 }
 
@@ -231,7 +259,7 @@ struct QueuedFollowUpsPreviewView: View {
             HStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Text("Queued Next")
                     .remoraFont(.caption, weight: .semibold)
                     .foregroundColor(RemoraTheme.textPrimary)
@@ -284,21 +312,32 @@ struct QueuedFollowUpsPreviewView: View {
                                         .remoraFont(.caption, weight: .semibold)
                                 }
                             }
-                            .foregroundColor(preview.kind == .pendingSteer ? RemoraTheme.accent : RemoraTheme.textPrimary)
+                            .foregroundColor(
+                                preview.kind == .pendingSteer
+                                    ? RemoraTheme.accentForegroundOnSurface
+                                    : RemoraTheme.textPrimary
+                            )
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                             .background(RemoraTheme.surface.opacity(0.96))
                             .clipShape(Capsule())
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .disabled(preview.kind == .pendingSteer)
+                        .accessibilityLabel(
+                            preview.kind == .pendingSteer ? "Steer queued" : "Steer with this queued message"
+                        )
                     }
 
                     Button(action: { onDelete(preview) }) {
                         Image(systemName: "trash")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(RemoraTheme.textSecondary)
-                            .frame(width: 30, height: 30)
+                            .frame(
+                                width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                height: RemoraAccessibilityMetrics.minimumHitTarget
+                            )
                     }
                     .buttonStyle(.plain)
                 }

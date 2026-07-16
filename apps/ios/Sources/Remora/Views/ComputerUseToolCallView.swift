@@ -83,7 +83,7 @@ struct ComputerUseToolCallView: View {
         HStack(spacing: 8) {
             Image(systemName: toolIcon)
                 .remoraFont(size: 12, weight: .semibold)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
             Text(view.summary)
                 .remoraFont(size: summaryFontSize)
@@ -155,7 +155,7 @@ struct ComputerUseToolCallView: View {
                 } label: {
                     Text(errorExpanded ? "Show less" : "Show more")
                         .remoraFont(.caption2, weight: .semibold)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(errorExpanded ? "Show less error text" : "Show more error text")
@@ -178,7 +178,7 @@ struct ComputerUseToolCallView: View {
                 } label: {
                     Text(a11yExpanded ? "Show less" : "Show more")
                         .remoraFont(.caption2, weight: .medium)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 .buttonStyle(.plain)
             }

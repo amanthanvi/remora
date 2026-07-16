@@ -138,7 +138,7 @@ struct SessionServerCardRow: View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: icon)
                 .remoraFont(size: 16, weight: .medium)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .frame(width: 28, height: 28)
                 .background(RemoraTheme.accent.opacity(0.12))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -183,7 +183,7 @@ struct SessionServerCardRow: View {
             case .badge(let text):
                 Text(text)
                     .remoraFont(.caption, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             case .chevron:
                 Image(systemName: "chevron.right")
                     .remoraFont(size: 12, weight: .semibold)

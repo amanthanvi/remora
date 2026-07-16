@@ -53,7 +53,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .sheet(item: $activeServerSheet) { sheet in
@@ -109,7 +109,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "paintbrush")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Appearance")
                         .remoraFont(.subheadline)
@@ -130,7 +130,7 @@ struct SettingsView: View {
             Toggle(isOn: $collapseTurns) {
                 HStack(spacing: 10) {
                     Image(systemName: "rectangle.compress.vertical")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Collapse Turns")
@@ -184,7 +184,7 @@ struct SettingsView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -223,7 +223,7 @@ struct SettingsView: View {
                         if fontFamily == option.rawValue {
                             Image(systemName: "checkmark")
                                 .remoraFont(.subheadline, weight: .semibold)
-                                .foregroundColor(RemoraTheme.accentStrong)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         }
                     }
                 }
@@ -244,7 +244,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkles")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Wake Pet")
@@ -274,7 +274,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "flask")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Experimental Features")
                         .remoraFont(.subheadline)
@@ -297,7 +297,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkles")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Support Remora")
                         .remoraFont(.subheadline)
@@ -340,7 +340,7 @@ struct SettingsView: View {
                         } label: {
                             HStack {
                                 Image(systemName: conn.isLocal ? "iphone" : "server.rack")
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     .frame(width: 20)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(conn.displayName)
@@ -370,11 +370,11 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Image(systemName: "plus.circle.fill")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Add Server")
                         .remoraFont(.footnote)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     Spacer()
                 }
             }
@@ -709,7 +709,7 @@ private struct SettingsServerConnectionEditor: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .alert("Invalid Server", isPresented: Binding(
@@ -802,14 +802,14 @@ private struct SettingsServerConnectionEditor: View {
             Button("Save") {
                 submit(reconnect: false)
             }
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             .remoraFont(.subheadline)
 
             if !isSpecialPairedServer {
                 Button("Save & Reconnect") {
                     submit(reconnect: true)
                 }
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .remoraFont(.subheadline)
             }
         }
@@ -998,7 +998,7 @@ private struct SettingsConnectionAccountSection: View {
                         Text("Login with ChatGPT")
                             .remoraFont(.subheadline)
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 .disabled(isAuthWorking)
                 .listRowBackground(RemoraTheme.surface.opacity(0.6))

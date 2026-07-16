@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct AnimatedSplashView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isPulsing = false
 
     let appReady: Bool
@@ -10,13 +11,13 @@ struct AnimatedSplashView: View {
     var body: some View {
         ZStack {
             if !compact {
-                RemoraTheme.backgroundGradient.ignoresSafeArea()
+                RemoraTheme.background.ignoresSafeArea()
             }
 
             VStack(spacing: compact ? 0 : 18) {
                 RemoraLogo(size: compact ? 92 : 164)
-                    .scaleEffect(isPulsing ? 1.04 : 0.96)
-                    .opacity(isPulsing ? 1 : 0.72)
+                    .scaleEffect(reduceMotion ? 1 : (isPulsing ? 1.04 : 0.96))
+                    .opacity(reduceMotion ? 1 : (isPulsing ? 1 : 0.72))
 
                 if !compact {
                     Text("Your agents, wherever you are")
@@ -26,12 +27,25 @@ struct AnimatedSplashView: View {
             }
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
-                isPulsing = true
+            if reduceMotion {
+                isPulsing = false
+            } else {
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                    isPulsing = true
+                }
             }
             if appReady {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                     onFinished()
+                }
+            }
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            if shouldReduceMotion {
+                isPulsing = false
+            } else {
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                    isPulsing = true
                 }
             }
         }

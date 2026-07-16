@@ -135,7 +135,7 @@ struct ConversationInfoView: View {
                    !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(model)
                         .remoraFont(size: 13, weight: .medium)
-                        .foregroundStyle(RemoraTheme.accent)
+                        .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .modifier(GlassRectModifier(cornerRadius: 8))
@@ -232,7 +232,7 @@ struct ConversationInfoView: View {
             VStack(spacing: 6) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(RemoraTheme.accent)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     .frame(width: 52, height: 52)
                     .modifier(GlassRectModifier(cornerRadius: 14))
                 Text(label)
@@ -363,7 +363,7 @@ struct ConversationInfoView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value)
                 .remoraFont(size: 20, weight: .bold)
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             Text(title)
                 .remoraFont(size: 12, weight: .medium)
                 .foregroundStyle(RemoraTheme.textSecondary)
@@ -428,14 +428,14 @@ struct ConversationInfoView: View {
                     x: .value("Thread", entry.threadTitle),
                     y: .value("Tokens", entry.tokens)
                 )
-                .foregroundStyle(RemoraTheme.accent.opacity(0.3))
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.3))
                 .interpolationMethod(.catmullRom)
 
                 LineMark(
                     x: .value("Thread", entry.threadTitle),
                     y: .value("Tokens", entry.tokens)
                 )
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                 .interpolationMethod(.catmullRom)
             }
             .chartXAxis {
@@ -469,7 +469,7 @@ struct ConversationInfoView: View {
                     x: .value("Date", Date(timeIntervalSince1970: TimeInterval(entry.dateEpoch)), unit: .day),
                     y: .value("Activity", entry.turnCount)
                 )
-                .foregroundStyle(RemoraTheme.accent.opacity(0.7))
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.7))
                 .cornerRadius(2)
             }
             .chartXAxis {
@@ -503,7 +503,7 @@ struct ConversationInfoView: View {
                     x: .value("Count", entry.threadCount),
                     y: .value("Model", entry.model)
                 )
-                .foregroundStyle(RemoraTheme.accent.opacity(0.7))
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.7))
                 .cornerRadius(2)
             }
             .chartXAxis {

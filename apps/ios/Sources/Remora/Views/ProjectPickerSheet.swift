@@ -41,7 +41,7 @@ struct ProjectPickerSheet: View {
                         onCreateNew()
                     } label: {
                         Label("New Project", systemImage: "plus")
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     }
                 }
             }
@@ -106,7 +106,7 @@ struct ProjectPickerSheet: View {
                     HStack(spacing: 6) {
                         if let serverName = serverNamesById[project.serverId] {
                             Text(serverName)
-                                .foregroundStyle(RemoraTheme.accent.opacity(0.75))
+                                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.75))
                         }
                         Text(PathDisplay.display(project.cwd, isLocal: false))
                             .foregroundStyle(RemoraTheme.textMuted)
@@ -145,7 +145,7 @@ struct ProjectPickerSheet: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .background(Capsule().fill(RemoraTheme.accent.opacity(0.15)))
-                    .foregroundStyle(RemoraTheme.accent)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             }
             .buttonStyle(.plain)
             .padding(.top, 4)

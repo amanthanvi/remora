@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 
 struct ConversationComposerEntryRowView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var showAttachMenu: Bool
     @Binding var inputText: String
     @Binding var isComposerFocused: Bool
@@ -79,7 +80,7 @@ struct ConversationComposerEntryRowView: View {
                     showAttachMenu = true
                 } label: {
                     Image(systemName: "plus")
-                        .font(RemoraFont.styled(size: 20, weight: .semibold))
+                        .remoraControlIconFont(size: 20, weight: .semibold)
                         .foregroundColor(RemoraTheme.textPrimary)
                         .frame(width: Metrics.controlSize, height: Metrics.controlSize)
                         .modifier(GlassCircleModifier())
@@ -89,7 +90,7 @@ struct ConversationComposerEntryRowView: View {
                 .padding(-4)
                 .buttonStyle(.plain)
                 .hoverEffect(.highlight)
-                .transition(.scale.combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
                 .accessibilityLabel("Attach")
                 .zIndex(1)
             }
@@ -107,8 +108,8 @@ struct ConversationComposerEntryRowView: View {
                     )
 
                     if inputText.isEmpty {
-                        Text("Message remora...")
-                            .font(RemoraFont.styled(size: 17))
+                        Text("Message your agent…")
+                            .remoraFont(size: 17)
                             .foregroundColor(RemoraTheme.textMuted)
                             .padding(.leading, 16)
                             .padding(.top, 11)
@@ -117,14 +118,33 @@ struct ConversationComposerEntryRowView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+                if shouldShowExpand {
+                    Button {
+                        showExpanded = true
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .remoraControlIconFont(size: 12, weight: .semibold)
+                            .foregroundColor(RemoraTheme.textSecondary)
+                            .frame(
+                                width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                height: RemoraAccessibilityMetrics.minimumHitTarget
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .hoverEffect(.highlight)
+                    .accessibilityLabel("Expand composer")
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
+                }
+
                 if voiceManager.isRecording {
                     AudioWaveformView(level: voiceManager.audioLevel)
                         .frame(width: 48, height: 20)
 
                     Button(action: onStopRecording) {
                         Image(systemName: "stop.circle.fill")
-                            .font(RemoraFont.styled(size: 28))
-                            .foregroundColor(RemoraTheme.accentStrong)
+                            .remoraControlIconFont(size: 28)
+                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                             .frame(width: Metrics.trailingControlSize, height: Metrics.trailingControlSize)
                             .contentShape(Circle())
                     }
@@ -138,7 +158,7 @@ struct ConversationComposerEntryRowView: View {
                 } else if allowsVoiceInput {
                     Button(action: onStartRecording) {
                         Image(systemName: "mic.fill")
-                            .font(RemoraFont.styled(size: 18))
+                            .remoraControlIconFont(size: 18)
                             .foregroundColor(RemoraTheme.textSecondary)
                             .frame(width: Metrics.trailingControlSize, height: Metrics.trailingControlSize)
                             .contentShape(Circle())
@@ -150,31 +170,16 @@ struct ConversationComposerEntryRowView: View {
             }
             .frame(maxWidth: .infinity, minHeight: Metrics.controlSize)
             .modifier(GlassRoundedRectModifier(cornerRadius: Metrics.inputCornerRadius))
-            .overlay(alignment: .topTrailing) {
-                if shouldShowExpand {
-                    Button {
-                        showExpanded = true
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(RemoraFont.styled(size: 12, weight: .semibold))
-                            .foregroundColor(RemoraTheme.textSecondary)
-                            .padding(6)
-                            .contentShape(Rectangle())
-                    }
-                    .hoverEffect(.highlight)
-                    .padding(.top, 2)
-                    .padding(.trailing, 6)
-                    .accessibilityLabel("Expand composer")
-                    .transition(.opacity.combined(with: .scale))
-                }
-            }
-            .animation(.easeInOut(duration: 0.15), value: shouldShowExpand)
+            .animation(
+                RemoraMotionPolicy.animation(.easeInOut(duration: 0.15), reduceMotion: reduceMotion),
+                value: shouldShowExpand
+            )
 
             if canSend {
                 Button(action: onSendText) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(RemoraFont.styled(size: 30))
-                        .foregroundColor(RemoraTheme.accent)
+                        .remoraControlIconFont(size: 30)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: Metrics.trailingControlSize, height: Metrics.trailingControlSize)
                         .contentShape(Circle())
                 }
@@ -183,25 +188,38 @@ struct ConversationComposerEntryRowView: View {
                 .disabled(voiceManager.isRecording || voiceManager.isTranscribing)
                 .opacity(voiceManager.isRecording || voiceManager.isTranscribing ? 0.45 : 1)
                 .accessibilityLabel("Send")
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
 
             if isTurnActive && !canSend {
                 Button(action: onInterrupt) {
                     Text("Cancel")
-                        .font(RemoraFont.styled(size: 15, weight: .medium))
+                        .remoraFont(size: 15, weight: .medium)
                         .foregroundColor(RemoraTheme.textPrimary)
                         .padding(.horizontal, 14)
-                        .frame(height: Metrics.controlSize)
+                        .padding(.vertical, 10)
+                        .frame(minHeight: Metrics.controlSize)
                         .modifier(GlassCapsuleModifier())
                 }
                 .buttonStyle(.plain)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: isTurnActive)
-        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: canSend)
+        .animation(
+            RemoraMotionPolicy.animation(
+                .spring(response: 0.3, dampingFraction: 0.86),
+                reduceMotion: reduceMotion
+            ),
+            value: isTurnActive
+        )
+        .animation(
+            RemoraMotionPolicy.animation(
+                .spring(response: 0.3, dampingFraction: 0.86),
+                reduceMotion: reduceMotion
+            ),
+            value: canSend
+        )
         .padding(.horizontal, Metrics.horizontalPadding)
         .padding(.top, Metrics.verticalPadding)
         .padding(.bottom, Metrics.verticalPadding)

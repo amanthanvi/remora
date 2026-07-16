@@ -17,6 +17,7 @@ struct ThreadSearchResultsView: View {
     /// the floating top/bottom chrome. Caller passes the same values the
     /// tasks list uses so the search view feels like a drop-in replacement.
     var contentInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Tracks which fork lineages the user has expanded inline. Keyed by the
     /// lineage's root `ThreadKey`. Empty by default — clusters render
@@ -96,7 +97,12 @@ struct ThreadSearchResultsView: View {
                                 pinnedThreadKeys: pinnedThreadKeys,
                                 isExpanded: expandedClusters.contains(cluster.rootKey),
                                 onToggleExpanded: {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                    withAnimation(
+                                        RemoraMotionPolicy.animation(
+                                            .easeInOut(duration: 0.2),
+                                            reduceMotion: reduceMotion
+                                        )
+                                    ) {
                                         if expandedClusters.contains(cluster.rootKey) {
                                             expandedClusters.remove(cluster.rootKey)
                                         } else {
@@ -154,7 +160,7 @@ struct ThreadSearchResultsView: View {
             .remoraFont(.caption)
             .foregroundStyle(isActive ? RemoraTheme.textOnAccent : RemoraTheme.textSecondary)
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .background(isActive ? RemoraTheme.accent : RemoraTheme.surface.opacity(0.65))
             .overlay(
                 Capsule()
@@ -163,6 +169,19 @@ struct ThreadSearchResultsView: View {
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(kind == nil ? "All runtimes" : "\(label) runtime")
+        .accessibilityValue(isActive ? "Selected" : "Not selected")
+        .accessibilityAddTraits(isActive ? .isSelected : [])
+    }
+}
+
+enum ThreadSearchAccessibility {
+    static func pinActionLabel(threadTitle: String, isPinned: Bool) -> String {
+        "\(isPinned ? "Unpin" : "Pin") \(threadTitle)"
+    }
+
+    static func branchesActionLabel(count: Int, isExpanded: Bool) -> String {
+        "\(isExpanded ? "Collapse" : "Expand") \(count) branches"
     }
 }
 
@@ -178,22 +197,21 @@ private struct ThreadSearchRow: View {
                 ThreadSearchRuntimeIcon(kind: session.agentRuntimeKind)
                 VStack(alignment: .leading, spacing: 2) {
                     FormattedText(text: session.sessionTitle, lineLimit: 1)
-                        .font(.custom(RemoraFont.markdownFontName, size: 13))
-                        .fontWeight(.semibold)
+                        .remoraFont(size: 13, weight: .semibold)
                         .foregroundStyle(RemoraTheme.textPrimary)
                     HStack(spacing: 4) {
                         Text(session.serverDisplayName)
-                            .foregroundStyle(RemoraTheme.accent.opacity(0.7))
+                            .foregroundStyle(RemoraTheme.accentForeground)
                         if let workspace = HomeDashboardSupport.workspaceLabel(for: session.cwd) {
                             Text("\u{00b7}")
-                                .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                                .foregroundStyle(RemoraTheme.textMuted)
                             Text(workspace)
-                                .foregroundStyle(RemoraTheme.textSecondary.opacity(0.8))
+                                .foregroundStyle(RemoraTheme.textSecondary)
                         }
                         Text("\u{00b7}")
-                            .foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                            .foregroundStyle(RemoraTheme.textMuted)
                         Text(relativeDate(Int64(session.updatedAt.timeIntervalSince1970)))
-                            .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                            .foregroundStyle(RemoraTheme.textMuted)
                     }
                     .remoraMonoFont(size: 10, weight: .regular)
                     .lineLimit(1)
@@ -201,13 +219,22 @@ private struct ThreadSearchRow: View {
                 Spacer(minLength: 8)
                 Image(systemName: isPinned ? "checkmark.circle.fill" : "plus.circle")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(isPinned ? RemoraTheme.accent : RemoraTheme.textSecondary.opacity(0.7))
+                    .foregroundStyle(isPinned ? RemoraTheme.accentForeground : RemoraTheme.textSecondary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(
+            ThreadSearchAccessibility.pinActionLabel(
+                threadTitle: session.sessionTitle,
+                isPinned: isPinned
+            )
+        )
+        .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+        .accessibilityAddTraits(isPinned ? .isSelected : [])
     }
 }
 
@@ -240,6 +267,7 @@ private struct ThreadSearchClusterRow: View {
     let onToggleExpanded: () -> Void
     let onPin: (HomeDashboardRecentSession) -> Void
     let onUnpin: (HomeDashboardRecentSession) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The cluster head represents the lineage's identity. Prefer the root
     /// thread (the original) so the head reads stable: forks come and go,
@@ -262,7 +290,7 @@ private struct ThreadSearchClusterRow: View {
             if let head { headRow(for: head) }
             if isExpanded {
                 childrenList
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
             }
         }
         .background(isExpanded ? RemoraTheme.surface.opacity(0.3) : Color.clear)
@@ -274,26 +302,32 @@ private struct ThreadSearchClusterRow: View {
             ThreadSearchRuntimeIcon(kind: session.agentRuntimeKind)
             VStack(alignment: .leading, spacing: 2) {
                 FormattedText(text: session.sessionTitle, lineLimit: 1)
-                    .font(.custom(RemoraFont.markdownFontName, size: 13))
-                    .fontWeight(.semibold)
+                    .remoraFont(size: 13, weight: .semibold)
                     .foregroundStyle(RemoraTheme.textPrimary)
                 HStack(spacing: 4) {
                     Text(session.serverDisplayName)
-                        .foregroundStyle(RemoraTheme.accent.opacity(0.7))
+                        .foregroundStyle(RemoraTheme.accentForeground)
                     if let workspace = HomeDashboardSupport.workspaceLabel(for: session.cwd) {
-                        Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
-                        Text(workspace).foregroundStyle(RemoraTheme.textSecondary.opacity(0.8))
+                        Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
+                        Text(workspace).foregroundStyle(RemoraTheme.textSecondary)
                     }
-                    Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted.opacity(0.5))
+                    Text("\u{00b7}").foregroundStyle(RemoraTheme.textMuted)
                     Text(relativeDate(Int64(headLatestUpdatedAt.timeIntervalSince1970)))
-                        .foregroundStyle(RemoraTheme.textMuted.opacity(0.8))
+                        .foregroundStyle(RemoraTheme.textMuted)
                 }
                 .remoraMonoFont(size: 10, weight: .regular)
                 .lineLimit(1)
             }
             Spacer(minLength: 6)
             branchesPill
-            pinButton(isPinned: isPinned, size: 16) {
+            pinButton(
+                isPinned: isPinned,
+                size: 16,
+                accessibilityLabel: ThreadSearchAccessibility.pinActionLabel(
+                    threadTitle: session.sessionTitle,
+                    isPinned: isPinned
+                )
+            ) {
                 isPinned ? onUnpin(session) : onPin(session)
             }
         }
@@ -313,9 +347,9 @@ private struct ThreadSearchClusterRow: View {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .remoraFont(size: 8, weight: .semibold)
             }
-            .foregroundStyle(RemoraTheme.accent)
+            .foregroundStyle(RemoraTheme.accentForeground)
             .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .background(
                 Capsule().fill(RemoraTheme.accent.opacity(isExpanded ? 0.18 : 0.12))
             )
@@ -324,7 +358,13 @@ private struct ThreadSearchClusterRow: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(cluster.members.count) branches")
+        .accessibilityLabel(
+            ThreadSearchAccessibility.branchesActionLabel(
+                count: cluster.members.count,
+                isExpanded: isExpanded
+            )
+        )
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
     }
 
     private var childrenList: some View {
@@ -346,28 +386,40 @@ private struct ThreadSearchClusterRow: View {
                             HStack(spacing: 6) {
                                 FormattedText(text: branchLabel(for: member, isRoot: isRoot), lineLimit: 1)
                                     .remoraFont(size: 12.5, weight: isPinned ? .semibold : .regular)
-                                    .foregroundStyle(isPinned ? RemoraTheme.accent : RemoraTheme.textPrimary.opacity(0.92))
+                                    .foregroundStyle(isPinned ? RemoraTheme.accentForeground : RemoraTheme.textPrimary)
                                 if isRoot {
                                     Text("root")
                                         .remoraMonoFont(size: 9, weight: .regular)
-                                        .foregroundStyle(RemoraTheme.textMuted.opacity(0.7))
+                                        .foregroundStyle(RemoraTheme.textMuted)
                                 }
                             }
                             Text(relativeDate(Int64(member.updatedAt.timeIntervalSince1970)))
                                 .remoraMonoFont(size: 10, weight: .regular)
-                                .foregroundStyle(RemoraTheme.textMuted.opacity(0.75))
+                                .foregroundStyle(RemoraTheme.textMuted)
                         }
                         Spacer(minLength: 6)
-                        pinButton(isPinned: isPinned, size: 14) {
-                            isPinned ? onUnpin(member) : onPin(member)
-                        }
+                        Image(systemName: isPinned ? "checkmark.circle.fill" : "plus.circle")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(isPinned ? RemoraTheme.accentForeground : RemoraTheme.textSecondary)
+                            .frame(
+                                width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                height: RemoraAccessibilityMetrics.minimumHitTarget
+                            )
                     }
                     .padding(.leading, 36)
                     .padding(.trailing, 14)
-                    .padding(.vertical, 5)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(
+                    ThreadSearchAccessibility.pinActionLabel(
+                        threadTitle: branchLabel(for: member, isRoot: isRoot),
+                        isPinned: isPinned
+                    )
+                )
+                .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+                .accessibilityAddTraits(isPinned ? .isSelected : [])
             }
         }
         .padding(.bottom, 4)
@@ -379,13 +431,26 @@ private struct ThreadSearchClusterRow: View {
         }
     }
 
-    private func pinButton(isPinned: Bool, size: CGFloat, action: @escaping () -> Void) -> some View {
+    private func pinButton(
+        isPinned: Bool,
+        size: CGFloat,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: isPinned ? "checkmark.circle.fill" : "plus.circle")
                 .font(.system(size: size, weight: .medium))
-                .foregroundStyle(isPinned ? RemoraTheme.accent : RemoraTheme.textSecondary.opacity(0.7))
+                .foregroundStyle(isPinned ? RemoraTheme.accentForeground : RemoraTheme.textSecondary)
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+        .accessibilityAddTraits(isPinned ? .isSelected : [])
     }
 
     /// Codex auto-titles threads from the *first* user message, which is

@@ -89,7 +89,7 @@ struct SSHAgentPickerSheet: View {
                         onCancel()
                         dismiss()
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .disabled(isConnecting)
                 }
             }
@@ -100,7 +100,7 @@ struct SSHAgentPickerSheet: View {
         Section {
             HStack(spacing: 12) {
                 Image(systemName: "terminal")
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(context.server.name)
                         .remoraFont(.subheadline)
@@ -144,7 +144,7 @@ struct SSHAgentPickerSheet: View {
                         Spacer()
                         if selectedKinds.contains(agent.kind) {
                             Image(systemName: "checkmark.square.fill")
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         } else if isBridgeKind(agent.kind), agent.status == .available {
                             Image(systemName: "square")
                                 .foregroundColor(RemoraTheme.textMuted)
@@ -166,7 +166,7 @@ struct SSHAgentPickerSheet: View {
                         }
                     }
                     .font(.caption)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .disabled(isConnecting)
                 }
             }
@@ -185,7 +185,7 @@ struct SSHAgentPickerSheet: View {
                         ProgressView().tint(RemoraTheme.accent)
                     }
                     Text("Connect")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .remoraFont(.subheadline)
                 }
             }

@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 
 struct ConversationComposerTextView: UIViewRepresentable {
+    @Environment(\.textScale) private var textScale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var text: String
     @Binding var isFocused: Bool
     @Binding var selectedRange: NSRange
@@ -199,11 +201,20 @@ struct ConversationComposerTextView: UIViewRepresentable {
         }
 
         private func composerFont() -> UIFont {
-            let pointSize = UIFont.preferredFont(forTextStyle: .body).pointSize
+            let pointSize = 17 * max(parent.textScale, 0.1)
+            let baseFont: UIFont
             if RemoraFont.storedFamily.isMono {
-                return RemoraFont.uiMonoFont(size: pointSize)
+                baseFont = RemoraFont.uiMonoFont(size: pointSize)
+            } else {
+                baseFont = UIFont.systemFont(ofSize: pointSize)
             }
-            return UIFont.systemFont(ofSize: pointSize)
+            let traits = UITraitCollection(
+                preferredContentSizeCategory: parent.dynamicTypeSize.remoraContentSizeCategory
+            )
+            return UIFontMetrics(forTextStyle: .body).scaledFont(
+                for: baseFont,
+                compatibleWith: traits
+            )
         }
 
         private func updateFocusBinding(_ isFocused: Bool) {
@@ -224,6 +235,26 @@ struct ConversationComposerTextView: UIViewRepresentable {
                 guard let self else { return }
                 self.parent.selectedRange = range
             }
+        }
+    }
+}
+
+private extension DynamicTypeSize {
+    var remoraContentSizeCategory: UIContentSizeCategory {
+        switch self {
+        case .xSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .xLarge: return .extraLarge
+        case .xxLarge: return .extraExtraLarge
+        case .xxxLarge: return .extraExtraExtraLarge
+        case .accessibility1: return .accessibilityMedium
+        case .accessibility2: return .accessibilityLarge
+        case .accessibility3: return .accessibilityExtraLarge
+        case .accessibility4: return .accessibilityExtraExtraLarge
+        case .accessibility5: return .accessibilityExtraExtraExtraLarge
+        @unknown default: return .large
         }
     }
 }
