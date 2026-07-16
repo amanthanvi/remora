@@ -316,6 +316,9 @@ fn v2_code() -> RemotePairingCode {
         "invitation_id": URL_SAFE_NO_PAD.encode([3_u8; 16]),
         "secret": URL_SAFE_NO_PAD.encode([4_u8; 32]),
         "expires_at": 10_300,
+        "max_runtime_ids": ["claude", "codex"],
+        "max_scopes": ["inspect_runtimes", "connect_runtime", "restart_runtime", "self_revoke"],
+        "confirmation_mode": "interactive",
         "host_name": "Studio",
         "relay": "https://relay.example"
     })

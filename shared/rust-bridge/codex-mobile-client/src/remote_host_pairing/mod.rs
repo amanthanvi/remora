@@ -12,6 +12,7 @@
 
 mod identity;
 mod ports;
+pub(crate) mod remora_link_v2;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};

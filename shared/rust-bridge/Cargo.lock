@@ -3026,6 +3026,7 @@ dependencies = [
  "lru 0.12.5",
  "ndk-context",
  "openssl-sys",
+ "p256 0.13.2",
  "rand_core 0.6.4",
  "regex",
  "reqwest 0.12.28",
