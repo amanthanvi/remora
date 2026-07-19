@@ -38,7 +38,7 @@ pub mod preferences;
 pub mod project;
 pub mod reconnect;
 pub mod recorder;
-pub mod remote_host_pairing;
+pub(crate) mod remote_host_pairing;
 pub mod remote_path;
 pub mod saved_apps;
 pub mod source_review;

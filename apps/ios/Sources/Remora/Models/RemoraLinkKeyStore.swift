@@ -33,6 +33,17 @@ struct RemoraLinkSignature: Equatable, Sendable {
     /// ASN.1 DER ECDSA signature returned by Security.framework.
     let derRepresentation: Data
     let assurance: RemoraLinkKeyAssurance
+
+    func withUnsafeBytes<Result>(
+        _ body: (UnsafeRawBufferPointer) throws -> Result
+    ) rethrows -> Result {
+        try derRepresentation.withUnsafeBytes(body)
+    }
+}
+
+enum RemoraLinkKeyDeletionOutcome: Equatable, Sendable {
+    case deleted
+    case alreadyMissing
 }
 
 enum RemoraLinkKeyStoreError: LocalizedError, Equatable {
@@ -128,7 +139,7 @@ protocol RemoraLinkKeySecurity {
     func publicKeyX963(privateKey: AnyObject) -> RemoraLinkSecurityDataResult
     func signMessageP256SHA256(
         privateKey: AnyObject,
-        message: Data
+        message: UnsafeRawBufferPointer
     ) -> RemoraLinkSecurityDataResult
     func deletePrivateKey(applicationTag: Data) -> OSStatus
 }
@@ -154,10 +165,10 @@ enum RemoraLinkSoftwareKeyPolicy: Equatable, Sendable {
 /// Rust-owned slot. The slot is hashed before becoming a Keychain application
 /// tag, so native persistence never stores a host ID, relay address, or other
 /// pairing metadata.
-final class RemoraLinkKeyStore {
+final class RemoraLinkKeyStore: @unchecked Sendable {
     static let shared = RemoraLinkKeyStore()
 
-    private static let namespace = "com.remora.app.remote-pairing.signing.v1"
+    private static let namespace = "com.remora.app.remora-link.v2.signing"
     private static let maximumSlotBytes = 512
 
     private let security: any RemoraLinkKeySecurity
@@ -211,9 +222,32 @@ final class RemoraLinkKeyStore {
         return try publicKey(handle: resolved.0, assurance: resolved.1)
     }
 
+    /// Load the public half of an existing key without creating any Keychain
+    /// material. A missing slot is a normal `nil` result; all custody and
+    /// validation failures remain explicit errors.
+    func load(slot: String) throws -> RemoraLinkPublicKey? {
+        guard let tag = applicationTag(for: slot) else {
+            throw RemoraLinkKeyStoreError.invalidSlot
+        }
+        switch security.lookupPrivateKey(applicationTag: tag) {
+        case .found(let handle, let assurance):
+            let accepted = try accepted(handle: handle, assurance: assurance)
+            return try publicKey(handle: accepted.0, assurance: accepted.1)
+        case .locked:
+            throw RemoraLinkKeyStoreError.keychainLocked
+        case .missing:
+            return nil
+        case .failed(let status):
+            throw RemoraLinkKeyStoreError.keychain(status)
+        }
+    }
+
     /// Sign Rust-owned canonical transcript bytes in message mode exactly once.
     /// Security.framework performs SHA-256 internally and returns DER ECDSA.
-    func sign(slot: String, message: Data) throws -> RemoraLinkSignature {
+    func sign(
+        slot: String,
+        message: UnsafeRawBufferPointer
+    ) throws -> RemoraLinkSignature {
         guard let tag = applicationTag(for: slot) else {
             throw RemoraLinkKeyStoreError.invalidSlot
         }
@@ -240,14 +274,25 @@ final class RemoraLinkKeyStore {
         }
     }
 
+    func sign(slot: String, message: Data) throws -> RemoraLinkSignature {
+        try message.withUnsafeBytes { bytes in
+            try sign(slot: slot, message: bytes)
+        }
+    }
+
     /// Idempotently delete one per-host private key. This removes only the
     /// Rust-selected slot and never scans or imports the legacy Alleycat stores.
-    func delete(slot: String) throws {
+    func delete(slot: String) throws -> RemoraLinkKeyDeletionOutcome {
         guard let tag = applicationTag(for: slot) else {
             throw RemoraLinkKeyStoreError.invalidSlot
         }
         let status = security.deletePrivateKey(applicationTag: tag)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
+        switch status {
+        case errSecSuccess:
+            return .deleted
+        case errSecItemNotFound:
+            return .alreadyMissing
+        default:
             if status == errSecInteractionNotAllowed {
                 throw RemoraLinkKeyStoreError.keychainLocked
             }
@@ -448,7 +493,7 @@ final class SystemRemoraLinkKeySecurity: RemoraLinkKeySecurity {
 
     func signMessageP256SHA256(
         privateKey: AnyObject,
-        message: Data
+        message: UnsafeRawBufferPointer
     ) -> RemoraLinkSecurityDataResult {
         guard CFGetTypeID(privateKey) == SecKeyGetTypeID() else {
             return .failed(errSecParam)
@@ -458,11 +503,19 @@ final class SystemRemoraLinkKeySecurity: RemoraLinkKeySecurity {
         guard SecKeyIsAlgorithmSupported(privateKey, .sign, algorithm) else {
             return .failed(errSecParam)
         }
+        guard let messageData = CFDataCreateWithBytesNoCopy(
+            kCFAllocatorDefault,
+            message.bindMemory(to: UInt8.self).baseAddress,
+            message.count,
+            kCFAllocatorNull
+        ) else {
+            return .failed(errSecAllocate)
+        }
         var error: Unmanaged<CFError>?
         guard let signature = SecKeyCreateSignature(
             privateKey,
             algorithm,
-            message as CFData,
+            messageData,
             &error
         ) as Data? else {
             let failure = error?.takeRetainedValue()

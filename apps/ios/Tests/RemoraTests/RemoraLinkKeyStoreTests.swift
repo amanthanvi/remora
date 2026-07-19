@@ -41,7 +41,7 @@ final class RemoraLinkKeyStoreTests: XCTestCase {
         XCTAssertTrue(
             security.createdTags.allSatisfy {
                 String(decoding: $0, as: UTF8.self)
-                    .hasPrefix("com.remora.app.remote-pairing.signing.v1.")
+                    .hasPrefix("com.remora.app.remora-link.v2.signing.")
             }
         )
     }
@@ -134,13 +134,26 @@ final class RemoraLinkKeyStoreTests: XCTestCase {
         _ = try store.createIfNeeded(slot: "slot-a")
         _ = try store.createIfNeeded(slot: "slot-b")
 
-        try store.delete(slot: "slot-a")
-        try store.delete(slot: "slot-a")
+        XCTAssertEqual(try store.delete(slot: "slot-a"), .deleted)
+        XCTAssertEqual(try store.delete(slot: "slot-a"), .alreadyMissing)
 
         XCTAssertEqual(store.status(slot: "slot-a"), .missing)
         XCTAssertEqual(store.status(slot: "slot-b"), .available(.hardwareProtected))
         XCTAssertEqual(security.deletedTags.count, 2)
         XCTAssertEqual(security.deletedTags[0], security.deletedTags[1])
+    }
+
+    func testLoadDoesNotCreateAMissingKey() throws {
+        let security = FakeRemoraLinkKeySecurity()
+        let store = RemoraLinkKeyStore(security: security, softwareKeyPolicy: .disabled)
+
+        XCTAssertNil(try store.load(slot: "missing-slot"))
+        XCTAssertTrue(security.creationPolicies.isEmpty)
+        XCTAssertTrue(security.createdTags.isEmpty)
+
+        let created = try store.createIfNeeded(slot: "missing-slot")
+        XCTAssertEqual(try store.load(slot: "missing-slot"), created)
+        XCTAssertEqual(security.creationPolicies.count, 1)
     }
 
     func testRejectsInvalidSlotAndMalformedPublicKey() {
@@ -237,9 +250,9 @@ private final class FakeRemoraLinkKeySecurity: RemoraLinkKeySecurity {
 
     func signMessageP256SHA256(
         privateKey _: AnyObject,
-        message: Data
+        message: UnsafeRawBufferPointer
     ) -> RemoraLinkSecurityDataResult {
-        signedMessages.append(message)
+        signedMessages.append(Data(message))
         return .value(derSignature)
     }
 

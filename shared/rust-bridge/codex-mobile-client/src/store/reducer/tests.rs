@@ -59,11 +59,7 @@ fn sync_thread_list_for_runtime_tags_threads() {
     let config = make_server_config("srv");
     reducer.upsert_server(&config, ServerHealthSnapshot::Connected);
 
-    reducer.sync_thread_list_for_runtime(
-        "srv",
-        "pi".to_string(),
-        &[make_thread_info("thread-1")],
-    );
+    reducer.sync_thread_list_for_runtime("srv", "pi".to_string(), &[make_thread_info("thread-1")]);
 
     let key = ThreadKey {
         server_id: "srv".to_string(),
@@ -73,6 +69,27 @@ fn sync_thread_list_for_runtime_tags_threads() {
         reducer.thread_snapshot(&key).unwrap().agent_runtime_kind,
         "pi".to_string()
     );
+}
+
+#[test]
+fn authoritative_runtime_refresh_prunes_only_that_runtime() {
+    let reducer = AppStoreReducer::new();
+    for (runtime, thread_id) in [("codex", "stale-codex"), ("pi", "keep-pi")] {
+        let mut thread = ThreadSnapshot::from_info("srv", make_thread_info(thread_id));
+        thread.agent_runtime_kind = runtime.to_string();
+        reducer.upsert_thread_snapshot(thread);
+    }
+
+    reducer.finalize_thread_list_sync_for_runtime("srv", "codex", &HashSet::new());
+
+    assert!(!reducer.snapshot().threads.contains_key(&ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "stale-codex".to_string(),
+    }));
+    assert!(reducer.snapshot().threads.contains_key(&ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "keep-pi".to_string(),
+    }));
 }
 
 #[test]
@@ -160,8 +177,7 @@ fn sync_thread_list_preserves_active_missing_thread() {
         server_id: "srv".to_string(),
         thread_id: "active".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("active")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("active")));
     reducer.set_active_thread(Some(active_key.clone()));
     let mut receiver = reducer.subscribe();
 
@@ -295,8 +311,7 @@ fn sync_thread_list_preserves_existing_title_when_incoming_title_missing() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     let mut incoming = make_thread_info("thread");
     incoming.title = None;
@@ -317,8 +332,7 @@ fn turn_diff_updates_become_conversation_items() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     reducer.apply_ui_event(&UiEvent::TurnDiffUpdated {
         key: key.clone(),
@@ -349,8 +363,7 @@ fn turn_plan_updates_populate_active_plan_progress_without_timeline_items() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     reducer.apply_ui_event(&UiEvent::TurnPlanUpdated {
         key: key.clone(),
@@ -596,8 +609,7 @@ fn thread_item_changed_projects_multi_agent_targets_to_display_labels() {
         thread_id: "parent".to_string(),
     };
 
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("parent")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("parent")));
 
     let mut child_info = make_thread_info("child-thread");
     child_info.agent_nickname = Some("Scout".to_string());
@@ -619,13 +631,11 @@ fn thread_item_changed_projects_multi_agent_targets_to_display_labels() {
                     prompt: Some("Inspect".to_string()),
                     targets: vec!["child-thread".to_string()],
                     receiver_thread_ids: vec!["child-thread".to_string()],
-                    agent_states: vec![
-                        crate::conversation_uniffi::HydratedMultiAgentStateData {
-                            target_id: "child-thread".to_string(),
-                            status: crate::types::AppSubagentStatus::Running,
-                            message: Some("Working".to_string()),
-                        },
-                    ],
+                    agent_states: vec![crate::conversation_uniffi::HydratedMultiAgentStateData {
+                        target_id: "child-thread".to_string(),
+                        status: crate::types::AppSubagentStatus::Running,
+                        message: Some("Working".to_string()),
+                    }],
                 },
             ),
             source_turn_id: Some("turn-1".to_string()),
@@ -770,8 +780,7 @@ fn model_reroutes_become_divider_items() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     reducer.apply_ui_event(&UiEvent::ModelRerouted {
         key: key.clone(),
@@ -812,8 +821,7 @@ fn resolved_user_input_appends_response_item() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.replace_pending_user_inputs(vec![PendingUserInputRequest {
         id: "req-1".to_string(),
         server_id: key.server_id.clone(),
@@ -932,8 +940,7 @@ fn resolved_user_input_hides_other_placeholder_when_note_present() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.replace_pending_user_inputs(vec![PendingUserInputRequest {
         id: "req-1".to_string(),
         server_id: key.server_id.clone(),
@@ -1045,8 +1052,7 @@ fn stage_local_user_message_overlay_projects_immediately() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     let overlay_id = reducer
         .stage_local_user_message_overlay(
@@ -1083,8 +1089,7 @@ fn server_backed_user_message_supersedes_local_overlay_after_turn_binding() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let mut receiver = reducer.subscribe();
     assert!(drain_updates(&mut receiver).is_empty());
 
@@ -1137,8 +1142,7 @@ fn binding_turn_after_server_user_item_arrives_removes_local_overlay() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let mut receiver = reducer.subscribe();
     assert!(drain_updates(&mut receiver).is_empty());
 
@@ -1192,8 +1196,7 @@ fn server_backed_user_message_immediately_supersedes_unbound_local_overlay() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     reducer
         .stage_local_user_message_overlay(
@@ -1428,8 +1431,7 @@ fn upsert_thread_snapshot_preserves_existing_title_when_incoming_title_missing()
         thread_id: "thread".to_string(),
     };
 
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
 
     let mut incoming = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
     incoming.info.title = None;
@@ -1476,8 +1478,7 @@ fn upsert_thread_snapshot_binds_pending_local_user_overlay_to_incoming_active_tu
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let overlay_id = reducer
         .stage_local_user_message_overlay(
             &key,
@@ -1529,8 +1530,7 @@ fn upsert_thread_snapshot_dedupes_matching_unbound_local_overlay() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer
         .stage_local_user_message_overlay(
             &key,
@@ -1572,8 +1572,7 @@ fn turn_started_consumes_first_queued_follow_up_preview() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.enqueue_thread_follow_up_preview(
         &key,
         AppQueuedFollowUpPreview {
@@ -1610,8 +1609,7 @@ fn turn_started_binds_first_pending_local_user_message_overlay() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let overlay_id = reducer
         .stage_local_user_message_overlay(
             &key,
@@ -1699,8 +1697,7 @@ fn thread_name_updated_emits_thread_state_updated_without_thread_upsert() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let mut receiver = reducer.subscribe();
     assert!(drain_updates(&mut receiver).is_empty());
 
@@ -1729,8 +1726,7 @@ fn thread_status_changed_emits_thread_metadata_changed_for_existing_thread() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let mut receiver = reducer.subscribe();
     assert!(drain_updates(&mut receiver).is_empty());
 
@@ -1764,25 +1760,22 @@ fn duplicate_thread_item_upsert_is_suppressed() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     let mut receiver = reducer.subscribe();
     assert!(drain_updates(&mut receiver).is_empty());
 
     let item = HydratedConversationItem {
         id: "call-1".to_string(),
-        content: HydratedConversationItemContent::CommandExecution(
-            HydratedCommandExecutionData {
-                command: "echo hi".to_string(),
-                cwd: "/tmp".to_string(),
-                output: Some("hi".to_string()),
-                exit_code: Some(0),
-                status: AppOperationStatus::Completed,
-                duration_ms: Some(10),
-                process_id: None,
-                actions: Vec::new(),
-            },
-        ),
+        content: HydratedConversationItemContent::CommandExecution(HydratedCommandExecutionData {
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+            output: Some("hi".to_string()),
+            exit_code: Some(0),
+            status: AppOperationStatus::Completed,
+            duration_ms: Some(10),
+            process_id: None,
+            actions: Vec::new(),
+        }),
         source_turn_id: Some("turn-1".to_string()),
         source_turn_index: Some(1),
         timestamp: None,
@@ -1950,8 +1943,7 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer
-        .upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.enqueue_thread_follow_up_preview(
         &key,
         AppQueuedFollowUpPreview {
@@ -2086,9 +2078,7 @@ fn dynamic_tool_arg_delta_reuses_known_item_id_when_later_delta_omits_it() {
 
 #[test]
 fn dynamic_tool_arg_delta_buffer_clears_on_item_completed() {
-    use codex_app_server_protocol::{
-        DynamicToolCallStatus, ItemCompletedNotification, ThreadItem,
-    };
+    use codex_app_server_protocol::{DynamicToolCallStatus, ItemCompletedNotification, ThreadItem};
     let reducer = AppStoreReducer::new();
     let key = key_thread("thread-2");
     reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(

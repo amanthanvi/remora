@@ -607,6 +607,50 @@ pub(super) async fn refresh_thread_list_from_app_server(
     Ok(())
 }
 
+pub(crate) async fn refresh_runtime_thread_list_from_client(
+    client: &codex_app_server_client::AppServerClient,
+    app_store: Arc<AppStoreReducer>,
+    server_id: &str,
+    runtime_kind: AgentRuntimeKind,
+) -> Result<(), RpcError> {
+    let mut incoming_ids = HashSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let params = match cursor {
+            Some(cursor) => serde_json::json!({ "cursor": cursor }),
+            None => serde_json::json!({}),
+        };
+        let request: upstream::ClientRequest = serde_json::from_value(serde_json::json!({
+            "id": format!("remora-link-reconcile-{}", uuid::Uuid::new_v4()),
+            "method": "thread/list",
+            "params": params,
+        }))
+        .map_err(|error| RpcError::Deserialization(format!("build thread/list: {error}")))?;
+        let response = client
+            .request(request)
+            .await
+            .map_err(|error| RpcError::Transport(TransportError::SendFailed(error.to_string())))?
+            .map_err(|error| RpcError::Server {
+                code: error.code,
+                message: error.message,
+            })?;
+        let mut response = response;
+        normalize_empty_thread_list_cwds(&mut response);
+        let response =
+            serde_json::from_value::<upstream::ThreadListResponse>(response).map_err(|error| {
+                RpcError::Deserialization(format!("deserialize thread/list: {error}"))
+            })?;
+        let page = thread_list_page_to_thread_infos(response.data, &mut incoming_ids);
+        app_store.upsert_thread_list_page_for_runtime(server_id, runtime_kind.clone(), &page);
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    app_store.finalize_thread_list_sync_for_runtime(server_id, &runtime_kind, &incoming_ids);
+    Ok(())
+}
+
 pub(super) async fn refresh_account_from_app_server(
     session: Arc<ServerSession>,
     app_store: Arc<AppStoreReducer>,

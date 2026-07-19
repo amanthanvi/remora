@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -839,6 +840,18 @@ fn assert_invalid_policy_request(value: serde_json::Value) {
 }
 
 #[test]
+fn only_exact_lowercase_shell_uses_the_reserved_non_coding_policy() {
+    let mut reserved = valid_enroll_value();
+    reserved["selected_runtime_ids"] = serde_json::json!(["shell"]);
+    reserved["requested_scopes"] = serde_json::json!(["connect_runtime", "self_revoke"]);
+    assert!(RequestV2::decode_json(&serde_json::to_vec(&reserved).unwrap()).is_ok());
+
+    let mut distinct_runtime = reserved;
+    distinct_runtime["selected_runtime_ids"] = serde_json::json!(["SHELL"]);
+    assert_invalid_policy_request(distinct_runtime);
+}
+
+#[test]
 fn request_scalar_bounds_and_exact_encodings_are_fail_closed() {
     let mut value = valid_enroll_value();
     value["v"] = serde_json::json!(1);
@@ -1307,4 +1320,25 @@ fn challenge_and_terminal_correlation_rejects_cross_operation_substitution() {
         ),
         Err(WireError::InvalidResponse)
     );
+}
+
+#[test]
+fn terminal_correlation_retains_no_invitation_authority_even_when_it_is_all_zero() {
+    let invitation_secret = URL_SAFE_NO_PAD.encode([0_u8; 32]);
+    let request = RequestV2::decode_json(
+        format!(
+            r#"{{"op":"inspect_invitation","v":2,"invitation_id":"{INVITATION_ID}","secret":"{invitation_secret}","device_public_key":"{DEVICE_PUBLIC_KEY}","client_nonce":"{CLIENT_NONCE}"}}"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+
+    let correlation = request.terminal_correlation().unwrap();
+    assert!(!format!("{correlation:?}").contains(&invitation_secret));
+    match correlation {
+        RequestCorrelationV2::InspectInvitation { invitation_id } => {
+            assert_eq!(invitation_id, INVITATION_ID);
+        }
+        _ => panic!("correlation must preserve the request variant"),
+    }
 }

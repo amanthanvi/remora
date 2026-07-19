@@ -18,7 +18,7 @@ use super::wire::{
     enrollment_transcript_hash, validate_policy,
 };
 
-pub(super) const JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub(crate) const JOURNAL_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_ENROLLMENT_CANDIDATES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -60,6 +60,10 @@ pub(crate) enum JournalPhaseV2 {
 pub(crate) struct HostBindingJournalV2 {
     pub(crate) host_id: String,
     pub(crate) node_id: String,
+    /// Invitation-provided display label. It is never identity or authority;
+    /// the pinned Iroh endpoint remains the host identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host_display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) relay_hint: Option<String>,
     pub(crate) hardware_key_slot: String,
@@ -253,10 +257,15 @@ pub(crate) enum JournalValidationError {
 }
 
 impl PairingJournalEntryV2 {
-    pub(super) fn validate(&self) -> Result<(), JournalValidationError> {
+    pub(crate) fn validate(&self) -> Result<(), JournalValidationError> {
         if self.schema_version != JOURNAL_SCHEMA_VERSION
             || self.binding.host_id != format!("remora-link:{}", self.binding.node_id)
             || !valid_text(&self.binding.node_id, 256)
+            || self
+                .binding
+                .host_display_name
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, 255))
             || !valid_text(&self.binding.hardware_key_slot, 256)
             || self
                 .binding
@@ -285,7 +294,8 @@ impl PairingJournalEntryV2 {
             }
             let mut seen = std::collections::HashSet::new();
             if invitation.runtime_offers.iter().any(|offer| {
-                !invitation.max_runtime_ids.contains(&offer.runtime_id)
+                offer.validate().is_err()
+                    || !invitation.max_runtime_ids.contains(&offer.runtime_id)
                     || !seen.insert(offer.runtime_id.as_str())
             }) {
                 return Err(JournalValidationError::Corrupt);
@@ -507,6 +517,8 @@ impl PairingJournalEntryV2 {
 pub(crate) enum JournalPortErrorV2 {
     #[error("Remora Link v2 journal is unavailable")]
     Unavailable,
+    #[error("Remora Link v2 journal is corrupt")]
+    Corrupt,
     #[error("Remora Link v2 journal changed concurrently")]
     Conflict,
 }

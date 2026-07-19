@@ -34,11 +34,13 @@ enum class RemoraLinkDeviceKeyFailure {
     SOFTWARE_BACKED_KEY_REJECTED,
     UNSUPPORTED_KEY,
     KEYSTORE_FAILURE,
-    SIGNING_FAILURE,
+    OPERATION_UNAVAILABLE,
+    INVALID_SIGNATURE,
 }
 
 enum class RemoraLinkDeviceKeyDeletionStatus {
     DELETED,
+    ALREADY_MISSING,
     INVALID_OPAQUE_SLOT,
     KEYSTORE_FAILURE,
 }
@@ -73,12 +75,12 @@ sealed interface RemoraLinkSignatureStatus {
  */
 class RemoraLinkDeviceKeyProvider(
     allowDebugEmulatorSoftwareAssurance: Boolean = false,
-) {
+) : RemoraLinkDeviceKeyCustody {
     private val debugEmulatorSoftwareAssuranceAllowed =
         allowDebugEmulatorSoftwareAssurance && BuildConfig.DEBUG && isProbablyEmulator()
     private val lock = Any()
 
-    fun ensureKey(opaqueSlot: String): RemoraLinkDeviceKeyStatus = synchronized(lock) {
+    override fun ensureKey(opaqueSlot: String): RemoraLinkDeviceKeyStatus = synchronized(lock) {
         val alias = keyAlias(opaqueSlot)
             ?: return@synchronized RemoraLinkDeviceKeyStatus.Unavailable(
                 RemoraLinkDeviceKeyFailure.INVALID_OPAQUE_SLOT,
@@ -106,7 +108,39 @@ class RemoraLinkDeviceKeyProvider(
         }
     }
 
-    fun sign(opaqueSlot: String, canonicalMessage: ByteArray): RemoraLinkSignatureStatus =
+    /** Loads an existing key without creating or replacing any Keystore entry. */
+    override fun loadKey(opaqueSlot: String): RemoraLinkDeviceKeyStatus = synchronized(lock) {
+        val alias = keyAlias(opaqueSlot)
+            ?: return@synchronized RemoraLinkDeviceKeyStatus.Unavailable(
+                RemoraLinkDeviceKeyFailure.INVALID_OPAQUE_SLOT,
+            )
+
+        try {
+            val keyStore = loadKeyStore()
+            if (!keyStore.containsAlias(alias)) {
+                return@synchronized RemoraLinkDeviceKeyStatus.Unavailable(
+                    RemoraLinkDeviceKeyFailure.KEY_NOT_FOUND,
+                )
+            }
+            val keyPair = loadKeyPair(keyStore, alias)
+                ?: return@synchronized RemoraLinkDeviceKeyStatus.Unavailable(
+                    RemoraLinkDeviceKeyFailure.KEY_INVALIDATED,
+                )
+            readyStatus(keyPair)
+        } catch (_: java.security.UnrecoverableKeyException) {
+            RemoraLinkDeviceKeyStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEY_INVALIDATED)
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            RemoraLinkDeviceKeyStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEY_INVALIDATED)
+        } catch (_: InvalidAlgorithmParameterException) {
+            RemoraLinkDeviceKeyStatus.Unavailable(RemoraLinkDeviceKeyFailure.UNSUPPORTED_KEY)
+        } catch (_: ProviderException) {
+            RemoraLinkDeviceKeyStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEYSTORE_FAILURE)
+        } catch (_: Exception) {
+            RemoraLinkDeviceKeyStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEYSTORE_FAILURE)
+        }
+    }
+
+    override fun sign(opaqueSlot: String, canonicalMessage: ByteArray): RemoraLinkSignatureStatus =
         synchronized(lock) {
             val alias = keyAlias(opaqueSlot)
                 ?: return@synchronized RemoraLinkSignatureStatus.Unavailable(
@@ -129,28 +163,46 @@ class RemoraLinkDeviceKeyProvider(
                         // SHA256withECDSA hashes exactly once. The canonical message must not be
                         // pre-hashed before crossing this boundary.
                         signer.update(canonicalMessage)
-                        RemoraLinkSignatureStatus.Signed(signer.sign())
+                        val signatureDer = signer.sign()
+                        if (isCanonicalP256EcdsaDerSignature(signatureDer)) {
+                            RemoraLinkSignatureStatus.Signed(signatureDer)
+                        } else {
+                            signatureDer.fill(0)
+                            RemoraLinkSignatureStatus.Unavailable(
+                                RemoraLinkDeviceKeyFailure.INVALID_SIGNATURE,
+                            )
+                        }
                     }
                 }
             } catch (_: java.security.UnrecoverableKeyException) {
                 RemoraLinkSignatureStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEY_INVALIDATED)
             } catch (_: KeyPermanentlyInvalidatedException) {
                 RemoraLinkSignatureStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEY_INVALIDATED)
+            } catch (_: ProviderException) {
+                RemoraLinkSignatureStatus.Unavailable(
+                    RemoraLinkDeviceKeyFailure.OPERATION_UNAVAILABLE,
+                )
             } catch (_: Exception) {
-                RemoraLinkSignatureStatus.Unavailable(RemoraLinkDeviceKeyFailure.SIGNING_FAILURE)
+                // KeyStore access and Signature engine failures are operational availability
+                // failures. Only concrete malformed DER evidence above is InvalidSignature.
+                RemoraLinkSignatureStatus.Unavailable(
+                    RemoraLinkDeviceKeyFailure.OPERATION_UNAVAILABLE,
+                )
             }
         }
 
     /** Idempotently removes the key. Absence is already the desired state. */
-    fun deleteKey(opaqueSlot: String): RemoraLinkDeviceKeyDeletionStatus = synchronized(lock) {
+    override fun deleteKey(opaqueSlot: String): RemoraLinkDeviceKeyDeletionStatus = synchronized(lock) {
         val alias = keyAlias(opaqueSlot)
             ?: return@synchronized RemoraLinkDeviceKeyDeletionStatus.INVALID_OPAQUE_SLOT
         try {
             val keyStore = loadKeyStore()
-            if (keyStore.containsAlias(alias)) {
+            if (!keyStore.containsAlias(alias)) {
+                RemoraLinkDeviceKeyDeletionStatus.ALREADY_MISSING
+            } else {
                 keyStore.deleteEntry(alias)
+                RemoraLinkDeviceKeyDeletionStatus.DELETED
             }
-            RemoraLinkDeviceKeyDeletionStatus.DELETED
         } catch (_: Exception) {
             RemoraLinkDeviceKeyDeletionStatus.KEYSTORE_FAILURE
         }
@@ -255,6 +307,13 @@ class RemoraLinkDeviceKeyProvider(
     }
 }
 
+internal interface RemoraLinkDeviceKeyCustody {
+    fun ensureKey(opaqueSlot: String): RemoraLinkDeviceKeyStatus
+    fun loadKey(opaqueSlot: String): RemoraLinkDeviceKeyStatus
+    fun sign(opaqueSlot: String, canonicalMessage: ByteArray): RemoraLinkSignatureStatus
+    fun deleteKey(opaqueSlot: String): RemoraLinkDeviceKeyDeletionStatus
+}
+
 internal enum class SecurityObservation {
     STRONGBOX,
     TRUSTED_ENVIRONMENT,
@@ -300,6 +359,32 @@ internal fun encodeP256PublicKeySec1(publicKey: ECPublicKey): ByteArray {
     return byteArrayOf(0x04) + x + y
 }
 
+/** Strict canonical DER validation matching the P-256 signature boundary Rust enforces. */
+internal fun isCanonicalP256EcdsaDerSignature(signature: ByteArray): Boolean {
+    if (signature.size !in MIN_P256_DER_SIGNATURE_BYTES..MAX_P256_DER_SIGNATURE_BYTES) return false
+    if (signature[0] != DER_SEQUENCE_TAG || signature[1].toInt() != signature.size - 2) return false
+    var cursor = 2
+
+    fun readInteger(): BigInteger? {
+        if (cursor + 2 > signature.size || signature[cursor] != DER_INTEGER_TAG) return null
+        val length = signature[cursor + 1].toInt() and 0xff
+        cursor += 2
+        if (length !in 1..MAX_P256_DER_INTEGER_BYTES || cursor + length > signature.size) {
+            return null
+        }
+        val first = signature[cursor].toInt() and 0xff
+        if ((first and 0x80) != 0) return null
+        if (length > 1 && first == 0 && (signature[cursor + 1].toInt() and 0x80) == 0) {
+            return null
+        }
+        val value = BigInteger(1, signature.copyOfRange(cursor, cursor + length))
+        cursor += length
+        return value.takeIf { it.signum() > 0 && it < P256_CURVE_ORDER }
+    }
+
+    return readInteger() != null && readInteger() != null && cursor == signature.size
+}
+
 private fun BigInteger.toUnsignedFixed(size: Int): ByteArray {
     require(signum() >= 0) { "coordinate must be unsigned" }
     val raw = toByteArray()
@@ -307,3 +392,13 @@ private fun BigInteger.toUnsignedFixed(size: Int): ByteArray {
     require(unsigned.size <= size) { "coordinate exceeds P-256 width" }
     return ByteArray(size - unsigned.size) + unsigned
 }
+
+private const val MIN_P256_DER_SIGNATURE_BYTES = 8
+private const val MAX_P256_DER_SIGNATURE_BYTES = 72
+private const val MAX_P256_DER_INTEGER_BYTES = 33
+private const val DER_SEQUENCE_TAG: Byte = 0x30
+private const val DER_INTEGER_TAG: Byte = 0x02
+private val P256_CURVE_ORDER = BigInteger(
+    "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+    16,
+)

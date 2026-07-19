@@ -83,6 +83,7 @@ inherits = "release"
 lto = false
 strip = true
 debug = 0
+debug-assertions = true
 codegen-units = 16
 
 [patch.crates-io]

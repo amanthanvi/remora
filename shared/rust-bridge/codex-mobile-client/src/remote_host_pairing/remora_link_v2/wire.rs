@@ -27,6 +27,7 @@ const MAX_PUBLIC_KEY_TEXT: usize = 128;
 const MAX_SIGNATURE_TEXT: usize = 128;
 const OPAQUE_ID_BYTES: usize = 16;
 const NONCE_BYTES: usize = 32;
+const INVITATION_SECRET_BYTES: usize = 32;
 const DEVICE_PUBLIC_KEY_BYTES: usize = 65;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -131,6 +132,45 @@ impl fmt::Debug for RequestV2 {
     }
 }
 
+/// Field-only correlation for the second half of an already transmitted
+/// control exchange. This type intentionally has no invitation-secret field,
+/// so no valid bearer value can survive in a retained exchange.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RequestCorrelationV2 {
+    InspectInvitation {
+        invitation_id: String,
+    },
+    Enroll {
+        invitation_id: String,
+        device_public_key: String,
+        selected_runtime_ids: Vec<String>,
+        requested_scopes: Vec<DeviceScopeV2>,
+        idempotency_key: String,
+    },
+    ListAgents {
+        credential_id: String,
+    },
+    RestartAgent {
+        credential_id: String,
+        agent: String,
+        idempotency_key: String,
+        command_sequence: u64,
+    },
+    Connect {
+        credential_id: String,
+        agent: String,
+    },
+    RevokeSelf {
+        credential_id: String,
+        idempotency_key: String,
+    },
+    RollbackEnrollment {
+        credential_id: String,
+        enrollment_idempotency_key: String,
+        idempotency_key: String,
+    },
+}
+
 impl RequestV2 {
     pub(crate) fn decode_json(bytes: &[u8]) -> Result<Self, WireError> {
         let request: Self = serde_json::from_slice(bytes).map_err(|_| WireError::InvalidRequest)?;
@@ -180,6 +220,72 @@ impl RequestV2 {
             | Self::RevokeSelf { credential_id, .. }
             | Self::RollbackEnrollment { credential_id, .. } => Some(credential_id),
         }
+    }
+
+    pub(crate) fn terminal_correlation(&self) -> Result<RequestCorrelationV2, WireError> {
+        self.validate()?;
+        Ok(match self {
+            Self::InspectInvitation { invitation_id, .. } => {
+                RequestCorrelationV2::InspectInvitation {
+                    invitation_id: invitation_id.clone(),
+                }
+            }
+            Self::Enroll {
+                invitation_id,
+                device_public_key,
+                selected_runtime_ids,
+                requested_scopes,
+                idempotency_key,
+                ..
+            } => RequestCorrelationV2::Enroll {
+                invitation_id: invitation_id.clone(),
+                device_public_key: device_public_key.clone(),
+                selected_runtime_ids: selected_runtime_ids.clone(),
+                requested_scopes: requested_scopes.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+            Self::ListAgents { credential_id, .. } => RequestCorrelationV2::ListAgents {
+                credential_id: credential_id.clone(),
+            },
+            Self::RestartAgent {
+                credential_id,
+                agent,
+                idempotency_key,
+                command_sequence,
+                ..
+            } => RequestCorrelationV2::RestartAgent {
+                credential_id: credential_id.clone(),
+                agent: agent.clone(),
+                idempotency_key: idempotency_key.clone(),
+                command_sequence: *command_sequence,
+            },
+            Self::Connect {
+                credential_id,
+                agent,
+                ..
+            } => RequestCorrelationV2::Connect {
+                credential_id: credential_id.clone(),
+                agent: agent.clone(),
+            },
+            Self::RevokeSelf {
+                credential_id,
+                idempotency_key,
+                ..
+            } => RequestCorrelationV2::RevokeSelf {
+                credential_id: credential_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+            Self::RollbackEnrollment {
+                credential_id,
+                enrollment_idempotency_key,
+                idempotency_key,
+                ..
+            } => RequestCorrelationV2::RollbackEnrollment {
+                credential_id: credential_id.clone(),
+                enrollment_idempotency_key: enrollment_idempotency_key.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+        })
     }
 
     pub(crate) fn operation_payload_hash(&self) -> Result<[u8; 32], WireError> {
@@ -245,7 +351,7 @@ impl RequestV2 {
                 ..
             } => {
                 valid_opaque(invitation_id, OPAQUE_ID_BYTES)?;
-                valid_exact_b64(secret, 32)?;
+                valid_exact_b64(secret, INVITATION_SECRET_BYTES)?;
                 validate_public_key(device_public_key)?;
             }
             Self::Enroll {
@@ -259,7 +365,7 @@ impl RequestV2 {
                 ..
             } => {
                 valid_opaque(invitation_id, OPAQUE_ID_BYTES)?;
-                valid_exact_b64(secret, 32)?;
+                valid_exact_b64(secret, INVITATION_SECRET_BYTES)?;
                 valid_device_name(device_name)?;
                 validate_public_key(device_public_key)?;
                 validate_grant(selected_runtime_ids, requested_scopes)?;
@@ -308,6 +414,98 @@ impl RequestV2 {
             }
         };
         Ok(())
+    }
+}
+
+impl RequestCorrelationV2 {
+    fn validate(&self) -> Result<(), WireError> {
+        match self {
+            Self::InspectInvitation { invitation_id } => {
+                valid_opaque(invitation_id, OPAQUE_ID_BYTES)?;
+            }
+            Self::Enroll {
+                invitation_id,
+                device_public_key,
+                selected_runtime_ids,
+                requested_scopes,
+                idempotency_key,
+            } => {
+                valid_opaque(invitation_id, OPAQUE_ID_BYTES)?;
+                validate_public_key(device_public_key)?;
+                validate_grant(selected_runtime_ids, requested_scopes)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::ListAgents { credential_id } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+            }
+            Self::RestartAgent {
+                credential_id,
+                agent,
+                idempotency_key,
+                command_sequence,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_runtime_id(agent)?;
+                valid_idempotency(idempotency_key)?;
+                if *command_sequence == 0 {
+                    return Err(WireError::InvalidRequest);
+                }
+            }
+            Self::Connect {
+                credential_id,
+                agent,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_runtime_id(agent)?;
+            }
+            Self::RevokeSelf {
+                credential_id,
+                idempotency_key,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::RollbackEnrollment {
+                credential_id,
+                enrollment_idempotency_key,
+                idempotency_key,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_idempotency(enrollment_idempotency_key)?;
+                valid_idempotency(idempotency_key)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expected_credential(
+        &self,
+        authenticated_client_endpoint_id: &str,
+    ) -> Result<(String, bool), WireError> {
+        self.validate()?;
+        validate_endpoint_id(authenticated_client_endpoint_id)?;
+        Ok(match self {
+            Self::InspectInvitation { invitation_id } => (invitation_id.clone(), true),
+            Self::Enroll {
+                invitation_id,
+                device_public_key,
+                idempotency_key,
+                ..
+            } => (
+                prospective_credential_id(
+                    invitation_id,
+                    authenticated_client_endpoint_id,
+                    device_public_key,
+                    idempotency_key,
+                )?,
+                true,
+            ),
+            Self::ListAgents { credential_id }
+            | Self::RestartAgent { credential_id, .. }
+            | Self::Connect { credential_id, .. }
+            | Self::RevokeSelf { credential_id, .. }
+            | Self::RollbackEnrollment { credential_id, .. } => (credential_id.clone(), false),
+        })
     }
 }
 
@@ -441,7 +639,7 @@ pub(crate) struct RuntimeOfferV2 {
 }
 
 impl RuntimeOfferV2 {
-    fn validate(&self) -> Result<(), WireError> {
+    pub(crate) fn validate(&self) -> Result<(), WireError> {
         valid_runtime_id(&self.runtime_id).map_err(|_| WireError::InvalidResponse)?;
         valid_response_label(&self.display_name)?;
         if self.recommended && !self.available {
@@ -907,9 +1105,27 @@ impl ResponseV2 {
         challenge: &ProofChallengeV2,
         authenticated_client_endpoint_id: &str,
     ) -> Result<(), WireError> {
+        let correlation = request.terminal_correlation()?;
+        self.validate_terminal_shape_for_correlation(
+            &correlation,
+            challenge,
+            authenticated_client_endpoint_id,
+        )
+    }
+
+    pub(crate) fn validate_terminal_shape_for_correlation(
+        &self,
+        correlation: &RequestCorrelationV2,
+        challenge: &ProofChallengeV2,
+        authenticated_client_endpoint_id: &str,
+    ) -> Result<(), WireError> {
         self.validate()?;
-        request.validate()?;
-        validate_challenge_for_request(challenge, request, authenticated_client_endpoint_id)?;
+        correlation.validate()?;
+        validate_challenge_for_correlation(
+            challenge,
+            correlation,
+            authenticated_client_endpoint_id,
+        )?;
         if self.challenge.is_some() {
             return Err(WireError::InvalidResponse);
         }
@@ -917,14 +1133,14 @@ impl ResponseV2 {
             return Ok(());
         }
 
-        match request {
-            RequestV2::InspectInvitation { invitation_id, .. } => {
+        match correlation {
+            RequestCorrelationV2::InspectInvitation { invitation_id } => {
                 let result = self.inspection.as_ref().ok_or(WireError::InvalidResponse)?;
                 if result.invitation_id != *invitation_id {
                     return Err(WireError::InvalidResponse);
                 }
             }
-            RequestV2::Enroll {
+            RequestCorrelationV2::Enroll {
                 selected_runtime_ids,
                 requested_scopes,
                 ..
@@ -948,12 +1164,12 @@ impl ResponseV2 {
                 }
                 _ => return Err(WireError::InvalidResponse),
             },
-            RequestV2::ListAgents { .. } => {
+            RequestCorrelationV2::ListAgents { .. } => {
                 if self.agents.is_none() {
                     return Err(WireError::InvalidResponse);
                 }
             }
-            RequestV2::RestartAgent {
+            RequestCorrelationV2::RestartAgent {
                 agent,
                 idempotency_key,
                 command_sequence,
@@ -967,12 +1183,12 @@ impl ResponseV2 {
                     return Err(WireError::InvalidResponse);
                 }
             }
-            RequestV2::Connect { .. } => {
+            RequestCorrelationV2::Connect { .. } => {
                 if self.session.is_none() {
                     return Err(WireError::InvalidResponse);
                 }
             }
-            RequestV2::RevokeSelf {
+            RequestCorrelationV2::RevokeSelf {
                 credential_id,
                 idempotency_key,
                 ..
@@ -983,7 +1199,7 @@ impl ResponseV2 {
                     idempotency_key,
                 )?;
             }
-            RequestV2::RollbackEnrollment {
+            RequestCorrelationV2::RollbackEnrollment {
                 credential_id,
                 idempotency_key,
                 ..
@@ -1265,10 +1481,12 @@ pub(crate) fn validate_policy(
     Ok(())
 }
 fn validate_grant(runtimes: &[String], scopes: &[DeviceScopeV2]) -> Result<(), WireError> {
+    let selects_coding_runtime = runtimes.iter().any(|runtime| runtime != "shell");
     if runtimes.is_empty()
         || runtimes.len() > MAX_RUNTIME_IDS
         || !is_canonical_runtime_ids(runtimes)
         || !is_canonical_scopes(scopes)
+        || (selects_coding_runtime && !scopes.contains(&DeviceScopeV2::InspectRuntimes))
         || !scopes.contains(&DeviceScopeV2::ConnectRuntime)
         || !scopes.contains(&DeviceScopeV2::SelfRevoke)
     {
@@ -1383,7 +1601,7 @@ fn valid_idempotency(value: &str) -> Result<(), WireError> {
     }
 }
 
-fn valid_device_name(value: &str) -> Result<(), WireError> {
+pub(crate) fn valid_device_name(value: &str) -> Result<(), WireError> {
     if value.len() > MAX_DEVICE_NAME_BYTES || value.chars().any(char::is_control) {
         return Err(WireError::InvalidRequest);
     }
@@ -1465,6 +1683,24 @@ fn validate_challenge_for_request(
             false,
         ),
     };
+    if challenge.credential_id != expected_credential_id
+        || (zero_epoch && challenge.auth_epoch != 0)
+    {
+        return Err(WireError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_challenge_for_correlation(
+    challenge: &ProofChallengeV2,
+    correlation: &RequestCorrelationV2,
+    authenticated_client_endpoint_id: &str,
+) -> Result<(), WireError> {
+    challenge
+        .validate()
+        .map_err(|_| WireError::InvalidResponse)?;
+    let (expected_credential_id, zero_epoch) =
+        correlation.expected_credential(authenticated_client_endpoint_id)?;
     if challenge.credential_id != expected_credential_id
         || (zero_epoch && challenge.auth_epoch != 0)
     {

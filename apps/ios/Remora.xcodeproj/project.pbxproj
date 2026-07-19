@@ -17,6 +17,7 @@
 		0393372D33CEFCB849B1B714 /* AppServerSnapshot+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 535359D6AC508D7AB76D279E /* AppServerSnapshot+UI.swift */; };
 		03E290EF0CC7C7D84BD7B10B /* HomeDashboardSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE587003BE37CD3913A0360 /* HomeDashboardSupport.swift */; };
 		0417C8C5B8CC09CD3343D52A /* poimandres.json in Resources */ = {isa = PBXBuildFile; fileRef = 974822255928A225B0097573 /* poimandres.json */; };
+		0491871238372826135B5486 /* RemoraLinkNativeAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E316D53DAF39E5B645DB0250 /* RemoraLinkNativeAdapters.swift */; };
 		049D5175BE9FC48D1BAA021E /* ConversationComposerContextBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2ADDF7DE421AFF93B7AF4A /* ConversationComposerContextBarView.swift */; };
 		049DCF761950892C8F7B523C /* remora-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = 56CC601168974759FA4FDA31 /* remora-dark.json */; };
 		05A48E4C3A6C7D7D0915A81A /* ConversationTimelineDetailRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED8068DF6F187912895ACF0 /* ConversationTimelineDetailRows.swift */; };
@@ -47,6 +48,7 @@
 		0FB00696952C39476329791B /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C84ECDA1C1606A617CD37BB4 /* Metal.framework */; };
 		0FE93854DA6F054E83D2EB5B /* SavedProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40561CC2521F01C72F795F46 /* SavedProjectStore.swift */; };
 		101D33C1504E29D12BCB2430 /* everforest-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = 059CDA86A066794B6D091B01 /* everforest-dark.json */; };
+		10317BCF52E476655FC5256A /* RemoraLinkTransportIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D812DEB7E9A2DCF253C24C9C /* RemoraLinkTransportIdentityStore.swift */; };
 		111076E6AD2893D6CC88000E /* AppSnapshotRecord+Runtime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B4D66E7C648A7D1E9FB780 /* AppSnapshotRecord+Runtime.swift */; };
 		118EEE67772F32543AEC0651 /* CrossServerTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C38F0112B6CFFB2F9F7BD4 /* CrossServerTools.swift */; };
 		11963E5F0A1DF39D480C42AF /* ConversationTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F02770F7A68121156258AAFD /* ConversationTimelineView.swift */; };
@@ -73,6 +75,7 @@
 		1AA81A42BB67ECCFBCA005EE /* DiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F940BF83BC68E86EBC3DF82D /* DiscoveryView.swift */; };
 		1B43DA6F5D643D4F6F333033 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5B1305AF1F2487FF3226FFFB /* QuartzCore.framework */; };
 		1B4E4EE14F884D5610972DD8 /* SavedAppDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9881D07E83E43E0C084A41F0 /* SavedAppDetailView.swift */; };
+		1C325A4E7A6F2F82FC6B6385 /* RemoraLinkJournalStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA310BE38C7E3BD3297122A9 /* RemoraLinkJournalStoreTests.swift */; };
 		1C6FA026CE61CC62D9033516 /* linear-light.json in Resources */ = {isa = PBXBuildFile; fileRef = FFB662741D4B8B7848C23F32 /* linear-light.json */; };
 		1C935B07EBA7B2B01B8BFD39 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B2DEFC3E8E4154E0F9C3B21 /* SystemConfiguration.framework */; };
 		1CBC1D57DF8FD32A1B67F99E /* vesper.json in Resources */ = {isa = PBXBuildFile; fileRef = 14257960342C7986F9B8FE6C /* vesper.json */; };
@@ -168,13 +171,16 @@
 		3E0B101522A66156914E7EE9 /* ThemeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AAC710EB03C53592B0C6E73 /* ThemeDefinition.swift */; };
 		3E64C4AB47C7AB55A4AFBDC1 /* DebugBuildLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6015513380C96D72A11BF22 /* DebugBuildLabel.swift */; };
 		3F1D095F17D9D8FC94047F4F /* dracula.json in Resources */ = {isa = PBXBuildFile; fileRef = 08656F7D396E91166CE15FEA /* dracula.json */; };
+		3F49B4C430E1871857C5F50E /* RemoraLinkTransportIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D812DEB7E9A2DCF253C24C9C /* RemoraLinkTransportIdentityStore.swift */; };
 		3F4B77F9C588C53BE9265B68 /* linear-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = D7B9C675BD4B6AF00B7550EC /* linear-dark.json */; };
 		3F8B652D85B091788F33D977 /* SessionsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57013801182EAC078885E274 /* SessionsScreen.swift */; };
 		40E176CBD402D6BD2B3B27F2 /* ConversationInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5D00081043C0583D4A7FD2F /* ConversationInfoView.swift */; };
 		4172C2F4B60081F0B198155B /* SessionsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57013801182EAC078885E274 /* SessionsScreen.swift */; };
+		417DA39AD10C5E815EEEB1C9 /* RemoraLinkHostsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93806BF02A76FA0969D2D83A /* RemoraLinkHostsSettingsView.swift */; };
 		41DA12E8B398590AB2EF1E0E /* InlineHandoffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5FD0059762AACA39E8F604F /* InlineHandoffView.swift */; };
 		4249AD64B16B6E8CF0494B0E /* ConversationWarmupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FEBBBE5A390082B299B8FBF /* ConversationWarmupCoordinator.swift */; };
 		425C5C211EE7DDC53C594C7F /* ConversationComposerAttachSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5E886C9D0C3764A26394932 /* ConversationComposerAttachSheet.swift */; };
+		425D8302EFFCE8AC11618188 /* RemoraLinkTransportIdentityStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 740FB702A59F24349F1645E2 /* RemoraLinkTransportIdentityStoreTests.swift */; };
 		42C5710E0911A9F65ED8F0FA /* TipJarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12378398F53A8739CDD11737 /* TipJarView.swift */; };
 		43176DB10E35CCA50FDF95B7 /* SshSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD18C3A72ED6BFB1F348B95E /* SshSessionStore.swift */; };
 		4371DDF84CF9D63E380E3BAD /* ConversationTimelineDiffPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF55D259693DA1EA6C82639B /* ConversationTimelineDiffPresentation.swift */; };
@@ -206,6 +212,7 @@
 		4E83D7CBE68E8E80BA2FFEE4 /* AnimatedSplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */; };
 		4F03A509CFB9D202F56D0C45 /* HeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98BFBBD7CC19011CF27DDEB0 /* HeaderView.swift */; };
 		4F204482623BE38999EF72E1 /* HomeNavigationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8564FF6B000DEAA1AAE911AD /* HomeNavigationView.swift */; };
+		4F2E9115620AA34327C1E8BF /* RemoraLinkPairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */; };
 		4F6C7ED21745F38FB9FD2F47 /* rose-pine-x.json in Resources */ = {isa = PBXBuildFile; fileRef = 679C21A52E749E2A019F90F6 /* rose-pine-x.json */; };
 		4FF66157090F938C1ECDAAC3 /* AppSnapshotRecord+Runtime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B4D66E7C648A7D1E9FB780 /* AppSnapshotRecord+Runtime.swift */; };
 		50901F43CA2C6FEC7477CE91 /* gruvbox-dark-soft.json in Resources */ = {isa = PBXBuildFile; fileRef = 37832A7D4CCC865DE9D9549E /* gruvbox-dark-soft.json */; };
@@ -253,6 +260,7 @@
 		61DBCA243DB5F323F4D9F25B /* PathDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CCCE6F1872680BBC36C221E /* PathDisplay.swift */; };
 		6246B2C6F1E14A70E4BE7C93 /* ConversationTimelineCommandRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */; };
 		630781052F285C12F247EAD9 /* min-dark-.json in Resources */ = {isa = PBXBuildFile; fileRef = 3A6505020028B54D7D1C0391 /* min-dark-.json */; };
+		633A9A4CF5C7FC676CD7DD26 /* RemoraLinkNativeAdaptersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5215ACFC0980666A8E13224A /* RemoraLinkNativeAdaptersTests.swift */; };
 		63887277DBCF0ADC2BE0A8D0 /* AnimatedSplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */; };
 		63A3E2F93FE53D868E632F6F /* RemoraPlatform.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD9CAC70D8BAA99A5EB42B58 /* RemoraPlatform.swift */; };
 		641E3A81043754191CD710D3 /* StreamingRendererCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B45A78FED7E65E2BF232F757 /* StreamingRendererCoordinator.swift */; };
@@ -338,6 +346,7 @@
 		9226DB21700DDB52D710125E /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1B0300A1F31C8D6F5F1C3DA0 /* Security.framework */; };
 		92B1C371E95CD74BFF5121D9 /* ConversationTurnRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FEF2824DA02F95ACAC68916 /* ConversationTurnRow.swift */; };
 		92FEF02B5DC468A925F7A40C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 07FEAB11BA99AE0498705A12 /* Assets.xcassets */; };
+		9399CE46EE43FB139CF07E5E /* RemoraLinkPairingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38667C85428CEDB6605F0887 /* RemoraLinkPairingModelTests.swift */; };
 		9546719B7D9858C9F9701543 /* PiPContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D46E136BBB4A6EB72DBA108 /* PiPContentView.swift */; };
 		95800CA98E1CEFB9C5EAB57C /* MessageBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D6799A787AFECC3712E330F /* MessageBubbleView.swift */; };
 		95FAF052A4657689E48B8968 /* BackgroundAwarenessModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F499A05D16D0A9EA587F19 /* BackgroundAwarenessModels.swift */; };
@@ -345,6 +354,7 @@
 		96EFA12F07CEFD3EB7936D27 /* slack-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = 43B3901157B71229720B8044 /* slack-dark.json */; };
 		97484A21C55DCD589D1D15E5 /* ConversationComposerModalCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D75F4516E398499B877A4F2C /* ConversationComposerModalCoordinator.swift */; };
 		975BFD9512034D6A091D31C9 /* ProjectPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43C82D155593B26BCFD3567 /* ProjectPickerSheet.swift */; };
+		97DD7650C36ECFFB0AF7BC53 /* AppRuntimeControllerRemoraLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73A5DA3EE572509DE7CB676B /* AppRuntimeControllerRemoraLinkTests.swift */; };
 		988ED6600E9318A546CC1C9D /* ConversationWarmupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FEBBBE5A390082B299B8FBF /* ConversationWarmupCoordinator.swift */; };
 		98E142785F47323C5301EAF2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89DA72F709685EDF25453E68 /* SettingsView.swift */; };
 		990B404961DAFE1B2C7CAF36 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89DA72F709685EDF25453E68 /* SettingsView.swift */; };
@@ -386,6 +396,7 @@
 		A4244045CEA74F1B921D6A06 /* AppDestinationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBBCD6284E873201668C2E7 /* AppDestinationViews.swift */; };
 		A4E654D2AEF57E8B5DF44D12 /* SwiftSshTrustBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16C4FA95AD8A637879EDA0C1 /* SwiftSshTrustBackend.swift */; };
 		A56612EC1AE0D9818F020773 /* PiPHostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4651C4AB158C2B8617EA2CC5 /* PiPHostView.swift */; };
+		A5A15045D02A63682B37300F /* RemoraLinkHostsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93806BF02A76FA0969D2D83A /* RemoraLinkHostsSettingsView.swift */; };
 		A5E5494800B00ED09A4C007B /* AppLifecycleController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4503D8B4D186CE508D33B23 /* AppLifecycleController.swift */; };
 		A63101844006D5AAC604A35B /* lobster-dark-dxSKfHK-.json in Resources */ = {isa = PBXBuildFile; fileRef = B7915421BAD86EF403703A0A /* lobster-dark-dxSKfHK-.json */; };
 		A6855E8DB760F9D79B59021F /* usgc-metalgate.json in Resources */ = {isa = PBXBuildFile; fileRef = C8A3A6F574DDEE46764CCF3F /* usgc-metalgate.json */; };
@@ -409,6 +420,7 @@
 		AEE772AE3971B902780B469B /* oscurange-C.json in Resources */ = {isa = PBXBuildFile; fileRef = 828564DC3A7A8AC67682F520 /* oscurange-C.json */; };
 		AEEC4175009495513909452E /* ConversationComposerModalCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D75F4516E398499B877A4F2C /* ConversationComposerModalCoordinator.swift */; };
 		AF3C4CE901B9513FE7C47F67 /* PluginMentionEncodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C25BAF3A8C882F62CEC452 /* PluginMentionEncodingTests.swift */; };
+		AF4E7BFC912466A171F4FD23 /* RemoraLinkJournalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27C708C413E6AD87BE5B4290 /* RemoraLinkJournalStore.swift */; };
 		AF7165E1B4E47743033BA9C1 /* ConversationScreenModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83A933EE152EF35CE7CAC6A6 /* ConversationScreenModelTests.swift */; };
 		AFFCD488F2E5DFC7C66E86FB /* ConversationComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576B75F09A2487B4EB1D40A6 /* ConversationComposerTextView.swift */; };
 		B03511826E62704E1E8381E6 /* AudioWaveformView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BCFD2FB57C5199F9F9F592D /* AudioWaveformView.swift */; };
@@ -437,6 +449,7 @@
 		BBF44EE2CD40C81AFD8645D2 /* everforest-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = 059CDA86A066794B6D091B01 /* everforest-dark.json */; };
 		BC1E86014D9C56A6EFFB5970 /* ChatTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52DAC3CB8B0D1EC1F458A1D3 /* ChatTypes.swift */; };
 		BC4959D73F5F3D3BF978FD4A /* StreamingAssistantRenderCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9ADC2E292EBD285710E6672 /* StreamingAssistantRenderCacheTests.swift */; };
+		BE3D8A54D7E925E201D55E10 /* RemoraLinkPairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */; };
 		BF3629BE785DAD332249FF76 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = 797244A928B3D2C06167B413 /* Nuke */; };
 		BF40A7A8D813934E5B2F860F /* LLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6937E6076FBBA177313790BA /* LLog.swift */; };
 		BF95A99F6FEFDF4CC6DEED46 /* catppuccin-macchiato.json in Resources */ = {isa = PBXBuildFile; fileRef = 35CF42BF23984EADD8559604 /* catppuccin-macchiato.json */; };
@@ -492,10 +505,12 @@
 		D59DA4CD058C53D890A3FAFB /* GhosttyTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBAC08ED78E62A2E738001EE /* GhosttyTerminalView.swift */; };
 		D5AB635917DE2250A470DE54 /* usgc-themes-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = B9FBB8351A539A60C1A758C0 /* usgc-themes-LICENSE.txt */; };
 		D5C41E51A42E5C3F72365A96 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD64F146D9F8F34C3CAD1D72 /* ConversationView.swift */; };
+		D5F3C2AD7BA76662C7D1144C /* RemoraLinkJournalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27C708C413E6AD87BE5B4290 /* RemoraLinkJournalStore.swift */; };
 		D66057AD28B3E64C6D083A6B /* ConversationComposerSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16420180870A693EB9E36765 /* ConversationComposerSupport.swift */; };
 		D68207D5B909F0BD8C4FDD36 /* RemoraLinkKeyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31509A2E68B0AAFEFB8544A6 /* RemoraLinkKeyStoreTests.swift */; };
 		D693EC2BBD584B311A8EBD76 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A93C6229FB65F9420E6E3997 /* AppModel.swift */; };
 		D6C123B79163DEEB7B45389F /* ConversationComposerEntryRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E67E6CE077A304BEDAB9CD8 /* ConversationComposerEntryRowView.swift */; };
+		D7314D7B16805B567DB27CAD /* RemoraLinkNativeAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E316D53DAF39E5B645DB0250 /* RemoraLinkNativeAdapters.swift */; };
 		D76D349014C4CE495B900C8F /* gruvbox-light-soft.json in Resources */ = {isa = PBXBuildFile; fileRef = 04E1D32C283E09F5CED01C4D /* gruvbox-light-soft.json */; };
 		D7B289C48BBA5E2E9B53DD73 /* BerkeleyMono-Regular.otf in Resources */ = {isa = PBXBuildFile; fileRef = DF4A9DBEB53438FDB81BA300 /* BerkeleyMono-Regular.otf */; };
 		D7E2B5ABD6EF6A8E25B4B0EC /* NewThreadHeroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA3E2EBCACDB01BF7C4D10A /* NewThreadHeroView.swift */; };
@@ -646,6 +661,7 @@
 		21E9881F291B1B17E94ED2B7 /* github-dark-high-contrast.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "github-dark-high-contrast.json"; sourceTree = "<group>"; };
 		2212D34839318AC7800877A0 /* MinigameOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinigameOverlayView.swift; sourceTree = "<group>"; };
 		23F0A9E90CFFA08D188A2908 /* InlineVoiceStatusStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineVoiceStatusStrip.swift; sourceTree = "<group>"; };
+		27C708C413E6AD87BE5B4290 /* RemoraLinkJournalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkJournalStore.swift; sourceTree = "<group>"; };
 		29F6852AC9984149BCE1BAD9 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		2A19422A565DD359FBC01EA5 /* remora-light.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "remora-light.json"; sourceTree = "<group>"; };
 		2B819FBC5C941EA7131EFB67 /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
@@ -668,6 +684,7 @@
 		366DCD6DBBB4CE714989B8BF /* Info-Catalyst.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Info-Catalyst.plist"; sourceTree = "<group>"; };
 		36E9C86DB61D45A50F3280C3 /* theme-manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "theme-manifest.json"; sourceTree = "<group>"; };
 		37832A7D4CCC865DE9D9549E /* gruvbox-dark-soft.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "gruvbox-dark-soft.json"; sourceTree = "<group>"; };
+		38667C85428CEDB6605F0887 /* RemoraLinkPairingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkPairingModelTests.swift; sourceTree = "<group>"; };
 		3A6505020028B54D7D1C0391 /* min-dark-.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "min-dark-.json"; sourceTree = "<group>"; };
 		3B19A43369AE2E453F0C478D /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
 		3CCCE6F1872680BBC36C221E /* PathDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathDisplay.swift; sourceTree = "<group>"; };
@@ -697,6 +714,7 @@
 		4ED8068DF6F187912895ACF0 /* ConversationTimelineDetailRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTimelineDetailRows.swift; sourceTree = "<group>"; };
 		4F4B16D90CE744DBD0687A45 /* ConversationBottomChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationBottomChrome.swift; sourceTree = "<group>"; };
 		50E23B21A5D94BEF151DA5F8 /* github-light-high-contrast.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "github-light-high-contrast.json"; sourceTree = "<group>"; };
+		5215ACFC0980666A8E13224A /* RemoraLinkNativeAdaptersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkNativeAdaptersTests.swift; sourceTree = "<group>"; };
 		52DAC3CB8B0D1EC1F458A1D3 /* ChatTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTypes.swift; sourceTree = "<group>"; };
 		535359D6AC508D7AB76D279E /* AppServerSnapshot+UI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppServerSnapshot+UI.swift"; sourceTree = "<group>"; };
 		56CC601168974759FA4FDA31 /* remora-dark.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "remora-dark.json"; sourceTree = "<group>"; };
@@ -730,7 +748,9 @@
 		70EFFFE78684DB06FB3301C0 /* ExperimentalFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentalFeatures.swift; sourceTree = "<group>"; };
 		71775B453F85C386905AD982 /* WallpaperSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperSelectionView.swift; sourceTree = "<group>"; };
 		718F957070F808D5FDA61A2A /* NetworkDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiscovery.swift; sourceTree = "<group>"; };
+		73A5DA3EE572509DE7CB676B /* AppRuntimeControllerRemoraLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntimeControllerRemoraLinkTests.swift; sourceTree = "<group>"; };
 		73F0F152AE99E6C600E886D0 /* CloudKVSBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKVSBridge.swift; sourceTree = "<group>"; };
+		740FB702A59F24349F1645E2 /* RemoraLinkTransportIdentityStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkTransportIdentityStoreTests.swift; sourceTree = "<group>"; };
 		74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePairingSheet.swift; sourceTree = "<group>"; };
 		757AB7CBCDDEF4D98C4B53FB /* light-plus.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "light-plus.json"; sourceTree = "<group>"; };
 		765C6F054278979294EB4C5C /* ConversationDisplayUITestHarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDisplayUITestHarnessView.swift; sourceTree = "<group>"; };
@@ -771,6 +791,7 @@
 		9132900940DFF3B28132EE5D /* SSHLoginSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHLoginSheet.swift; sourceTree = "<group>"; };
 		915C44E2734A36B30186D373 /* AmbientSuggestionsList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientSuggestionsList.swift; sourceTree = "<group>"; };
 		9295B2EC0343A4FC6825DA85 /* SavedAppsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedAppsStore.swift; sourceTree = "<group>"; };
+		93806BF02A76FA0969D2D83A /* RemoraLinkHostsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkHostsSettingsView.swift; sourceTree = "<group>"; };
 		945F96224B74447D4F142741 /* HomeDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeDashboardView.swift; sourceTree = "<group>"; };
 		94EFB4ABDBB1423FB25E9F65 /* AppModelConversationObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelConversationObservation.swift; sourceTree = "<group>"; };
 		974822255928A225B0097573 /* poimandres.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = poimandres.json; sourceTree = "<group>"; };
@@ -831,12 +852,14 @@
 		BF798AD372B6BC310D6BB0EE /* WidgetWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetWebView.swift; sourceTree = "<group>"; };
 		C013D6776F9ADB752E4F2CF6 /* SilentAudioKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SilentAudioKeeper.swift; sourceTree = "<group>"; };
 		C0F499A05D16D0A9EA587F19 /* BackgroundAwarenessModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundAwarenessModels.swift; sourceTree = "<group>"; };
+		C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkPairingModel.swift; sourceTree = "<group>"; };
 		C48C690A262B385942C8433B /* NetworkReachabilityObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityObserver.swift; sourceTree = "<group>"; };
 		C5FD0059762AACA39E8F604F /* InlineHandoffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineHandoffView.swift; sourceTree = "<group>"; };
 		C84ECDA1C1606A617CD37BB4 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		C8A3A6F574DDEE46764CCF3F /* usgc-metalgate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "usgc-metalgate.json"; sourceTree = "<group>"; };
 		C90E83E4AAC3C7DFDAD40641 /* AppSnapshotRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSnapshotRuntimeTests.swift; sourceTree = "<group>"; };
 		CA20016012CF5FE658E5DA50 /* ServerPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerPill.swift; sourceTree = "<group>"; };
+		CA310BE38C7E3BD3297122A9 /* RemoraLinkJournalStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkJournalStoreTests.swift; sourceTree = "<group>"; };
 		CA7D0CCA98198331F09EF144 /* ConversationComposerContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerContentView.swift; sourceTree = "<group>"; };
 		CBA4567FE71237EFE5B60C04 /* catppuccin-latte-Bd1wq-gC.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "catppuccin-latte-Bd1wq-gC.json"; sourceTree = "<group>"; };
 		CD5761CEFDCBA5714B138C06 /* RemoraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraApp.swift; sourceTree = "<group>"; };
@@ -853,6 +876,7 @@
 		D6E8D4F5D3C8213A7ED65EA9 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		D75F4516E398499B877A4F2C /* ConversationComposerModalCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerModalCoordinator.swift; sourceTree = "<group>"; };
 		D7B9C675BD4B6AF00B7550EC /* linear-dark.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "linear-dark.json"; sourceTree = "<group>"; };
+		D812DEB7E9A2DCF253C24C9C /* RemoraLinkTransportIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkTransportIdentityStore.swift; sourceTree = "<group>"; };
 		D82F87B8442CEB3AFF729F95 /* TerminalSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionController.swift; sourceTree = "<group>"; };
 		D90F4DDDFBCFCDE3E795ACFF /* SavedAppsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedAppsStoreTests.swift; sourceTree = "<group>"; };
 		D91978BCCA89CF972C4C0902 /* vitesse-light.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "vitesse-light.json"; sourceTree = "<group>"; };
@@ -874,6 +898,7 @@
 		E0B9677738C5ED3C786BBD78 /* ConversationAttachmentSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAttachmentSupport.swift; sourceTree = "<group>"; };
 		E13BE22ACEC376C5218583F2 /* kanagawa-lotus.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "kanagawa-lotus.json"; sourceTree = "<group>"; };
 		E2644C3FD24851010FBACFF1 /* CommandPaletteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPaletteView.swift; sourceTree = "<group>"; };
+		E316D53DAF39E5B645DB0250 /* RemoraLinkNativeAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkNativeAdapters.swift; sourceTree = "<group>"; };
 		E3C547F7F1E1AEA0842A1FA7 /* Remora.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Remora.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E43C82D155593B26BCFD3567 /* ProjectPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectPickerSheet.swift; sourceTree = "<group>"; };
 		E6015513380C96D72A11BF22 /* DebugBuildLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugBuildLabel.swift; sourceTree = "<group>"; };
@@ -989,6 +1014,7 @@
 			children = (
 				5FE5D60EDEFFE11B8BAC8696 /* AdaptiveNavigationAndActionsTests.swift */,
 				8F321E3EBF3F9E573401A475 /* AppModelConversationObservationTests.swift */,
+				73A5DA3EE572509DE7CB676B /* AppRuntimeControllerRemoraLinkTests.swift */,
 				C90E83E4AAC3C7DFDAD40641 /* AppSnapshotRuntimeTests.swift */,
 				4B276301E29FB654E8CF293C /* AppStatePermissionTests.swift */,
 				05A3A9C88283ADE03A8EC7D3 /* BackgroundAwarenessTests.swift */,
@@ -1006,7 +1032,11 @@
 				99C25BAF3A8C882F62CEC452 /* PluginMentionEncodingTests.swift */,
 				E0A2EDAACD0296BDE7E2A1F7 /* RealtimeConversationProtocolTests.swift */,
 				0FBB885FDC08FDC50AB045B5 /* RemoraAppearanceModeTests.swift */,
+				CA310BE38C7E3BD3297122A9 /* RemoraLinkJournalStoreTests.swift */,
 				31509A2E68B0AAFEFB8544A6 /* RemoraLinkKeyStoreTests.swift */,
+				5215ACFC0980666A8E13224A /* RemoraLinkNativeAdaptersTests.swift */,
+				38667C85428CEDB6605F0887 /* RemoraLinkPairingModelTests.swift */,
+				740FB702A59F24349F1645E2 /* RemoraLinkTransportIdentityStoreTests.swift */,
 				D90F4DDDFBCFCDE3E795ACFF /* SavedAppsStoreTests.swift */,
 				E9ADC2E292EBD285710E6672 /* StreamingAssistantRenderCacheTests.swift */,
 				E91256DAD35E3D3B75406E8C /* ThemeDefinitionTests.swift */,
@@ -1250,6 +1280,7 @@
 				E43C82D155593B26BCFD3567 /* ProjectPickerSheet.swift */,
 				CE2F32E473C7C7417DDBE66F /* QuickReplySheet.swift */,
 				7856B1F3573FCEE4176F1D73 /* RealtimeVoiceScreen.swift */,
+				93806BF02A76FA0969D2D83A /* RemoraLinkHostsSettingsView.swift */,
 				30C0DF13F976468BCB6AC957 /* RemoraLogo.swift */,
 				0A443BFB18FB8A3CBE8D0307 /* RemoraTransmissionView.swift */,
 				74B6C672BAEC1AF16D79BE39 /* RemotePairingSheet.swift */,
@@ -1327,7 +1358,11 @@
 				3D8E726EB6C448A4DD277E72 /* RealtimeWebRtcSession.swift */,
 				30528403C12FF836A81B02F1 /* RecentDirectoryStore.swift */,
 				2F5F1BC67DFBA0F7C99ECD76 /* RemoraActionCatalog.swift */,
+				27C708C413E6AD87BE5B4290 /* RemoraLinkJournalStore.swift */,
 				02A00B95494F5A8D39330EC8 /* RemoraLinkKeyStore.swift */,
+				E316D53DAF39E5B645DB0250 /* RemoraLinkNativeAdapters.swift */,
+				C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */,
+				D812DEB7E9A2DCF253C24C9C /* RemoraLinkTransportIdentityStore.swift */,
 				1ABE1871BF3ED1F7F0A0DF96 /* RemoraPalette.swift */,
 				DD9CAC70D8BAA99A5EB42B58 /* RemoraPlatform.swift */,
 				0A101F240DAD5BF82689897C /* SavedAppsDirectory.swift */,
@@ -1784,7 +1819,12 @@
 				C155AE4D220C8C60BF83CFD9 /* RecentDirectoryStore.swift in Sources */,
 				FFAFB53A0CFC9DAE91B89BAD /* RemoraActionCatalog.swift in Sources */,
 				37F1FEEA001DBF93F4FC7BD6 /* RemoraApp.swift in Sources */,
+				A5A15045D02A63682B37300F /* RemoraLinkHostsSettingsView.swift in Sources */,
+				AF4E7BFC912466A171F4FD23 /* RemoraLinkJournalStore.swift in Sources */,
 				5171BF90DFBBC22ABEC0B31D /* RemoraLinkKeyStore.swift in Sources */,
+				0491871238372826135B5486 /* RemoraLinkNativeAdapters.swift in Sources */,
+				BE3D8A54D7E925E201D55E10 /* RemoraLinkPairingModel.swift in Sources */,
+				3F49B4C430E1871857C5F50E /* RemoraLinkTransportIdentityStore.swift in Sources */,
 				2C45020BA3CDF447B703028C /* RemoraLogo.swift in Sources */,
 				48F6601A255EEE6962E8B824 /* RemoraPalette.swift in Sources */,
 				63A3E2F93FE53D868E632F6F /* RemoraPlatform.swift in Sources */,
@@ -1849,6 +1889,7 @@
 			files = (
 				49105D9365ECCE6A2FBE8E1F /* AdaptiveNavigationAndActionsTests.swift in Sources */,
 				C507649C2DA154EC2DE86FE6 /* AppModelConversationObservationTests.swift in Sources */,
+				97DD7650C36ECFFB0AF7BC53 /* AppRuntimeControllerRemoraLinkTests.swift in Sources */,
 				6D9FF0FDDC5A66B6933BB6F5 /* AppSnapshotRuntimeTests.swift in Sources */,
 				C29836864035CC44A0C083B3 /* AppStatePermissionTests.swift in Sources */,
 				18143087FB6C3B8A28D08861 /* BackgroundAwarenessTests.swift in Sources */,
@@ -1866,7 +1907,11 @@
 				AF3C4CE901B9513FE7C47F67 /* PluginMentionEncodingTests.swift in Sources */,
 				883DF9203486C8FB913614D7 /* RealtimeConversationProtocolTests.swift in Sources */,
 				2E36BD3A0C3CBF8B909FAC35 /* RemoraAppearanceModeTests.swift in Sources */,
+				1C325A4E7A6F2F82FC6B6385 /* RemoraLinkJournalStoreTests.swift in Sources */,
 				D68207D5B909F0BD8C4FDD36 /* RemoraLinkKeyStoreTests.swift in Sources */,
+				633A9A4CF5C7FC676CD7DD26 /* RemoraLinkNativeAdaptersTests.swift in Sources */,
+				9399CE46EE43FB139CF07E5E /* RemoraLinkPairingModelTests.swift in Sources */,
+				425D8302EFFCE8AC11618188 /* RemoraLinkTransportIdentityStoreTests.swift in Sources */,
 				78CCDD1C371FE0C8F15F1F3A /* SavedAppsStoreTests.swift in Sources */,
 				BC4959D73F5F3D3BF978FD4A /* StreamingAssistantRenderCacheTests.swift in Sources */,
 				CBC62578FDF80A3C007D25D1 /* ThemeDefinitionTests.swift in Sources */,
@@ -2002,7 +2047,12 @@
 				F67788DDA7D5CE8E07E246C7 /* RecentDirectoryStore.swift in Sources */,
 				761504130284AF4C852AB2D7 /* RemoraActionCatalog.swift in Sources */,
 				0AD2D4F7A35E20642A43C1BB /* RemoraApp.swift in Sources */,
+				417DA39AD10C5E815EEEB1C9 /* RemoraLinkHostsSettingsView.swift in Sources */,
+				D5F3C2AD7BA76662C7D1144C /* RemoraLinkJournalStore.swift in Sources */,
 				0F10C662187D6F333193F3B2 /* RemoraLinkKeyStore.swift in Sources */,
+				D7314D7B16805B567DB27CAD /* RemoraLinkNativeAdapters.swift in Sources */,
+				4F2E9115620AA34327C1E8BF /* RemoraLinkPairingModel.swift in Sources */,
+				10317BCF52E476655FC5256A /* RemoraLinkTransportIdentityStore.swift in Sources */,
 				7649D15EE7086620C77CBF2C /* RemoraLogo.swift in Sources */,
 				513B0D0290540C59D36F14DD /* RemoraPalette.swift in Sources */,
 				58BAC018B4CB4D08A8939A0E /* RemoraPlatform.swift in Sources */,

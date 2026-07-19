@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,13 +25,13 @@ use super::v2_journal::{
     RevocationReceiptJournalV2, is_subset, scope_subset,
 };
 use super::v2_ports::{
-    CredentialCustodyPortV2, CredentialPortError, EntropyPortV2, HardwareKeyV2, HostPortErrorV2,
-    HostPortV2, HostRouteV2, StartedExchangeV2,
+    CredentialCustodyPortV2, CredentialPortError, EntropyPortV2, FinishedExchangeV2, HardwareKeyV2,
+    HostPortErrorV2, HostPortV2, HostRouteV2, StartedExchangeV2,
 };
 use super::wire::{
     AgentInfoV2, ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
     InvitationInspectionV2, PendingEnrollmentV2, RequestV2, ResponseV2, RestartStatusV2,
-    RevocationReceiptV2, SessionV2, WireError, derive_sas, validate_policy,
+    RevocationReceiptV2, SessionV2, WireError, derive_sas, valid_device_name, validate_policy,
 };
 use crate::remote_host_pairing::identity::V2Invite;
 
@@ -46,6 +47,9 @@ pub(crate) struct ReconnectOutcomeV2 {
     pub(crate) host_id: String,
     pub(crate) runtime_id: String,
     pub(crate) session: SessionV2,
+    /// Exact take-once identity for the runtime stream retained by the host
+    /// adapter that completed this authenticated connect round.
+    pub(crate) attachment_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +149,53 @@ pub(crate) struct PairingLifecycleV2 {
     host_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
+/// Cancellation guard for the interval after the host has retained an
+/// exchange and before `finish_exchange` has taken ownership of it. Dropping
+/// a mobile future anywhere in that interval schedules best-effort abandon.
+struct ExchangeLeaseV2 {
+    host: Arc<dyn HostPortV2>,
+    started: Option<StartedExchangeV2>,
+}
+
+impl ExchangeLeaseV2 {
+    fn new(host: Arc<dyn HostPortV2>, started: StartedExchangeV2) -> Self {
+        Self {
+            host,
+            started: Some(started),
+        }
+    }
+
+    fn abandon(&mut self) {
+        if let Some(started) = self.started.as_ref() {
+            self.host.abandon_exchange(&started.exchange_id);
+            self.started.take();
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.started.take();
+    }
+}
+
+impl Deref for ExchangeLeaseV2 {
+    type Target = StartedExchangeV2;
+
+    fn deref(&self) -> &Self::Target {
+        self.started
+            .as_ref()
+            .expect("exchange lease is accessed only while armed")
+    }
+}
+
+impl Drop for ExchangeLeaseV2 {
+    fn drop(&mut self) {
+        let Some(started) = self.started.take() else {
+            return;
+        };
+        self.host.abandon_exchange(&started.exchange_id);
+    }
+}
+
 impl PairingLifecycleV2 {
     pub(crate) fn new(
         host: Arc<dyn HostPortV2>,
@@ -179,6 +230,7 @@ impl PairingLifecycleV2 {
                 binding: HostBindingJournalV2 {
                     host_id: host_id.clone(),
                     node_id: invite.node_id.clone(),
+                    host_display_name: invite.host_name.clone(),
                     relay_hint: invite.relay.clone(),
                     hardware_key_slot: hardware_key.slot.clone(),
                     device_public_key: hardware_key.public_key.clone(),
@@ -202,7 +254,8 @@ impl PairingLifecycleV2 {
         let started = self.begin_round(&mut entry, &request, true).await?;
         let terminal = self
             .complete_round(&mut entry, &request, started, None)
-            .await?;
+            .await?
+            .response;
         if !terminal.ok {
             return Err(map_terminal_error(&terminal));
         }
@@ -233,6 +286,9 @@ impl PairingLifecycleV2 {
         selected_runtime_ids: Vec<String>,
         requested_scopes: Vec<DeviceScopeV2>,
     ) -> Result<EnrollmentOutcomeV2, LifecycleErrorV2> {
+        valid_device_name(&display_name).map_err(|_| LifecycleErrorV2::InvalidSelection)?;
+        let (selected_runtime_ids, requested_scopes) =
+            canonicalize_selection(selected_runtime_ids, requested_scopes)?;
         let host_id = host_id(invite);
         let host_lock = self.host_lock(&host_id).await;
         let _operation = host_lock.lock().await;
@@ -323,12 +379,16 @@ impl PairingLifecycleV2 {
             resume: last_seq.map(|last_seq| super::wire::ResumeV2 { last_seq }),
         };
         let started = self.begin_round(&mut entry, &request, false).await?;
-        let terminal = self
+        let finished = self
             .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
             .await?;
+        let terminal = finished.response;
         if !terminal.ok {
             return Err(map_terminal_error(&terminal));
         }
+        let attachment_id = finished
+            .attachment_id
+            .ok_or(LifecycleErrorV2::ProtocolViolation)?;
         let session = terminal
             .session
             .ok_or(LifecycleErrorV2::ProtocolViolation)?;
@@ -336,6 +396,7 @@ impl PairingLifecycleV2 {
             host_id: host_id.to_string(),
             runtime_id,
             session,
+            attachment_id,
         })
     }
 
@@ -370,7 +431,8 @@ impl PairingLifecycleV2 {
         let started = self.begin_round(&mut entry, &request, false).await?;
         let terminal = self
             .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
-            .await?;
+            .await?
+            .response;
         if !terminal.ok {
             return Err(map_terminal_error(&terminal));
         }
@@ -453,7 +515,8 @@ impl PairingLifecycleV2 {
         let started = self.begin_round(&mut entry, &request, false).await?;
         let terminal = self
             .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
-            .await?;
+            .await?
+            .response;
         let Some(result) = terminal.restart.as_ref() else {
             if terminal.error_code == Some(super::wire::ErrorCodeV2::AgentUnavailable) {
                 // The pinned host rejects unavailable runtimes before its
@@ -583,6 +646,16 @@ impl PairingLifecycleV2 {
             .ok_or(LifecycleErrorV2::InvitationMismatch)?;
         match entry.phase.clone() {
             JournalPhaseV2::RollbackPending => return self.drive_mutation(&mut entry).await,
+            JournalPhaseV2::Ready => {
+                // Inspection cannot create host-side credential authority.
+                // Tear down the local key/journal only; `false` guarantees
+                // this path never carries a remote-revocation obligation.
+                let outcome = self.forget_locked(&mut entry, false).await?;
+                return match outcome {
+                    ForgetOutcomeV2::ForgottenLocally { .. }
+                    | ForgetOutcomeV2::AlreadyForgotten { .. } => Ok(MutationOutcomeV2::RolledBack),
+                };
+            }
             JournalPhaseV2::EnrollmentStaged | JournalPhaseV2::EnrollmentPending => {}
             JournalPhaseV2::Revoked {
                 key_cleanup_pending,
@@ -714,7 +787,7 @@ impl PairingLifecycleV2 {
         request
             .validate()
             .map_err(|_| LifecycleErrorV2::InvalidSelection)?;
-        let started = self.begin_round(entry, &request, false).await?;
+        let mut started = self.begin_round(entry, &request, false).await?;
         let challenge = started
             .challenge_response
             .challenge
@@ -727,7 +800,7 @@ impl PairingLifecycleV2 {
             .as_mut()
             .ok_or(LifecycleErrorV2::JournalCorrupt)?;
         if enrollment.candidates.len() >= MAX_ENROLLMENT_CANDIDATES {
-            self.host.abandon_exchange(&started.exchange_id).await;
+            started.abandon();
             let credential_id = enrollment
                 .prospective_credential_id
                 .clone()
@@ -738,7 +811,7 @@ impl PairingLifecycleV2 {
         }
         match enrollment.prospective_credential_id.as_deref() {
             Some(value) if value != candidate.credential_id => {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 self.quarantine(entry, QuarantineReasonV2::ClientIdentityDrift)
                     .await?;
                 return Err(LifecycleErrorV2::ClientIdentityDrift);
@@ -755,14 +828,15 @@ impl PairingLifecycleV2 {
         {
             Ok(saved) => saved,
             Err(error) => {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 return Err(error);
             }
         };
 
         let terminal = self
             .complete_round(entry, &request, started, Some(0))
-            .await?;
+            .await?
+            .response;
         if !terminal.ok {
             return Err(map_terminal_error(&terminal));
         }
@@ -914,7 +988,8 @@ impl PairingLifecycleV2 {
         };
         let terminal = self
             .complete_round(entry, &request, started, expected_epoch)
-            .await?;
+            .await?
+            .response;
         let receipt = terminal
             .revocation
             .clone()
@@ -1019,34 +1094,36 @@ impl PairingLifecycleV2 {
         entry: &mut PairingJournalEntryV2,
         request: &RequestV2,
         allow_client_rebind: bool,
-    ) -> Result<StartedExchangeV2, LifecycleErrorV2> {
+    ) -> Result<ExchangeLeaseV2, LifecycleErrorV2> {
         let route = HostRouteV2 {
             node_id: entry.binding.node_id.clone(),
             relay_hint: entry.binding.relay_hint.clone(),
         };
         let started = self.host.start_exchange(&route, request).await?;
+        let mut started = ExchangeLeaseV2::new(Arc::clone(&self.host), started);
         if started.exchange_id.is_empty()
             || started.authenticated_host_endpoint_id != entry.binding.node_id
         {
-            self.host.abandon_exchange(&started.exchange_id).await;
+            started.abandon();
             self.quarantine(entry, QuarantineReasonV2::HostIdentityDrift)
                 .await?;
             return Err(LifecycleErrorV2::HostIdentityDrift);
         }
         if started.authenticated_client_endpoint_id.is_empty() {
-            self.host.abandon_exchange(&started.exchange_id).await;
+            started.abandon();
             return Err(LifecycleErrorV2::ProtocolViolation);
         }
         if !started.challenge_response.ok && started.challenge_response.challenge.is_none() {
-            self.host.abandon_exchange(&started.exchange_id).await;
-            return Err(map_terminal_error(&started.challenge_response));
+            let error = map_terminal_error(&started.challenge_response);
+            started.abandon();
+            return Err(error);
         }
         if started
             .challenge_response
             .validate_challenge_for_request(request, &started.authenticated_client_endpoint_id)
             .is_err()
         {
-            self.host.abandon_exchange(&started.exchange_id).await;
+            started.abandon();
             return Err(LifecycleErrorV2::ProtocolViolation);
         }
 
@@ -1054,7 +1131,7 @@ impl PairingLifecycleV2 {
             != Some(started.authenticated_client_endpoint_id.as_str());
         if client_changed {
             if entry.binding.client_endpoint_id.is_some() && !allow_client_rebind {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 self.quarantine(entry, QuarantineReasonV2::ClientIdentityDrift)
                     .await?;
                 return Err(LifecycleErrorV2::ClientIdentityDrift);
@@ -1067,7 +1144,7 @@ impl PairingLifecycleV2 {
             {
                 Ok(saved) => saved,
                 Err(error) => {
-                    self.host.abandon_exchange(&started.exchange_id).await;
+                    started.abandon();
                     return Err(error);
                 }
             };
@@ -1079,35 +1156,54 @@ impl PairingLifecycleV2 {
         &self,
         entry: &mut PairingJournalEntryV2,
         request: &RequestV2,
-        started: StartedExchangeV2,
+        mut started: ExchangeLeaseV2,
         expected_epoch: Option<u64>,
-    ) -> Result<ResponseV2, LifecycleErrorV2> {
+    ) -> Result<FinishedExchangeV2, LifecycleErrorV2> {
+        let authenticated_client_endpoint_id = started.authenticated_client_endpoint_id.clone();
         let challenge = started
             .challenge_response
             .challenge
-            .as_ref()
+            .clone()
             .ok_or(LifecycleErrorV2::ProtocolViolation)?;
+        let expires_at = match u64::try_from(challenge.expires_at) {
+            Ok(expires_at) => expires_at,
+            Err(_) => {
+                started.abandon();
+                return Err(LifecycleErrorV2::ProtocolViolation);
+            }
+        };
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(now) => now.as_secs(),
+            Err(_) => {
+                started.abandon();
+                return Err(LifecycleErrorV2::ProtocolViolation);
+            }
+        };
+        if expires_at <= now {
+            started.abandon();
+            return Err(LifecycleErrorV2::ProtocolViolation);
+        }
         if expected_epoch.is_some_and(|epoch| challenge.auth_epoch != epoch) {
-            self.host.abandon_exchange(&started.exchange_id).await;
+            started.abandon();
             return Err(LifecycleErrorV2::AuthorizationRequired);
         }
         let hardware_key = match self.load_matching_key(entry).await {
             Ok(key) => key,
             Err(error) => {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 return Err(error);
             }
         };
         let transcript = match proof_transcript(
             request,
-            challenge,
+            &challenge,
             &started.authenticated_host_endpoint_id,
             &started.authenticated_client_endpoint_id,
             &hardware_key,
         ) {
             Ok(transcript) => transcript,
             Err(_) => {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 return Err(LifecycleErrorV2::ProtocolViolation);
             }
         };
@@ -1121,18 +1217,20 @@ impl PairingLifecycleV2 {
         {
             Ok(proof) => proof,
             Err(error) => {
-                self.host.abandon_exchange(&started.exchange_id).await;
+                started.abandon();
                 return Err(error.into());
             }
         };
-        let terminal = match self
+        let terminal_result = self
             .host
             .finish_exchange(&started.exchange_id, &proof)
-            .await
-        {
-            Ok(terminal) => terminal,
+            .await;
+        // A completed host call has already removed the retained exchange.
+        // If the await is cancelled, the still-armed lease above abandons it.
+        started.disarm();
+        let finished = match terminal_result {
+            Ok(finished) => finished,
             Err(error) => {
-                self.host.abandon_exchange(&started.exchange_id).await;
                 if error == HostPortErrorV2::ProtocolViolation
                     && matches!(request, RequestV2::Enroll { .. })
                 {
@@ -1141,21 +1239,21 @@ impl PairingLifecycleV2 {
                 return Err(error.into());
             }
         };
-        if terminal
+        if finished
+            .response
             .validate_terminal_shape_for_request(
                 request,
-                challenge,
-                &started.authenticated_client_endpoint_id,
+                &challenge,
+                &authenticated_client_endpoint_id,
             )
             .is_err()
         {
-            self.host.abandon_exchange(&started.exchange_id).await;
             if matches!(request, RequestV2::Enroll { .. }) {
                 self.schedule_current_enrollment_rollback(entry).await?;
             }
             return Err(LifecycleErrorV2::ProtocolViolation);
         }
-        Ok(terminal)
+        Ok(finished)
     }
 
     async fn load_matching_key(
@@ -1307,6 +1405,7 @@ impl PairingLifecycleV2 {
         entry.binding = HostBindingJournalV2 {
             host_id: host_id(invite),
             node_id: invite.node_id.clone(),
+            host_display_name: invite.host_name.clone(),
             relay_hint: invite.relay.clone(),
             hardware_key_slot: hardware_key.slot.clone(),
             device_public_key: hardware_key.public_key.clone(),
@@ -1333,6 +1432,7 @@ impl From<JournalPortErrorV2> for LifecycleErrorV2 {
     fn from(value: JournalPortErrorV2) -> Self {
         match value {
             JournalPortErrorV2::Unavailable => Self::JournalUnavailable,
+            JournalPortErrorV2::Corrupt => Self::JournalCorrupt,
             JournalPortErrorV2::Conflict => Self::JournalConflict,
         }
     }
@@ -1478,6 +1578,22 @@ fn validate_selection(
         return Err(LifecycleErrorV2::InvalidSelection);
     }
     Ok(())
+}
+
+fn canonicalize_selection(
+    mut selected_runtime_ids: Vec<String>,
+    mut requested_scopes: Vec<DeviceScopeV2>,
+) -> Result<(Vec<String>, Vec<DeviceScopeV2>), LifecycleErrorV2> {
+    selected_runtime_ids.sort();
+    requested_scopes.sort();
+    if selected_runtime_ids
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+        || requested_scopes.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(LifecycleErrorV2::InvalidSelection);
+    }
+    Ok((selected_runtime_ids, requested_scopes))
 }
 
 fn enrollment_candidate(

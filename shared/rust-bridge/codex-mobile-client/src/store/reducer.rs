@@ -587,6 +587,28 @@ impl AppStoreReducer {
         }
     }
 
+    /// Complete an authoritative list refresh for one multiplexed runtime
+    /// without pruning sibling runtimes that were not part of this request.
+    pub(crate) fn finalize_thread_list_sync_for_runtime(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        incoming_ids: &HashSet<String>,
+    ) {
+        let sibling_ids = self
+            .snapshot()
+            .threads
+            .iter()
+            .filter(|(key, thread)| {
+                key.server_id == server_id && thread.agent_runtime_kind != runtime_kind
+            })
+            .map(|(key, _)| key.thread_id.clone())
+            .collect::<HashSet<_>>();
+        let mut retained_ids = incoming_ids.clone();
+        retained_ids.extend(sibling_ids);
+        self.finalize_thread_list_sync(server_id, &retained_ids);
+    }
+
     pub fn upsert_thread_snapshot(&self, mut thread: ThreadSnapshot) {
         let key = thread.key.clone();
         {

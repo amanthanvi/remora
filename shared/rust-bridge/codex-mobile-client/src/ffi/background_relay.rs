@@ -137,7 +137,7 @@ pub enum AppRelaySecretCasOutcome {
 pub struct AppRelaySecretValue(Vec<u8>);
 
 impl AppRelaySecretValue {
-    fn new(bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -146,7 +146,7 @@ impl AppRelaySecretValue {
         &self.0
     }
 
-    fn into_bytes(mut self) -> Vec<u8> {
+    pub(crate) fn into_bytes(mut self) -> Vec<u8> {
         std::mem::take(&mut self.0)
     }
 }

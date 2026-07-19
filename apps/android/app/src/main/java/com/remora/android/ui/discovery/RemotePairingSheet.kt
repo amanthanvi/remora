@@ -1,8 +1,11 @@
 package com.remora.android.ui.discovery
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,20 +15,23 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -43,18 +49,29 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.password
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -65,199 +82,104 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import com.remora.android.core.bridge.UniffiInit
-import com.remora.android.state.AlleycatCredentialStore
-import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.LocalAppModel
-import com.remora.android.ui.common.AgentIconView
-import com.remora.android.ui.common.BetaBadge
-import com.remora.android.ui.common.isBetaAgentName
+import com.remora.android.ui.RemoraTheme
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import uniffi.codex_mobile_client.AppAlleycatAgentInfo
-import uniffi.codex_mobile_client.AppAlleycatAgentWire
-import uniffi.codex_mobile_client.AppAlleycatPairPayload
-import uniffi.codex_mobile_client.AlleycatBridge
-
-data class RemotePairingTarget(
-    val serverId: String,
-    val nodeId: String,
-    val displayName: String,
-    val params: AppAlleycatPairPayload,
-    val agentName: String,
-    val agentWire: AppAlleycatAgentWire,
-)
+import uniffi.codex_mobile_client.AppRemoraLinkAcceptance
+import uniffi.codex_mobile_client.AppRemoraLinkConfirmationMode
+import uniffi.codex_mobile_client.AppRemoraLinkInspection
+import uniffi.codex_mobile_client.AppRemoraLinkPairingCancellationOutcome
+import uniffi.codex_mobile_client.AppRemoraLinkPairingCode
+import uniffi.codex_mobile_client.AppRemoraLinkPairingOutcome
+import uniffi.codex_mobile_client.AppRemoraLinkPendingApproval
+import uniffi.codex_mobile_client.AppRemoraLinkScope
 
 private const val LOG_TAG = "RemotePairingSheet"
 
 @Composable
 fun RemotePairingSheet(
     onDismiss: () -> Unit,
-    onConnected: (RemotePairingTarget) -> Unit,
-    startScanningOnAppear: Boolean = false,
+    onPaired: (hostId: String) -> Unit,
+    resumeHostId: String? = null,
+    pendingApproval: AppRemoraLinkPendingApproval? = null,
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val credentialStore = remember(context) {
-        AlleycatCredentialStore(context.applicationContext)
-    }
-    val pairingBridge = remember { AlleycatBridge() }
+    val api = remember(appModel) {
+        object : RemoraLinkPairingApi {
+            override suspend fun checkAvailability() {
+                appModel.withRemoraLinkV2 { Unit }
+            }
 
-    var displayName by remember { mutableStateOf("") }
-    var parsedParams by remember { mutableStateOf<AppAlleycatPairPayload?>(null) }
-    var agents by remember { mutableStateOf<List<AppAlleycatAgentInfo>>(emptyList()) }
-    var selectedAgentNames by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var isLoadingAgents by remember { mutableStateOf(false) }
-    var parseError by remember { mutableStateOf<String?>(null) }
-    var agentError by remember { mutableStateOf<String?>(null) }
-    var connectError by remember { mutableStateOf<String?>(null) }
-    var isConnecting by remember { mutableStateOf(false) }
+            override suspend fun inspect(code: AppRemoraLinkPairingCode): AppRemoraLinkInspection =
+                appModel.withRemoraLinkV2 { it.inspectRemoraLinkCode(code) }
+
+            override suspend fun accept(
+                acceptance: AppRemoraLinkAcceptance,
+            ): AppRemoraLinkPairingOutcome =
+                appModel.withRemoraLinkV2 { it.acceptRemoraLinkOffer(acceptance) }
+
+            override suspend fun await(hostId: String): AppRemoraLinkPairingOutcome =
+                appModel.withRemoraLinkV2 { it.awaitRemoraLinkPairing(hostId, null) }
+
+            override suspend fun cancel(
+                hostId: String,
+            ): AppRemoraLinkPairingCancellationOutcome =
+                appModel.withRemoraLinkV2 { it.cancelRemoraLinkPairing(hostId) }
+        }
+    }
+    val controller = remember(api) {
+        RemoraLinkPairingController(api, Build.MODEL.orEmpty())
+    }
+    val state by controller.state.collectAsState()
+
     var showScanner by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
-    var pasteJson by remember { mutableStateOf("") }
+    var pastedCode by remember { mutableStateOf("") }
     var cameraDenied by remember { mutableStateOf(false) }
 
-    fun loadAgents(params: AppAlleycatPairPayload) {
-        isLoadingAgents = true
-        agentError = null
-        scope.launch {
-            try {
-                val loaded = withContext(Dispatchers.IO) {
-                    UniffiInit.ensure(context.applicationContext)
-                    appModel.serverBridge.listAlleycatAgents(params)
-                }
-                if (parsedParams?.nodeId == params.nodeId) {
-                    agents = loaded
-                    selectedAgentNames = loaded
-                        .filter { it.available && !isBetaAgentName(it.name, it.displayName) }
-                        .map { it.name }
-                        .toSet()
-                    isLoadingAgents = false
-                }
-            } catch (e: Exception) {
-                Log.w(LOG_TAG, "Remote agent discovery failed", e)
-                if (parsedParams?.nodeId == params.nodeId) {
-                    agents = emptyList()
-                    selectedAgentNames = emptySet()
-                    isLoadingAgents = false
-                    agentError = e.message ?: "Unable to list agents"
-                }
-            }
-        }
-    }
-
-    fun handleScannedPayload(raw: String) {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return
-        try {
-            val params = pairingBridge.parsePairPayload(trimmed)
-            parsedParams = params
-            displayName = suggestedDisplayName(params)
-            agents = emptyList()
-            selectedAgentNames = emptySet()
-            parseError = null
-            agentError = null
-            connectError = null
-            loadAgents(params)
-        } catch (e: Exception) {
-            parsedParams = null
-            agents = emptyList()
-            selectedAgentNames = emptySet()
-            parseError = e.message ?: "Invalid pairing payload"
-        }
+    fun inspectCode(code: String) {
+        pastedCode = ""
+        scope.launch { controller.submitCode(code) }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+        ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) {
-            cameraDenied = false
-            showScanner = true
-        } else {
-            cameraDenied = true
-        }
+        cameraDenied = !granted
+        showScanner = granted
     }
 
     fun requestCameraAndScan() {
-        when {
+        if (
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED -> {
-                cameraDenied = false
-                showScanner = true
-            }
-            else -> permissionLauncher.launch(Manifest.permission.CAMERA)
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            cameraDenied = false
+            showScanner = true
+        } else {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
-    var autoStartTriggered by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(startScanningOnAppear) {
-        if (startScanningOnAppear && !autoStartTriggered) {
-            autoStartTriggered = true
-            requestCameraAndScan()
+    LaunchedEffect(controller, resumeHostId, pendingApproval) {
+        if (resumeHostId != null && pendingApproval != null) {
+            controller.resume(resumeHostId, pendingApproval)
+        } else {
+            controller.checkAvailability()
         }
     }
-
-    fun connect() {
-        val params = parsedParams ?: return
-        val selectedAgents = agents.filter { it.available && it.name in selectedAgentNames }
-        val fallbackAgent = selectedAgents.firstOrNull() ?: return
-        val trimmedDisplay = displayName.trim()
-        val resolvedName = trimmedDisplay.ifEmpty { suggestedDisplayName(params) }
-        val serverId = "alleycat:${params.nodeId}"
-
-        isConnecting = true
-        connectError = null
-
-        scope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) {
-                    UniffiInit.ensure(context.applicationContext)
-                    appModel.serverBridge.connectRemoteOverAlleycat(
-                        serverId = serverId,
-                        displayName = resolvedName,
-                        params = params,
-                        agentName = fallbackAgent.name,
-                        selectedAgentNames = selectedAgents.map { it.name },
-                        wire = fallbackAgent.wire,
-                    )
-                }
-                runCatching {
-                    credentialStore.saveToken(params.nodeId, params.token)
-                }.onFailure {
-                    Log.w(LOG_TAG, "Remote pairing token save failed", it)
-                }
-                isConnecting = false
-                onConnected(
-                    RemotePairingTarget(
-                        serverId = result.serverId,
-                        nodeId = result.nodeId,
-                        displayName = resolvedName,
-                        params = params,
-                        agentName = result.agentName,
-                        agentWire = fallbackAgent.wire,
-                    )
-                )
-            } catch (e: Exception) {
-                Log.w(LOG_TAG, "Remote pairing failed", e)
-                isConnecting = false
-                connectError = e.message ?: "Unable to connect"
-            }
-        }
-    }
-
-    val availableAgents = agents.filter { it.available }
-    val selectedAgents = agents.filter { it.available && it.name in selectedAgentNames }
-    val canConnect = !isConnecting && !isLoadingAgents && parsedParams != null && selectedAgents.isNotEmpty()
 
     if (showScanner) {
         QrScannerScreen(
-            onScanned = { payload ->
+            onScanned = { code ->
                 showScanner = false
-                handleScannedPayload(payload)
+                inspectCode(code)
             },
             onCancel = { showScanner = false },
         )
@@ -274,360 +196,531 @@ fun RemotePairingSheet(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "Add Remote Host",
+                text = "Remora Link",
                 color = RemoraTheme.textPrimary,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = onDismiss, enabled = !isConnecting) {
-                Text("Cancel", color = RemoraTheme.accent)
-            }
-        }
-
-        SectionHeader(label = "Pairing")
-        OutlinedButton(
-            onClick = ::requestCameraAndScan,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(
-                imageVector = Icons.Default.QrCodeScanner,
-                contentDescription = null,
-                tint = RemoraTheme.accent,
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = if (parsedParams == null) "Scan Pairing QR" else "Rescan QR",
-                color = RemoraTheme.accent,
-            )
-        }
-        if (cameraDenied) {
-            Text(
-                text = "Camera permission is required to scan a pairing QR. Grant access in system Settings, or paste the JSON below.",
-                color = RemoraTheme.warning,
-                fontSize = 11.sp,
-            )
-        }
-
-        DisclosureRow(
-            expanded = showPaste,
-            label = "Paste Pairing JSON",
-            onToggle = { showPaste = !showPaste },
-        )
-        if (showPaste) {
-            OutlinedTextField(
-                value = pasteJson,
-                onValueChange = { pasteJson = it },
-                placeholder = {
-                    Text(
-                        text = "{\"v\":1,\"node_id\":\"...\",\"token\":\"...\",\"relay\":\"https://...\"}",
-                        color = RemoraTheme.textMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                    )
-                },
-                minLines = 3,
-                maxLines = 6,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(
-                    onClick = {
-                        clipboardManager.getText()?.text?.let { pasteJson = it }
-                    },
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ContentCopy,
-                        contentDescription = null,
-                        tint = RemoraTheme.accent,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Paste from Clipboard", color = RemoraTheme.accent)
-                }
-                TextButton(
-                    onClick = { handleScannedPayload(pasteJson) },
-                    enabled = pasteJson.trim().isNotEmpty(),
-                ) {
-                    Text(
-                        text = if (parsedParams == null) "Parse JSON" else "Reparse JSON",
-                        color = RemoraTheme.accent,
-                    )
-                }
-            }
-        }
-
-        parseError?.let { message ->
-            Text(message, color = RemoraTheme.warning, fontSize = 12.sp)
-        }
-
-        val params = parsedParams
-        if (params != null) {
-            SectionHeader(label = "Scanned Host")
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(RemoraTheme.surface, RoundedCornerShape(8.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                PreviewRow("node", shortNodeId(params.nodeId))
-                PreviewRow("protocol", "v${params.v.toInt()}")
-                params.relay?.takeIf { it.isNotBlank() }?.let {
-                    PreviewRow("relay", it)
-                }
-                params.hostName?.takeIf { it.isNotBlank() }?.let {
-                    PreviewRow("host", it)
-                }
-            }
-
-            OutlinedTextField(
-                value = displayName,
-                onValueChange = { displayName = it },
-                label = { Text("display name (optional)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionHeader(label = "Agents", modifier = Modifier.weight(1f))
-                if (availableAgents.isNotEmpty()) {
-                    TextButton(
-                        onClick = {
-                            selectedAgentNames = if (selectedAgents.size == availableAgents.size) {
-                                emptySet()
-                            } else {
-                                availableAgents.map { it.name }.toSet()
-                            }
-                        },
-                    ) {
-                        Text(
-                            text = if (selectedAgents.size == availableAgents.size) "None" else "All",
-                            color = RemoraTheme.accent,
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-            }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(RemoraTheme.surface, RoundedCornerShape(8.dp))
-                    .padding(vertical = 4.dp),
-            ) {
-                when {
-                    isLoadingAgents -> Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(8.dp),
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = RemoraTheme.accent,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Loading agents", color = RemoraTheme.textSecondary, fontSize = 12.sp)
-                    }
-                    agents.isEmpty() -> Text(
-                        text = "No agents are available on this host.",
-                        color = RemoraTheme.textMuted,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(8.dp),
-                    )
-                    else -> agents.forEach { agent ->
-                        AgentRow(
-                            agent = agent,
-                            selected = agent.name in selectedAgentNames,
-                            onCheckedChange = { checked ->
-                                if (agent.available) {
-                                    selectedAgentNames = if (checked) {
-                                        selectedAgentNames + agent.name
-                                    } else {
-                                        selectedAgentNames - agent.name
-                                    }
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        agentError?.let { message ->
-            Text(message, color = RemoraTheme.warning, fontSize = 12.sp)
-        }
-
-        Button(
-            onClick = ::connect,
-            enabled = canConnect,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = RemoraTheme.accent.copy(alpha = 0.18f),
-                contentColor = RemoraTheme.accent,
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            if (isConnecting) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
+            TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = RemoraTheme.minimumTouchTarget)) {
+                Text(
+                    if (state is RemoraLinkPairingState.Awaiting) "Continue later" else "Close",
                     color = RemoraTheme.accent,
                 )
-                Spacer(Modifier.width(8.dp))
             }
-            Text("Connect")
         }
 
-        connectError?.let { message ->
-            Text(message, color = RemoraTheme.danger, fontSize = 12.sp)
+        when (val current = state) {
+            is RemoraLinkPairingState.Availability -> AvailabilityContent(
+                current,
+                onRetry = { scope.launch { controller.checkAvailability() } },
+            )
+            RemoraLinkPairingState.Ingress -> IngressContent(
+                showPaste = showPaste,
+                pastedCode = pastedCode,
+                cameraDenied = cameraDenied,
+                onScan = ::requestCameraAndScan,
+                onShowPaste = { showPaste = true },
+                onPasteChanged = { pastedCode = it },
+                onPasteClipboard = { clipboard.getText()?.text?.let { pastedCode = it } },
+                onInspect = { inspectCode(pastedCode) },
+            )
+            RemoraLinkPairingState.Inspecting -> ProgressContent("Checking pairing code…")
+            is RemoraLinkPairingState.LegacyRePair -> LegacyRePairContent(
+                state = current,
+                onScan = {
+                    controller.returnToIngress()
+                    requestCameraAndScan()
+                },
+                onEnterCode = {
+                    controller.returnToIngress()
+                    showPaste = true
+                },
+            )
+            is RemoraLinkPairingState.Offer -> OfferContent(
+                state = current,
+                onDeviceNameChange = controller::updateDeviceDisplayName,
+                onToggleRuntime = controller::toggleRuntime,
+                onToggleScope = controller::toggleScope,
+                onAccept = { scope.launch { controller.acceptOffer() } },
+            )
+            is RemoraLinkPairingState.Accepting -> ProgressContent(
+                "Securing ${current.hostDisplayName}…",
+            )
+            is RemoraLinkPairingState.Awaiting -> AwaitingContent(
+                state = current,
+                onAwait = { scope.launch { controller.awaitApproval() } },
+                onCancel = { scope.launch { controller.cancelPairing() } },
+                onDismiss = onDismiss,
+            )
+            is RemoraLinkPairingState.Cancelling -> ProgressContent("Cancelling pairing…")
+            is RemoraLinkPairingState.OutcomeUnknown -> MessageContent(
+                title = "Outcome unknown",
+                message = current.message,
+                actionLabel = "Check again",
+                onAction = controller::returnToIngress,
+            )
+            is RemoraLinkPairingState.Success -> SuccessContent(
+                state = current,
+                onDone = { onPaired(current.hostId) },
+            )
+            is RemoraLinkPairingState.Failure -> MessageContent(
+                title = "Couldn’t pair",
+                message = current.message,
+                actionLabel = "Try another code",
+                onAction = controller::returnToIngress,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun AvailabilityContent(
+    state: RemoraLinkPairingState.Availability,
+    onRetry: () -> Unit,
+) {
+    if (state.checking) {
+        ProgressContent("Checking Remora Link availability…")
+    } else {
+        MessageContent(
+            title = "Remora Link unavailable",
+            message = state.message ?: "Secure pairing could not be initialized.",
+            actionLabel = "Retry",
+            onAction = onRetry,
+        )
+    }
+}
+
+@Composable
+private fun IngressContent(
+    showPaste: Boolean,
+    pastedCode: String,
+    cameraDenied: Boolean,
+    onScan: () -> Unit,
+    onShowPaste: () -> Unit,
+    onPasteChanged: (String) -> Unit,
+    onPasteClipboard: () -> Unit,
+    onInspect: () -> Unit,
+) {
+    Text(
+        "On the host, run this command. Then scan or paste the one-time pairing code.",
+        color = RemoraTheme.textSecondary,
+        fontSize = 13.sp,
+    )
+    PairCommandRow()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PrimaryIngressButton(
+            label = "Scan QR",
+            icon = Icons.Default.QrCodeScanner,
+            onClick = onScan,
+            modifier = Modifier.weight(1f),
+        )
+        PrimaryIngressButton(
+            label = "Enter code",
+            icon = Icons.Default.ContentCopy,
+            onClick = onShowPaste,
+            modifier = Modifier.weight(1f),
+        )
+    }
+    if (cameraDenied) {
+        Text(
+            "Camera access was denied. You can paste the same pairing code instead.",
+            color = RemoraTheme.textSecondary,
+            fontSize = 12.sp,
+        )
+    }
+    if (showPaste) {
+        OutlinedTextField(
+            value = pastedCode,
+            onValueChange = onPasteChanged,
+            label = { Text("One-time pairing code") },
+            placeholder = { Text("Paste code", fontFamily = RemoraTheme.monoFont) },
+            minLines = 2,
+            maxLines = 4,
+            keyboardOptions = KeyboardOptions(
+                autoCorrectEnabled = false,
+                keyboardType = KeyboardType.Password,
+            ),
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription = "Remora Link one-time pairing code. Secure entry."
+                    password()
+                },
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            TextButton(onClick = onPasteClipboard, modifier = Modifier.heightIn(min = RemoraTheme.minimumTouchTarget)) {
+                Text("Paste from clipboard", color = RemoraTheme.accent)
+            }
+            Button(
+                onClick = onInspect,
+                enabled = pastedCode.isNotBlank(),
+                modifier = Modifier.heightIn(min = RemoraTheme.minimumTouchTarget),
+                colors = pairingButtonColors(),
+            ) { Text("Continue") }
         }
     }
 }
 
 @Composable
-private fun AgentRow(
-    agent: AppAlleycatAgentInfo,
-    selected: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+private fun OfferContent(
+    state: RemoraLinkPairingState.Offer,
+    onDeviceNameChange: (String) -> Unit,
+    onToggleRuntime: (String) -> Unit,
+    onToggleScope: (AppRemoraLinkScope) -> Unit,
+    onAccept: () -> Unit,
 ) {
-    // Plain clickable Row instead of TextButton — TextButton injects
-    // Material's minimum touch target (~48dp) plus internal content
-    // padding, which made each agent row much taller than the actual
-    // text content needed and forced the agent list to take far more
-    // vertical space than necessary on small screens.
+    Text(state.offer.hostDisplayName, color = RemoraTheme.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        if (state.offer.confirmationMode == AppRemoraLinkConfirmationMode.INTERACTIVE) {
+            "This host requires approval. You’ll compare a short security code on both devices."
+        } else {
+            "Review what this host is offering before pairing."
+        },
+        color = RemoraTheme.textSecondary,
+        fontSize = 12.sp,
+    )
+    OutlinedTextField(
+        value = state.deviceDisplayName,
+        onValueChange = onDeviceNameChange,
+        label = { Text("This device’s name") },
+        supportingText = { Text("Up to $REMORA_LINK_DEVICE_NAME_MAX_BYTES UTF-8 bytes") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    PairingSectionHeader("Runtimes")
+    state.offer.runtimeOffers.forEach { runtime ->
+        SelectablePairingRow(
+            label = runtime.displayName,
+            subtitle = when {
+                !runtime.available -> "Unavailable"
+                runtime.recommended -> "Recommended"
+                else -> null
+            },
+            checked = runtime.runtimeId in state.selectedRuntimeIds,
+            enabled = runtime.available,
+            onClick = { onToggleRuntime(runtime.runtimeId) },
+        )
+    }
+
+    PairingSectionHeader("Permissions")
+    state.offer.maximumScopes.forEach { scope ->
+        val required = scope in state.offer.requiredScopes
+        SelectablePairingRow(
+            label = scopeLabel(scope),
+            subtitle = if (required) "Required by host" else scopeDescription(scope),
+            checked = scope in state.selectedScopes,
+            enabled = !required,
+            onClick = { onToggleScope(scope) },
+        )
+    }
+    state.validationMessage?.let {
+        Text(
+            it,
+            color = RemoraTheme.danger,
+            fontSize = 12.sp,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
+        )
+    }
+    Button(
+        onClick = onAccept,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+        colors = pairingButtonColors(),
+    ) { Text("Pair securely") }
+}
+
+@Composable
+private fun AwaitingContent(
+    state: RemoraLinkPairingState.Awaiting,
+    onAwait: () -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Text("Approve on the host", color = RemoraTheme.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "Confirm that this security code matches the one shown on the host:",
+        color = RemoraTheme.textSecondary,
+        fontSize = 13.sp,
+    )
+    Text(
+        state.sas,
+        color = RemoraTheme.accent,
+        fontFamily = RemoraTheme.monoFont,
+        fontSize = 28.sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(RemoraTheme.surface, RoundedCornerShape(12.dp))
+            .padding(20.dp)
+            .semantics { contentDescription = "Security code ${state.sas}" },
+    )
+    Text(
+        "Closing this sheet does not cancel pairing. You can continue later from Remora Link Hosts.",
+        color = RemoraTheme.textSecondary,
+        fontSize = 12.sp,
+    )
+    Button(
+        onClick = onAwait,
+        enabled = !state.waiting,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+        colors = pairingButtonColors(),
+    ) {
+        if (state.waiting) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = RemoraTheme.accent)
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(if (state.waiting) "Waiting for approval…" else "I approved it — continue")
+    }
+    OutlinedButton(
+        onClick = onDismiss,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+    ) { Text("Dismiss and continue later", color = RemoraTheme.accent) }
+    TextButton(
+        onClick = onCancel,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+    ) { Text("Cancel pairing", color = RemoraTheme.danger) }
+}
+
+@Composable
+private fun LegacyRePairContent(
+    state: RemoraLinkPairingState.LegacyRePair,
+    onScan: () -> Unit,
+    onEnterCode: () -> Unit,
+) {
+    Text(
+        "Pair ${state.hostDisplayName} again",
+        color = RemoraTheme.textPrimary,
+        fontSize = 17.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+    Text(
+        "This is a legacy v1 code created by `$REMORA_LINK_LEGACY_PAIR_COMMAND`. " +
+            "Update the host and run this command to create a secure Remora Link v2 code.",
+        color = RemoraTheme.textSecondary,
+        fontSize = 13.sp,
+    )
+    PairCommandRow()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PrimaryIngressButton(
+            label = "Scan QR",
+            icon = Icons.Default.QrCodeScanner,
+            onClick = onScan,
+            modifier = Modifier.weight(1f),
+        )
+        PrimaryIngressButton(
+            label = "Enter code",
+            icon = Icons.Default.ContentCopy,
+            onClick = onEnterCode,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun SuccessContent(state: RemoraLinkPairingState.Success, onDone: () -> Unit) {
+    Text(
+        if (state.alreadyPaired) "Already paired" else "Pairing complete",
+        color = RemoraTheme.success,
+        fontSize = 18.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+    state.sas?.let {
+        Text("Verified security code $it", color = RemoraTheme.textSecondary, fontSize = 12.sp)
+    }
+    Text(
+        "${state.selectedRuntimeIds.size} runtime${if (state.selectedRuntimeIds.size == 1) "" else "s"} available through Remora Link.",
+        color = RemoraTheme.textSecondary,
+        fontSize = 13.sp,
+    )
+    Button(
+        onClick = onDone,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+        colors = pairingButtonColors(),
+    ) { Text("Done") }
+}
+
+@Composable
+private fun ProgressContent(message: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+    ) {
+        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = RemoraTheme.accent)
+        Text(message, color = RemoraTheme.textSecondary, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun MessageContent(
+    title: String,
+    message: String,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    Text(title, color = RemoraTheme.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        message,
+        color = RemoraTheme.textSecondary,
+        fontSize = 13.sp,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
+    )
+    Button(
+        onClick = onAction,
+        modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+        colors = pairingButtonColors(),
+    ) { Text(actionLabel) }
+}
+
+@Composable
+private fun SelectablePairingRow(
+    label: String,
+    subtitle: String?,
+    checked: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (agent.available) {
-                    Modifier.clickable { onCheckedChange(!selected) }
-                } else {
-                    Modifier
-                },
+            .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Checkbox,
+                onValueChange = { onClick() },
             )
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        AgentIconView(
-            kind = agent.name,
-            sizeDp = 22,
-            modifier = Modifier.alpha(if (agent.available) 1f else 0.45f),
-        )
-        Spacer(Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = agent.displayName,
-                    color = if (agent.available) RemoraTheme.textPrimary else RemoraTheme.textMuted,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                if (isBetaAgentName(agent.name, agent.displayName)) {
-                    Spacer(Modifier.width(6.dp))
-                    BetaBadge()
-                }
-            }
-            Text(
-                text = wireLabel(agent.wire),
-                color = RemoraTheme.textSecondary,
-                fontSize = 11.sp,
-            )
+        Column(Modifier.weight(1f)) {
+            Text(label, color = if (enabled) RemoraTheme.textPrimary else RemoraTheme.textMuted, fontSize = 13.sp)
+            subtitle?.let { Text(it, color = RemoraTheme.textSecondary, fontSize = 11.sp) }
         }
-        if (!agent.available) {
-            Text("Unavailable", color = RemoraTheme.textMuted, fontSize = 11.sp)
-        } else {
-            Checkbox(
-                checked = selected,
-                onCheckedChange = onCheckedChange,
-                enabled = true,
-                modifier = Modifier.size(28.dp),
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = enabled,
+            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+        )
+    }
+}
+
+@Composable
+private fun PrimaryIngressButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier,
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = RemoraTheme.minimumTouchTarget),
+        colors = pairingButtonColors(),
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label)
+    }
+}
+
+@Composable
+private fun PairCommandRow() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var copied by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
+            .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+    ) {
+        Text(
+            REMORA_LINK_PAIR_COMMAND,
+            color = RemoraTheme.textPrimary,
+            fontFamily = RemoraTheme.monoFont,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = {
+                val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                manager?.setPrimaryClip(ClipData.newPlainText("Remora Link pairing command", REMORA_LINK_PAIR_COMMAND))
+                copied = true
+                scope.launch {
+                    delay(1_400)
+                    copied = false
+                }
+            },
+            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+            contentPadding = PaddingValues(0.dp),
+        ) {
+            Icon(
+                if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                contentDescription = if (copied) "Pairing command copied" else "Copy pairing command",
+                tint = RemoraTheme.accent,
+                modifier = Modifier.size(18.dp),
             )
         }
     }
 }
 
-
 @Composable
-private fun SectionHeader(label: String, modifier: Modifier = Modifier) {
+private fun PairingSectionHeader(label: String) {
     Text(
-        text = label.uppercase(),
+        label.uppercase(),
         color = RemoraTheme.textSecondary,
-        fontSize = 10.sp,
+        fontSize = 11.sp,
         fontWeight = FontWeight.SemiBold,
-        modifier = modifier.padding(top = 4.dp),
+        modifier = Modifier.padding(top = 4.dp),
     )
 }
 
 @Composable
-private fun PreviewRow(label: String, value: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = label,
-            color = RemoraTheme.textSecondary,
-            fontSize = 11.sp,
-            modifier = Modifier.width(96.dp),
-        )
-        Text(
-            text = value,
-            color = RemoraTheme.textPrimary,
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-    }
+private fun pairingButtonColors() = ButtonDefaults.buttonColors(
+    containerColor = RemoraTheme.accent.copy(alpha = 0.18f),
+    contentColor = RemoraTheme.accent,
+    disabledContainerColor = RemoraTheme.surface,
+    disabledContentColor = RemoraTheme.textMuted,
+)
+
+private fun scopeLabel(scope: AppRemoraLinkScope): String = when (scope) {
+    AppRemoraLinkScope.INSPECT_RUNTIMES -> "See available runtimes"
+    AppRemoraLinkScope.CONNECT_RUNTIME -> "Connect to runtimes"
+    AppRemoraLinkScope.RESTART_RUNTIME -> "Restart runtimes"
+    AppRemoraLinkScope.SELF_REVOKE -> "Revoke this device"
+}
+
+private fun scopeDescription(scope: AppRemoraLinkScope): String = when (scope) {
+    AppRemoraLinkScope.INSPECT_RUNTIMES -> "Read runtime availability"
+    AppRemoraLinkScope.CONNECT_RUNTIME -> "Open runtime sessions"
+    AppRemoraLinkScope.RESTART_RUNTIME -> "Request runtime restarts"
+    AppRemoraLinkScope.SELF_REVOKE -> "Allow this device to revoke its host access"
 }
 
 @Composable
-private fun DisclosureRow(
-    expanded: Boolean,
-    label: String,
-    onToggle: () -> Unit,
-) {
-    TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = (if (expanded) "▾ " else "▸ ") + label,
-            color = RemoraTheme.textSecondary,
-            fontSize = 12.sp,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-private fun shortNodeId(raw: String): String =
-    if (raw.length <= 16) raw else raw.take(8) + "..." + raw.takeLast(8)
-
-private fun suggestedDisplayName(params: AppAlleycatPairPayload): String =
-    params.hostName?.trim()?.takeIf { it.isNotEmpty() }
-        ?: "Remora ${shortNodeId(params.nodeId)}"
-
-private fun wireLabel(wire: AppAlleycatAgentWire): String = when (wire) {
-    AppAlleycatAgentWire.WEBSOCKET -> "websocket"
-    AppAlleycatAgentWire.JSONL -> "jsonl"
-}
-
-fun remotePairingWireStorageValue(wire: AppAlleycatAgentWire): String = when (wire) {
-    AppAlleycatAgentWire.WEBSOCKET -> "websocket"
-    AppAlleycatAgentWire.JSONL -> "jsonl"
-}
-
-private const val PAIR_COMMAND = "npx kittylitter"
-
-@Composable
-private fun QrScannerScreen(
-    onScanned: (String) -> Unit,
-    onCancel: () -> Unit,
-) {
+private fun QrScannerScreen(onScanned: (String) -> Unit, onCancel: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val barcodeScanner = remember {
         BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build()
+            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build(),
         )
     }
     var scanned by remember { mutableStateOf(false) }
@@ -639,209 +732,69 @@ private fun QrScannerScreen(
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black),
-    ) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
+            factory = { scannerContext ->
+                PreviewView(scannerContext).also { previewView ->
+                    previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
+                    bindCameraUseCases(
+                        context = scannerContext,
+                        lifecycleOwner = lifecycleOwner,
+                        previewView = previewView,
+                        barcodeScanner = barcodeScanner,
+                        executor = executor,
+                        onResult = { code ->
+                            if (!scanned) {
+                                scanned = true
+                                onScanned(code)
+                            }
+                        },
+                    )
                 }
-                bindCameraUseCases(
-                    context = ctx,
-                    lifecycleOwner = lifecycleOwner,
-                    previewView = previewView,
-                    barcodeScanner = barcodeScanner,
-                    executor = executor,
-                    onResult = { payload ->
-                        if (!scanned) {
-                            scanned = true
-                            onScanned(payload)
-                        }
-                    },
-                )
-                previewView
             },
         )
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(320.dp)
-                .background(
-                    androidx.compose.ui.graphics.Brush.verticalGradient(
-                        colors = listOf(
-                            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f),
-                            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0f),
-                        ),
-                    ),
-                )
-                .align(Alignment.TopCenter),
-        )
-
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Row(modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth()) {
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = onCancel,
-                    colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
-                        contentColor = androidx.compose.ui.graphics.Color.White,
-                    ),
                     modifier = Modifier
-                        .background(
-                            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f),
-                            RoundedCornerShape(50),
-                        ),
-                ) {
-                    Text(
-                        text = "Cancel",
-                        color = androidx.compose.ui.graphics.Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                        .heightIn(min = RemoraTheme.minimumTouchTarget)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(24.dp)),
+                ) { Text("Cancel", color = Color.White) }
             }
-
-            InstructionsCard()
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            FramingHint()
-        }
-    }
-}
-
-@Composable
-private fun InstructionsCard() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f),
-                RoundedCornerShape(14.dp),
-            )
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            text = "Pair with Remora",
-            color = androidx.compose.ui.graphics.Color.White,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        StepRow(number = "1", title = "On the host you want to connect to, run:")
-        CommandRow()
-        StepRow(number = "2", title = "Point this camera at the QR code it prints.")
-    }
-}
-
-@Composable
-private fun StepRow(number: String, title: String) {
-    Row(
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .background(RemoraTheme.accent, androidx.compose.foundation.shape.CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(14.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("Scan Remora Link code", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Run this on the host:", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+                Text(
+                    REMORA_LINK_PAIR_COMMAND,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp)).padding(10.dp),
+                )
+                Text("Point the camera at the QR code it prints.", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+            }
+            Spacer(Modifier.weight(1f))
             Text(
-                text = number,
-                color = androidx.compose.ui.graphics.Color.Black,
+                "Hold steady — the QR code is detected automatically.",
+                color = Color.White.copy(alpha = 0.8f),
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = title,
-            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.92f),
-            fontSize = 13.sp,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-@Composable
-private fun CommandRow() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var copied by remember { mutableStateOf(false) }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.padding(start = 30.dp),
-    ) {
-        Text(
-            text = PAIR_COMMAND,
-            color = androidx.compose.ui.graphics.Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier
-                .weight(1f)
-                .background(
-                    androidx.compose.ui.graphics.Color.White.copy(alpha = 0.12f),
-                    RoundedCornerShape(8.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-        )
-        TextButton(
-            onClick = {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                    as? android.content.ClipboardManager
-                clipboard?.setPrimaryClip(
-                    android.content.ClipData.newPlainText("Remora pairing command", PAIR_COMMAND),
-                )
-                copied = true
-                scope.launch {
-                    kotlinx.coroutines.delay(1400)
-                    copied = false
-                }
-            },
-            modifier = Modifier
-                .size(36.dp)
-                .background(
-                    androidx.compose.ui.graphics.Color.White.copy(alpha = 0.14f),
-                    androidx.compose.foundation.shape.CircleShape,
-                ),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-        ) {
-            Icon(
-                imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                contentDescription = if (copied) "Copied" else "Copy command",
-                tint = androidx.compose.ui.graphics.Color.White,
-                modifier = Modifier.size(16.dp),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(24.dp)).padding(10.dp),
             )
         }
     }
-}
-
-@Composable
-private fun FramingHint() {
-    Text(
-        text = "Hold steady — the QR code is detected automatically.",
-        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.75f),
-        fontSize = 12.sp,
-        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.4f),
-                RoundedCornerShape(50),
-            )
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-    )
 }
 
 private fun bindCameraUseCases(
@@ -849,15 +802,13 @@ private fun bindCameraUseCases(
     lifecycleOwner: LifecycleOwner,
     previewView: PreviewView,
     barcodeScanner: com.google.mlkit.vision.barcode.BarcodeScanner,
-    executor: java.util.concurrent.ExecutorService,
+    executor: ExecutorService,
     onResult: (String) -> Unit,
 ) {
     val providerFuture = ProcessCameraProvider.getInstance(context)
     providerFuture.addListener({
         val provider = providerFuture.get()
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
-        }
+        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
@@ -870,26 +821,14 @@ private fun bindCameraUseCases(
             val image = InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees)
             barcodeScanner.process(image)
                 .addOnSuccessListener { barcodes ->
-                    barcodes
-                        .firstOrNull { it.format == Barcode.FORMAT_QR_CODE }
-                        ?.rawValue
-                        ?.let(onResult)
+                    barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE }?.rawValue?.let(onResult)
                 }
-                .addOnFailureListener { err ->
-                    Log.w(LOG_TAG, "barcode analyze failed", err)
-                }
+                .addOnFailureListener { Log.w(LOG_TAG, "barcode analyze failed", it) }
                 .addOnCompleteListener { proxy.close() }
         }
         runCatching {
             provider.unbindAll()
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                analysis,
-            )
-        }.onFailure {
-            Log.w(LOG_TAG, "bindToLifecycle failed", it)
-        }
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+        }.onFailure { Log.w(LOG_TAG, "bindToLifecycle failed", it) }
     }, ContextCompat.getMainExecutor(context))
 }

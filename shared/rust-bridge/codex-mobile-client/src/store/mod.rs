@@ -8,8 +8,8 @@ pub mod snapshot;
 pub mod updates;
 mod voice;
 
-pub use agent_metadata::{AgentMetadataStore, AppAgentMetadata};
 pub use activity::AgentActivityPhase;
+pub use agent_metadata::{AgentMetadataStore, AppAgentMetadata};
 
 pub(crate) use boundary::project_thread_snapshot;
 pub use boundary::{

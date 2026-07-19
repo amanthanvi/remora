@@ -6,7 +6,7 @@
 //! Uses upstream `RemoteAppServerClient` for remote connections and
 //! upstream `InProcessClientHandle` for local (in-process) connections.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -733,6 +733,24 @@ fn available_runtime_kinds_from_health(
     kinds
 }
 
+fn initial_runtime_health(
+    requested_runtime_kinds: &[AgentRuntimeKind],
+    connected_runtime_kinds: &HashSet<AgentRuntimeKind>,
+) -> HashMap<AgentRuntimeKind, ConnectionHealth> {
+    requested_runtime_kinds
+        .iter()
+        .cloned()
+        .map(|runtime_kind| {
+            let health = if connected_runtime_kinds.contains(&runtime_kind) {
+                ConnectionHealth::Connected
+            } else {
+                ConnectionHealth::Disconnected
+            };
+            (runtime_kind, health)
+        })
+        .collect()
+}
+
 struct ReconnectBackoff {
     base: Duration,
     cap: Duration,
@@ -1170,10 +1188,31 @@ impl ServerSession {
         resources: Vec<RuntimeRemoteSessionResource>,
         extras: RemoteSessionExtras,
     ) -> Result<Self, TransportError> {
-        let requested_runtime_kinds = resources
+        Self::connect_remote_multiplexed_with_unavailable(config, resources, Vec::new(), extras)
+            .await
+    }
+
+    /// Build one multiplexed session while retaining selected runtimes whose
+    /// initial authenticated attach failed. Failed runtimes have no worker and
+    /// therefore no competing reconnect authority; they remain visible as
+    /// `Disconnected` until the owning transport orchestrator performs one
+    /// cold rebuild of the host session.
+    pub(crate) async fn connect_remote_multiplexed_with_unavailable(
+        config: ServerConfig,
+        resources: Vec<RuntimeRemoteSessionResource>,
+        unavailable_runtime_kinds: Vec<AgentRuntimeKind>,
+        extras: RemoteSessionExtras,
+    ) -> Result<Self, TransportError> {
+        let connected_runtime_kinds = resources
             .iter()
             .map(|resource| resource.runtime_kind.clone())
             .collect::<Vec<_>>();
+        let mut requested_runtime_kinds = connected_runtime_kinds.clone();
+        for runtime_kind in unavailable_runtime_kinds {
+            if !requested_runtime_kinds.contains(&runtime_kind) {
+                requested_runtime_kinds.push(runtime_kind);
+            }
+        }
         let first_runtime_kind = resources
             .first()
             .map(|resource| resource.runtime_kind.clone())
@@ -1187,12 +1226,9 @@ impl ServerSession {
         let (url, args) = remote_connect_args(&config);
         let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
         let connection_timeline = ConnectionTimeline::default();
+        let connected_runtime_kinds = connected_runtime_kinds.into_iter().collect::<HashSet<_>>();
         let runtime_health_state = Arc::new(StdMutex::new(RuntimeHealthState {
-            by_runtime: requested_runtime_kinds
-                .iter()
-                .cloned()
-                .map(|runtime_kind| (runtime_kind, ConnectionHealth::Connected))
-                .collect::<HashMap<_, _>>(),
+            by_runtime: initial_runtime_health(&requested_runtime_kinds, &connected_runtime_kinds),
             generation: 0,
             cold_repair_claimed: false,
         }));
@@ -1741,23 +1777,32 @@ async fn reconnect_remote_client(
         }
 
         let dial_started = Instant::now();
-        let connect_result: Result<Reconnected, TransportError> = match transport {
-            Some(t) => t.reconnect(args, websocket_url).await,
-            None => connect_remote_client(args).await.map(|client| Reconnected {
-                client,
-                keepalive: None,
-            }),
-        };
+        let connect_result: Result<(Reconnected, ReplayOutcome), TransportError> = async {
+            let next = match transport {
+                Some(t) => t.reconnect(args, websocket_url).await?,
+                None => Reconnected {
+                    client: connect_remote_client(args).await?,
+                    keepalive: None,
+                },
+            };
+            let replay_outcome = transport
+                .map(|transport| transport.take_replay_outcome())
+                .unwrap_or(ReplayOutcome::Complete);
+            if let Some(transport) = transport {
+                transport
+                    .reconcile_replay(&next.client, replay_outcome)
+                    .await?;
+            }
+            Ok((next, replay_outcome))
+        }
+        .await;
 
         match connect_result {
-            Ok(next) => {
+            Ok((next, replay_outcome)) => {
                 *client = next.client;
                 if next.keepalive.is_some() {
                     *keepalive = next.keepalive;
                 }
-                let replay_outcome = transport
-                    .map(|transport| transport.take_replay_outcome())
-                    .unwrap_or(ReplayOutcome::Complete);
                 if !health.update(ConnectionHealth::Connected) {
                     return None;
                 }
@@ -2661,6 +2706,11 @@ mod tests {
         reconnects: Arc<AtomicUsize>,
     }
 
+    struct BlockingReconcileTransport {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
     #[async_trait]
     impl RemoteTransport for TestReconnectTransport {
         async fn reconnect(
@@ -2679,6 +2729,98 @@ mod tests {
                 keepalive: None,
             })
         }
+    }
+
+    #[async_trait]
+    impl RemoteTransport for BlockingReconcileTransport {
+        async fn reconnect(
+            &self,
+            _args: &RemoteAppServerConnectArgs,
+            _websocket_url: &str,
+        ) -> Result<Reconnected, TransportError> {
+            Ok(Reconnected {
+                client: app_server_client_for_json_line_server(
+                    TestJsonLineServer::Respond(json!({})),
+                    "reconcile-test-bridge",
+                )
+                .await,
+                keepalive: None,
+            })
+        }
+
+        fn take_replay_outcome(&self) -> ReplayOutcome {
+            ReplayOutcome::AuthoritativeRefreshRequired
+        }
+
+        async fn reconcile_replay(
+            &self,
+            _client: &AppServerClient,
+            outcome: ReplayOutcome,
+        ) -> Result<(), TransportError> {
+            assert_eq!(outcome, ReplayOutcome::AuthoritativeRefreshRequired);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_drift_reconciliation_finishes_before_connected_is_published() {
+        let mut client = app_server_client_for_json_line_server(
+            TestJsonLineServer::Respond(json!({})),
+            "initial-reconcile-test-bridge",
+        )
+        .await;
+        let mut keepalive = None;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let transport: Arc<dyn RemoteTransport> = Arc::new(BlockingReconcileTransport {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let (health_tx, health_rx) = watch::channel(ConnectionHealth::Disconnected);
+        let health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Disconnected)]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
+        let health = RuntimeHealthReporter {
+            runtime_kind: "codex".to_string(),
+            state: health_state,
+            session_health_tx: health_tx,
+        };
+        let args = test_remote_args("reconcile-test-bridge");
+        let timeline = ConnectionTimeline::default();
+        let runtime_kind = "codex".to_string();
+        let reconnect = reconnect_remote_client(
+            &mut client,
+            &mut keepalive,
+            &args,
+            "reconcile-test-bridge",
+            &health,
+            &timeline,
+            &runtime_kind,
+            ConnectionTrigger::TransportDisconnected,
+            1,
+            Some(&transport),
+        );
+        tokio::pin!(reconnect);
+
+        tokio::select! {
+            _ = started.notified() => {}
+            outcome = &mut reconnect => panic!("reconnect published early: {outcome:?}"),
+        }
+        assert!(matches!(
+            *health_rx.borrow(),
+            ConnectionHealth::Connecting { .. }
+        ));
+
+        release.notify_one();
+        assert_eq!(
+            reconnect.await,
+            Some(ReplayOutcome::AuthoritativeRefreshRequired)
+        );
+        assert_eq!(*health_rx.borrow(), ConnectionHealth::Connected);
     }
 
     #[tokio::test]
@@ -2836,6 +2978,26 @@ mod tests {
             available_runtime_kinds_from_health(&selected_runtime_health),
             vec!["codex".to_string(), "opencode".to_string()],
             "an exhausted runtime must not satisfy selected-runtime availability checks"
+        );
+    }
+
+    #[test]
+    fn initially_unavailable_selected_runtime_is_visible_but_isolated() {
+        let requested = vec!["codex".to_string(), "pi".to_string()];
+        let connected = HashSet::from(["codex".to_string()]);
+        let health = initial_runtime_health(&requested, &connected);
+
+        assert_eq!(health["codex"], ConnectionHealth::Connected);
+        assert_eq!(health["pi"], ConnectionHealth::Disconnected);
+        assert_eq!(
+            aggregate_runtime_health(health.values()),
+            ConnectionHealth::Connected,
+            "a failed selected sibling must not take down the usable runtime"
+        );
+        assert!(runtime_health_is_degraded(&health));
+        assert_eq!(
+            available_runtime_kinds_from_health(&health),
+            vec!["codex".to_string()]
         );
     }
 

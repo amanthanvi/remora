@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -8,6 +9,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 
 use super::super::identity::V2Invite;
 use super::lifecycle::*;
@@ -84,6 +86,9 @@ struct TestCustodyV2 {
     present: AtomicBool,
     load_missing_error: AtomicBool,
     fail_delete: AtomicBool,
+    block_sign: AtomicBool,
+    sign_started: Notify,
+    release_sign: Notify,
     sign_count: AtomicUsize,
 }
 
@@ -105,6 +110,9 @@ impl TestCustodyV2 {
             present: AtomicBool::new(true),
             load_missing_error: AtomicBool::new(false),
             fail_delete: AtomicBool::new(false),
+            block_sign: AtomicBool::new(false),
+            sign_started: Notify::new(),
+            release_sign: Notify::new(),
             sign_count: AtomicUsize::new(0),
         }
     }
@@ -142,6 +150,10 @@ impl CredentialCustodyPortV2 for TestCustodyV2 {
         assert_eq!(slot, self.key.slot);
         if !self.present.load(Ordering::SeqCst) {
             return Err(CredentialPortError::Missing);
+        }
+        if self.block_sign.load(Ordering::SeqCst) {
+            self.sign_started.notify_one();
+            self.release_sign.notified().await;
         }
         self.sign_count.fetch_add(1, Ordering::SeqCst);
         let signature: Signature = self.signing_key.sign(message);
@@ -198,6 +210,7 @@ struct ScriptedHostV2 {
     invite: V2Invite,
     identity_drift: AtomicBool,
     invalid_challenge: AtomicBool,
+    challenge_expires_at: AtomicI64,
     policy_drift: AtomicBool,
     endpoint_fingerprint_mismatch: AtomicBool,
     device_key_fingerprint_mismatch: AtomicBool,
@@ -221,6 +234,8 @@ struct ScriptedHostV2 {
     abandon_count: AtomicUsize,
     close_count: AtomicUsize,
     connect_count: AtomicUsize,
+    connect_resume_cursors: StdMutex<Vec<Option<u64>>>,
+    fail_connect: AtomicBool,
     include_out_of_grant_agent: AtomicBool,
 }
 
@@ -233,6 +248,7 @@ impl ScriptedHostV2 {
             invite,
             identity_drift: AtomicBool::new(false),
             invalid_challenge: AtomicBool::new(false),
+            challenge_expires_at: AtomicI64::new(1_900_000_000),
             policy_drift: AtomicBool::new(false),
             endpoint_fingerprint_mismatch: AtomicBool::new(false),
             device_key_fingerprint_mismatch: AtomicBool::new(false),
@@ -256,6 +272,8 @@ impl ScriptedHostV2 {
             abandon_count: AtomicUsize::new(0),
             close_count: AtomicUsize::new(0),
             connect_count: AtomicUsize::new(0),
+            connect_resume_cursors: StdMutex::new(Vec::new()),
+            fail_connect: AtomicBool::new(false),
             include_out_of_grant_agent: AtomicBool::new(false),
         }
     }
@@ -375,7 +393,7 @@ impl HostPortV2 for ScriptedHostV2 {
             },
             auth_epoch,
             server_nonce,
-            expires_at: 1_900_000_000,
+            expires_at: self.challenge_expires_at.load(Ordering::SeqCst),
         };
         self.rounds.lock().unwrap().insert(
             exchange_id.clone(),
@@ -404,7 +422,7 @@ impl HostPortV2 for ScriptedHostV2 {
         &self,
         exchange_id: &str,
         proof: &ProofV2,
-    ) -> Result<ResponseV2, HostPortErrorV2> {
+    ) -> Result<FinishedExchangeV2, HostPortErrorV2> {
         self.finish_count.fetch_add(1, Ordering::SeqCst);
         let round = self
             .rounds
@@ -423,14 +441,24 @@ impl HostPortV2 for ScriptedHostV2 {
                     max_runtime_ids: self.invite.max_runtime_ids.clone(),
                     max_scopes: self.invite.max_scopes.clone(),
                     confirmation_mode: self.invite.confirmation_mode,
-                    runtime_offers: vec![RuntimeOfferV2 {
-                        runtime_id: "codex".to_string(),
-                        display_name: "Codex".to_string(),
-                        available: true,
-                        recommended: true,
-                    }],
+                    runtime_offers: self
+                        .invite
+                        .max_runtime_ids
+                        .iter()
+                        .rev()
+                        .enumerate()
+                        .map(|(index, runtime_id)| RuntimeOfferV2 {
+                            runtime_id: runtime_id.clone(),
+                            display_name: runtime_id.clone(),
+                            available: true,
+                            recommended: index == 0,
+                        })
+                        .collect(),
                 });
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
             }
             RequestV2::Enroll {
                 device_name,
@@ -461,7 +489,10 @@ impl HostPortV2 for ScriptedHostV2 {
                     confirmation.sas = "000-000".to_string();
                 }
                 if self.malformed_enrollment_terminal.load(Ordering::SeqCst) {
-                    return Ok(Self::terminal(true));
+                    return Ok(FinishedExchangeV2 {
+                        response: Self::terminal(true),
+                        attachment_id: None,
+                    });
                 }
                 let mut response = Self::terminal(true);
                 match *self.enrollment_terminal.lock().unwrap() {
@@ -513,17 +544,36 @@ impl HostPortV2 for ScriptedHostV2 {
                         });
                     }
                 }
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
             }
-            RequestV2::Connect { .. } => {
+            RequestV2::Connect { resume, .. } => {
                 self.connect_count.fetch_add(1, Ordering::SeqCst);
+                self.connect_resume_cursors
+                    .lock()
+                    .unwrap()
+                    .push(resume.as_ref().map(|resume| resume.last_seq));
+                if self.fail_connect.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::AgentUnavailable);
+                    response.error = Some(ErrorCodeV2::AgentUnavailable.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
                 let mut response = Self::terminal(true);
                 response.session = Some(SessionV2 {
                     attached: AttachKindV2::Resumed,
                     current_seq: 44,
                     floor_seq: 10,
                 });
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: Some(format!("attachment-{exchange_id}")),
+                })
             }
             RequestV2::ListAgents { .. } => {
                 let mut response = Self::terminal(true);
@@ -546,7 +596,10 @@ impl HostPortV2 for ScriptedHostV2 {
                     });
                 }
                 response.agents = Some(agents);
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
             }
             RequestV2::RevokeSelf {
                 credential_id,
@@ -596,7 +649,10 @@ impl HostPortV2 for ScriptedHostV2 {
                     response.error_code = Some(ErrorCodeV2::OutcomeUnknown);
                     response.error = Some(ErrorCodeV2::OutcomeUnknown.message().to_string());
                 }
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
             }
             RequestV2::RestartAgent {
                 agent,
@@ -633,12 +689,15 @@ impl HostPortV2 for ScriptedHostV2 {
                     response.error_code = Some(ErrorCodeV2::OutcomeUnknown);
                     response.error = Some(ErrorCodeV2::OutcomeUnknown.message().to_string());
                 }
-                Ok(response)
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
             }
         }
     }
 
-    async fn abandon_exchange(&self, exchange_id: &str) {
+    fn abandon_exchange(&self, exchange_id: &str) {
         self.abandon_count.fetch_add(1, Ordering::SeqCst);
         self.rounds.lock().unwrap().remove(exchange_id);
     }
@@ -649,7 +708,7 @@ impl HostPortV2 for ScriptedHostV2 {
 }
 
 struct HarnessV2 {
-    lifecycle: PairingLifecycleV2,
+    lifecycle: Arc<PairingLifecycleV2>,
     journal: Arc<MemoryJournalV2>,
     custody: Arc<TestCustodyV2>,
     host: Arc<ScriptedHostV2>,
@@ -688,12 +747,12 @@ fn harness_with_invite(invite: V2Invite) -> HarnessV2 {
         custody.key.public_key.clone(),
         invite.clone(),
     ));
-    let lifecycle = PairingLifecycleV2::new(
+    let lifecycle = Arc::new(PairingLifecycleV2::new(
         host.clone(),
         journal.clone(),
         custody.clone(),
         Arc::new(TestEntropyV2::default()),
-    );
+    ));
     HarnessV2 {
         lifecycle,
         journal,
@@ -774,6 +833,102 @@ async fn enrollment_commits_only_after_hash_and_sas_match_and_journal_is_nonsecr
     assert!(!serialized.contains("private_key"));
     assert!(!serialized.contains("signature"));
     assert_eq!(harness.custody.sign_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn enrollment_canonicalizes_display_order_but_rejects_duplicate_selections() {
+    let mut multi_runtime_invite = invite();
+    multi_runtime_invite.max_runtime_ids = vec!["claude".to_string(), "codex".to_string()];
+    let harness = harness_with_invite(multi_runtime_invite);
+    harness.lifecycle.inspect(&harness.invite).await.unwrap();
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .enroll(
+                &harness.invite,
+                "Remora Phone".to_string(),
+                vec!["codex".to_string(), "codex".to_string()],
+                vec![DeviceScopeV2::InspectRuntimes],
+            )
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .enroll(
+                &harness.invite,
+                "Remora Phone".to_string(),
+                vec!["codex".to_string()],
+                vec![
+                    DeviceScopeV2::InspectRuntimes,
+                    DeviceScopeV2::InspectRuntimes,
+                ],
+            )
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
+    );
+
+    let outcome = harness
+        .lifecycle
+        .enroll(
+            &harness.invite,
+            "Remora Phone".to_string(),
+            vec!["codex".to_string(), "claude".to_string()],
+            vec![
+                DeviceScopeV2::SelfRevoke,
+                DeviceScopeV2::RestartRuntime,
+                DeviceScopeV2::ConnectRuntime,
+                DeviceScopeV2::InspectRuntimes,
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, EnrollmentOutcomeV2::Enrolled(_)));
+
+    let credential = harness
+        .journal
+        .entry(&harness.host_id)
+        .credential
+        .expect("enrollment must persist a credential");
+    assert_eq!(
+        credential.selected_runtime_ids,
+        vec!["claude".to_string(), "codex".to_string()]
+    );
+    assert_eq!(
+        credential.granted_scopes,
+        vec![
+            DeviceScopeV2::InspectRuntimes,
+            DeviceScopeV2::ConnectRuntime,
+            DeviceScopeV2::RestartRuntime,
+            DeviceScopeV2::SelfRevoke,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn invalid_display_names_fail_before_mutating_the_ready_journal() {
+    let harness = harness();
+    harness.lifecycle.inspect(&harness.invite).await.unwrap();
+    let ready = harness.journal.entry(&harness.host_id);
+    let (_, runtimes, scopes) = selection();
+
+    for invalid_name in ["bad\nname".to_string(), "x".repeat(81)] {
+        assert_eq!(
+            harness
+                .lifecycle
+                .enroll(
+                    &harness.invite,
+                    invalid_name,
+                    runtimes.clone(),
+                    scopes.clone(),
+                )
+                .await,
+            Err(LifecycleErrorV2::InvalidSelection)
+        );
+        assert_eq!(harness.journal.entry(&harness.host_id), ready);
+    }
 }
 
 #[tokio::test]
@@ -1096,6 +1251,25 @@ async fn malformed_challenge_is_abandoned_before_any_proof() {
 }
 
 #[tokio::test]
+async fn stale_challenge_is_abandoned_before_signing_or_finishing() {
+    for expires_at in [1, i64::MIN] {
+        let harness = harness();
+        harness
+            .host
+            .challenge_expires_at
+            .store(expires_at, Ordering::SeqCst);
+        assert_eq!(
+            harness.lifecycle.inspect(&harness.invite).await,
+            Err(LifecycleErrorV2::ProtocolViolation)
+        );
+        assert_eq!(harness.custody.sign_count.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.host.finish_count.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.host.abandon_count.load(Ordering::SeqCst), 1);
+        assert!(harness.host.rounds.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn custody_missing_error_is_durably_quarantined() {
     let harness = harness();
     inspect_and_enroll(&harness).await;
@@ -1312,10 +1486,26 @@ async fn reconnect_is_host_runtime_scoped_and_uses_a_fresh_hardware_key_proof() 
         .unwrap();
     assert_eq!(outcome.runtime_id, "codex");
     assert_eq!(outcome.session.current_seq, 44);
+    assert!(outcome.attachment_id.starts_with("attachment-exchange-"));
     assert_eq!(harness.host.connect_count.load(Ordering::SeqCst), 1);
     assert_eq!(
         harness.custody.sign_count.load(Ordering::SeqCst),
         signed_before + 1
+    );
+    let next_outcome = harness
+        .lifecycle
+        .reconnect(&harness.host_id, "codex".to_string(), Some(44))
+        .await
+        .unwrap();
+    assert_ne!(
+        outcome.attachment_id, next_outcome.attachment_id,
+        "same-runtime reconnects must retain exact distinct attachment custody"
+    );
+    assert_eq!(harness.host.connect_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *harness.host.connect_resume_cursors.lock().unwrap(),
+        vec![Some(41), Some(44)],
+        "each reconnect must use only the v2 replay cursor supplied for that attachment"
     );
     assert_eq!(
         harness
@@ -1323,6 +1513,21 @@ async fn reconnect_is_host_runtime_scoped_and_uses_a_fresh_hardware_key_proof() 
             .reconnect(&harness.host_id, "claude".to_string(), None)
             .await,
         Err(LifecycleErrorV2::InvalidSelection)
+    );
+}
+
+#[tokio::test]
+async fn reconnect_maps_failed_terminal_before_requiring_an_attachment() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    harness.host.fail_connect.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .reconnect(&harness.host_id, "codex".to_string(), None)
+            .await,
+        Err(LifecycleErrorV2::AgentUnavailable)
     );
 }
 
@@ -1831,6 +2036,49 @@ async fn interrupted_local_forget_recovers_after_key_deletion_becomes_available(
 }
 
 #[tokio::test]
+async fn cancel_ready_pairing_deletes_local_authority_without_a_remote_request() {
+    let harness = harness();
+    harness.lifecycle.inspect(&harness.invite).await.unwrap();
+    let completed_exchanges = harness.host.finish_count.load(Ordering::SeqCst);
+    let started_exchanges = harness.host.next_round.load(Ordering::SeqCst);
+    let ready = harness.journal.entry(&harness.host_id);
+    assert_eq!(ready.phase, JournalPhaseV2::Ready);
+    assert!(ready.invitation.is_some());
+    assert!(harness.custody.present.load(Ordering::SeqCst));
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .cancel_enrollment(&harness.host_id)
+            .await
+            .unwrap(),
+        MutationOutcomeV2::RolledBack
+    );
+
+    assert_eq!(
+        harness.host.next_round.load(Ordering::SeqCst),
+        started_exchanges
+    );
+    assert_eq!(
+        harness.host.finish_count.load(Ordering::SeqCst),
+        completed_exchanges
+    );
+    assert!(harness.host.mutation_keys.lock().unwrap().is_empty());
+    assert!(!harness.custody.present.load(Ordering::SeqCst));
+    let cancelled = harness.journal.entry(&harness.host_id);
+    assert_eq!(
+        cancelled.phase,
+        JournalPhaseV2::Forgotten {
+            host_revocation_still_required: false
+        }
+    );
+    assert!(cancelled.invitation.is_none());
+    assert!(cancelled.enrollment.is_none());
+    assert!(cancelled.credential.is_none());
+    assert!(cancelled.mutation.is_none());
+}
+
+#[tokio::test]
 async fn cancel_before_any_enrollment_proof_is_local_only() {
     let harness = harness();
     harness.lifecycle.inspect(&harness.invite).await.unwrap();
@@ -1888,6 +2136,54 @@ async fn journal_validation_rejects_widened_or_unbound_enrolled_authority() {
     let mut unbound = enrolled;
     unbound.credential.as_mut().unwrap().transcript_hash = URL_SAFE_NO_PAD.encode([0_u8; 32]);
     assert_eq!(unbound.validate(), Err(JournalValidationError::Corrupt));
+}
+
+#[tokio::test]
+async fn journal_validation_rejects_corrupt_runtime_offer_presentation() {
+    let harness = harness();
+    harness.lifecycle.inspect(&harness.invite).await.unwrap();
+    let mut ready = harness.journal.entry(&harness.host_id);
+    let offer = ready
+        .invitation
+        .as_mut()
+        .unwrap()
+        .runtime_offers
+        .first_mut()
+        .unwrap();
+    offer.available = false;
+    offer.recommended = true;
+
+    assert_eq!(ready.validate(), Err(JournalValidationError::Corrupt));
+}
+
+#[tokio::test]
+async fn cancelling_after_exchange_start_abandons_the_retained_round() {
+    let harness = harness();
+    harness.lifecycle.inspect(&harness.invite).await.unwrap();
+    harness.custody.block_sign.store(true, Ordering::SeqCst);
+    let sign_started = harness.custody.sign_started.notified();
+    let (name, runtimes, scopes) = selection();
+    let lifecycle = Arc::clone(&harness.lifecycle);
+    let invite = harness.invite.clone();
+    let mut enrollment =
+        Box::pin(async move { lifecycle.enroll(&invite, name, runtimes, scopes).await });
+
+    tokio::select! {
+        _ = sign_started => {}
+        result = &mut enrollment => panic!("enrollment completed before blocked signing: {result:?}"),
+    }
+    std::thread::spawn(move || drop(enrollment))
+        .join()
+        .expect("foreign-thread cancellation must not panic");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while harness.host.abandon_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("foreign-thread cancellation must abandon the exchange synchronously");
+    assert!(harness.host.rounds.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

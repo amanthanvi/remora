@@ -2,7 +2,8 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use p256::ecdsa::Signature;
+use p256::ecdsa::signature::Verifier as _;
+use p256::ecdsa::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -45,9 +46,28 @@ pub(super) async fn sign_proof(
     transcript: &[u8],
 ) -> Result<ProofV2, CredentialPortError> {
     let mut signature_bytes = custody.sign_message(&hardware_key.slot, transcript).await?;
-    let signature =
-        Signature::from_der(&signature_bytes).map_err(|_| CredentialPortError::InvalidSignature)?;
+    let signature = Signature::from_der(&signature_bytes).map_err(|_| {
+        signature_bytes.zeroize();
+        CredentialPortError::InvalidSignature
+    })?;
     if signature.to_der().as_bytes() != signature_bytes {
+        signature_bytes.zeroize();
+        return Err(CredentialPortError::InvalidSignature);
+    }
+    let mut public_key = match URL_SAFE_NO_PAD.decode(&hardware_key.public_key) {
+        Ok(public_key) => public_key,
+        Err(_) => {
+            signature_bytes.zeroize();
+            return Err(CredentialPortError::InvalidSignature);
+        }
+    };
+    let verifying_key = VerifyingKey::from_sec1_bytes(&public_key).map_err(|_| {
+        public_key.zeroize();
+        signature_bytes.zeroize();
+        CredentialPortError::InvalidSignature
+    })?;
+    public_key.zeroize();
+    if verifying_key.verify(transcript, &signature).is_err() {
         signature_bytes.zeroize();
         return Err(CredentialPortError::InvalidSignature);
     }
@@ -62,4 +82,98 @@ pub(super) async fn sign_proof(
         .validate()
         .map_err(|_| CredentialPortError::InvalidSignature)?;
     Ok(proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use p256::ecdsa::signature::Signer as _;
+    use p256::ecdsa::{Signature, SigningKey};
+
+    use super::*;
+
+    struct SigningCustody {
+        signing_key: SigningKey,
+        message_override: Option<&'static [u8]>,
+    }
+
+    #[async_trait]
+    impl CredentialCustodyPortV2 for SigningCustody {
+        async fn ensure_hardware_key(
+            &self,
+            _host_id: &str,
+        ) -> Result<HardwareKeyV2, CredentialPortError> {
+            unreachable!()
+        }
+
+        async fn load_hardware_key(
+            &self,
+            _slot: &str,
+        ) -> Result<Option<HardwareKeyV2>, CredentialPortError> {
+            unreachable!()
+        }
+
+        async fn sign_message(
+            &self,
+            _slot: &str,
+            message: &[u8],
+        ) -> Result<Vec<u8>, CredentialPortError> {
+            let signature: Signature = self
+                .signing_key
+                .sign(self.message_override.unwrap_or(message));
+            Ok(signature.to_der().as_bytes().to_vec())
+        }
+
+        async fn delete_hardware_key(&self, _slot: &str) -> Result<(), CredentialPortError> {
+            unreachable!()
+        }
+    }
+
+    fn hardware_key(signing_key: &SigningKey) -> HardwareKeyV2 {
+        HardwareKeyV2 {
+            slot: "remora-link:test".to_string(),
+            public_key: URL_SAFE_NO_PAD.encode(
+                signing_key
+                    .verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn proof_signing_rejects_a_signature_from_the_wrong_hardware_key() {
+        let expected = SigningKey::from_bytes((&[7_u8; 32]).into()).unwrap();
+        let wrong = SigningKey::from_bytes((&[9_u8; 32]).into()).unwrap();
+        let result = sign_proof(
+            &SigningCustody {
+                signing_key: wrong,
+                message_override: None,
+            },
+            &hardware_key(&expected),
+            &URL_SAFE_NO_PAD.encode([3_u8; 16]),
+            b"canonical proof transcript",
+        )
+        .await;
+
+        assert_eq!(result, Err(CredentialPortError::InvalidSignature));
+    }
+
+    #[tokio::test]
+    async fn proof_signing_rejects_a_signature_over_the_wrong_transcript() {
+        let signing_key = SigningKey::from_bytes((&[7_u8; 32]).into()).unwrap();
+        let hardware_key = hardware_key(&signing_key);
+        let result = sign_proof(
+            &SigningCustody {
+                signing_key,
+                message_override: Some(b"different transcript"),
+            },
+            &hardware_key,
+            &URL_SAFE_NO_PAD.encode([3_u8; 16]),
+            b"canonical proof transcript",
+        )
+        .await;
+
+        assert_eq!(result, Err(CredentialPortError::InvalidSignature));
+    }
 }

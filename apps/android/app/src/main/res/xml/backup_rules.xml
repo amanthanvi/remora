@@ -2,6 +2,8 @@
 <full-backup-content>
     <!-- Device-bound credentials and provider registrations must never restore
          onto a device whose Android Keystore identity is different. -->
+    <!-- Remora Link v2's journal and encrypted transport identity are stored under
+         noBackupFilesDir, which Android excludes from backup unconditionally. -->
     <exclude domain="sharedpref" path="remora_push_awareness_v1.xml" />
     <exclude domain="sharedpref" path="alleycat_credentials.xml" />
     <exclude domain="file" path="remora_link_credentials_v2/" />

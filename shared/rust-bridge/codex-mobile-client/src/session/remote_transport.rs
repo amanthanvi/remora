@@ -83,6 +83,16 @@ pub(crate) trait RemoteTransport: Send + Sync + 'static {
         ReplayOutcome::Complete
     }
 
+    /// Complete any authoritative reconciliation required by the replay
+    /// outcome before the session publishes `Connected`.
+    async fn reconcile_replay(
+        &self,
+        _client: &AppServerClient,
+        _outcome: ReplayOutcome,
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     /// Hint that the host network may have changed (e.g. iOS resumed the
     /// app from background suspension). Transports that have an iroh
     /// `Endpoint` use this to call `Endpoint::network_change()` so QUIC

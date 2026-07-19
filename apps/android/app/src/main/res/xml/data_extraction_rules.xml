@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
+    <!-- Remora Link v2's journal and encrypted transport identity are stored under
+         noBackupFilesDir, which Android excludes from cloud and device transfer. -->
     <cloud-backup disableIfNoEncryptionCapabilities="true">
         <exclude domain="sharedpref" path="remora_push_awareness_v1.xml" />
         <exclude domain="sharedpref" path="alleycat_credentials.xml" />

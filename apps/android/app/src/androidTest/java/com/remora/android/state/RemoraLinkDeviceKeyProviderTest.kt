@@ -62,7 +62,7 @@ class RemoraLinkDeviceKeyProviderTest {
         provider.ensureKey(slot) as RemoraLinkDeviceKeyStatus.Ready
 
         assertEquals(RemoraLinkDeviceKeyDeletionStatus.DELETED, provider.deleteKey(slot))
-        assertEquals(RemoraLinkDeviceKeyDeletionStatus.DELETED, provider.deleteKey(slot))
+        assertEquals(RemoraLinkDeviceKeyDeletionStatus.ALREADY_MISSING, provider.deleteKey(slot))
         assertEquals(
             RemoraLinkSignatureStatus.Unavailable(RemoraLinkDeviceKeyFailure.KEY_NOT_FOUND),
             provider.sign(slot, byteArrayOf(1, 2, 3)),

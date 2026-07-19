@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Widgets
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -94,6 +95,7 @@ fun SettingsSheet(
         SettingsSubScreen.Pets -> PetsScreen(onBack = { subScreen = null })
         SettingsSubScreen.TipJar -> TipJarScreen(onBack = { subScreen = null })
         SettingsSubScreen.Debug -> DebugScreen(onBack = { subScreen = null })
+        SettingsSubScreen.RemoraLinkHosts -> RemoraLinkHostsScreen(onBack = { subScreen = null })
         null -> SettingsTopLevel(
             onDismiss = onDismiss,
             onOpenAppearance = { subScreen = SettingsSubScreen.Appearance },
@@ -101,6 +103,7 @@ fun SettingsSheet(
             onOpenPets = { subScreen = SettingsSubScreen.Pets },
             onOpenTipJar = { subScreen = SettingsSubScreen.TipJar },
             onOpenDebug = { subScreen = SettingsSubScreen.Debug },
+            onOpenRemoraLinkHosts = { subScreen = SettingsSubScreen.RemoraLinkHosts },
             onOpenAccount = onOpenAccount,
             onOpenApps = onOpenApps,
         )
@@ -109,7 +112,7 @@ fun SettingsSheet(
 
 enum class SettingsStartDestination { TopLevel, Pets }
 
-private enum class SettingsSubScreen { Appearance, Experimental, Pets, TipJar, Debug }
+private enum class SettingsSubScreen { Appearance, Experimental, Pets, TipJar, Debug, RemoraLinkHosts }
 
 @Composable
 private fun SettingsTopLevel(
@@ -119,6 +122,7 @@ private fun SettingsTopLevel(
     onOpenPets: () -> Unit,
     onOpenTipJar: () -> Unit,
     onOpenDebug: () -> Unit,
+    onOpenRemoraLinkHosts: () -> Unit,
     onOpenAccount: (serverId: String) -> Unit,
     onOpenApps: (() -> Unit)?,
 ) {
@@ -271,6 +275,16 @@ private fun SettingsTopLevel(
             } else {
                 SettingsRow(label = "Connect to a server first")
             }
+        }
+
+        // ── Servers ──
+        item { SectionHeader("Remora Link") }
+        item {
+            NavRow(
+                icon = Icons.Default.Link,
+                label = "Remora Link Hosts",
+                onClick = onOpenRemoraLinkHosts,
+            )
         }
 
         // ── Servers ──

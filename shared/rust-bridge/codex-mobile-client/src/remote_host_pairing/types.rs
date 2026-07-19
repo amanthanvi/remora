@@ -8,25 +8,25 @@
 ///
 /// This value is sensitive input. It must never be logged or embedded in an
 /// observable snapshot.
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone)]
 pub struct RemotePairingCode {
     pub encoded: String,
 }
 
 /// Stable paired-host identity, derived and validated in Rust.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RemoteHostId {
     pub value: String,
 }
 
 /// Process-local capability identifying one inspected offer.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RemotePairingOfferId {
     pub value: String,
 }
 
 /// Pairing protocol generation hidden behind the semantic module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemotePairingProtocol {
     /// Existing `alleycat/1` host-wide bearer-token protocol. This remains
     /// recognizable for compatibility, but cannot issue a v2 device grant.
@@ -36,7 +36,7 @@ pub enum RemotePairingProtocol {
 }
 
 /// Whether an inspected code may enter the new pairing transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemotePairingOfferDisposition {
     Ready,
     /// The code belongs to the legacy bearer protocol. The caller must obtain
@@ -49,7 +49,7 @@ pub enum RemotePairingOfferDisposition {
 /// This is useful before a network adapter is available. It is intentionally
 /// not named an authenticated host offer: runtime metadata is added only after
 /// the host port verifies the same identity.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePairingCodeInspection {
     pub host_id: RemoteHostId,
     pub suggested_display_name: String,
@@ -59,7 +59,7 @@ pub struct RemotePairingCodeInspection {
 }
 
 /// Semantic runtime advertised by an authenticated host offer.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteRuntimeOffer {
     pub runtime_id: String,
     pub display_name: String,
@@ -68,7 +68,7 @@ pub struct RemoteRuntimeOffer {
 }
 
 /// Secret-free, short-lived offer returned after host inspection.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePairingOffer {
     pub offer_id: RemotePairingOfferId,
     pub host_id: RemoteHostId,
@@ -80,7 +80,7 @@ pub struct RemotePairingOffer {
 }
 
 /// User acceptance of the exact offer revision held by Rust.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePairingAcceptance {
     pub offer_id: RemotePairingOfferId,
     pub display_name: Option<String>,
@@ -88,7 +88,7 @@ pub struct RemotePairingAcceptance {
 }
 
 /// Why an operation can only continue after a fresh v2 pairing ceremony.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteRePairReason {
     LegacyBearerCredential,
     MissingPairing,
@@ -100,7 +100,7 @@ pub enum RemoteRePairReason {
 }
 
 /// Why locally persisted state needs repair before it can be used safely.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemotePairingRepairReason {
     MissingHostCredential,
     InterruptedCommit,
@@ -113,7 +113,7 @@ pub enum RemotePairingRepairReason {
 }
 
 /// Result of accepting an inspected offer.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemotePairingOutcome {
     Paired {
         host_id: RemoteHostId,
@@ -132,7 +132,7 @@ pub enum RemotePairingOutcome {
 }
 
 /// Result of connecting an already paired host by opaque ID only.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteReconnectOutcome {
     Connected {
         host_id: RemoteHostId,
@@ -154,7 +154,7 @@ pub enum RemoteReconnectOutcome {
 }
 
 /// How strongly the host confirmed credential revocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCredentialRevocationStatus {
     Confirmed,
     /// The durable local tombstone is active; host confirmation should be
@@ -165,7 +165,7 @@ pub enum HostCredentialRevocationStatus {
 }
 
 /// Result of host-authoritative revocation.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteRevokeOutcome {
     Revoked {
         host_id: RemoteHostId,
@@ -184,7 +184,7 @@ pub enum RemoteRevokeOutcome {
 ///
 /// Forget is intentionally distinct from revoke: it never claims that the
 /// host invalidated this device's grant.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteForgetOutcome {
     ForgottenLocally {
         host_id: RemoteHostId,
@@ -201,7 +201,7 @@ pub enum RemoteForgetOutcome {
 
 /// Sanitized errors at the module boundary. No variant contains raw adapter
 /// messages or pairing input.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum RemoteHostPairingError {
     #[error("pairing code is malformed")]
     MalformedCode,

@@ -510,8 +510,8 @@ fun DiscoveryScreen(
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ChooserCard(
-                title = "Pair with Remora",
-                subtitle = "Run npx kittylitter on the host, then scan the QR code it prints.",
+                title = "Remora Link",
+                subtitle = "Run $REMORA_LINK_PAIR_COMMAND on the host, then scan or paste its one-time code.",
                 badge = "RECOMMENDED",
                 icon = Icons.Default.QrCodeScanner,
                 supportedAgents = RemotePairingAgents,
@@ -820,21 +820,10 @@ fun DiscoveryScreen(
         ) {
             RemotePairingSheet(
                 onDismiss = { showRemotePairingSheet = false },
-                startScanningOnAppear = true,
-                onConnected = { result ->
+                onPaired = {
                     showRemotePairingSheet = false
                     scope.launch {
-                        SavedServerStore.rememberAlleycat(
-                            context = context,
-                            serverId = result.serverId,
-                            displayName = result.displayName,
-                            nodeId = result.nodeId,
-                            relay = result.params.relay,
-                            agentName = result.agentName,
-                            agentWire = remotePairingWireStorageValue(result.agentWire),
-                        )
                         appModel.refreshSnapshot()
-                        pendingAutoNavigateServerId = result.serverId
                     }
                 },
             )

@@ -13,7 +13,7 @@ mod discovery;
 mod errors;
 mod parser;
 mod reconnect;
-mod remote_host_pairing;
+pub(crate) mod remora_link_v2;
 mod remote_path;
 pub(crate) mod shared;
 mod ssh;
@@ -42,7 +42,19 @@ pub use discovery::{
 pub use errors::ClientError;
 pub use parser::MessageParser;
 pub use reconnect::{ReconnectController, ReconnectShutdownOutcome};
-pub use remote_host_pairing::RemoteHostPairingInspector;
+pub use remora_link_v2::{
+    AppRemoraLinkAcceptance, AppRemoraLinkAttachKind, AppRemoraLinkConfirmationMode,
+    AppRemoraLinkDeviceKeyBackend, AppRemoraLinkDeviceKeyError, AppRemoraLinkFailure,
+    AppRemoraLinkForgetResult, AppRemoraLinkHardwareKey, AppRemoraLinkHardwareKeyLoad,
+    AppRemoraLinkHostFailure, AppRemoraLinkHostState, AppRemoraLinkHostSummary,
+    AppRemoraLinkInspection, AppRemoraLinkJournalBackend, AppRemoraLinkJournalLoad,
+    AppRemoraLinkJournalSnapshot, AppRemoraLinkJournalWriteOutcome, AppRemoraLinkKeyAssurance,
+    AppRemoraLinkKeyDeletionStatus, AppRemoraLinkOffer, AppRemoraLinkPairingCancellationOutcome,
+    AppRemoraLinkPairingCode, AppRemoraLinkPairingOutcome, AppRemoraLinkPendingApproval,
+    AppRemoraLinkReconnectAttempt, AppRemoraLinkReconnectBatch, AppRemoraLinkReconnectResult,
+    AppRemoraLinkRevocationOutcome, AppRemoraLinkRuntimeOffer, AppRemoraLinkScope,
+    AppRemoraLinkTransportIdentityBackend, AppRemoraLinkTransportIdentityError, RemoraLinkError,
+};
 pub use remote_path::RemotePath;
 pub use ssh::{AppSshBridgeConnectResult, AppSshConnectionResult, AppSshSessionResult, SshBridge};
 pub use terminal::{
@@ -56,11 +68,4 @@ pub use terminal::{
 pub use crate::reconnect::{
     ReconnectOutcome, ReconnectResult, SavedServerRecord, SlingshotCredentialProvider,
     SlingshotCredentialRecord, SshAuthMethodRecord, SshCredentialProvider, SshCredentialRecord,
-};
-pub use crate::remote_host_pairing::types::{
-    HostCredentialRevocationStatus, RemoteForgetOutcome, RemoteHostId, RemoteHostPairingError,
-    RemotePairingAcceptance, RemotePairingCode, RemotePairingCodeInspection, RemotePairingOffer,
-    RemotePairingOfferDisposition, RemotePairingOfferId, RemotePairingOutcome,
-    RemotePairingProtocol, RemotePairingRepairReason, RemoteRePairReason, RemoteReconnectOutcome,
-    RemoteRevokeOutcome, RemoteRuntimeOffer,
 };

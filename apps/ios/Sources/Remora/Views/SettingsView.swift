@@ -44,6 +44,7 @@ struct SettingsView: View {
                     petSection
                     experimentalSection
                     accountSection
+                    remoraLinkHostsSection
                     serversSection
                 }
                 .scrollContentBackground(.hidden)
@@ -320,6 +321,36 @@ struct SettingsView: View {
             } else {
                 SettingsDisconnectedAccountSection()
             }
+        }
+    }
+
+    // MARK: - Remora Link Hosts
+
+    private var remoraLinkHostsSection: some View {
+        Section {
+            NavigationLink {
+                RemoraLinkHostsSettingsView(appModel: appModel)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "link.badge.plus")
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remora Link Hosts")
+                            .remoraFont(.subheadline)
+                            .foregroundColor(RemoraTheme.textPrimary)
+                        Text("Pairing trust, revocation, and cleanup")
+                            .remoraFont(.caption)
+                            .foregroundColor(RemoraTheme.textSecondary)
+                    }
+                }
+                .frame(minHeight: 44)
+            }
+            .accessibilityHint("Shows hosts paired through Remora Link")
+            .listRowBackground(RemoraTheme.surface.opacity(0.6))
+        } header: {
+            Text("Remora Link")
+                .foregroundColor(RemoraTheme.textSecondary)
         }
     }
 

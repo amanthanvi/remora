@@ -78,6 +78,14 @@ pub(crate) struct StartedExchangeV2 {
     pub(crate) challenge_response: ResponseV2,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FinishedExchangeV2 {
+    pub(crate) response: ResponseV2,
+    /// Exact process-local custody identity for a successfully attached
+    /// runtime stream. Non-connect exchanges never produce an attachment.
+    pub(crate) attachment_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum HostPortErrorV2 {
     #[error("Remora Link host is temporarily unavailable")]
@@ -108,10 +116,13 @@ pub(crate) trait HostPortV2: Send + Sync {
         &self,
         exchange_id: &str,
         proof: &ProofV2,
-    ) -> Result<ResponseV2, HostPortErrorV2>;
+    ) -> Result<FinishedExchangeV2, HostPortErrorV2>;
 
     /// Best-effort disposal for an exchange that cannot safely send a proof.
-    async fn abandon_exchange(&self, exchange_id: &str);
+    /// Remove and close a retained exchange using only bounded local work.
+    /// This must be synchronous and idempotent so a cancellation guard can
+    /// invoke it safely from `Drop`, including on a foreign executor thread.
+    fn abandon_exchange(&self, exchange_id: &str);
 
     /// Close locally retained runtime streams for one host. This performs no
     /// remote authorization mutation and is therefore used by both revoke and

@@ -10,7 +10,7 @@
 //! interim without turning expected adapter-facing items into warning noise.
 #![allow(dead_code)]
 
-mod identity;
+pub(crate) mod identity;
 mod ports;
 pub(crate) mod remora_link_v2;
 pub mod types;

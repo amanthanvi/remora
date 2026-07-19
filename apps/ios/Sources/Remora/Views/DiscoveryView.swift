@@ -10,7 +10,7 @@ struct DiscoveryView: View {
     @State private var pendingSSHServer: DiscoveredServer?
     @State private var sshAgentContext: SSHBridgeAgentContext?
     @State private var showManualEntry = false
-    @State private var showAlleycatSheet = false
+    @State private var showRemoraLinkSheet = false
     @State private var showSlingshotHosts = false
     @State private var slingshotEnvironments: [AppSlingshotEnvironment] = []
     @State private var slingshotIsLoading = false
@@ -152,10 +152,9 @@ struct DiscoveryView: View {
         .sheet(isPresented: $showSlingshotHosts) {
             slingshotHostsSheet
         }
-        .sheet(isPresented: $showAlleycatSheet) {
-            RemotePairingSheet(appModel: appModel, startScanningOnAppear: true) { result in
-                showAlleycatSheet = false
-                Task { await connectAlleycatTarget(result) }
+        .sheet(isPresented: $showRemoraLinkSheet) {
+            RemotePairingSheet(appModel: appModel, startScanningOnAppear: true) { _ in
+                Task { await appModel.refreshSnapshot() }
             }
         }
         .onChange(of: showManualEntry) { _, isPresented in
@@ -249,15 +248,15 @@ struct DiscoveryView: View {
                     .padding(.top, 8)
 
                 chooserCard(
-                    title: "Pair with Remora",
-                    subtitle: "Run npx kittylitter on the host, then scan the QR code it prints.",
+                    title: "Remora Link",
+                    subtitle: "Run npx --yes remora-link@latest pair on the host, then scan or paste its code.",
                     badge: "RECOMMENDED",
                     icon: "qrcode.viewfinder",
                     supportedAgents: Self.remoraAgents,
                     isRecommended: true,
                     accessibilityID: "discovery.chooser.remora"
                 ) {
-                    showAlleycatSheet = true
+                    showRemoraLinkSheet = true
                 }
 
                 chooserCard(
@@ -930,49 +929,6 @@ struct DiscoveryView: View {
             navigateAfterConnect(server)
         } else {
             connectError = "Failed to connect"
-        }
-    }
-
-    /// Called by the pairing sheet after it has already opened a
-    /// fully connected ServerSession. Persist the stable node/agent metadata
-    /// and navigate; the token stays in Keychain.
-    private func connectAlleycatTarget(_ result: RemotePairingTarget) async {
-        let synthesized = DiscoveredServer(
-            id: result.serverId,
-            name: result.displayName,
-            hostname: result.nodeId,
-            port: nil,
-            codexPorts: [],
-            sshPort: nil,
-            source: .manual,
-            hasCodexServer: true,
-            wakeMAC: nil,
-            sshPortForwardingEnabled: false,
-            websocketURL: nil,
-            preferredConnectionMode: nil,
-            preferredCodexPort: nil,
-            os: nil,
-            sshBanner: nil
-        )
-        SavedServerStore.rememberAlleycat(
-            synthesized,
-            nodeId: result.nodeId,
-            relay: result.params.relay,
-            agentName: result.agentName,
-            agentWire: alleycatWireStorageValue(result.agentWire)
-        )
-        await appModel.refreshSnapshot()
-        if appModel.snapshot?.servers.first(where: { $0.serverId == result.serverId })?.health == .connected {
-            navigateAfterConnect(synthesized)
-        }
-    }
-
-    private func alleycatWireStorageValue(_ wire: AppAlleycatAgentWire) -> String {
-        switch wire {
-        case .websocket:
-            return "websocket"
-        case .jsonl:
-            return "jsonl"
         }
     }
 

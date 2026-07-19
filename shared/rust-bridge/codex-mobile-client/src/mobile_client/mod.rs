@@ -43,7 +43,7 @@ mod slingshot;
 mod store_listener;
 #[cfg(test)]
 mod tests;
-mod thread_projection;
+pub(crate) mod thread_projection;
 mod user_input;
 
 use self::dynamic_tools::*;
@@ -137,6 +137,12 @@ pub struct MobileClient {
     /// Serializes configuration replacement and clearing across all FFI
     /// handles, including secure integrity-key bootstrap.
     pub(crate) background_relay_configuration: Arc<tokio::sync::Mutex<()>>,
+    /// Optional native persistence and hardware-custody configuration for the
+    /// Rust-owned Remora Link v2 lifecycle. Shared by every AppClient handle.
+    pub(crate) remora_link:
+        Arc<RwLock<Option<Arc<crate::ffi::remora_link_v2::ConfiguredRemoraLink>>>>,
+    /// Serializes Remora Link configuration replacement and endpoint teardown.
+    pub(crate) remora_link_configuration: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// State for a single in-flight guided SSH connect.
@@ -274,6 +280,8 @@ impl MobileClient {
             terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
             background_relay: Arc::new(RwLock::new(None)),
             background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
+            remora_link: Arc::new(RwLock::new(None)),
+            remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -333,7 +341,9 @@ impl MobileClient {
         }
     }
 
-    fn sessions_read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Arc<ServerSession>>> {
+    pub(crate) fn sessions_read(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, Arc<ServerSession>>> {
         match self.sessions.read() {
             Ok(guard) => guard,
             Err(error) => {
@@ -565,7 +575,7 @@ impl MobileClient {
         }
     }
 
-    async fn replace_existing_session(&self, server_id: &str) {
+    pub(crate) async fn replace_existing_session(&self, server_id: &str) {
         let _ = self
             .replace_existing_session_with_guard(server_id, None)
             .await;
@@ -606,7 +616,7 @@ impl MobileClient {
     /// Runs the steps that are identical across transports: marking the server
     /// `Connected`, registering runtime info, spawning event/health readers,
     /// inserting into the session map, and queuing post-connect warmup.
-    fn attach_remote_session(
+    pub(crate) fn attach_remote_session(
         &self,
         server_id: &str,
         session: Arc<ServerSession>,

@@ -1,5 +1,6 @@
 package com.remora.android.state
 
+import com.remora.android.BuildConfig
 import com.remora.android.core.bridge.UniffiInit
 import com.remora.android.util.LLog
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,15 @@ class AppModel private constructor(context: android.content.Context) {
     val reachability: NetworkReachabilityObserver
     /** Persists the iroh device secret key across cold launches. */
     val alleycatCredentials: AlleycatCredentialStore
+    /** Process-lifetime Remora Link v2 callbacks retained independently of UI lifecycle. */
+    val remoraLinkJournalBackend: AndroidRemoraLinkJournalBackend
+    val remoraLinkTransportIdentityBackend: AndroidRemoraLinkTransportIdentityBackend
+    val remoraLinkDeviceKeyBackend: AndroidRemoraLinkDeviceKeyBackend
+    private val remoraLinkConfigurationScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private lateinit var remoraLinkConfigurationGate: RemoraLinkConfigurationGate
+    val remoraLinkAvailable: StateFlow<Boolean>
+        get() = remoraLinkConfigurationGate.available
     val appContext: android.content.Context = context
     init {
         UniffiInit.ensure(context)
@@ -148,6 +158,24 @@ class AppModel private constructor(context: android.content.Context) {
         reachability = NetworkReachabilityObserver(context, this)
         reachability.start()
 
+        remoraLinkJournalBackend = AndroidRemoraLinkJournalBackend(context)
+        remoraLinkTransportIdentityBackend = AndroidRemoraLinkTransportIdentityBackend(context)
+        remoraLinkDeviceKeyBackend = AndroidRemoraLinkDeviceKeyBackend(
+            RemoraLinkDeviceKeyProvider(
+                // The provider additionally checks BuildConfig.DEBUG and emulator identity;
+                // passing false in release makes software custody impossible by construction.
+                allowDebugEmulatorSoftwareAssurance = BuildConfig.DEBUG,
+            ),
+        )
+        remoraLinkConfigurationGate = RemoraLinkConfigurationGate(remoraLinkConfigurationScope) {
+            client.configureRemoraLink(
+                journal = remoraLinkJournalBackend,
+                transportIdentity = remoraLinkTransportIdentityBackend,
+                deviceKeys = remoraLinkDeviceKeyBackend,
+            )
+        }
+        retryRemoraLinkConfiguration()
+
         // Push any persisted iroh device secret key to the Rust client
         // BEFORE any alleycat operation triggers the endpoint bind, so
         // the same `EndpointId` is reused across cold launches.
@@ -169,6 +197,20 @@ class AppModel private constructor(context: android.content.Context) {
         runCatching { alleycatCredentials.saveDeviceSecretKey(bytes) }
             .onFailure { LLog.w("AppModel", "saveDeviceSecretKey failed: ${it.message}") }
     }
+
+    /** Retry-safe process-lifetime setup; callers may retry after a fail-closed preflight. */
+    fun retryRemoraLinkConfiguration(): Job =
+        remoraLinkConfigurationGate.configureInSeparateJob().also { job ->
+            job.invokeOnCompletion {
+                remoraLinkConfigurationGate.lastFailure?.let { failure ->
+                    LLog.w("AppModel", "Remora Link v2 configuration unavailable: ${failure.message}")
+                }
+            }
+        }
+
+    /** All v2 operations must pass this gate; legacy Alleycat setup remains independent. */
+    suspend fun <T> withRemoraLinkV2(operation: suspend (AppClient) -> T): T =
+        remoraLinkConfigurationGate.runWhileAvailable { operation(client) }
 
     // --- Observable state ----------------------------------------------------
 
@@ -287,6 +329,7 @@ class AppModel private constructor(context: android.content.Context) {
     private var activeClients: Int = 0
 
     fun start() {
+        if (!remoraLinkAvailable.value) retryRemoraLinkConfiguration()
         val shouldStart = synchronized(lifecycleLock) {
             activeClients += 1
             subscriptionJob?.isActive != true
