@@ -3,7 +3,7 @@
 //! The control lifecycle authenticates and attaches a runtime stream. This
 //! module keeps the resulting byte stream transport-neutral: attachment
 //! identity is exact, custody is bounded and expiring, and the stream adapter
-//! selects the advertised app-server framing without reusing Alleycat state.
+//! selects the advertised app-server framing without reusing retired v1 state.
 
 use std::collections::HashMap;
 use std::pin::Pin;

@@ -1,7 +1,7 @@
 //! Transport-agnostic reconnect surface for remote `AppServerClient`s.
 //!
-//! Both the SSH (russh + WebSocket-over-tunnel) and Alleycat (Iroh QUIC)
-//! transports need to be able to re-establish their underlying connection
+//! SSH, Remora Link, and other managed transports need to be able to
+//! re-establish their underlying connection
 //! and produce a fresh `AppServerClient` after a transient drop. This module
 //! defines the small trait the session worker uses to drive that operation
 //! without knowing which transport is underneath.
@@ -15,8 +15,8 @@ use crate::transport::TransportError;
 
 /// Whether the transport's replay handshake proved that the replacement
 /// stream is caught up. `AuthoritativeRefreshRequired` is deliberately a
-/// transport-neutral outcome: Alleycat maps its `drift_reload` attach result
-/// here, while transports without replay semantics retain the default.
+/// transport-neutral outcome for reconnect protocols that detect replay
+/// drift, while transports without replay semantics retain the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ReplayOutcome {
     #[default]
@@ -25,7 +25,7 @@ pub(crate) enum ReplayOutcome {
 }
 
 /// Transport-scoped state that must outlive the worker's `client` binding
-/// (e.g. the iroh `Connection` backing an Alleycat stream). The worker
+/// (e.g. a connection backing a managed stream). The worker
 /// swaps the keepalive Arc on each successful reconnect so the previous
 /// resource is dropped only AFTER the new one is installed.
 ///
@@ -62,8 +62,8 @@ pub(crate) trait RemoteTransport: Send + Sync + 'static {
     ///
     /// `args` and `websocket_url` describe the original connect parameters and
     /// are provided for transports that fall back to a plain WebSocket connect
-    /// (e.g. SSH after a port-forward refresh). Transports that ignore them
-    /// (e.g. Alleycat, which derives everything from its own params) may do so.
+    /// (e.g. SSH after a port-forward refresh). Transports that derive their
+    /// route from their own parameters may ignore them.
     async fn reconnect(
         &self,
         args: &RemoteAppServerConnectArgs,
@@ -100,18 +100,6 @@ pub(crate) trait RemoteTransport: Send + Sync + 'static {
     /// for the idle timeout. Default: no-op for TCP-based transports
     /// where the OS already surfaces network changes.
     async fn notify_network_change(&self) {}
-
-    /// Tear down the currently-installed underlying connection — used
-    /// when the application has out-of-band knowledge that the connection
-    /// is dead even though iroh hasn't observed it yet (e.g. the OS
-    /// suspended us for longer than iroh's per-path idle timeout). For
-    /// alleycat this calls `Connection::close()` on the live session;
-    /// the worker's `client.next_event()` then yields `None` and the
-    /// existing reconnect path opens a fresh `Connection` on the shared
-    /// `Endpoint`. Default: no-op for transports where the OS has
-    /// already surfaced any genuinely-dead state via the underlying
-    /// stream's read/write errors.
-    async fn close_current_connection(&self) {}
 }
 
 #[cfg(test)]
@@ -166,26 +154,26 @@ mod tests {
             "an SSH reconnect (keepalive: None) must not clobber the existing keepalive"
         );
 
-        // Alleycat-style reconnect: keepalive carries a fresh Arc; old one drops.
-        let next_alleycat_drop_count = Arc::new(AtomicUsize::new(0));
-        let next_alleycat: Arc<dyn SessionKeepalive> = Arc::new(DropCounter {
-            counter: Arc::clone(&next_alleycat_drop_count),
+        // Managed reconnect: keepalive carries a fresh Arc; old one drops.
+        let next_managed_drop_count = Arc::new(AtomicUsize::new(0));
+        let next_managed: Arc<dyn SessionKeepalive> = Arc::new(DropCounter {
+            counter: Arc::clone(&next_managed_drop_count),
         });
-        keepalive = Some(next_alleycat);
+        keepalive = Some(next_managed);
         assert_eq!(
             drop_count.load(Ordering::SeqCst),
             1,
             "the previous keepalive Arc must drop exactly once after the swap"
         );
         assert_eq!(
-            next_alleycat_drop_count.load(Ordering::SeqCst),
+            next_managed_drop_count.load(Ordering::SeqCst),
             0,
             "the new keepalive Arc must remain alive"
         );
 
         // Worker exit: dropping the slot drops the new keepalive.
         drop(keepalive);
-        assert_eq!(next_alleycat_drop_count.load(Ordering::SeqCst), 1);
+        assert_eq!(next_managed_drop_count.load(Ordering::SeqCst), 1);
     }
 
     /// `RemoteTransport` must be usable as a trait object (`Arc<dyn ...>`).

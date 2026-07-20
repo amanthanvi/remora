@@ -286,14 +286,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_snapshot_never_retains_pairing_secrets_or_routing_ids() {
+    fn terminal_snapshot_never_retains_pairing_routing_ids() {
         let reducer = AppStoreReducer::new();
         reducer.open_terminal_session_record(
             "terminal".to_string(),
-            TerminalBackendKind::RemoteAlleycat {
-                node_id: "sensitive-node".to_string(),
-                token: "sensitive-token".to_string(),
-                relay: Some("sensitive-relay".to_string()),
+            TerminalBackendKind::RemoteRemoraLink {
+                host_id: "remora-link:sensitive-node".to_string(),
                 shell: None,
             },
             80,
@@ -308,8 +306,6 @@ mod tests {
             TerminalTransportKind::RemoraLink
         );
         assert!(!boundary_debug.contains("sensitive-node"));
-        assert!(!boundary_debug.contains("sensitive-token"));
-        assert!(!boundary_debug.contains("sensitive-relay"));
     }
 
     #[test]
@@ -341,10 +337,8 @@ mod tests {
         reducer.sync_thread_list("server", &[thread_info("thread-a")]);
         reducer.open_terminal_session_record(
             "unscoped".to_string(),
-            TerminalBackendKind::RemoteAlleycat {
-                node_id: "node".to_string(),
-                token: "token".to_string(),
-                relay: None,
+            TerminalBackendKind::RemoteRemoraLink {
+                host_id: "remora-link:node".to_string(),
                 shell: None,
             },
             80,
@@ -420,10 +414,8 @@ mod tests {
         let reducer = AppStoreReducer::new();
         reducer.open_terminal_session_record(
             "terminal".to_string(),
-            TerminalBackendKind::RemoteAlleycat {
-                node_id: "node".to_string(),
-                token: "token".to_string(),
-                relay: None,
+            TerminalBackendKind::RemoteRemoraLink {
+                host_id: "remora-link:node".to_string(),
                 shell: None,
             },
             80,

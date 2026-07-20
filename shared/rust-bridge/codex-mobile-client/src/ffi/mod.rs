@@ -4,7 +4,6 @@
 //! The scaffolding macro is invoked in lib.rs; this module holds additional
 //! FFI helper types and exported functions.
 
-pub(crate) mod alleycat;
 mod android;
 mod app_store;
 pub(crate) mod background_relay;
@@ -20,10 +19,6 @@ mod ssh;
 mod terminal;
 
 pub use crate::ssh_bridge::{AgentAvailabilityStatus, RemoteAgentAvailability, SshBridgeTransport};
-pub use alleycat::{
-    AlleycatBridge, AppAlleycatAgentInfo, AppAlleycatAgentWire, AppAlleycatConnectResult,
-    AppAlleycatPairPayload,
-};
 pub use app_store::{AppStore, AppStoreSubscription};
 pub use background_relay::{
     AppRelayBindingState, AppRelayBindingStatus, AppRelayEventClass, AppRelayFailure,

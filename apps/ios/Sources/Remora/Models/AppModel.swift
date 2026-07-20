@@ -44,7 +44,6 @@ final class AppModel {
         let rc = ReconnectController()
         rc.setCredentialProvider(provider: SwiftSshCredentialProvider())
         rc.setSlingshotCredentialProvider(provider: SwiftSlingshotCredentialProvider())
-        rc.setMultiClankerAndQuicEnabled(enabled: true)
         return RustBridges(
             store: AppStore(),
             client: AppClient(),

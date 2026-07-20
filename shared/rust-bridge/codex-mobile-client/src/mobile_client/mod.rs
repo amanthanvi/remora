@@ -7,10 +7,6 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::alleycat::{
-    AgentInfo as AlleycatAgentInfo, AgentWire as AlleycatAgentWire, AlleycatReconnectTransport,
-    ParsedPairPayload as ParsedAlleycatPairPayload,
-};
 use crate::discovery::{DiscoveredServer, DiscoveryConfig, DiscoveryService, MdnsSeed};
 use crate::session::connection::InProcessConfig;
 use crate::session::connection::{
@@ -95,32 +91,11 @@ pub struct MobileClient {
     pub(crate) slingshot_credentials_directory: Arc<StdMutex<Option<String>>>,
     direct_resumed_threads: Arc<StdMutex<HashSet<ThreadKey>>>,
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
-    /// Single shared iroh `Endpoint` for all alleycat operations. iroh is
-    /// designed for one-per-app reuse: `Endpoint::connect(&self, ...)`
-    /// takes `&self` so it can be called many times to open new
-    /// connections, and `Endpoint::network_change()` re-evaluates paths
-    /// across every active `Connection` carried on it. Building a fresh
-    /// endpoint per reconnect (the prior behavior) was rebinding UDP
-    /// sockets, generating fresh secret keys, re-running relay
-    /// discovery, and logging "Aborting ungracefully" on every drop.
-    /// Lazily initialized on the first `list_agents` /
-    /// `connect_remote_over_alleycat`.
-    alleycat_endpoint: Arc<tokio::sync::OnceCell<iroh::Endpoint>>,
-    /// Persisted iroh device secret key. The platform loads the key
-    /// bytes from keychain (iOS) / EncryptedSharedPreferences (Android)
-    /// at app launch and pushes them in via
-    /// `set_alleycat_secret_key`. After `alleycat_endpoint()` initializes,
-    /// the platform reads the actually-used bytes back via
-    /// `alleycat_secret_key` and persists them — so the next cold
-    /// launch reuses the same `EndpointId` (faster relay re-association,
-    /// stable peer identity).
-    alleycat_secret_key: Arc<StdMutex<Option<[u8; 32]>>>,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
     /// bootstrap task.
     pub(crate) ssh_bootstrap_flows:
         Arc<tokio::sync::Mutex<HashMap<String, ManagedSshBootstrapFlow>>>,
-    alleycat_restart_targets: Arc<StdMutex<HashMap<String, AlleycatRestartTarget>>>,
     /// Live terminal session handles keyed by session id. The store
     /// holds the FFI-visible snapshot
     /// (`AppSnapshot.terminal_sessions`); these are the strong
@@ -148,11 +123,6 @@ pub struct MobileClient {
 /// State for a single in-flight guided SSH connect.
 pub struct ManagedSshBootstrapFlow {}
 
-#[derive(Debug, Clone)]
-struct AlleycatRestartTarget {
-    params: crate::alleycat::ParsedPairPayload,
-}
-
 /// A waiter registered by `update_saved_app` to receive the next
 /// finalized `show_widget` on a specific thread. See
 /// `MobileClient::widget_waiters` and `dynamic_tools::try_fulfill_widget_waiter`.
@@ -175,7 +145,7 @@ struct OAuthCallbackTunnel {
 }
 
 #[derive(Debug, Clone)]
-pub struct AlleycatConnectOutcome {
+pub struct SshBridgeConnectOutcome {
     pub server_id: String,
     pub node_id: String,
     pub agent_name: String,
@@ -210,42 +180,6 @@ fn is_method_not_found(error: &str) -> bool {
         || error.to_ascii_lowercase().contains("not implemented")
 }
 
-fn alleycat_runtime_agent_names(
-    runtime_agents: &[(AgentRuntimeKind, AlleycatAgentInfo)],
-) -> String {
-    runtime_agents
-        .iter()
-        .map(|(_, agent)| agent.name.clone())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn missing_runtime_kinds(
-    existing_runtime_kinds: &[AgentRuntimeKind],
-    requested_runtime_kinds: &HashSet<AgentRuntimeKind>,
-) -> Vec<AgentRuntimeKind> {
-    let existing = existing_runtime_kinds
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let mut missing = requested_runtime_kinds
-        .iter()
-        .cloned()
-        .filter(|kind| !existing.contains(kind))
-        .collect::<Vec<_>>();
-    missing.sort();
-    missing
-}
-
-fn alleycat_requested_runtime_kinds(
-    runtime_agents: &[(AgentRuntimeKind, AlleycatAgentInfo)],
-) -> HashSet<AgentRuntimeKind> {
-    runtime_agents
-        .iter()
-        .map(|(runtime_kind, _)| runtime_kind.clone())
-        .collect()
-}
-
 impl MobileClient {
     /// Create a new `MobileClient`.
     pub fn new() -> Self {
@@ -273,60 +207,13 @@ impl MobileClient {
             slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
             direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
             thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
-            alleycat_endpoint: Arc::new(tokio::sync::OnceCell::new()),
-            alleycat_secret_key: Arc::new(StdMutex::new(None)),
             ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            alleycat_restart_targets: Arc::new(StdMutex::new(HashMap::new())),
             terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
             background_relay: Arc::new(RwLock::new(None)),
             background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
             remora_link: Arc::new(RwLock::new(None)),
             remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
         }
-    }
-
-    /// Platform pre-loads the persisted device key bytes from secure
-    /// storage. Must be called BEFORE the first alleycat operation —
-    /// once `alleycat_endpoint()` lazily initializes, the secret key
-    /// is captured into the iroh endpoint and any subsequent set is a
-    /// no-op for that endpoint's lifetime.
-    pub fn set_alleycat_secret_key(&self, bytes: Option<Vec<u8>>) {
-        let parsed = bytes.and_then(|v| <[u8; 32]>::try_from(v).ok());
-        match self.alleycat_secret_key.lock() {
-            Ok(mut guard) => *guard = parsed,
-            Err(error) => *error.into_inner() = parsed,
-        }
-    }
-
-    /// Read the secret key bytes the alleycat endpoint is bound to.
-    /// Returns `None` if the endpoint hasn't been initialized yet.
-    /// Platform calls this after `alleycat_endpoint()` initializes to
-    /// persist freshly-generated keys to secure storage.
-    pub fn alleycat_secret_key(&self) -> Option<Vec<u8>> {
-        self.alleycat_endpoint
-            .get()
-            .map(|endpoint| endpoint.secret_key().to_bytes().to_vec())
-    }
-
-    /// Lazy accessor for the shared alleycat iroh `Endpoint`. The first
-    /// caller binds the endpoint (UDP socket, persisted-or-fresh
-    /// `SecretKey`, relay discovery); every subsequent caller gets a
-    /// cheap clone of the same `Endpoint` handle. Reconnects open new
-    /// `Connection`s on this endpoint instead of building a new one
-    /// from scratch — that's the model iroh is designed for and is
-    /// what makes `Endpoint::network_change()` work across reconnect
-    /// cycles.
-    pub(crate) async fn alleycat_endpoint(
-        &self,
-    ) -> Result<iroh::Endpoint, crate::alleycat::AlleycatError> {
-        let secret_key = match self.alleycat_secret_key.lock() {
-            Ok(guard) => *guard,
-            Err(error) => *error.into_inner(),
-        };
-        self.alleycat_endpoint
-            .get_or_try_init(|| async { crate::alleycat::bind_alleycat_endpoint(secret_key).await })
-            .await
-            .cloned()
     }
 
     fn sessions_write(
@@ -611,7 +498,7 @@ impl MobileClient {
     }
 
     /// Common post-`connect_remote_multiplexed` attach work shared by every
-    /// remote-connect orchestrator (Alleycat, SSH-direct, SSH-bridges).
+    /// remote-connect orchestrator (Remora Link, SSH-direct, SSH-bridges).
     ///
     /// Runs the steps that are identical across transports: marking the server
     /// `Connected`, registering runtime info, spawning event/health readers,
@@ -692,334 +579,6 @@ impl MobileClient {
         Ok(server_id)
     }
 
-    pub async fn list_alleycat_agents(
-        &self,
-        params: ParsedAlleycatPairPayload,
-    ) -> Result<Vec<AlleycatAgentInfo>, TransportError> {
-        let endpoint = self
-            .alleycat_endpoint()
-            .await
-            .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-        let agents = crate::alleycat::list_agents(&endpoint, params)
-            .await
-            .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-        // Cache metadata so platforms can render labels/icons/capability
-        // flags from anywhere in the app, not just at probe time.
-        self.agent_metadata
-            .upsert_all(agents.iter().map(|agent| crate::store::AppAgentMetadata {
-                name: agent.name.clone(),
-                display_name: agent.display_name.clone(),
-                presentation: agent.presentation.clone().map(Into::into),
-                capabilities: agent.capabilities.clone().map(Into::into),
-            }));
-        Ok(agents)
-    }
-
-    pub async fn connect_remote_over_alleycat(
-        &self,
-        server_id: String,
-        display_name: String,
-        params: ParsedAlleycatPairPayload,
-        agent_name: String,
-        selected_agent_names: Vec<String>,
-        wire: AlleycatAgentWire,
-    ) -> Result<AlleycatConnectOutcome, TransportError> {
-        self.connect_remote_over_alleycat_inner(
-            server_id,
-            display_name,
-            params,
-            agent_name,
-            selected_agent_names,
-            wire,
-            None,
-        )
-        .await?
-        .ok_or_else(|| TransportError::ConnectionFailed("cold reconnect deferred".to_string()))
-    }
-
-    pub(crate) async fn reconnect_remote_over_alleycat(
-        &self,
-        server_id: String,
-        display_name: String,
-        params: ParsedAlleycatPairPayload,
-        agent_name: String,
-        selected_agent_names: Vec<String>,
-        wire: AlleycatAgentWire,
-        cold_guard: ColdReconnectGuard,
-    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
-        self.connect_remote_over_alleycat_inner(
-            server_id,
-            display_name,
-            params,
-            agent_name,
-            selected_agent_names,
-            wire,
-            Some(cold_guard),
-        )
-        .await
-    }
-
-    async fn connect_remote_over_alleycat_inner(
-        &self,
-        server_id: String,
-        display_name: String,
-        params: ParsedAlleycatPairPayload,
-        agent_name: String,
-        selected_agent_names: Vec<String>,
-        wire: AlleycatAgentWire,
-        cold_guard: Option<ColdReconnectGuard>,
-    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
-        info!(
-            "MobileClient: connect_remote_over_alleycat start server_id={} node_id={} agent={} selected_agents={:?} wire={:?}",
-            server_id, params.node_id, agent_name, selected_agent_names, wire
-        );
-        let selected_agent_names = selected_agent_names
-            .into_iter()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-            .collect::<std::collections::HashSet<_>>();
-        let mut seen_runtime_kinds = std::collections::HashSet::new();
-        let requested_agents = self
-            .list_alleycat_agents(params.clone())
-            .await?
-            .into_iter()
-            .filter_map(|agent| {
-                if !selected_agent_names.is_empty() && !selected_agent_names.contains(&agent.name) {
-                    return None;
-                }
-                let runtime_kind =
-                    crate::alleycat::agent_runtime_kind(&agent.name, &agent.display_name)?;
-                if !seen_runtime_kinds.insert(runtime_kind.clone()) {
-                    return None;
-                }
-                (agent.available).then_some((runtime_kind, agent))
-            })
-            .collect::<Vec<_>>();
-        let runtime_agents = if requested_agents.is_empty() {
-            if !selected_agent_names.is_empty() && !selected_agent_names.contains(&agent_name) {
-                self.app_store
-                    .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
-                return Err(TransportError::ConnectionFailed(
-                    "no selected remote runtime streams are available".to_string(),
-                ));
-            }
-            vec![(
-                crate::alleycat::agent_runtime_kind(&agent_name, &agent_name)
-                    .unwrap_or("codex".to_string()),
-                AlleycatAgentInfo {
-                    name: agent_name.clone(),
-                    display_name: display_name.clone(),
-                    wire,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            )]
-        } else {
-            requested_agents
-        };
-        let requested_runtime_kinds = alleycat_requested_runtime_kinds(&runtime_agents);
-        let requested_agent_names = alleycat_runtime_agent_names(&runtime_agents);
-        let visible_server_id = format!("alleycat:{}", params.node_id);
-        let server_id = if server_id.starts_with(&visible_server_id) {
-            visible_server_id
-        } else {
-            server_id
-        };
-
-        // Short-circuit if a healthy session for this server already
-        // exists. Otherwise the saved-server reconnect path can race with
-        // `AlleycatReconnectTransport`'s own auto-retry: the transport
-        // self-heals after a `BrokenPipe`, fires a Disconnected→Connected
-        // health transition that schedules `run_post_reconnect_resubscribe`
-        // against the now-healthy old session, and the saved-server
-        // reconnect tears that session down via `replace_existing_session`
-        // before the resubscribe finishes — every pending `thread/resume`
-        // then fails with `transport error: disconnected`.
-        if let Some(existing) = self.sessions_read().get(server_id.as_str()).cloned() {
-            let health = existing.health().borrow().clone();
-            if matches!(
-                health,
-                crate::session::connection::ConnectionHealth::Connected
-            ) {
-                let runtime_kinds = existing.available_runtime_kinds();
-                let missing = missing_runtime_kinds(&runtime_kinds, &requested_runtime_kinds);
-                if missing.is_empty() {
-                    if cold_guard.is_some() {
-                        return Ok(None);
-                    }
-                    info!(
-                        "MobileClient: connect_remote_over_alleycat short-circuit; healthy session exists server_id={} runtimes={:?}",
-                        server_id, runtime_kinds,
-                    );
-                    return Ok(Some(AlleycatConnectOutcome {
-                        server_id,
-                        node_id: params.node_id.clone(),
-                        agent_name: requested_agent_names,
-                    }));
-                }
-                info!(
-                    "MobileClient: connect_remote_over_alleycat rebuilding healthy session server_id={} existing_runtimes={:?} missing_selected_runtimes={:?}",
-                    server_id, runtime_kinds, missing,
-                );
-            }
-        }
-
-        let config = ServerConfig {
-            server_id: server_id.clone(),
-            display_name,
-            host: params.node_id.clone(),
-            port: 0,
-            websocket_url: Some(format!("ws://alleycat/{}", params.node_id)),
-            is_local: false,
-            tls: false,
-        };
-        match self.alleycat_restart_targets.lock() {
-            Ok(mut guard) => {
-                guard.insert(
-                    server_id.clone(),
-                    AlleycatRestartTarget {
-                        params: params.clone(),
-                    },
-                );
-            }
-            Err(error) => {
-                error.into_inner().insert(
-                    server_id.clone(),
-                    AlleycatRestartTarget {
-                        params: params.clone(),
-                    },
-                );
-            }
-        }
-        if !self
-            .replace_existing_session_with_guard(server_id.as_str(), cold_guard.as_ref())
-            .await
-        {
-            return Ok(None);
-        }
-        self.app_store
-            .upsert_server(&config, ServerHealthSnapshot::Connecting);
-
-        let endpoint = match self.alleycat_endpoint().await {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                self.app_store
-                    .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
-                return Err(TransportError::ConnectionFailed(error.to_string()));
-            }
-        };
-
-        let mut runtime_resources = Vec::new();
-        let mut runtime_infos = Vec::new();
-        for (runtime_kind, agent) in runtime_agents {
-            let reconnect_transport = AlleycatReconnectTransport::new(
-                params.clone(),
-                agent.name.clone(),
-                agent.wire,
-                endpoint.clone(),
-            );
-            let (remote_client, alleycat_session) =
-                match reconnect_transport.connect_initial().await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        warn!(
-                            "MobileClient: alleycat connect failed server_id={} agent={} error={}",
-                            server_id, agent.name, error
-                        );
-                        continue;
-                    }
-                };
-            // Register the freshly-built session with the transport so
-            // `close_current_connection()` can target this Connection
-            // before the worker has had to call `reconnect()`.
-            reconnect_transport
-                .register_initial_session(Arc::clone(&alleycat_session))
-                .await;
-            runtime_infos.push(AgentRuntimeInfo {
-                kind: runtime_kind.clone(),
-                name: agent.name.clone(),
-                display_name: agent.display_name.clone(),
-                available: true,
-            });
-            let trait_transport: Arc<dyn crate::session::remote_transport::RemoteTransport> =
-                Arc::new(reconnect_transport);
-            let keepalive: Arc<dyn crate::session::remote_transport::SessionKeepalive> =
-                alleycat_session;
-            runtime_resources.push(RuntimeRemoteSessionResource {
-                runtime_kind,
-                client: remote_client,
-                transport: Some(trait_transport),
-                keepalive: Some(keepalive),
-            });
-        }
-        if runtime_resources.is_empty() {
-            self.app_store
-                .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
-            return Err(TransportError::ConnectionFailed(
-                "no available remote runtime streams connected".to_string(),
-            ));
-        }
-
-        info!(
-            "MobileClient: alleycat building multiplexed session server_id={} runtime_kinds={:?}",
-            server_id,
-            runtime_resources
-                .iter()
-                .map(|r| r.runtime_kind.clone())
-                .collect::<Vec<_>>()
-        );
-        let session = match ServerSession::connect_remote_multiplexed(
-            config,
-            runtime_resources,
-            RemoteSessionExtras::default(),
-        )
-        .await
-        {
-            Ok(session) => Arc::new(session),
-            Err(error) => {
-                warn!(
-                    "MobileClient: alleycat app-server session failed server_id={} error={}",
-                    server_id, error
-                );
-                self.app_store
-                    .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
-                return Err(error);
-            }
-        };
-        info!(
-            "MobileClient: alleycat session ready server_id={} runtime_kinds={:?}",
-            server_id,
-            session.runtime_kinds()
-        );
-
-        self.attach_remote_session(&server_id, session, runtime_infos.clone());
-
-        // Preserve the user's *intent* in the saved-server record rather
-        // than only the agents that successfully attached on this call.
-        // If a transient failure drops one runtime (e.g. devin's ACP
-        // child hits a stale session lock once), the next reconnect
-        // should still try every agent the user originally picked, not
-        // silently shrink to the survivors. Falls back to the connected
-        // set if the user didn't explicitly select anything (legacy
-        // single-agent callers).
-        let persisted_agents = if !requested_agent_names.is_empty() {
-            requested_agent_names
-        } else {
-            runtime_infos
-                .iter()
-                .map(|runtime| runtime.name.clone())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-
-        Ok(Some(AlleycatConnectOutcome {
-            server_id,
-            node_id: params.node_id,
-            agent_name: persisted_agents,
-        }))
-    }
-
     pub async fn connect_remote_over_ssh_bridges(
         &self,
         ssh_client: Arc<SshClient>,
@@ -1029,7 +588,7 @@ impl MobileClient {
         state_root: String,
         runtime_kinds: Vec<AgentRuntimeKind>,
         transport: crate::ssh_bridge::SshBridgeTransport,
-    ) -> Result<AlleycatConnectOutcome, TransportError> {
+    ) -> Result<SshBridgeConnectOutcome, TransportError> {
         self.connect_remote_over_ssh_bridges_inner(
             ssh_client,
             server_id,
@@ -1054,7 +613,7 @@ impl MobileClient {
         runtime_kinds: Vec<AgentRuntimeKind>,
         transport: crate::ssh_bridge::SshBridgeTransport,
         cold_guard: ColdReconnectGuard,
-    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
+    ) -> Result<Option<SshBridgeConnectOutcome>, TransportError> {
         self.connect_remote_over_ssh_bridges_inner(
             ssh_client,
             server_id,
@@ -1078,7 +637,7 @@ impl MobileClient {
         runtime_kinds: Vec<AgentRuntimeKind>,
         transport: crate::ssh_bridge::SshBridgeTransport,
         cold_guard: Option<ColdReconnectGuard>,
-    ) -> Result<Option<AlleycatConnectOutcome>, TransportError> {
+    ) -> Result<Option<SshBridgeConnectOutcome>, TransportError> {
         if runtime_kinds.is_empty() {
             return Err(TransportError::ConnectionFailed(
                 "no SSH runtime kinds selected".to_string(),
@@ -1157,7 +716,7 @@ impl MobileClient {
         );
         self.attach_remote_session(&server_id, session, runtime_infos.clone());
 
-        Ok(Some(AlleycatConnectOutcome {
+        Ok(Some(SshBridgeConnectOutcome {
             server_id,
             node_id: host,
             agent_name: runtime_infos
@@ -1311,10 +870,9 @@ impl MobileClient {
             Arc::clone(&ssh_pid),
         );
 
-        // Eagerly establish the Codex client now that the SSH bootstrap is up.
-        // Surfacing connect errors here matches the eager-connect semantics used
-        // by `connect_remote_over_alleycat` and the multi-runtime SSH-bridges
-        // path, so `connect_remote_multiplexed` only sees populated clients.
+        // Eagerly establish the Codex client now that the SSH bootstrap is up,
+        // matching the multi-runtime SSH-bridges path so the multiplexed
+        // session only sees populated clients.
         let (_, connect_args) = crate::session::connection::remote_connect_args(&config);
         let initial_connect = match bootstrap.transport {
             SshBootstrapTransport::AppServerProxy => {
@@ -1400,65 +958,14 @@ impl MobileClient {
         Ok(server_id)
     }
 
-    /// Hint every active session that the host network may have changed
-    /// (e.g. iOS just resumed the app from background suspension). For
-    /// alleycat/iroh-backed sessions this triggers `Endpoint::network_change()`,
-    /// letting QUIC re-evaluate paths and refresh relays without waiting for
-    /// the idle timeout. TCP-based sessions default to a no-op since the
-    /// kernel already surfaces those changes.
+    /// Hint every active session that the host network may have changed.
+    /// Iroh-backed Remora Link sessions re-evaluate paths while TCP-based
+    /// sessions use the default no-op.
     pub async fn notify_network_change(&self) {
         let sessions: Vec<Arc<ServerSession>> = self.sessions_read().values().cloned().collect();
         for session in sessions {
             session.notify_network_change().await;
         }
-    }
-
-    /// Forcibly abandon the currently-installed underlying connection
-    /// for every active session. The session worker observes the close
-    /// on the next `client.next_event()` poll and rebuilds via its
-    /// existing reconnect path — the post-reconnect resubscribe in
-    /// `spawn_health_reader` re-attaches the new `ConnectionId` to each
-    /// loaded thread's subscription set.
-    ///
-    /// Called from the platform lifecycle when we have out-of-band
-    /// knowledge that the connection is dead (e.g. iOS resumed us after
-    /// suspension longer than iroh's per-path idle timeout, so the
-    /// existing path is silently dead and `network_change()` alone
-    /// would only refresh the endpoint's discovery layer — not the
-    /// connection-level path). See `ReconnectController::on_long_resume`.
-    pub async fn abandon_alleycat_connections(&self) {
-        let sessions: Vec<Arc<ServerSession>> = self.sessions_read().values().cloned().collect();
-        for session in sessions {
-            // Direct-resume markers are scoped to a live `ConnectionId`. Once
-            // we close the underlying Connection, any subsequent
-            // `external_resume_thread` for this server must re-issue
-            // `thread/resume` against the new connection — otherwise it
-            // would short-circuit on the stale marker and the new
-            // `ConnectionId` would never be added to the per-thread
-            // subscription set, silencing turn-stream events. The
-            // post-reconnect resubscribe in `spawn_health_reader` also
-            // clears these on Disconnected→Connected, but doing it eagerly
-            // here lets a refresh issued before the new connection is up
-            // (e.g. push-wake `refreshTrackedThreads`) take the slow path.
-            self.clear_direct_resume_markers_for_server(session.config().server_id.as_str());
-            session.close_current_connections().await;
-        }
-    }
-
-    /// Gracefully close the shared alleycat iroh `Endpoint` if it has
-    /// been initialized. Awaits iroh's close handshake (sends
-    /// CONNECTION_CLOSE to peers, drains in-flight ACKs). Idempotent —
-    /// calling on an already-closed or never-initialized endpoint is a
-    /// no-op.
-    pub async fn shutdown_alleycat_endpoint(&self) {
-        let Some(endpoint) = self.alleycat_endpoint.get().cloned() else {
-            return;
-        };
-        if endpoint.is_closed() {
-            return;
-        }
-        info!("MobileClient: shutting down alleycat endpoint");
-        endpoint.close().await;
     }
 
     /// Disconnect a server by its ID.
@@ -1480,14 +987,6 @@ impl MobileClient {
         }
         let session = self.sessions_write().remove(server_id);
         self.clear_direct_resume_markers_for_server(server_id);
-        match self.alleycat_restart_targets.lock() {
-            Ok(mut guard) => {
-                guard.remove(server_id);
-            }
-            Err(error) => {
-                error.into_inner().remove(server_id);
-            }
-        }
         self.app_store.remove_server(server_id);
 
         let inner = Arc::clone(&self.oauth_callback_tunnels);
@@ -1503,19 +1002,6 @@ impl MobileClient {
 
     pub async fn restart_app_server(&self, server_id: &str) -> Result<(), TransportError> {
         self.clear_oauth_callback_tunnel(server_id).await;
-        let alleycat_restart_target = match self.alleycat_restart_targets.lock() {
-            Ok(guard) => guard.get(server_id).cloned(),
-            Err(error) => error.into_inner().get(server_id).cloned(),
-        };
-        if let Some(target) = alleycat_restart_target {
-            let endpoint = self
-                .alleycat_endpoint()
-                .await
-                .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-            crate::alleycat::restart_agent(&endpoint, target.params, "codex".to_string())
-                .await
-                .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-        }
         let session = self.sessions_write().remove(server_id);
         self.clear_direct_resume_markers_for_server(server_id);
         self.app_store.remove_server(server_id);
@@ -2862,7 +2348,7 @@ pub(super) fn runtime_kinds_support_account_sync(runtime_kinds: &[AgentRuntimeKi
 ///
 /// Upstream codex routes per-turn events (`TurnStarted`, `Item*`,
 /// `TurnCompleted`) only to the connections currently in each thread's
-/// subscription set. When `AlleycatReconnectTransport::reconnect()` swaps
+/// subscription set. When a remote transport reconnect swaps
 /// in a fresh `AppServerClient`, the server sees a brand-new
 /// `ConnectionId` that isn't subscribed to anything; the old one was
 /// already unregistered when its connection dropped. The mobile client's

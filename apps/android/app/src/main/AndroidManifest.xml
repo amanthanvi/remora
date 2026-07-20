@@ -7,10 +7,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
+        android:name="com.remora.android.RemoraApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -62,9 +62,6 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name="com.remora.android.state.PetOverlayService"
-            android:exported="false" />
         <service
             android:name="com.remora.android.background.RemoraFirebaseMessagingService"
             android:exported="false">

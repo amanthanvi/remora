@@ -93,7 +93,8 @@ class AppModel private constructor(context: android.content.Context) {
 
         fun init(context: android.content.Context): AppModel {
             if (_instance == null) {
-                _instance = AppModel(context.applicationContext)
+                val appContext = context.applicationContext
+                _instance = AppModel(appContext)
             }
             return _instance!!
         }
@@ -119,8 +120,6 @@ class AppModel private constructor(context: android.content.Context) {
     val launchState: AppLaunchState
     /** Observes Wi-Fi ↔ cellular handoffs etc. and hints iroh. */
     val reachability: NetworkReachabilityObserver
-    /** Persists the iroh device secret key across cold launches. */
-    val alleycatCredentials: AlleycatCredentialStore
     /** Process-lifetime Remora Link v2 callbacks retained independently of UI lifecycle. */
     val remoraLinkJournalBackend: AndroidRemoraLinkJournalBackend
     val remoraLinkTransportIdentityBackend: AndroidRemoraLinkTransportIdentityBackend
@@ -153,7 +152,6 @@ class AppModel private constructor(context: android.content.Context) {
         reconnectController.setSlingshotCredentialProvider(
             KotlinSlingshotCredentialProvider(ChatGPTOAuthTokenStore(context))
         )
-        reconnectController.setMultiClankerAndQuicEnabled(true)
         launchState = AppLaunchState(context)
         reachability = NetworkReachabilityObserver(context, this)
         reachability.start()
@@ -176,26 +174,6 @@ class AppModel private constructor(context: android.content.Context) {
         }
         retryRemoraLinkConfiguration()
 
-        // Push any persisted iroh device secret key to the Rust client
-        // BEFORE any alleycat operation triggers the endpoint bind, so
-        // the same `EndpointId` is reused across cold launches.
-        alleycatCredentials = AlleycatCredentialStore(context)
-        runCatching { alleycatCredentials.loadDeviceSecretKey() }
-            .getOrNull()
-            ?.let { client.setAlleycatSecretKey(it) }
-    }
-
-    /**
-     * After an alleycat operation has triggered the Rust endpoint
-     * bind, read back the device key bytes from Rust and persist if
-     * not already saved. Idempotent.
-     */
-    fun persistAlleycatSecretKeyIfNeeded() {
-        val bytes = client.alleycatSecretKey() ?: return
-        val existing = runCatching { alleycatCredentials.loadDeviceSecretKey() }.getOrNull()
-        if (existing != null && existing.contentEquals(bytes)) return
-        runCatching { alleycatCredentials.saveDeviceSecretKey(bytes) }
-            .onFailure { LLog.w("AppModel", "saveDeviceSecretKey failed: ${it.message}") }
     }
 
     /** Retry-safe process-lifetime setup; callers may retry after a fail-closed preflight. */
@@ -208,7 +186,7 @@ class AppModel private constructor(context: android.content.Context) {
             }
         }
 
-    /** All v2 operations must pass this gate; legacy Alleycat setup remains independent. */
+    /** All Remora Link operations must pass the configured v2 gate. */
     suspend fun <T> withRemoraLinkV2(operation: suspend (AppClient) -> T): T =
         remoraLinkConfigurationGate.runWhileAvailable { operation(client) }
 

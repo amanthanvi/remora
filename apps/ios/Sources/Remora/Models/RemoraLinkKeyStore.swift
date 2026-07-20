@@ -281,7 +281,7 @@ final class RemoraLinkKeyStore: @unchecked Sendable {
     }
 
     /// Idempotently delete one per-host private key. This removes only the
-    /// Rust-selected slot and never scans or imports the legacy Alleycat stores.
+    /// Rust-selected slot and never scans or imports retired v1 stores.
     func delete(slot: String) throws -> RemoraLinkKeyDeletionOutcome {
         guard let tag = applicationTag(for: slot) else {
             throw RemoraLinkKeyStoreError.invalidSlot

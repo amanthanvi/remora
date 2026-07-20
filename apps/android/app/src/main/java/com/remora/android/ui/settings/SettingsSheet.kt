@@ -44,7 +44,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.remora.android.state.DebugSettings
-import com.remora.android.state.PetOverlayController
 import com.remora.android.state.SavedServer
 import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SshAuthMethod
@@ -76,23 +75,14 @@ import uniffi.codex_mobile_client.AppServerSnapshot
 fun SettingsSheet(
     onDismiss: () -> Unit,
     onOpenAccount: (serverId: String) -> Unit,
-    initialSubScreen: SettingsStartDestination = SettingsStartDestination.TopLevel,
     onOpenApps: (() -> Unit)? = null,
 ) {
     // Sub-screen navigation
-    var subScreen by remember(initialSubScreen) {
-        mutableStateOf(
-            when (initialSubScreen) {
-                SettingsStartDestination.TopLevel -> null
-                SettingsStartDestination.Pets -> SettingsSubScreen.Pets
-            },
-        )
-    }
+    var subScreen by remember { mutableStateOf<SettingsSubScreen?>(null) }
 
     when (subScreen) {
         SettingsSubScreen.Appearance -> AppearanceScreen(onBack = { subScreen = null })
         SettingsSubScreen.Experimental -> ExperimentalScreen(onBack = { subScreen = null })
-        SettingsSubScreen.Pets -> PetsScreen(onBack = { subScreen = null })
         SettingsSubScreen.TipJar -> TipJarScreen(onBack = { subScreen = null })
         SettingsSubScreen.Debug -> DebugScreen(onBack = { subScreen = null })
         SettingsSubScreen.RemoraLinkHosts -> RemoraLinkHostsScreen(onBack = { subScreen = null })
@@ -100,7 +90,6 @@ fun SettingsSheet(
             onDismiss = onDismiss,
             onOpenAppearance = { subScreen = SettingsSubScreen.Appearance },
             onOpenExperimental = { subScreen = SettingsSubScreen.Experimental },
-            onOpenPets = { subScreen = SettingsSubScreen.Pets },
             onOpenTipJar = { subScreen = SettingsSubScreen.TipJar },
             onOpenDebug = { subScreen = SettingsSubScreen.Debug },
             onOpenRemoraLinkHosts = { subScreen = SettingsSubScreen.RemoraLinkHosts },
@@ -110,16 +99,13 @@ fun SettingsSheet(
     }
 }
 
-enum class SettingsStartDestination { TopLevel, Pets }
-
-private enum class SettingsSubScreen { Appearance, Experimental, Pets, TipJar, Debug, RemoraLinkHosts }
+private enum class SettingsSubScreen { Appearance, Experimental, TipJar, Debug, RemoraLinkHosts }
 
 @Composable
 private fun SettingsTopLevel(
     onDismiss: () -> Unit,
     onOpenAppearance: () -> Unit,
     onOpenExperimental: () -> Unit,
-    onOpenPets: () -> Unit,
     onOpenTipJar: () -> Unit,
     onOpenDebug: () -> Unit,
     onOpenRemoraLinkHosts: () -> Unit,
@@ -199,24 +185,6 @@ private fun SettingsTopLevel(
                         colors = SwitchDefaults.colors(checkedTrackColor = RemoraTheme.accent),
                     )
                 },
-            )
-        }
-
-        // ── Pets ──
-        item { SectionHeader("Pet") }
-        item {
-            SettingsRow(
-                icon = { Icon(Icons.Default.Pets, null, tint = RemoraTheme.accent, modifier = Modifier.size(18.dp)) },
-                label = "Wake Pet",
-                subtitle = PetOverlayController.selectedPet?.displayName ?: "Choose a Codex pet",
-                trailing = {
-                    Switch(
-                        checked = PetOverlayController.visible,
-                        onCheckedChange = { PetOverlayController.setVisible(context, it) },
-                        colors = SwitchDefaults.colors(checkedTrackColor = RemoraTheme.accent),
-                    )
-                },
-                onClick = onOpenPets,
             )
         }
 

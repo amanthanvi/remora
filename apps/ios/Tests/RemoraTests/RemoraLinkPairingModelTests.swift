@@ -61,6 +61,23 @@ final class RemoraLinkPairingModelTests: XCTestCase {
         XCTAssertEqual(remainingBytes, Array(repeating: 0, count: "secret-pairing-code".utf8.count))
     }
 
+    func testLegacyInspectionMapsToExplicitRemoraLinkRepairState() async {
+        let model = makeModel(inspect: { _ in
+            .legacyRePairRequired(hostId: "host-v1", hostDisplayName: "Studio Mac")
+        })
+
+        model.inspect(codeText: "legacy-code")
+        await waitUntil {
+            model.state == .legacyRePair(hostId: "host-v1", hostDisplayName: "Studio Mac")
+        }
+
+        XCTAssertEqual(RemotePairingSheet.legacyRePairTitle, "Pair again with Remora Link")
+        let message = RemotePairingSheet.legacyRePairMessage(hostDisplayName: "Studio Mac")
+        XCTAssertTrue(message.contains("legacy invitation"))
+        XCTAssertTrue(message.contains("new Remora Link pairing code"))
+        XCTAssertFalse(message.contains("npx kittylitter"))
+    }
+
     func testOfferUsesRustDefaultsAndKeepsRequiredScopesSelected() async {
         let model = makeModel(inspect: { _ in .ready(offer: Self.offer) })
 

@@ -1,18 +1,35 @@
-//! Global cache of agent metadata sourced from alleycat probe
-//! responses. Platforms (Swift / Kotlin) read from here when they need
+//! Global cache of agent metadata sourced from remote runtime inspection.
+//! Platforms (Swift / Kotlin) read from here when they need
 //! to render an agent's label, icon, sort order, BETA badge, or branch
 //! on capability flags.
 //!
 //! The store is keyed by the lowercase agent `name` (the same string
-//! alleycat advertises and uses to route `Connect` requests). Multiple
+//! a remote host advertises and uses to route connect requests). Multiple
 //! servers may advertise the same agent name; the latest probe wins —
 //! agents are expected to converge on identical metadata across hosts
-//! built from the same alleycat version.
+//! built from the same runtime bridge version.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::ffi::alleycat::{AppAgentCapabilities, AppAgentPresentation};
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AppAgentPresentation {
+    pub title: Option<String>,
+    pub is_beta: bool,
+    pub sort_order: i32,
+    pub description: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AppAgentCapabilities {
+    pub locks_reasoning_effort_after_activity: bool,
+    pub visible_modes: Option<Vec<String>>,
+    pub supports_ssh_bridge: bool,
+    pub uses_direct_codex_port: bool,
+    pub supports_thread_permission_overrides: bool,
+    pub reports_effective_thread_permissions: bool,
+}
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AppAgentMetadata {
@@ -33,7 +50,7 @@ impl AgentMetadataStore {
     }
 
     /// Replace this agent's metadata. Called whenever a probe response
-    /// carries fresh data. Older alleycat hosts that omit `presentation`
+    /// carries fresh data. Older hosts that omit `presentation`
     /// / `capabilities` / `icon` still overwrite the entry — clients
     /// must tolerate partial metadata.
     pub fn upsert(&self, metadata: AppAgentMetadata) {
@@ -60,8 +77,7 @@ impl AgentMetadataStore {
             guard
                 .values()
                 .find(|metadata| {
-                    crate::alleycat::agent_runtime_kind(&metadata.name, &metadata.display_name)
-                        .as_deref()
+                    canonical_agent_runtime_kind(&metadata.name, &metadata.display_name).as_deref()
                         == Some(key.as_str())
                 })
                 .cloned()
@@ -88,6 +104,41 @@ impl AgentMetadataStore {
         });
         out
     }
+}
+
+fn canonical_agent_runtime_kind(name: &str, display_name: &str) -> Option<String> {
+    let name = name.trim().to_ascii_lowercase();
+    let display_name = display_name.trim().to_ascii_lowercase();
+    let candidate = if name.is_empty() {
+        display_name.as_str()
+    } else {
+        name.as_str()
+    };
+    let canonical = match candidate {
+        "codex" => Some("codex"),
+        "pi" | "pi.dev" | "pidev" => Some("pi"),
+        "amp" | "ampcode" | "amp-code" | "amp_code" => Some("amp"),
+        "opencode" | "open-code" | "open_code" => Some("opencode"),
+        "claude" | "claude-code" | "claude_code" => Some("claude"),
+        "droid" | "factory" | "factory-droid" | "factory_droid" => Some("droid"),
+        "hermes" => Some("hermes"),
+        _ if display_name == "codex" => Some("codex"),
+        _ if display_name == "pi" || display_name == "pi.dev" => Some("pi"),
+        _ if display_name == "amp" || display_name == "amp code" => Some("amp"),
+        _ if display_name == "opencode" || display_name == "open code" => Some("opencode"),
+        _ if display_name == "claude" || display_name == "claude code" => Some("claude"),
+        _ if display_name == "droid"
+            || display_name == "factory"
+            || display_name == "factory droid" =>
+        {
+            Some("droid")
+        }
+        _ if display_name == "hermes" => Some("hermes"),
+        _ => None,
+    };
+    canonical
+        .map(ToOwned::to_owned)
+        .or_else(|| (!candidate.is_empty()).then(|| candidate.to_owned()))
 }
 
 #[cfg(test)]

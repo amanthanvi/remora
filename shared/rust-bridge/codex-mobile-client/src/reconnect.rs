@@ -3,7 +3,6 @@
 //! Consolidates the duplicated transport-resolution and reconnect-plan
 //! computation that previously lived in platform Swift/Kotlin code.
 
-use crate::alleycat::{AgentWire as AlleycatAgentWire, ParsedPairPayload as AlleycatPairPayload};
 use crate::mobile_client::MobileClient;
 use crate::session::connection::{ConnectionHealth, InProcessConfig, ServerConfig};
 use crate::slingshot_url::is_slingshot_connection_url;
@@ -36,16 +35,10 @@ pub struct SavedServerRecord {
     pub ssh_port_forwarding_enabled: Option<bool>,
     pub websocket_url: Option<String>,
     pub remembered_by_user: bool,
-    /// Legacy Alleycat marker. Unsupported after the iroh-backed host migration;
-    /// records with only these fields require a new pairing scan.
-    pub alleycat_host: Option<String>,
-    /// Legacy Alleycat relay UDP port.
-    pub alleycat_udp_port: Option<u16>,
-    pub alleycat_node_id: Option<String>,
-    pub alleycat_token: Option<String>,
-    pub alleycat_relay: Option<String>,
-    pub alleycat_agent_name: Option<String>,
-    pub alleycat_agent_wire: Option<String>,
+    /// `None` identifies a non-bridge saved server. `Some([])` identifies an
+    /// SSH bridge whose available runtimes should be probed on reconnect;
+    /// `Some(kinds)` reconnects only the selected runtime kinds.
+    pub ssh_bridge_runtime_kinds: Option<Vec<AgentRuntimeKind>>,
 }
 
 /// SSH auth method discriminator.
@@ -192,13 +185,6 @@ pub(crate) enum ReconnectPlan {
         environment_id: String,
         credential: SlingshotCredentialRecord,
     },
-    Alleycat {
-        server_id: String,
-        display_name: String,
-        params: AlleycatPairPayload,
-        agent_name: String,
-        wire: AlleycatAgentWire,
-    },
 }
 
 impl ReconnectPlan {
@@ -209,8 +195,7 @@ impl ReconnectPlan {
             | Self::Local { server_id, .. }
             | Self::DirectRemote { server_id, .. }
             | Self::RemoteUrl { server_id, .. }
-            | Self::Slingshot { server_id, .. }
-            | Self::Alleycat { server_id, .. } => server_id,
+            | Self::Slingshot { server_id, .. } => server_id,
         }
     }
 }
@@ -353,15 +338,8 @@ fn compute_reconnect_plan(
     server: &SavedServerRecord,
     credential: Option<&SshCredentialRecord>,
     is_connected: bool,
-    multi_clanker_and_quic_enabled: bool,
 ) -> Option<ReconnectPlan> {
-    compute_reconnect_plan_with_slingshot(
-        server,
-        credential,
-        None,
-        is_connected,
-        multi_clanker_and_quic_enabled,
-    )
+    compute_reconnect_plan_with_slingshot(server, credential, None, is_connected)
 }
 
 pub(crate) fn compute_reconnect_plan_with_slingshot(
@@ -369,14 +347,12 @@ pub(crate) fn compute_reconnect_plan_with_slingshot(
     credential: Option<&SshCredentialRecord>,
     slingshot_credential: Option<&SlingshotCredentialRecord>,
     is_connected: bool,
-    multi_clanker_and_quic_enabled: bool,
 ) -> Option<ReconnectPlan> {
     match decide_reconnect_plan_with_slingshot(
         server,
         credential,
         slingshot_credential,
         is_connected,
-        multi_clanker_and_quic_enabled,
     ) {
         ReconnectPlanDecision::Plan(plan) => Some(plan),
         ReconnectPlanDecision::NoAction(_) => None,
@@ -388,75 +364,30 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
     credential: Option<&SshCredentialRecord>,
     slingshot_credential: Option<&SlingshotCredentialRecord>,
     is_connected: bool,
-    multi_clanker_and_quic_enabled: bool,
 ) -> ReconnectPlanDecision {
     // 1. Skip if already connected
     if is_connected {
         return ReconnectPlanDecision::NoAction(ReconnectOutcome::AlreadyConnected);
     }
 
-    // 2. Stable Alleycat pairing wins before legacy tunnel/direct transports.
-    if multi_clanker_and_quic_enabled {
-        if let (Some(node_id), Some(token), Some(agent_name)) = (
-            server.alleycat_node_id.as_ref(),
-            server.alleycat_token.as_ref(),
-            server.alleycat_agent_name.as_ref(),
-        ) {
-            let wire = match server.alleycat_agent_wire.as_deref() {
-                Some("jsonl") => AlleycatAgentWire::Jsonl,
-                _ => AlleycatAgentWire::Websocket,
-            };
-            return ReconnectPlanDecision::Plan(ReconnectPlan::Alleycat {
+    // 2. SSH bridge records reconnect as one multiplexed in-process bridge
+    // group. Classification is explicit so mixed direct/SSH records keep
+    // their normal transport selection behavior.
+    if let Some(runtime_kinds) = server.ssh_bridge_runtime_kinds.as_ref() {
+        if let Some(cred) = credential {
+            return ReconnectPlanDecision::Plan(ReconnectPlan::SshBridge {
                 server_id: server.id.clone(),
                 display_name: server.name.clone(),
-                params: AlleycatPairPayload {
-                    version: crate::alleycat::ALLEYCAT_PROTOCOL_VERSION,
-                    node_id: node_id.clone(),
-                    token: token.clone(),
-                    relay: server.alleycat_relay.clone(),
-                    host_name: None,
-                },
-                agent_name: agent_name.clone(),
-                wire,
+                host: server.hostname.clone(),
+                ssh_port: resolved_ssh_port(server),
+                credential: cred.clone(),
+                runtime_kinds: normalized_ssh_bridge_runtime_kinds(runtime_kinds),
             });
         }
-
-        // 3. SSH bridge records need to reconnect as the multiplexed
-        // in-process bridge group. Falling through to the legacy SSH plan
-        // would only bootstrap direct Codex.
-        if is_ssh_bridge_record(server) {
-            if let Some(cred) = credential {
-                return ReconnectPlanDecision::Plan(ReconnectPlan::SshBridge {
-                    server_id: server.id.clone(),
-                    display_name: server.name.clone(),
-                    host: server.hostname.clone(),
-                    ssh_port: resolved_ssh_port(server),
-                    credential: cred.clone(),
-                    runtime_kinds: parse_ssh_bridge_runtime_kinds(
-                        server.alleycat_agent_name.as_deref(),
-                    ),
-                });
-            }
-            return ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential);
-        }
-
-        // A partially persisted modern pairing must not silently fall back to
-        // a different transport. That hides credential loss and can tear down
-        // a viable session before the user is told to repair the pairing.
-        let has_modern_pairing_state = server.alleycat_node_id.is_some()
-            || server.alleycat_token.is_some()
-            || server.alleycat_relay.is_some()
-            || server.alleycat_agent_name.is_some()
-            || matches!(
-                server.alleycat_agent_wire.as_deref(),
-                Some("jsonl" | "websocket")
-            );
-        if has_modern_pairing_state {
-            return ReconnectPlanDecision::NoAction(ReconnectOutcome::RepairRequired);
-        }
+        return ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential);
     }
 
-    // 4. WebSocket URL override -> RemoteUrl
+    // 3. WebSocket URL override -> RemoteUrl
     if let Some(ref ws_url) = server.websocket_url {
         // Slingshot URLs are saved-server markers. They require the
         // ChatGPT-token-aware Slingshot connector, not the generic websocket
@@ -487,7 +418,7 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
 
     let mode = resolved_preferred_connection_mode(server);
 
-    // 5. Explicit SSH mode + credential → Ssh
+    // 4. Explicit SSH mode + credential → Ssh
     if mode.as_deref() == Some("ssh") {
         if let Some(cred) = credential {
             return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
@@ -502,7 +433,7 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
         return ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential);
     }
 
-    // 6. Direct Codex port available → DirectRemote
+    // 5. Direct Codex port available → DirectRemote
     if let Some(port) = direct_codex_port(server) {
         return ReconnectPlanDecision::Plan(ReconnectPlan::DirectRemote {
             server_id: server.id.clone(),
@@ -512,7 +443,7 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
         });
     }
 
-    // 7. No explicit mode, but credential available → SSH (legacy fallback)
+    // 6. No explicit mode, but credential available → SSH (legacy fallback)
     if mode.is_none() {
         if let Some(cred) = credential {
             return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
@@ -525,7 +456,7 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
         }
     }
 
-    // 8. Local source → Local
+    // 7. Local source → Local
     if server.source == "local" {
         return ReconnectPlanDecision::Plan(ReconnectPlan::Local {
             server_id: server.id.clone(),
@@ -533,20 +464,7 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
         });
     }
 
-    // 9. Legacy or disabled modern pairings require a deliberate new pairing
-    // instead of a silent no-op.
-    let has_pairing_state = server.alleycat_host.is_some()
-        || server.alleycat_udp_port.is_some()
-        || server.alleycat_node_id.is_some()
-        || server.alleycat_token.is_some()
-        || server.alleycat_relay.is_some()
-        || server.alleycat_agent_name.is_some()
-        || server.alleycat_agent_wire.is_some();
-    if has_pairing_state {
-        return ReconnectPlanDecision::NoAction(ReconnectOutcome::RePairRequired);
-    }
-
-    // 10. No viable transport.
+    // 8. No viable transport.
     ReconnectPlanDecision::NoAction(ReconnectOutcome::ConfigurationRequired)
 }
 
@@ -713,8 +631,15 @@ pub(crate) async fn execute_reconnect_plan(
                     return ReconnectResult::failed(server_id, e.to_string());
                 }
             };
-            let selected =
-                resolve_ssh_bridge_runtime_kinds(Arc::clone(&ssh_client), runtime_kinds).await;
+            let selected = match resolve_ssh_bridge_runtime_kinds(
+                Arc::clone(&ssh_client),
+                runtime_kinds,
+            )
+            .await
+            {
+                Ok(selected) => selected,
+                Err(error) => return ReconnectResult::failed(server_id, error),
+            };
             let state_root = match ssh_bridge_state_root(host) {
                 Ok(path) => path,
                 Err(error) => {
@@ -885,81 +810,19 @@ pub(crate) async fn execute_reconnect_plan(
                 }
             }
         }
-        ReconnectPlan::Alleycat {
-            server_id,
-            display_name,
-            params,
-            agent_name,
-            wire,
-        } => {
-            info!(
-                "reconnect: executing Alleycat plan server_id={} node_id={} agent={}",
-                server_id, params.node_id, agent_name
-            );
-            let reconnect = match cold_guard.clone() {
-                Some(guard) => {
-                    client
-                        .reconnect_remote_over_alleycat(
-                            server_id.clone(),
-                            display_name.clone(),
-                            params.clone(),
-                            agent_name.clone(),
-                            split_agent_names(agent_name),
-                            *wire,
-                            guard,
-                        )
-                        .await
-                }
-                None => client
-                    .connect_remote_over_alleycat(
-                        server_id.clone(),
-                        display_name.clone(),
-                        params.clone(),
-                        agent_name.clone(),
-                        split_agent_names(agent_name),
-                        *wire,
-                    )
-                    .await
-                    .map(Some),
-            };
-            match reconnect {
-                Ok(Some(_)) => {
-                    ReconnectResult::completed(server_id, ReconnectOutcome::Connected, false)
-                }
-                Ok(None) => {
-                    ReconnectResult::completed(server_id, ReconnectOutcome::SelfHealing, false)
-                }
-                Err(e) => {
-                    warn!(
-                        "reconnect: Alleycat plan failed server_id={} error={}",
-                        server_id, e
-                    );
-                    ReconnectResult::failed(server_id, e.to_string())
-                }
-            }
-        }
     }
 }
 
-fn is_ssh_bridge_record(server: &SavedServerRecord) -> bool {
-    server.id.starts_with("ssh-bridge:")
-        || server.alleycat_agent_wire.as_deref() == Some("ssh-bridge")
-        || server
-            .websocket_url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("ssh-bridge://"))
-}
-
-fn parse_ssh_bridge_runtime_kinds(value: Option<&str>) -> Vec<AgentRuntimeKind> {
-    value
-        .unwrap_or_default()
-        .split(',')
+fn normalized_ssh_bridge_runtime_kinds(values: &[AgentRuntimeKind]) -> Vec<AgentRuntimeKind> {
+    values
+        .iter()
         .filter_map(|part| match part.trim().to_ascii_lowercase().as_str() {
+            "" => None,
             "codex" => Some("codex".to_string()),
             "claude" => Some("claude".to_string()),
             "pi" => Some("pi".to_string()),
             "opencode" | "open-code" | "open_code" => Some("opencode".to_string()),
-            _ => None,
+            other => Some(other.to_string()),
         })
         .fold(Vec::new(), |mut acc, kind| {
             if !acc.contains(&kind) {
@@ -972,7 +835,7 @@ fn parse_ssh_bridge_runtime_kinds(value: Option<&str>) -> Vec<AgentRuntimeKind> 
 async fn resolve_ssh_bridge_runtime_kinds(
     ssh_client: Arc<SshClient>,
     requested: &[AgentRuntimeKind],
-) -> Vec<AgentRuntimeKind> {
+) -> Result<Vec<AgentRuntimeKind>, String> {
     let availability = crate::ssh_bridge::probe_remote_agents(&ssh_client)
         .await
         .unwrap_or_default();
@@ -980,12 +843,20 @@ async fn resolve_ssh_bridge_runtime_kinds(
         "reconnect: SSH bridge agent availability requested={:?} availability={:?}",
         requested, availability
     );
-    let available = |kind: &AgentRuntimeKind| {
-        kind == "codex"
-            || availability.iter().any(|entry| {
-                &entry.kind == kind
-                    && entry.status == crate::ssh_bridge::AgentAvailabilityStatus::Available
-            })
+    select_ssh_bridge_runtime_kinds(requested, &availability)
+}
+
+fn select_ssh_bridge_runtime_kinds(
+    requested: &[AgentRuntimeKind],
+    availability: &[crate::ssh_bridge::RemoteAgentAvailability],
+) -> Result<Vec<AgentRuntimeKind>, String> {
+    let available = |kind: &AgentRuntimeKind| match kind.as_str() {
+        "codex" => true,
+        "claude" | "pi" | "opencode" => availability.iter().any(|entry| {
+            &entry.kind == kind
+                && entry.status == crate::ssh_bridge::AgentAvailabilityStatus::Available
+        }),
+        _ => false,
     };
 
     let candidates = if requested.is_empty() {
@@ -1008,14 +879,20 @@ async fn resolve_ssh_bridge_runtime_kinds(
                 }
                 acc
             });
-    if selected.is_empty() {
+    if selected.is_empty() && requested.is_empty() {
         selected.push("codex".to_string());
+    }
+    if selected.is_empty() {
+        return Err(format!(
+            "none of the explicitly selected SSH bridge runtimes are available: {}",
+            requested.join(", ")
+        ));
     }
     info!(
         "reconnect: SSH bridge selected runtimes requested={:?} selected={:?}",
         requested, selected
     );
-    selected
+    Ok(selected)
 }
 
 fn ssh_bridge_state_root(host: &str) -> Result<String, String> {
@@ -1050,15 +927,6 @@ fn percent_encode_alphanumeric(value: &str) -> String {
         }
     }
     encoded
-}
-
-fn split_agent_names(agent_name: &str) -> Vec<String> {
-    agent_name
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────────
@@ -1112,13 +980,7 @@ mod tests {
             ssh_port_forwarding_enabled: None,
             websocket_url: None,
             remembered_by_user: true,
-            alleycat_host: None,
-            alleycat_udp_port: None,
-            alleycat_node_id: None,
-            alleycat_token: None,
-            alleycat_relay: None,
-            alleycat_agent_name: None,
-            alleycat_agent_wire: None,
+            ssh_bridge_runtime_kinds: None,
         }
     }
 
@@ -1294,14 +1156,14 @@ mod tests {
     #[test]
     fn plan_skip_when_connected() {
         let s = base_server();
-        assert!(compute_reconnect_plan(&s, None, true, false).is_none());
+        assert!(compute_reconnect_plan(&s, None, true).is_none());
     }
 
     #[test]
     fn plan_remote_url_when_websocket_set() {
         let mut s = base_server();
         s.websocket_url = Some("wss://example.com/ws".into());
-        let plan = compute_reconnect_plan(&s, None, false, false);
+        let plan = compute_reconnect_plan(&s, None, false);
         assert!(matches!(plan, Some(ReconnectPlan::RemoteUrl { .. })));
     }
 
@@ -1310,7 +1172,7 @@ mod tests {
         let mut s = base_server();
         s.websocket_url =
             Some("slingshot://env_123?baseUrl=https://chatgpt.com/backend-api".into());
-        let plan = compute_reconnect_plan(&s, None, false, false);
+        let plan = compute_reconnect_plan(&s, None, false);
         assert!(plan.is_none());
     }
 
@@ -1323,7 +1185,7 @@ mod tests {
             account_id: "acct".into(),
         };
 
-        let plan = compute_reconnect_plan_with_slingshot(&s, None, Some(&credential), false, false);
+        let plan = compute_reconnect_plan_with_slingshot(&s, None, Some(&credential), false);
 
         match plan {
             Some(ReconnectPlan::Slingshot {
@@ -1345,87 +1207,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_alleycat_when_saved_pairing_has_token_and_agent() {
-        let mut s = base_server();
-        s.alleycat_node_id = Some("node123".into());
-        s.alleycat_token = Some("token123".into());
-        s.alleycat_relay = Some("https://relay.example".into());
-        s.alleycat_agent_name = Some("pi".into());
-        s.alleycat_agent_wire = Some("jsonl".into());
-        s.websocket_url = Some("wss://should-not-win.example/ws".into());
-
-        let plan = compute_reconnect_plan(&s, None, false, true);
-
-        match plan {
-            Some(ReconnectPlan::Alleycat {
-                server_id,
-                display_name,
-                params,
-                agent_name,
-                wire,
-            }) => {
-                assert_eq!(server_id, "srv-1");
-                assert_eq!(display_name, "Test Server");
-                assert_eq!(params.node_id, "node123");
-                assert_eq!(params.token, "token123");
-                assert_eq!(params.relay.as_deref(), Some("https://relay.example"));
-                assert_eq!(agent_name, "pi");
-                assert_eq!(wire, AlleycatAgentWire::Jsonl);
-            }
-            other => panic!("expected alleycat reconnect plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn plan_alleycat_defaults_wire_to_websocket() {
-        let mut s = base_server();
-        s.alleycat_node_id = Some("node123".into());
-        s.alleycat_token = Some("token123".into());
-        s.alleycat_agent_name = Some("codex".into());
-
-        let plan = compute_reconnect_plan(&s, None, false, true);
-
-        match plan {
-            Some(ReconnectPlan::Alleycat { wire, .. }) => {
-                assert_eq!(wire, AlleycatAgentWire::Websocket)
-            }
-            other => panic!("expected alleycat reconnect plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn plan_alleycat_disabled_falls_through_to_direct_remote() {
-        let mut s = base_server();
-        s.alleycat_node_id = Some("node123".into());
-        s.alleycat_token = Some("token123".into());
-        s.alleycat_agent_name = Some("pi".into());
-        s.port = 8390;
-        s.codex_ports = vec![8390];
-
-        let plan = compute_reconnect_plan(&s, None, false, false);
-
-        assert!(matches!(plan, Some(ReconnectPlan::DirectRemote { .. })));
-    }
-
-    #[test]
-    fn plan_alleycat_disabled_without_transport_is_skipped() {
-        let mut s = base_server();
-        s.alleycat_node_id = Some("node123".into());
-        s.alleycat_token = Some("token123".into());
-        s.alleycat_agent_name = Some("pi".into());
-        s.has_codex_server = false;
-        s.port = 0;
-        s.codex_ports = vec![];
-
-        assert!(compute_reconnect_plan(&s, None, false, false).is_none());
-    }
-
-    #[test]
     fn plan_ssh_when_mode_is_ssh_and_credential() {
         let mut s = base_server();
         s.preferred_connection_mode = Some("ssh".into());
         let cred = ssh_credential();
-        let plan = compute_reconnect_plan(&s, Some(&cred), false, false);
+        let plan = compute_reconnect_plan(&s, Some(&cred), false);
         assert!(matches!(plan, Some(ReconnectPlan::Ssh { .. })));
     }
 
@@ -1433,9 +1219,9 @@ mod tests {
     fn plan_none_when_mode_is_ssh_but_no_credential() {
         let mut s = base_server();
         s.preferred_connection_mode = Some("ssh".into());
-        assert!(compute_reconnect_plan(&s, None, false, false).is_none());
+        assert!(compute_reconnect_plan(&s, None, false).is_none());
         assert!(matches!(
-            decide_reconnect_plan_with_slingshot(&s, None, None, false, false),
+            decide_reconnect_plan_with_slingshot(&s, None, None, false),
             ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential)
         ));
     }
@@ -1446,29 +1232,15 @@ mod tests {
         s.websocket_url = Some("slingshot://env_123?baseUrl=https://chatgpt.com".into());
 
         assert!(matches!(
-            decide_reconnect_plan_with_slingshot(&s, None, None, false, false),
+            decide_reconnect_plan_with_slingshot(&s, None, None, false),
             ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSlingshotCredential)
-        ));
-    }
-
-    #[test]
-    fn plan_reports_incomplete_modern_pairing_as_repair_required() {
-        let mut s = base_server();
-        s.has_codex_server = false;
-        s.port = 0;
-        s.alleycat_node_id = Some("node123".into());
-        s.alleycat_agent_name = Some("codex".into());
-
-        assert!(matches!(
-            decide_reconnect_plan_with_slingshot(&s, None, None, false, true),
-            ReconnectPlanDecision::NoAction(ReconnectOutcome::RepairRequired)
         ));
     }
 
     #[test]
     fn plan_direct_remote_when_port_available() {
         let s = base_server();
-        let plan = compute_reconnect_plan(&s, None, false, false);
+        let plan = compute_reconnect_plan(&s, None, false);
         assert!(matches!(plan, Some(ReconnectPlan::DirectRemote { .. })));
         if let Some(ReconnectPlan::DirectRemote { port, .. }) = plan {
             assert_eq!(port, 8080);
@@ -1483,7 +1255,7 @@ mod tests {
         s.port = 0;
         s.codex_ports = vec![];
         let cred = ssh_credential();
-        let plan = compute_reconnect_plan(&s, Some(&cred), false, false);
+        let plan = compute_reconnect_plan(&s, Some(&cred), false);
         assert!(matches!(plan, Some(ReconnectPlan::Ssh { .. })));
     }
 
@@ -1494,7 +1266,7 @@ mod tests {
         s.has_codex_server = false;
         s.port = 0;
         s.codex_ports = vec![];
-        let plan = compute_reconnect_plan(&s, None, false, false);
+        let plan = compute_reconnect_plan(&s, None, false);
         assert!(matches!(plan, Some(ReconnectPlan::Local { .. })));
     }
 
@@ -1505,44 +1277,47 @@ mod tests {
         s.port = 0;
         s.codex_ports = vec![];
         s.source = "manual".into();
-        assert!(compute_reconnect_plan(&s, None, false, false).is_none());
+        assert!(compute_reconnect_plan(&s, None, false).is_none());
     }
 
     #[test]
-    fn plan_legacy_alleycat_record_falls_through_to_direct_transport() {
+    fn historical_bridge_id_without_bridge_marker_preserves_direct_transport() {
         let mut s = base_server();
+        s.id = "ssh-bridge:studio".into();
         s.has_codex_server = true;
         s.port = 8390;
         s.codex_ports = vec![8390];
-        s.alleycat_host = Some("studio.tail.ts.net".into());
-        s.alleycat_udp_port = Some(51820);
 
-        let plan = compute_reconnect_plan(&s, None, false, false);
+        let plan = compute_reconnect_plan(&s, None, false);
         assert!(matches!(plan, Some(ReconnectPlan::DirectRemote { .. })));
     }
 
     #[test]
-    fn plan_legacy_alleycat_record_requires_new_pairing_when_no_transport() {
+    fn historical_bridge_url_without_bridge_marker_preserves_explicit_ssh_transport() {
         let mut s = base_server();
+        s.id = "ssh-bridge:studio".into();
         s.has_codex_server = false;
         s.port = 0;
         s.codex_ports = vec![];
-        s.alleycat_host = Some("studio.tail.ts.net".into());
-        s.alleycat_udp_port = Some(51820);
+        s.websocket_url = None;
+        s.preferred_connection_mode = Some("ssh".into());
+        let credential = ssh_credential();
 
-        assert!(compute_reconnect_plan(&s, None, false, false).is_none());
+        assert!(matches!(
+            compute_reconnect_plan(&s, Some(&credential), false),
+            Some(ReconnectPlan::Ssh { .. })
+        ));
     }
 
     #[test]
-    fn plan_legacy_alleycat_record_skipped_when_already_connected() {
+    fn bridge_record_is_skipped_when_already_connected() {
         let mut s = base_server();
-        s.alleycat_host = Some("studio.tail.ts.net".into());
-        s.alleycat_udp_port = Some(51820);
-        assert!(compute_reconnect_plan(&s, None, true, false).is_none());
+        s.ssh_bridge_runtime_kinds = Some(vec![]);
+        assert!(compute_reconnect_plan(&s, None, true).is_none());
     }
 
     #[test]
-    fn plan_ssh_bridge_enabled_uses_bridge_plan() {
+    fn selected_ssh_bridge_runtimes_use_bridge_plan() {
         let mut s = base_server();
         s.id = "ssh-bridge:studio".into();
         s.hostname = "studio".into();
@@ -1550,17 +1325,25 @@ mod tests {
         s.codex_ports = vec![];
         s.ssh_port = Some(22);
         s.preferred_connection_mode = Some("ssh".into());
-        s.alleycat_agent_name = Some("pi,opencode".into());
-        s.alleycat_agent_wire = Some("ssh-bridge".into());
+        s.ssh_bridge_runtime_kinds = Some(vec![
+            "pi".into(),
+            "open-code".into(),
+            "PI".into(),
+            "unknown".into(),
+        ]);
         let cred = ssh_credential();
 
-        let plan = compute_reconnect_plan(&s, Some(&cred), false, true);
+        let plan = compute_reconnect_plan(&s, Some(&cred), false);
 
         match plan {
             Some(ReconnectPlan::SshBridge { runtime_kinds, .. }) => {
                 assert_eq!(
                     runtime_kinds,
-                    vec!["pi".to_string(), "opencode".to_string()]
+                    vec![
+                        "pi".to_string(),
+                        "opencode".to_string(),
+                        "unknown".to_string()
+                    ]
                 );
             }
             other => panic!("expected ssh bridge reconnect plan, got {other:?}"),
@@ -1568,7 +1351,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_ssh_bridge_disabled_uses_codex_ssh_plan() {
+    fn unsupported_explicit_ssh_bridge_runtime_does_not_become_probe_all() {
         let mut s = base_server();
         s.id = "ssh-bridge:studio".into();
         s.hostname = "studio".into();
@@ -1576,12 +1359,50 @@ mod tests {
         s.codex_ports = vec![];
         s.ssh_port = Some(22);
         s.preferred_connection_mode = Some("ssh".into());
-        s.alleycat_agent_name = Some("pi,opencode".into());
-        s.alleycat_agent_wire = Some("ssh-bridge".into());
+        s.ssh_bridge_runtime_kinds = Some(vec!["droid".into()]);
         let cred = ssh_credential();
 
-        let plan = compute_reconnect_plan(&s, Some(&cred), false, false);
+        let plan = compute_reconnect_plan(&s, Some(&cred), false);
 
-        assert!(matches!(plan, Some(ReconnectPlan::Ssh { .. })));
+        match plan {
+            Some(ReconnectPlan::SshBridge { runtime_kinds, .. }) => {
+                assert_eq!(runtime_kinds, vec!["droid".to_string()]);
+                assert!(select_ssh_bridge_runtime_kinds(&runtime_kinds, &[]).is_err());
+            }
+            other => panic!("expected ssh bridge reconnect plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_ssh_bridge_runtime_selection_preserves_probe_all_marker() {
+        let mut s = base_server();
+        s.id = "ssh-bridge:studio".into();
+        s.hostname = "studio".into();
+        s.port = 0;
+        s.codex_ports = vec![];
+        s.ssh_port = Some(22);
+        s.preferred_connection_mode = Some("ssh".into());
+        s.ssh_bridge_runtime_kinds = Some(vec![]);
+        let cred = ssh_credential();
+
+        let plan = compute_reconnect_plan(&s, Some(&cred), false);
+
+        match plan {
+            Some(ReconnectPlan::SshBridge { runtime_kinds, .. }) => {
+                assert!(runtime_kinds.is_empty());
+            }
+            other => panic!("expected ssh bridge reconnect plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_bridge_without_credential_reports_missing_credential() {
+        let mut s = base_server();
+        s.ssh_bridge_runtime_kinds = Some(vec!["codex".into()]);
+
+        assert!(matches!(
+            decide_reconnect_plan_with_slingshot(&s, None, None, false),
+            ReconnectPlanDecision::NoAction(ReconnectOutcome::MissingSshCredential)
+        ));
     }
 }

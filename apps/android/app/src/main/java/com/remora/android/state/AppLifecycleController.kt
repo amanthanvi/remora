@@ -15,40 +15,28 @@ class AppLifecycleController {
     /** Threads that were active when the app went to background. */
     private val backgroundedTurnKeys = mutableSetOf<ThreadKey>()
 
-    /**
-     * Wall-clock timestamp (epoch ms) of the most recent [onPause].
-     * Used to decide whether the existing alleycat `Connection` is
-     * almost certainly dead by the time we resume — see
-     * [LONG_RESUME_THRESHOLD_MS] and `onLongResume`.
-     */
+    /** Wall-clock timestamp (epoch ms) of the most recent [onPause]. */
     private var lastBackgroundedAt: Long? = null
 
     /**
      * Reconnects all saved servers on app launch or resume.
      */
     suspend fun reconnectSavedServers(context: Context, appModel: AppModel) {
-        val servers = SavedServerStore.remembered(context).map { it.toRecord(context) }
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(true)
+        val servers = SavedServerStore.remembered(context).map { it.toRecord() }
         appModel.reconnectController.syncSavedServers(servers)
-        // Hint iroh-backed sessions about a potential network change before
-        // running reconnect — alleycat can recover via path migration.
         appModel.reconnectController.notifyNetworkChange()
         val results = appModel.reconnectController.reconnectSavedServers()
         restoreLocalStateAfterReconnect(appModel, results)
         val retryResults = appModel.reconnectController.reconnectSavedServers()
         restoreLocalStateAfterReconnect(appModel, retryResults)
         appModel.refreshSnapshot()
-        // If reconnecting saved alleycat servers triggered the iroh
-        // endpoint bind, persist any freshly-generated device key.
-        appModel.persistAlleycatSecretKeyIfNeeded()
     }
 
     /**
      * Reconnects a single server by ID.
      */
     suspend fun reconnectServer(context: Context, appModel: AppModel, serverId: String) {
-        val servers = SavedServerStore.load(context).map { it.toRecord(context) }
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(true)
+        val servers = SavedServerStore.load(context).map { it.toRecord() }
         appModel.reconnectController.syncSavedServers(servers)
         val result = appModel.reconnectController.reconnectServer(serverId)
         restoreLocalStateAfterReconnect(appModel, listOf(result))
@@ -63,17 +51,10 @@ class AppLifecycleController {
             addAll(backgroundedTurnKeys)
             appModel.snapshot.value?.activeThread?.let(::add)
         }
-        val servers = SavedServerStore.remembered(context).map { it.toRecord(context) }
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(true)
+        val servers = SavedServerStore.remembered(context).map { it.toRecord() }
         appModel.reconnectController.syncSavedServers(servers)
 
-        // If we were suspended longer than iroh's per-path idle timeout,
-        // the existing alleycat Connection is almost certainly dead. Kill
-        // it before the user can issue a request — otherwise the worker's
-        // first request would wait the full 30s connection-idle timeout
-        // for iroh to declare the path dead. Fires BEFORE
-        // `onAppBecameActive` so the close lands before the
-        // network-change hint and saved-server reconnect.
+        // Close stale network paths before reconnecting after a long suspension.
         val backgroundedAt = lastBackgroundedAt
         lastBackgroundedAt = null
         if (backgroundedAt != null) {
@@ -81,9 +62,16 @@ class AppLifecycleController {
             if (durationMs > LONG_RESUME_THRESHOLD_MS) {
                 LLog.i(
                     "AppLifecycleController",
-                    "long resume — abandoning live alleycat connections backgroundDurationSec=${durationMs / 1000}",
+                    "long resume — abandoning stale connections backgroundDurationSec=${durationMs / 1000}",
                 )
-                appModel.reconnectController.onLongResume()
+                try {
+                    appModel.withRemoraLinkV2 { it.remoraLinkLongResume() }
+                } catch (error: Exception) {
+                    LLog.w(
+                        "AppLifecycleController",
+                        "Remora Link long-resume reconciliation failed: ${error.message}",
+                    )
+                }
             }
         }
 
@@ -111,9 +99,6 @@ class AppLifecycleController {
                 appModel.refreshThreadSnapshot(key)
             }
         }
-        // Capture any freshly-generated alleycat device secret key from
-        // this foreground's reconnect cycle.
-        appModel.persistAlleycatSecretKeyIfNeeded()
     }
 
     /**

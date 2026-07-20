@@ -19,7 +19,7 @@ Android runtime is now on the same Rust-first architecture as iOS:
 - `MainActivity` connects the default local server through `ServerBridge.connectLocalServer(...)`.
 - There is no separate bundled Android Codex process in the active app path.
 - `codex-mobile-client` owns both the runtime surface and Android JNI bootstrap.
-- The embedded app-server is not a local terminal; Android does not bundle an Alpine rootfs or proot.
+- The embedded app-server is not a terminal backend; terminal sessions run on remote hosts.
 
 Examples:
 

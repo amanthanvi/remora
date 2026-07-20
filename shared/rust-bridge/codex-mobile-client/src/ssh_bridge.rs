@@ -426,19 +426,6 @@ impl RemoteTransport for SshBridgeReconnectTransport {
             keepalive: None,
         })
     }
-
-    async fn close_current_connection(&self) {
-        let Some(close_handle) = self
-            .current_close
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        else {
-            return;
-        };
-        info!(kind = ?self.kind, "ssh bridge runtime close current stream");
-        close_handle.close();
-    }
 }
 
 pub async fn connect_app_server_client_via_ssh(

@@ -23,7 +23,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -31,7 +30,6 @@ import androidx.compose.ui.input.key.onKeyEvent
 import com.remora.android.state.AppModel
 import com.remora.android.state.LocalAccountLoginRequiredException
 import com.remora.android.state.NetworkDiscovery
-import com.remora.android.state.PetOverlayController
 import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.VoiceRuntimeController
 import com.remora.android.state.connectionModeLabel
@@ -44,11 +42,9 @@ import com.remora.android.ui.discovery.DiscoveryScreen
 import com.remora.android.ui.home.HomeDashboardScreen
 import com.remora.android.ui.home.HomeDashboardSupport
 import com.remora.android.ui.home.ProjectPickerSheet
-import com.remora.android.ui.pets.PetOverlayView
 import com.remora.android.state.SavedProjectStore
 import com.remora.android.ui.settings.AccountSheet
 import com.remora.android.ui.settings.SettingsSheet
-import com.remora.android.ui.settings.SettingsStartDestination
 import com.remora.android.ui.sessions.DirectoryPickerServerOption
 import com.remora.android.ui.sessions.DirectoryPickerSheet
 import com.remora.android.ui.sessions.SessionLaunchSupport
@@ -106,7 +102,6 @@ val LocalDismissedUserInputs = staticCompositionLocalOf<DismissedUserInputState>
 @Composable
 fun RemoraApp(
     appModel: AppModel,
-    openPetSettingsRequest: Int = 0,
 ) {
     val context = LocalContext.current
 
@@ -117,7 +112,6 @@ fun RemoraApp(
         com.remora.android.ui.home.DashboardZoomPrefs.initialize(context)
         ExperimentalFeatures.initialize(context)
         com.remora.android.state.DebugSettings.initialize(context)
-        PetOverlayController.initialize(context)
     }
 
     // Read currentStep so Compose tracks it as a dependency and recomposes on change.
@@ -151,7 +145,6 @@ fun RemoraApp(
         // Global sheet state
         var showDiscovery by remember { mutableStateOf(false) }
         var showSettings by remember { mutableStateOf(false) }
-        var settingsStartDestination by remember { mutableStateOf(SettingsStartDestination.TopLevel) }
         var showAccountForServer by remember { mutableStateOf<String?>(null) }
         var directoryPickerServerId by remember { mutableStateOf<String?>(null) }
         var directoryPickerForProject by remember { mutableStateOf(false) }
@@ -212,12 +205,6 @@ fun RemoraApp(
         // Network discovery
         val networkDiscovery = remember { NetworkDiscovery(appModel.discovery) }
         val voiceController = remember { VoiceRuntimeController.shared }
-
-        LaunchedEffect(openPetSettingsRequest) {
-            if (openPetSettingsRequest <= 0) return@LaunchedEffect
-            settingsStartDestination = SettingsStartDestination.Pets
-            showSettings = true
-        }
 
         // Navigate helpers
         val navigate = remember {
@@ -634,17 +621,6 @@ fun RemoraApp(
                 }
             }
 
-            val pet = PetOverlayController.selectedPet
-            if (pet != null && PetOverlayController.shouldShowInAppOverlay(context)) {
-                PetOverlayView(
-                    pet = pet,
-                    state = PetOverlayController.avatarState(snapshot),
-                    message = PetOverlayController.avatarMessage(snapshot),
-                    reducedMotion = context.animationsDisabled(),
-                    modifier = Modifier.align(Alignment.TopStart),
-                )
-            }
-
             // Global approval overlay
             if (visibleApprovals.isNotEmpty() || visibleUserInputs.isNotEmpty()) {
                 ApprovalOverlay(
@@ -709,17 +685,13 @@ fun RemoraApp(
                 SettingsSheet(
                     onDismiss = {
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                     },
                     onOpenAccount = { serverId ->
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                         showAccountForServer = serverId
                     },
-                    initialSubScreen = settingsStartDestination,
                     onOpenApps = {
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                         navigate(Route.Apps)
                     },
                 )

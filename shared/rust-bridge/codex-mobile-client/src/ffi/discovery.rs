@@ -285,49 +285,6 @@ impl ServerBridge {
         })
     }
 
-    pub async fn list_alleycat_agents(
-        &self,
-        params: crate::ffi::alleycat::AppAlleycatPairPayload,
-    ) -> Result<Vec<crate::ffi::alleycat::AppAlleycatAgentInfo>, ClientError> {
-        let parsed: crate::alleycat::ParsedPairPayload = params.into();
-        blocking_async!(self.rt, self.inner, |c| {
-            c.list_alleycat_agents(parsed)
-                .await
-                .map(|agents| agents.into_iter().map(Into::into).collect())
-                .map_err(|e| ClientError::Transport(e.to_string()))
-        })
-    }
-
-    pub async fn connect_remote_over_alleycat(
-        &self,
-        server_id: String,
-        display_name: String,
-        params: crate::ffi::alleycat::AppAlleycatPairPayload,
-        agent_name: String,
-        selected_agent_names: Vec<String>,
-        wire: crate::ffi::alleycat::AppAlleycatAgentWire,
-    ) -> Result<crate::ffi::alleycat::AppAlleycatConnectResult, ClientError> {
-        let parsed: crate::alleycat::ParsedPairPayload = params.into();
-        let wire: crate::alleycat::AgentWire = wire.into();
-        blocking_async!(self.rt, self.inner, |c| {
-            c.connect_remote_over_alleycat(
-                server_id,
-                display_name,
-                parsed,
-                agent_name,
-                selected_agent_names,
-                wire,
-            )
-            .await
-            .map(|outcome| crate::ffi::alleycat::AppAlleycatConnectResult {
-                server_id: outcome.server_id,
-                node_id: outcome.node_id,
-                agent_name: outcome.agent_name,
-            })
-            .map_err(|e| ClientError::Transport(e.to_string()))
-        })
-    }
-
     pub fn disconnect_server(&self, server_id: String) {
         self.inner.disconnect_server(&server_id);
     }

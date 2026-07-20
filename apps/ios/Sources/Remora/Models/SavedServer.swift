@@ -15,13 +15,14 @@ struct SavedServer: Codable, Identifiable, Equatable {
     let sshPortForwardingEnabled: Bool?
     let websocketURL: String?
     let rememberedByUser: Bool
-    /// Legacy pairing marker. Unsupported after the iroh-backed migration; kept so
-    /// old records decode and can be treated as requiring a new QR scan.
-    let alleycatHost: String?
-    let alleycatNodeId: String?
-    let alleycatRelay: String?
-    let alleycatAgentName: String?
-    let alleycatAgentWire: String?
+    /// `nil` is an ordinary direct/SSH server, `[]` probes all bridge runtimes,
+    /// and a non-empty list reconnects only the selected bridge runtimes.
+    let sshBridgeRuntimeKinds: [AgentRuntimeKind]?
+
+    /// Decode-only marker used by `SavedServerStore` to discard v1-only rows.
+    /// It is deliberately not encoded, so every successful load strips v1 data.
+    private(set) var containsLegacyV1Metadata = false
+    private var requiresPersistenceRewrite = false
 
     init(
         id: String,
@@ -38,11 +39,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
         sshPortForwardingEnabled: Bool?,
         websocketURL: String?,
         rememberedByUser: Bool = false,
-        alleycatHost: String? = nil,
-        alleycatNodeId: String? = nil,
-        alleycatRelay: String? = nil,
-        alleycatAgentName: String? = nil,
-        alleycatAgentWire: String? = nil
+        sshBridgeRuntimeKinds: [AgentRuntimeKind]? = nil
     ) {
         self.id = id
         self.name = name
@@ -58,11 +55,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
         self.sshPortForwardingEnabled = sshPortForwardingEnabled
         self.websocketURL = websocketURL
         self.rememberedByUser = rememberedByUser
-        self.alleycatHost = alleycatHost
-        self.alleycatNodeId = alleycatNodeId
-        self.alleycatRelay = alleycatRelay
-        self.alleycatAgentName = alleycatAgentName
-        self.alleycatAgentWire = alleycatAgentWire
+        self.sshBridgeRuntimeKinds = sshBridgeRuntimeKinds
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -80,6 +73,8 @@ struct SavedServer: Codable, Identifiable, Equatable {
         case sshPortForwardingEnabled
         case websocketURL
         case rememberedByUser
+        case sshBridgeRuntimeKinds
+        // Decode-only v1 keys. Never write these again.
         case alleycatHost
         case alleycatNodeId
         case alleycatRelay
@@ -113,11 +108,51 @@ struct SavedServer: Codable, Identifiable, Equatable {
         )
         self.websocketURL = try container.decodeIfPresent(String.self, forKey: .websocketURL)
         self.rememberedByUser = try container.decodeIfPresent(Bool.self, forKey: .rememberedByUser) ?? true
-        self.alleycatHost = try container.decodeIfPresent(String.self, forKey: .alleycatHost)
-        self.alleycatNodeId = try container.decodeIfPresent(String.self, forKey: .alleycatNodeId)
-        self.alleycatRelay = try container.decodeIfPresent(String.self, forKey: .alleycatRelay)
-        self.alleycatAgentName = try container.decodeIfPresent(String.self, forKey: .alleycatAgentName)
-        self.alleycatAgentWire = try container.decodeIfPresent(String.self, forKey: .alleycatAgentWire)
+        let legacyHost = try container.decodeIfPresent(String.self, forKey: .alleycatHost)
+        let legacyNodeId = try container.decodeIfPresent(String.self, forKey: .alleycatNodeId)
+        let legacyRelay = try container.decodeIfPresent(String.self, forKey: .alleycatRelay)
+        let legacyAgentName = try container.decodeIfPresent(String.self, forKey: .alleycatAgentName)
+        let legacyAgentWire = try container.decodeIfPresent(String.self, forKey: .alleycatAgentWire)
+        let historicalSSHBridge = legacyAgentWire == "ssh-bridge" || id.hasPrefix("ssh-bridge:")
+        self.containsLegacyV1Metadata = id.hasPrefix("alleycat:")
+            || historicalSSHBridge
+            || [legacyHost, legacyNodeId, legacyRelay, legacyAgentName, legacyAgentWire]
+                .contains { $0 != nil }
+
+        if container.contains(.sshBridgeRuntimeKinds) {
+            let decodedKinds = try container.decodeIfPresent(
+                [AgentRuntimeKind].self,
+                forKey: .sshBridgeRuntimeKinds
+            )
+            self.sshBridgeRuntimeKinds = decodedKinds.map(Self.normalizedSSHBridgeRuntimeKinds)
+            self.requiresPersistenceRewrite = decodedKinds == nil
+                || self.sshBridgeRuntimeKinds != decodedKinds
+        } else if historicalSSHBridge {
+            self.sshBridgeRuntimeKinds = Self.normalizedSSHBridgeRuntimeKinds(legacyAgentName)
+            self.requiresPersistenceRewrite = true
+        } else {
+            self.sshBridgeRuntimeKinds = nil
+        }
+        self.requiresPersistenceRewrite = requiresPersistenceRewrite || containsLegacyV1Metadata
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(hostname, forKey: .hostname)
+        try container.encodeIfPresent(port, forKey: .port)
+        try container.encode(codexPorts, forKey: .codexPorts)
+        try container.encodeIfPresent(sshPort, forKey: .sshPort)
+        try container.encode(source, forKey: .source)
+        try container.encode(hasCodexServer, forKey: .hasCodexServer)
+        try container.encodeIfPresent(wakeMAC, forKey: .wakeMAC)
+        try container.encodeIfPresent(preferredConnectionMode, forKey: .preferredConnectionMode)
+        try container.encodeIfPresent(preferredCodexPort, forKey: .preferredCodexPort)
+        try container.encodeIfPresent(sshPortForwardingEnabled, forKey: .sshPortForwardingEnabled)
+        try container.encodeIfPresent(websocketURL, forKey: .websocketURL)
+        try container.encode(rememberedByUser, forKey: .rememberedByUser)
+        try container.encodeIfPresent(sshBridgeRuntimeKinds, forKey: .sshBridgeRuntimeKinds)
     }
 
     func toDiscoveredServer() -> DiscoveredServer {
@@ -156,15 +191,11 @@ struct SavedServer: Codable, Identifiable, Equatable {
             sshPortForwardingEnabled: nil,
             websocketURL: server.websocketURL,
             rememberedByUser: rememberedByUser,
-            alleycatHost: nil,
-            alleycatNodeId: nil,
-            alleycatRelay: nil,
-            alleycatAgentName: nil,
-            alleycatAgentWire: nil
+            sshBridgeRuntimeKinds: nil
         )
     }
 
-    func withAlleycatHost(_ alleycatHost: String?) -> SavedServer {
+    func withSSHBridge(runtimeKinds: [AgentRuntimeKind]?) -> SavedServer {
         SavedServer(
             id: id,
             name: name,
@@ -180,64 +211,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
             sshPortForwardingEnabled: sshPortForwardingEnabled,
             websocketURL: websocketURL,
             rememberedByUser: rememberedByUser,
-            alleycatHost: alleycatHost,
-            alleycatNodeId: alleycatNodeId,
-            alleycatRelay: alleycatRelay,
-            alleycatAgentName: alleycatAgentName,
-            alleycatAgentWire: alleycatAgentWire
-        )
-    }
-
-    func withAlleycat(
-        nodeId: String?,
-        relay: String?,
-        agentName: String?,
-        agentWire: String?
-    ) -> SavedServer {
-        SavedServer(
-            id: id,
-            name: name,
-            hostname: hostname,
-            port: port,
-            codexPorts: codexPorts,
-            sshPort: sshPort,
-            source: source,
-            hasCodexServer: hasCodexServer,
-            wakeMAC: wakeMAC,
-            preferredConnectionMode: preferredConnectionMode,
-            preferredCodexPort: preferredCodexPort,
-            sshPortForwardingEnabled: sshPortForwardingEnabled,
-            websocketURL: websocketURL,
-            rememberedByUser: rememberedByUser,
-            alleycatHost: alleycatHost,
-            alleycatNodeId: nodeId,
-            alleycatRelay: relay,
-            alleycatAgentName: agentName,
-            alleycatAgentWire: agentWire
-        )
-    }
-
-    func withSSHBridge(runtimeKinds: [AgentRuntimeKind]) -> SavedServer {
-        SavedServer(
-            id: id,
-            name: name,
-            hostname: hostname,
-            port: port,
-            codexPorts: codexPorts,
-            sshPort: sshPort,
-            source: source,
-            hasCodexServer: hasCodexServer,
-            wakeMAC: wakeMAC,
-            preferredConnectionMode: preferredConnectionMode,
-            preferredCodexPort: preferredCodexPort,
-            sshPortForwardingEnabled: sshPortForwardingEnabled,
-            websocketURL: websocketURL,
-            rememberedByUser: rememberedByUser,
-            alleycatHost: alleycatHost,
-            alleycatNodeId: alleycatNodeId,
-            alleycatRelay: alleycatRelay,
-            alleycatAgentName: runtimeKinds.map(Self.sshBridgeRuntimeLabel).joined(separator: ","),
-            alleycatAgentWire: "ssh-bridge"
+            sshBridgeRuntimeKinds: runtimeKinds
         )
     }
 
@@ -257,11 +231,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
             sshPortForwardingEnabled: sshPortForwardingEnabled,
             websocketURL: websocketURL,
             rememberedByUser: rememberedByUser,
-            alleycatHost: alleycatHost,
-            alleycatNodeId: alleycatNodeId,
-            alleycatRelay: alleycatRelay,
-            alleycatAgentName: alleycatAgentName,
-            alleycatAgentWire: alleycatAgentWire
+            sshBridgeRuntimeKinds: sshBridgeRuntimeKinds
         )
     }
 
@@ -295,29 +265,46 @@ struct SavedServer: Codable, Identifiable, Equatable {
             sshPortForwardingEnabled: sshPortForwardingEnabled,
             websocketUrl: websocketURL,
             rememberedByUser: rememberedByUser,
-            alleycatHost: alleycatHost,
-            alleycatUdpPort: alleycatUdpPort,
-            alleycatNodeId: alleycatNodeId,
-            alleycatToken: alleycatNodeId.flatMap { try? AlleycatCredentialStore.shared.loadToken(nodeId: $0) },
-            alleycatRelay: alleycatRelay,
-            alleycatAgentName: alleycatAgentName,
-            alleycatAgentWire: alleycatAgentWire
+            sshBridgeRuntimeKinds: sshBridgeRuntimeKinds
         )
     }
 
-    private static func sshBridgeRuntimeLabel(_ kind: AgentRuntimeKind) -> String {
-        // The runtime kind IS the wire label now — the paired host advertises
-        // each agent by its lowercase id.
-        kind
+    var hasViableDirectOrSSHPath: Bool {
+        if websocketURL != nil { return true }
+        if let sshPort, sshPort > 0 { return true }
+        if source == .ssh || preferredConnectionMode == .ssh || sshPortForwardingEnabled == true {
+            return true
+        }
+        if let preferredCodexPort, preferredCodexPort > 0 { return true }
+        // Older SSH-only rows stored their SSH port in `port` before `sshPort`
+        // existed, so any non-zero legacy port is still a viable native path.
+        if let port, port > 0 { return true }
+        return codexPorts.contains { $0 > 0 }
     }
 
-    /// UDP port the legacy relay was bound on, parsed from the
-    /// synth `serverId` of `alleycat:<host>:<udpPort>` minted in
-    /// the legacy pairing QR sheet. Nil for other records.
-    var alleycatUdpPort: UInt16? {
-        guard alleycatHost != nil else { return nil }
-        guard id.hasPrefix("alleycat:") else { return nil }
-        guard let portString = id.split(separator: ":").last else { return nil }
-        return UInt16(portString)
+    private static func normalizedSSHBridgeRuntimeKinds(_ csv: String?) -> [AgentRuntimeKind] {
+        normalizedSSHBridgeRuntimeKinds(
+            (csv ?? "").split(separator: ",").map(String.init)
+        )
+    }
+
+    private static func normalizedSSHBridgeRuntimeKinds(
+        _ runtimeKinds: [AgentRuntimeKind]
+    ) -> [AgentRuntimeKind] {
+        var seen: Set<String> = []
+        return runtimeKinds.compactMap { raw -> AgentRuntimeKind? in
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalized: String
+            switch trimmed {
+            case "pi.dev", "pidev": normalized = "pi"
+            case "ampcode", "amp-code", "amp_code", "amp code": normalized = "amp"
+            case "open-code", "open_code", "open code": normalized = "opencode"
+            case "claude-code", "claude_code", "claude code": normalized = "claude"
+            case "factory", "factory-droid", "factory_droid", "factory droid": normalized = "droid"
+            default: normalized = trimmed
+            }
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { return nil }
+            return normalized
+        }
     }
 }

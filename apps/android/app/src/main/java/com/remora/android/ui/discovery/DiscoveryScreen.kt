@@ -775,6 +775,7 @@ fun DiscoveryScreen(
                         source = "ssh",
                         hasCodexServer = true,
                         preferredConnectionMode = "ssh",
+                        sshBridgeRuntimeKinds = selectedKinds,
                     )
                     appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
                     SavedServerStore.remember(context, server)

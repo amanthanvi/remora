@@ -164,7 +164,7 @@ uniffi::custom_type!(AppRemoraLinkPairingCode, Vec<u8>);
 ///
 /// The callback must return the already-stored value when present, otherwise
 /// atomically store and return `candidate`. It must never import or alias the
-/// legacy Alleycat endpoint identity. Exactly 32 bytes are required.
+/// retired v1 endpoint identity. Exactly 32 bytes are required.
 #[uniffi::export(callback_interface)]
 #[async_trait]
 pub trait AppRemoraLinkTransportIdentityBackend: Send + Sync {
@@ -1618,7 +1618,7 @@ fn project_remora_link_agent_metadata(agent: &AgentInfoV2) -> crate::store::AppA
         name: agent.name.clone(),
         display_name: agent.display_name.clone(),
         presentation: agent.presentation.as_ref().map(|presentation| {
-            crate::ffi::alleycat::AppAgentPresentation {
+            crate::store::AppAgentPresentation {
                 title: presentation.title.clone(),
                 is_beta: presentation.is_beta,
                 sort_order: presentation.sort_order,
@@ -1627,7 +1627,7 @@ fn project_remora_link_agent_metadata(agent: &AgentInfoV2) -> crate::store::AppA
             }
         }),
         capabilities: agent.capabilities.as_ref().map(|capabilities| {
-            crate::ffi::alleycat::AppAgentCapabilities {
+            crate::store::AppAgentCapabilities {
                 locks_reasoning_effort_after_activity: capabilities
                     .locks_reasoning_effort_after_activity,
                 visible_modes: capabilities.visible_modes.clone(),
@@ -2670,7 +2670,7 @@ impl Drop for RemoraLinkSessionKeepaliveV2 {
 
 /// Reconnect adapter for a runtime whose initial stream was attached through
 /// the authenticated Remora Link v2 lifecycle. The adapter owns the replay
-/// cursor and the currently installed connection; it never consults Alleycat
+/// cursor and the currently installed connection; it never consults retired v1
 /// tokens, state, or sequence metadata.
 pub(crate) struct RemoraLinkRemoteTransportV2 {
     configured: Arc<ConfiguredRemoraLink>,
@@ -2817,12 +2817,6 @@ impl RemoteTransport for RemoraLinkRemoteTransportV2 {
 
     async fn notify_network_change(&self) {
         self.configured.host.network_change().await;
-    }
-
-    async fn close_current_connection(&self) {
-        if let Some(keepalive) = self.current_keepalive.lock().await.take() {
-            keepalive.close_connection();
-        }
     }
 }
 
@@ -3989,7 +3983,7 @@ mod tests {
             rt: crate::ffi::shared::shared_runtime(),
         };
         let payload = serde_json::json!({
-            "v": crate::alleycat::ALLEYCAT_PROTOCOL_VERSION,
+            "v": 1,
             "node_id": "a".repeat(64),
             "token": "legacy-bearer",
             "host_name": "Legacy Studio"

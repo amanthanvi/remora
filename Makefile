@@ -629,18 +629,12 @@ clean-rust:
 clean-ios:
 	@echo "==> Cleaning iOS artifacts..."
 	@rm -rf $(IOS_FW_DIR)/codex_mobile_client.xcframework $(IOS_FW_DIR)/GhosttyKit.xcframework $(IOS_GENERATED)
-	@# Purge the generated local-terminal rootfs left by pre-trim checkouts.
-	@rm -rf $(IOS_DIR)/Resources/fs
-	@rm -f $(STAMP_XCGEN) $(STAMP_BINDINGS_S) $(STAMPS)/alpine-fs-* $(STAMPS)/ghostty-ios-*
+	@rm -f $(STAMP_XCGEN) $(STAMP_BINDINGS_S) $(STAMPS)/ghostty-ios-*
 
 clean-android:
 	@echo "==> Cleaning Android artifacts..."
 	@rm -rf $(ANDROID_JNI)/arm64-v8a $(ANDROID_JNI)/x86_64 $(ANDROID_DIR)/core/bridge/src/main/cpp/include/ghostty.h
-	@# Purge generated local-terminal payloads left by pre-trim checkouts so Gradle cannot package them.
-	@rm -f $(ANDROID_DIR)/app/src/main/assets/alpine-fs.tar.gz $(ANDROID_DIR)/app/src/main/assets/alpine-fs.tgz $(ANDROID_DIR)/app/src/main/assets/alpine-fs.version
-	@rm -f $(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libproot.so $(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libproot_loader.so $(ANDROID_DIR)/app/src/main/jniLibs/x86_64/libproot.so $(ANDROID_DIR)/app/src/main/jniLibs/x86_64/libproot_loader.so
-	@rm -f $(ANDROID_DIR)/app/src/main/assets/licenses/proot-COPYING.txt $(ANDROID_DIR)/app/src/main/assets/licenses/talloc-COPYING.txt $(ANDROID_DIR)/app/src/main/assets/proot.version
-	@rm -f $(STAMP_BINDINGS_K) $(STAMPS)/rust-android-* $(STAMPS)/ghostty-android-* $(STAMPS)/android-alpine-fs-* $(STAMPS)/proot-android-*
+	@rm -f $(STAMP_BINDINGS_K) $(STAMPS)/rust-android-* $(STAMPS)/ghostty-android-*
 	@cd $(ANDROID_DIR) && ./gradlew clean 2>/dev/null || true
 
 rebuild-bindings:

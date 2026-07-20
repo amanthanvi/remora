@@ -43,7 +43,6 @@ struct RemoraApp: App {
                     appModel.start()
                     voiceRuntime.bind(appModel: appModel)
                     appRuntime.bind(appModel: appModel, voiceRuntime: voiceRuntime)
-                    appDelegate.appRuntime = appRuntime
                     appRuntime.appDidBecomeActive()
                 }
         }

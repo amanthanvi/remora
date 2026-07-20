@@ -45,7 +45,7 @@ Refactors `connect_with_stream` into a wire-generic `connect_with_wire<W: JsonRp
 
 Touches `app-server-client/src/{lib.rs,remote.rs}`.
 
-Consumed by the SSH/Alleycat remote transport paths in `shared/rust-bridge/codex-mobile-client/src/alleycat.rs`, `src/session/connection.rs`, and `src/ssh_bridge.rs`. Websocket-style reconnects use `RemoteAppServerClient::connect_websocket_stream`. JSON-line transports (Pi/non-Codex servers, alleycat jsonl, SSH-bridge bootstrap) use Remora's `codex_slingshot::json_line_wire::connect_json_line_stream`, which builds a `JsonLineWire` and feeds it into `connect_with_wire`.
+Consumed by the retained remote transport paths in `shared/rust-bridge/codex-mobile-client/src/session/connection.rs` and `src/ssh_bridge.rs`. Websocket-style reconnects use `RemoteAppServerClient::connect_websocket_stream`. JSON-line transports (non-Codex servers and SSH-bridge bootstrap) use Remora's `codex_slingshot::json_line_wire::connect_json_line_stream`, which builds a `JsonLineWire` and feeds it into `connect_with_wire`.
 
 ## `absolute-path-cross-platform.patch`
 Lets `AbsolutePathBuf` deserialize Windows-style absolute paths on POSIX (and vice versa) without trying to canonicalize them through `path_absolutize::Absolutize` (which would mangle them by joining onto a POSIX cwd). Required because Remora mobile clients consume thread metadata from servers running on either OS.

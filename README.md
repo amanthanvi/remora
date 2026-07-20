@@ -56,21 +56,16 @@ Session state, streaming, hydration, discovery, and auth logic belong in Rust.
 
 Remora supports embedded and remote Codex app-server sessions, ChatGPT OAuth,
 WebRTC voice, and remote terminals over SSH or paired hosts rendered by Ghostty.
-The embedded app-server is not an on-device shell: Remora does not bundle
-an on-device Linux wrapper, Alpine rootfs, or proot. Opaque background wakeups
-are reconciled against durable state; notification payloads are never a source
-of truth or an approval surface. Watch, CarPlay, the full Live Activity
+The embedded app-server is not an on-device shell; terminal sessions always run
+on a remote host. Opaque background wakeups are reconciled against durable
+state; notification payloads are never a source of truth or an approval
+surface. Watch, CarPlay, the full Live Activity
 extension, and store-release automation remain out of scope.
 
 New remote pairing uses Remora Link. During development, build the native host
-from the pinned maintenance fork; the `npx remora-link` launcher will become the
-default bootstrap after its first trusted npm publication.
-
-```bash
-git clone https://github.com/amanthanvi/alleycat.git remora-link-host
-cd remora-link-host
-cargo run -p remora-link
-```
+from the reviewed source revision recorded in the Rust lockfile. The
+`npx remora-link` launcher will become the default bootstrap after its first
+trusted npm publication.
 
 ## License
 

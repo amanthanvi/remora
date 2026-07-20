@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Observes Android network reachability and forwards change events to the
- * shared Rust client so iroh-backed (alleycat) sessions can re-evaluate
+ * shared Rust client so remote sessions can re-evaluate
  * paths immediately on Wi-Fi ↔ cellular handoff, VPN toggle, etc.
  *
  * Without this, iroh would only notice a fundamental network change via

@@ -41,13 +41,6 @@ final class AppRuntimeController {
         self.appModel = appModel
         reachability.bind(appModel: appModel)
         startReachabilityIfNeeded()
-        do {
-            if let bytes = try AlleycatCredentialStore.shared.loadDeviceSecretKey() {
-                appModel.client.setAlleycatSecretKey(secretKeyBytes: bytes)
-            }
-        } catch {
-            NSLog("[PAIRING_DEVICE_KEY] load failed: %@", error.localizedDescription)
-        }
         configureRemoraLinkIfNeeded(client: appModel.client)
     }
 
@@ -125,44 +118,18 @@ final class AppRuntimeController {
         }
     }
 
-    /// Catalyst-side mirror of the iOS persist hook. Called from the
-    /// lifecycle stub after reconnect cycles so freshly-generated
-    /// device secret keys land in the keychain.
-    func persistAlleycatSecretKeyIfNeeded() {
-        guard let appModel else { return }
-        guard let data = appModel.client.alleycatSecretKey() else { return }
-        do {
-            let existing = try AlleycatCredentialStore.shared.loadDeviceSecretKey()
-            if existing == data { return }
-            try AlleycatCredentialStore.shared.saveDeviceSecretKey(data)
-        } catch {
-            NSLog("[PAIRING_DEVICE_KEY] save failed: %@", error.localizedDescription)
-        }
-    }
-
-    /// Best-effort graceful shutdown of the iroh endpoint. Wired from
-    /// `applicationWillTerminate` on Catalyst (NSApplicationDelegate
-    /// fires this reliably; iOS proper does not on swipe-up-to-kill).
-    func shutdownAlleycatEndpoint() async {
-        guard let appModel else { return }
-        await appModel.client.shutdownAlleycatEndpoint()
-    }
-
     func reconnectSavedServers() async {
         guard let appModel else { return }
         let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         await appModel.reconnectController.notifyNetworkChange()
         _ = await appModel.reconnectController.reconnectSavedServers()
         await appModel.refreshSnapshot()
-        persistAlleycatSecretKeyIfNeeded()
     }
 
     func reconnectServer(serverId: String) async {
         guard let appModel else { return }
         let servers = SavedServerStore.reconnectRecords()
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
         await appModel.refreshSnapshot()
@@ -188,7 +155,11 @@ final class AppRuntimeController {
                let duration = backgroundDuration,
                duration > Self.longResumeThreshold
             {
-                await appModel.reconnectController.onLongResume()
+                do {
+                    _ = try await appModel.client.remoraLinkLongResume()
+                } catch {
+                    LLog.error("remora-link", "long-resume reconciliation failed", error: error)
+                }
             }
             await self.reconnectSavedServers()
         }

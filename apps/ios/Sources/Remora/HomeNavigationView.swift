@@ -1297,7 +1297,6 @@ struct HomeNavigationView: View {
 
     private func renameServer(_ serverId: String, newName: String) {
         SavedServerStore.rename(serverId: serverId, newName: newName)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )

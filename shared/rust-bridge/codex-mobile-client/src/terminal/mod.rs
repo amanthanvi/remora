@@ -10,7 +10,6 @@ mod context;
 mod input;
 mod links;
 mod osc;
-mod remote_alleycat;
 mod remote_remora_link;
 pub(crate) mod remote_shell;
 mod renderer;

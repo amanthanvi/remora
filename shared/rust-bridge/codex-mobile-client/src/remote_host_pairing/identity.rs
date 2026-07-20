@@ -8,12 +8,8 @@ use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::remora_link_v2::{ConfirmationModeV2, DeviceScopeV2, validate_policy};
-use super::types::{
-    RemoteHostId, RemoteHostPairingError, RemotePairingCodeInspection,
-    RemotePairingOfferDisposition, RemotePairingProtocol,
-};
-
 pub(crate) const REMORA_LINK_V2_ALPN: &[u8] = b"remora-link/2";
+const LEGACY_V1_PROTOCOL_VERSION: u32 = 1;
 const REMORA_LINK_V2_ENVELOPE_PREFIX: &str = "remora-link:v2:";
 const MAX_ENCODED_SEGMENT_BYTES: usize = 4096;
 const MAX_DECODED_JSON_BYTES: usize = 4096;
@@ -26,33 +22,11 @@ const MAX_ENDPOINT_ID_BYTES: usize = 256;
 /// implementation is intentionally redacted.
 #[derive(Clone)]
 pub(crate) enum DecodedPairingCode {
-    LegacyV1 {
-        params: crate::alleycat::ParsedPairPayload,
-    },
+    LegacyV1 { params: LegacyV1Invitation },
     DeviceGrantV2(V2Invite),
 }
 
 impl DecodedPairingCode {
-    pub(crate) fn host_id(&self) -> RemoteHostId {
-        match self {
-            Self::LegacyV1 { params } => RemoteHostId {
-                // Existing profiles and ThreadKey values depend on this exact
-                // wire-compatibility ID. Do not rename it during the v2 cutover.
-                value: format!("alleycat:{}", params.node_id),
-            },
-            Self::DeviceGrantV2(invite) => RemoteHostId {
-                value: format!("remora-link:{}", invite.node_id),
-            },
-        }
-    }
-
-    pub(crate) fn protocol(&self) -> RemotePairingProtocol {
-        match self {
-            Self::LegacyV1 { .. } => RemotePairingProtocol::LegacyV1,
-            Self::DeviceGrantV2(_) => RemotePairingProtocol::DeviceGrantV2,
-        }
-    }
-
     pub(crate) fn suggested_display_name(&self) -> String {
         match self {
             Self::LegacyV1 { params } => params
@@ -67,29 +41,25 @@ impl DecodedPairingCode {
                 .unwrap_or_else(|| "Remora Link".to_string()),
         }
     }
+}
 
-    pub(crate) fn expires_at_unix_ms(&self) -> Option<u64> {
-        match self {
-            Self::LegacyV1 { .. } => None,
-            Self::DeviceGrantV2(invite) => u64::try_from(invite.expires_at)
-                .ok()
-                .and_then(|seconds| seconds.checked_mul(1_000)),
-        }
-    }
+#[derive(Clone)]
+pub(crate) struct LegacyV1Invitation {
+    pub(crate) node_id: String,
+    host_name: Option<String>,
+}
 
-    pub(crate) fn inspection(&self) -> RemotePairingCodeInspection {
-        let protocol = self.protocol();
-        RemotePairingCodeInspection {
-            host_id: self.host_id(),
-            suggested_display_name: self.suggested_display_name(),
-            protocol,
-            disposition: match protocol {
-                RemotePairingProtocol::LegacyV1 => RemotePairingOfferDisposition::RePairRequired,
-                RemotePairingProtocol::DeviceGrantV2 => RemotePairingOfferDisposition::Ready,
-            },
-            expires_at_unix_ms: self.expires_at_unix_ms(),
-        }
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PairingCodeError {
+    MalformedCode,
+    CodeTooLarge,
+    IncompatibleProtocol,
+    UnsupportedManualCode,
+    InvalidEnrollmentMaterial,
+    MissingHostIdentity,
+    InvalidHostIdentity,
+    MissingEnrollmentMaterial,
+    InvalidRelayHint,
 }
 
 impl fmt::Debug for DecodedPairingCode {
@@ -151,6 +121,22 @@ struct VersionProbe {
 }
 
 #[derive(Deserialize)]
+struct LegacyV1InvitationWire {
+    v: u32,
+    node_id: String,
+    token: String,
+    relay: Option<String>,
+    #[serde(default, alias = "hostname", alias = "display_name", alias = "name")]
+    host_name: Option<String>,
+}
+
+impl Drop for LegacyV1InvitationWire {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V2InviteWire {
     v: u32,
@@ -177,80 +163,77 @@ impl Drop for V2InviteWire {
 pub(crate) fn decode_pairing_code(
     encoded: String,
     now_unix_seconds: u64,
-) -> Result<DecodedPairingCode, RemoteHostPairingError> {
+) -> Result<DecodedPairingCode, PairingCodeError> {
     let encoded = Zeroizing::new(encoded);
     let trimmed = encoded.trim();
     if trimmed.is_empty() {
-        return Err(RemoteHostPairingError::MalformedCode);
+        return Err(PairingCodeError::MalformedCode);
     }
     let (json, v2_envelope): (Zeroizing<String>, bool) =
         if let Some(payload) = trimmed.strip_prefix(REMORA_LINK_V2_ENVELOPE_PREFIX) {
             if payload.len() > MAX_ENCODED_SEGMENT_BYTES {
-                return Err(RemoteHostPairingError::CodeTooLarge);
+                return Err(PairingCodeError::CodeTooLarge);
             }
             let mut decoded = URL_SAFE_NO_PAD
                 .decode(payload)
-                .map_err(|_| RemoteHostPairingError::MalformedCode)?;
+                .map_err(|_| PairingCodeError::MalformedCode)?;
             let canonical = Zeroizing::new(URL_SAFE_NO_PAD.encode(&decoded));
             if canonical.as_str() != payload {
                 decoded.zeroize();
-                return Err(RemoteHostPairingError::MalformedCode);
+                return Err(PairingCodeError::MalformedCode);
             }
             if decoded.len() > MAX_DECODED_JSON_BYTES {
                 decoded.zeroize();
-                return Err(RemoteHostPairingError::CodeTooLarge);
+                return Err(PairingCodeError::CodeTooLarge);
             }
             let decoded = match String::from_utf8(decoded) {
                 Ok(decoded) => decoded,
                 Err(error) => {
                     let mut bytes = error.into_bytes();
                     bytes.zeroize();
-                    return Err(RemoteHostPairingError::MalformedCode);
+                    return Err(PairingCodeError::MalformedCode);
                 }
             };
             (Zeroizing::new(decoded), true)
         } else if trimmed.starts_with('{') {
             if trimmed.len() > MAX_DECODED_JSON_BYTES {
-                return Err(RemoteHostPairingError::CodeTooLarge);
+                return Err(PairingCodeError::CodeTooLarge);
             }
             (Zeroizing::new(trimmed.to_string()), false)
         } else if trimmed.starts_with("remora-link:") {
             // Fail closed for unknown envelope versions. In particular, never
             // reinterpret a broken v2 envelope as a legacy bearer payload.
-            return Err(RemoteHostPairingError::IncompatibleProtocol);
+            return Err(PairingCodeError::IncompatibleProtocol);
         } else {
             // A human-entered short locator is not an authenticator. It stays
             // explicitly unsupported until bilateral confirmation or a PAKE flow
             // is implemented.
-            return Err(RemoteHostPairingError::UnsupportedManualCode);
+            return Err(PairingCodeError::UnsupportedManualCode);
         };
 
     let version: VersionProbe =
-        serde_json::from_str(&json).map_err(|_| RemoteHostPairingError::MalformedCode)?;
+        serde_json::from_str(&json).map_err(|_| PairingCodeError::MalformedCode)?;
     if v2_envelope && version.v != 2 {
-        return Err(RemoteHostPairingError::IncompatibleProtocol);
+        return Err(PairingCodeError::IncompatibleProtocol);
     }
     match version.v {
-        crate::alleycat::ALLEYCAT_PROTOCOL_VERSION => {
-            let mut params = crate::alleycat::parse_pair_payload(&json).map_err(map_v1_error)?;
-            // The v2 workflow retains only the classification fields. Existing
-            // v1 sessions continue through their separate compatibility path.
-            params.token.zeroize();
+        LEGACY_V1_PROTOCOL_VERSION => {
+            let params = decode_legacy_v1(&json)?;
             Ok(DecodedPairingCode::LegacyV1 { params })
         }
         2 if v2_envelope => {
             decode_v2(&json, now_unix_seconds).map(DecodedPairingCode::DeviceGrantV2)
         }
-        2 => Err(RemoteHostPairingError::IncompatibleProtocol),
-        _ => Err(RemoteHostPairingError::IncompatibleProtocol),
+        2 => Err(PairingCodeError::IncompatibleProtocol),
+        _ => Err(PairingCodeError::IncompatibleProtocol),
     }
 }
 
-fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, RemoteHostPairingError> {
+fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, PairingCodeError> {
     let mut wire: V2InviteWire =
-        serde_json::from_str(json).map_err(|_| RemoteHostPairingError::MalformedCode)?;
+        serde_json::from_str(json).map_err(|_| PairingCodeError::MalformedCode)?;
     if wire.v != 2 {
-        return Err(RemoteHostPairingError::IncompatibleProtocol);
+        return Err(PairingCodeError::IncompatibleProtocol);
     }
     if wire.expires_at < 0
         || u64::try_from(wire.expires_at)
@@ -258,19 +241,19 @@ fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, RemoteHostP
             .and_then(|seconds| seconds.checked_mul(1_000))
             .is_none()
     {
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
     if wire.node_id.is_empty() {
-        return Err(RemoteHostPairingError::MissingHostIdentity);
+        return Err(PairingCodeError::MissingHostIdentity);
     }
     if wire.node_id.len() > MAX_ENDPOINT_ID_BYTES
         || wire.node_id.trim() != wire.node_id
         || wire.node_id.chars().any(char::is_control)
     {
-        return Err(RemoteHostPairingError::InvalidHostIdentity);
+        return Err(PairingCodeError::InvalidHostIdentity);
     }
     let node_id = EndpointId::from_str(&wire.node_id)
-        .map_err(|_| RemoteHostPairingError::InvalidHostIdentity)?
+        .map_err(|_| PairingCodeError::InvalidHostIdentity)?
         .to_string();
 
     let mut invitation_id = Zeroizing::new(decode_exact_base64url(
@@ -285,19 +268,19 @@ fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, RemoteHostP
     )
     .is_err()
     {
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
     if wire
         .host_name
         .as_deref()
         .is_some_and(|name| !valid_label(name, MAX_HOST_NAME_BYTES))
     {
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
 
     let relay = wire.relay.take();
     if let Some(relay) = relay.as_deref() {
-        RelayUrl::from_str(relay).map_err(|_| RemoteHostPairingError::InvalidRelayHint)?;
+        RelayUrl::from_str(relay).map_err(|_| PairingCodeError::InvalidRelayHint)?;
     }
 
     Ok(V2Invite {
@@ -313,25 +296,22 @@ fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, RemoteHostP
     })
 }
 
-fn decode_exact_base64url(
-    value: &str,
-    expected_bytes: usize,
-) -> Result<Vec<u8>, RemoteHostPairingError> {
+fn decode_exact_base64url(value: &str, expected_bytes: usize) -> Result<Vec<u8>, PairingCodeError> {
     let expected_chars = expected_bytes.saturating_mul(8).div_ceil(6);
     if value.len() != expected_chars || value.contains('=') {
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
     let mut decoded = URL_SAFE_NO_PAD
         .decode(value)
-        .map_err(|_| RemoteHostPairingError::InvalidEnrollmentMaterial)?;
+        .map_err(|_| PairingCodeError::InvalidEnrollmentMaterial)?;
     if decoded.len() != expected_bytes {
         decoded.zeroize();
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
     let canonical = Zeroizing::new(URL_SAFE_NO_PAD.encode(&decoded));
     if canonical.as_str() != value {
         decoded.zeroize();
-        return Err(RemoteHostPairingError::InvalidEnrollmentMaterial);
+        return Err(PairingCodeError::InvalidEnrollmentMaterial);
     }
     Ok(decoded)
 }
@@ -363,26 +343,26 @@ fn valid_label(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
-fn map_v1_error(error: crate::alleycat::AlleycatError) -> RemoteHostPairingError {
-    match error {
-        crate::alleycat::AlleycatError::ProtocolMismatch { .. } => {
-            RemoteHostPairingError::IncompatibleProtocol
-        }
-        crate::alleycat::AlleycatError::Transport(_) => RemoteHostPairingError::HostUnavailable,
-        crate::alleycat::AlleycatError::InvalidPayload(message) => {
-            if message.contains("empty node_id") {
-                RemoteHostPairingError::MissingHostIdentity
-            } else if message.contains("invalid node_id") {
-                RemoteHostPairingError::InvalidHostIdentity
-            } else if message.contains("empty token") {
-                RemoteHostPairingError::MissingEnrollmentMaterial
-            } else if message.contains("relay URL") {
-                RemoteHostPairingError::InvalidRelayHint
-            } else {
-                RemoteHostPairingError::MalformedCode
-            }
-        }
+fn decode_legacy_v1(json: &str) -> Result<LegacyV1Invitation, PairingCodeError> {
+    let wire: LegacyV1InvitationWire =
+        serde_json::from_str(json).map_err(|_| PairingCodeError::MalformedCode)?;
+    if wire.v != LEGACY_V1_PROTOCOL_VERSION {
+        return Err(PairingCodeError::IncompatibleProtocol);
     }
+    if wire.node_id.trim().is_empty() {
+        return Err(PairingCodeError::MissingHostIdentity);
+    }
+    EndpointId::from_str(&wire.node_id).map_err(|_| PairingCodeError::InvalidHostIdentity)?;
+    if wire.token.trim().is_empty() {
+        return Err(PairingCodeError::MissingEnrollmentMaterial);
+    }
+    if let Some(relay) = wire.relay.as_deref() {
+        RelayUrl::from_str(relay).map_err(|_| PairingCodeError::InvalidRelayHint)?;
+    }
+    Ok(LegacyV1Invitation {
+        node_id: wire.node_id.clone(),
+        host_name: normalize_host_name(wire.host_name.clone()),
+    })
 }
 
 #[cfg(test)]
@@ -426,15 +406,13 @@ mod tests {
         .to_string();
 
         let decoded = decode_pairing_code(json, 1_000).expect("legacy code");
-        let inspection = decoded.inspection();
-        assert_eq!(inspection.protocol, RemotePairingProtocol::LegacyV1);
-        assert_eq!(
-            inspection.disposition,
-            RemotePairingOfferDisposition::RePairRequired
-        );
-        assert_eq!(inspection.host_id.value, format!("alleycat:{NODE_ID}"));
-        assert_eq!(inspection.suggested_display_name, "Old Host");
-        assert_eq!(inspection.expires_at_unix_ms, None);
+        match decoded {
+            DecodedPairingCode::LegacyV1 { params } => {
+                assert_eq!(params.node_id, NODE_ID);
+                assert_eq!(params.host_name.as_deref(), Some("Old Host"));
+            }
+            DecodedPairingCode::DeviceGrantV2(_) => panic!("expected legacy classification"),
+        }
     }
 
     #[test]
@@ -446,13 +424,15 @@ mod tests {
 
         assert!(matches!(
             decode_pairing_code(json, now),
-            Err(RemoteHostPairingError::IncompatibleProtocol)
+            Err(PairingCodeError::IncompatibleProtocol)
         ));
-        assert_eq!(
-            copied.inspection().host_id.value,
-            format!("remora-link:{NODE_ID}")
-        );
-        assert_eq!(copied.inspection().suggested_display_name, "Studio Mac");
+        match copied {
+            DecodedPairingCode::DeviceGrantV2(invite) => {
+                assert_eq!(invite.node_id, NODE_ID);
+                assert_eq!(invite.host_name.as_deref(), Some("Studio Mac"));
+            }
+            DecodedPairingCode::LegacyV1 { .. } => panic!("expected v2 invitation"),
+        }
     }
 
     #[test]
@@ -464,7 +444,7 @@ mod tests {
 
         assert!(matches!(
             decode_pairing_code(v2_envelope(value.to_string()), now),
-            Err(RemoteHostPairingError::MalformedCode)
+            Err(PairingCodeError::MalformedCode)
         ));
 
         let v1 = serde_json::json!({
@@ -479,7 +459,7 @@ mod tests {
         );
         assert!(matches!(
             decode_pairing_code(wrapped_v1, now),
-            Err(RemoteHostPairingError::IncompatibleProtocol)
+            Err(PairingCodeError::IncompatibleProtocol)
         ));
     }
 
@@ -490,14 +470,14 @@ mod tests {
         unknown["token"] = serde_json::Value::String("must-not-be-accepted".into());
         assert!(matches!(
             decode_pairing_code(v2_envelope(unknown.to_string()), now),
-            Err(RemoteHostPairingError::MalformedCode)
+            Err(PairingCodeError::MalformedCode)
         ));
 
         let mut short: serde_json::Value = serde_json::from_str(&v2_json(now)).unwrap();
         short["secret"] = serde_json::Value::String(URL_SAFE_NO_PAD.encode([1_u8; 31]));
         assert!(matches!(
             decode_pairing_code(v2_envelope(short.to_string()), now),
-            Err(RemoteHostPairingError::InvalidEnrollmentMaterial)
+            Err(PairingCodeError::InvalidEnrollmentMaterial)
         ));
     }
 
@@ -512,12 +492,12 @@ mod tests {
         far_future["expires_at"] = serde_json::Value::from(i64::MAX);
         assert!(matches!(
             decode_pairing_code(v2_envelope(far_future.to_string()), now),
-            Err(RemoteHostPairingError::InvalidEnrollmentMaterial)
+            Err(PairingCodeError::InvalidEnrollmentMaterial)
         ));
 
         assert!(matches!(
             decode_pairing_code("ABCD-EFGH".to_string(), now),
-            Err(RemoteHostPairingError::UnsupportedManualCode)
+            Err(PairingCodeError::UnsupportedManualCode)
         ));
     }
 

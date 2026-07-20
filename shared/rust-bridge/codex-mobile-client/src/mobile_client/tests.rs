@@ -414,59 +414,6 @@ mod mobile_client_tests {
     }
 
     #[test]
-    fn alleycat_short_circuit_detects_missing_selected_runtime() {
-        let requested = vec![
-            (
-                "codex".to_string(),
-                AlleycatAgentInfo {
-                    name: "codex".to_string(),
-                    display_name: "Codex".to_string(),
-                    wire: AlleycatAgentWire::Websocket,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-            (
-                "droid".to_string(),
-                AlleycatAgentInfo {
-                    name: "droid".to_string(),
-                    display_name: "Droid".to_string(),
-                    wire: AlleycatAgentWire::Jsonl,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-            (
-                "amp".to_string(),
-                AlleycatAgentInfo {
-                    name: "amp".to_string(),
-                    display_name: "Amp".to_string(),
-                    wire: AlleycatAgentWire::Jsonl,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-        ];
-        let requested_kinds = alleycat_requested_runtime_kinds(&requested);
-
-        assert_eq!(alleycat_runtime_agent_names(&requested), "codex,droid,amp");
-        assert_eq!(
-            missing_runtime_kinds(&["codex".to_string()], &requested_kinds),
-            vec!["amp".to_string(), "droid".to_string()]
-        );
-        assert!(
-            missing_runtime_kinds(
-                &["codex".to_string(), "droid".to_string(), "amp".to_string()],
-                &requested_kinds
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
     fn thread_runtime_infers_claude_from_existing_thread_model() {
         let client = MobileClient::new();
         let key = ThreadKey {

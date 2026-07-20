@@ -7,12 +7,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     private var contentReady = false
     private var splashDismissed = false
 
-    weak var appRuntime: AppRuntimeController?
-
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         LLog.bootstrap()
 
         LLog.info("lifecycle", "application did finish launching")
+        LegacyV1SecretPurge.shared.start()
         #if !targetEnvironment(macCatalyst)
         // Register on every launch so APNs can report token rotation. This does
         // not request alert permission; visible notification permission remains
@@ -158,26 +157,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 field.removeFromSuperview()
             }
         }
-    }
-
-    func applicationWillTerminate(_ application: UIApplication) {
-        // Best-effort graceful shutdown of the iroh endpoint. iOS only
-        // fires this hook reliably on Catalyst (NSApplicationDelegate)
-        // and on OS-initiated terminations from background — swipe-up-
-        // to-kill from app switcher does NOT fire it. Acceptable: the
-        // cost of skipping is one "Aborting ungracefully" log on iroh's
-        // side and the daemon waiting up to its idle timeout to reap
-        // the final zombie.
-        LLog.info("lifecycle", "applicationWillTerminate — closing pairing endpoint")
-        let semaphore = DispatchSemaphore(value: 0)
-        Task { @MainActor in
-            await self.appRuntime?.shutdownAlleycatEndpoint()
-            semaphore.signal()
-        }
-        // applicationWillTerminate gets ~5s before the OS kills us.
-        // Block briefly on the close handshake so iroh can flush
-        // CONNECTION_CLOSE frames; bail if iroh's drain takes too long.
-        _ = semaphore.wait(timeout: .now() + 2.5)
     }
 
 }

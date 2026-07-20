@@ -9,7 +9,9 @@ pub mod updates;
 mod voice;
 
 pub use activity::AgentActivityPhase;
-pub use agent_metadata::{AgentMetadataStore, AppAgentMetadata};
+pub use agent_metadata::{
+    AgentMetadataStore, AppAgentCapabilities, AppAgentMetadata, AppAgentPresentation,
+};
 
 pub(crate) use boundary::project_thread_snapshot;
 pub use boundary::{

@@ -22,8 +22,8 @@ runtime glossary.
 3. Build only the Kotlin/Compose app against existing JNI artifacts:
    - `cd apps/android && ./gradlew :app:assembleDebug`
 
-Android packages `codex-mobile-client` and Ghostty, not Alpine/proot. Terminal
-sessions are remote-only.
+Android packages `codex-mobile-client` and Ghostty. Terminal sessions are
+remote-only.
 
 ## Modules
 

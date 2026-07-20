@@ -7,8 +7,6 @@ use base64::Engine;
 use codex_app_server_protocol as upstream;
 use url::Url;
 
-const PET_RUNTIME_UNAVAILABLE_MESSAGE: &str = "pets require a connected Codex runtime; pair a remote host with the Codex agent or connect to a Codex server";
-
 /// Execute a simple one-shot command on a remote server.
 pub(crate) async fn exec_command_simple(
     client: &MobileClient,
@@ -201,158 +199,6 @@ fn is_windows_path(path: &str) -> bool {
         || path.starts_with("\\\\")
 }
 
-pub(super) struct RemotePetScanEntry {
-    pub(super) summary: types::AppPetSummary,
-    pub(super) manifest_json: String,
-}
-
-pub(super) async fn scan_remote_pets(
-    client: &MobileClient,
-    server_id: &str,
-) -> Result<Vec<RemotePetScanEntry>, ClientError> {
-    ensure_pet_runtime_available(client, server_id)?;
-
-    let script = r#"root="${CODEX_HOME:-$HOME/.codex}/pets"
-[ -d "$root" ] || exit 0
-for manifest in "$root"/*/pet.json; do
-  [ -f "$manifest" ] || continue
-  dir=${manifest%/pet.json}
-  printf '%s\t' "$(printf '%s' "$dir" | base64 | tr -d '\n')"
-  base64 < "$manifest" | tr -d '\n'
-  printf '\n'
-done"#;
-    let response = exec_command_simple_owned(
-        client,
-        server_id,
-        vec![
-            "/usr/bin/env".to_string(),
-            "sh".to_string(),
-            "-lc".to_string(),
-            script.to_string(),
-        ],
-        None,
-    )
-    .await?;
-    if response.exit_code != 0 {
-        let stderr = response.stderr.trim();
-        return Err(ClientError::Rpc(if stderr.is_empty() {
-            "pet scan failed".to_string()
-        } else {
-            stderr.to_string()
-        }));
-    }
-
-    let mut entries = Vec::new();
-    for line in response.stdout.lines() {
-        let Some((path_b64, manifest_b64)) = line.split_once('\t') else {
-            continue;
-        };
-        let path = decode_base64_utf8(path_b64, "pet path")?;
-        let manifest_json = decode_base64_utf8(manifest_b64, "pet manifest")?;
-        let mut summary = crate::pets::summary_from_manifest(path.clone(), &manifest_json, false);
-        if let Some(spritesheet_file) = summary.spritesheet_path.as_deref() {
-            let spritesheet_path = crate::pets::local_spritesheet_path(&path, spritesheet_file)
-                .map_err(ClientError::Serialization)?;
-            summary.has_valid_spritesheet =
-                remote_file_exists(client, server_id, &spritesheet_path).await?;
-            if summary.has_valid_spritesheet {
-                summary.validation_error = None;
-            } else if summary.validation_error.is_none() {
-                summary.validation_error = Some(format!("{spritesheet_file} is missing"));
-            }
-        }
-        entries.push(RemotePetScanEntry {
-            summary,
-            manifest_json,
-        });
-    }
-    entries.sort_by(|a, b| {
-        a.summary
-            .display_name
-            .to_lowercase()
-            .cmp(&b.summary.display_name.to_lowercase())
-    });
-    Ok(entries)
-}
-
-fn ensure_pet_runtime_available(client: &MobileClient, server_id: &str) -> Result<(), ClientError> {
-    let runtime_kinds = client
-        .get_session(server_id)
-        .map_err(|error| ClientError::Rpc(error.to_string()))?
-        .runtime_kinds();
-    if runtime_kinds.contains(&"codex".to_string()) {
-        return Ok(());
-    }
-    Err(ClientError::Rpc(
-        PET_RUNTIME_UNAVAILABLE_MESSAGE.to_string(),
-    ))
-}
-
-async fn remote_file_exists(
-    client: &MobileClient,
-    server_id: &str,
-    path: &str,
-) -> Result<bool, ClientError> {
-    let response =
-        exec_command_simple_owned(client, server_id, file_exists_command(path), None).await?;
-    Ok(response.exit_code == 0)
-}
-
-pub(super) async fn read_remote_file_bytes(
-    client: &MobileClient,
-    server_id: &str,
-    path: &str,
-) -> Result<Vec<u8>, ClientError> {
-    let response =
-        exec_command_simple_owned(client, server_id, image_read_command(path), None).await?;
-    if response.exit_code != 0 {
-        let stderr = response.stderr.trim();
-        return Err(ClientError::Rpc(if stderr.is_empty() {
-            "file read failed".to_string()
-        } else {
-            stderr.to_string()
-        }));
-    }
-    let payload: String = response
-        .stdout
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|error| ClientError::Serialization(format!("invalid file base64: {error}")))
-}
-
-fn decode_base64_utf8(value: &str, label: &str) -> Result<String, ClientError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(value.trim())
-        .map_err(|error| ClientError::Serialization(format!("invalid {label} base64: {error}")))?;
-    String::from_utf8(bytes)
-        .map_err(|error| ClientError::Serialization(format!("invalid {label} utf8: {error}")))
-}
-
-fn file_exists_command(path: &str) -> Vec<String> {
-    if is_windows_path(path) {
-        return vec![
-            "powershell.exe".to_string(),
-            "-NoProfile".to_string(),
-            "-NonInteractive".to_string(),
-            "-Command".to_string(),
-            "$p = $args[0]; if ($p.StartsWith('~/') -or $p.StartsWith('~\\\\')) { $p = Join-Path $HOME $p.Substring(2) }; if (Test-Path -LiteralPath $p -PathType Leaf) { exit 0 } else { exit 1 }".to_string(),
-            path.to_string(),
-        ];
-    }
-    vec![
-        "/usr/bin/env".to_string(),
-        "sh".to_string(),
-        "-lc".to_string(),
-        r#"path="$1"; case "$path" in "~/"*) path="$HOME/${path#~/}" ;; esac; test -f "$path""#
-            .to_string(),
-        "sh".to_string(),
-        path.to_string(),
-    ]
-}
-
 enum ImageViewSource {
     InlineData(Vec<u8>),
     FilePath(String),
@@ -410,18 +256,7 @@ fn inline_image_data(raw: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ImageViewSource, PET_RUNTIME_UNAVAILABLE_MESSAGE, image_read_command, normalized_image_path,
-    };
-
-    #[test]
-    fn pet_runtime_error_uses_neutral_remote_pairing_copy() {
-        assert_eq!(
-            PET_RUNTIME_UNAVAILABLE_MESSAGE,
-            "pets require a connected Codex runtime; pair a remote host with the Codex agent or connect to a Codex server"
-        );
-        assert!(!PET_RUNTIME_UNAVAILABLE_MESSAGE.contains("Alleycat"));
-    }
+    use super::{ImageViewSource, image_read_command, normalized_image_path};
 
     #[test]
     fn parses_inline_image_data() {

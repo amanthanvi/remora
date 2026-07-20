@@ -4,13 +4,11 @@ import UIKit
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(AppRuntimeController.self) private var appRuntime
     @Environment(ThemeManager.self) private var themeManager
     @State private var appState = AppState()
     @State private var stableSafeAreaInsets = StableSafeAreaInsets()
     @State private var conversationWarmup = ConversationWarmupCoordinator()
     @State private var actionCenter = RemoraActionCenter.shared
-    @State private var petOverlay = PetOverlayController.shared
     @State private var composerBottomInset: CGFloat = 0
     @State private var splashDismissed = false
     @Environment(\.colorScheme) private var colorScheme
@@ -177,16 +175,6 @@ struct ContentView: View {
 
     @ViewBuilder
     private var standardOverlays: some View {
-        if petOverlay.visible, let pet = petOverlay.selectedPet {
-            PetOverlayView(
-                pet: pet,
-                state: petOverlay.avatarState(runtime: appModel.chromeObservation.petRuntime),
-                message: petOverlay.avatarMessage(runtime: appModel.chromeObservation.petRuntime),
-                reduceMotion: UIAccessibility.isReduceMotionEnabled
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-
         if let approval = appModel.chromeObservation.pendingApproval {
             ApprovalPromptView(approval: approval) { decision in
                 Task {

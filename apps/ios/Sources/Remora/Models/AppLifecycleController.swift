@@ -20,16 +20,13 @@ final class AppLifecycleController {
 
     func reconnectSavedServers(appModel: AppModel) async {
         let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         await appModel.reconnectController.notifyNetworkChange()
         _ = await appModel.reconnectController.reconnectSavedServers()
         await appModel.refreshSnapshot()
-        AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
     }
 
     func reconnectServer(serverId: String, appModel: AppModel) async {
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: SavedServerStore.reconnectRecords())
         _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
         await appModel.refreshSnapshot()
@@ -110,7 +107,6 @@ final class AppLifecycleController {
     ) async -> AuthenticatedBackgroundStateResult {
         let previousSnapshot = appModel.snapshot
 
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords(rememberedOnly: true)
         )
@@ -144,7 +140,6 @@ final class AppLifecycleController {
         }
 
         guard await appModel.refreshSnapshotAuthoritative() else { return .failed }
-        AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
         return previousSnapshot != appModel.snapshot ? .changed : .unchanged
     }
 
@@ -153,14 +148,17 @@ final class AppLifecycleController {
         needsInitialReconnect: Bool,
         keysToRefresh: Set<ThreadKey>
     ) async {
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords(rememberedOnly: true)
         )
 
         let backgroundDuration = lastBackgroundedAt.map { Date().timeIntervalSince($0) }
         if let duration = backgroundDuration, duration > Self.longResumeThreshold {
-            await appModel.reconnectController.onLongResume()
+            do {
+                _ = try await appModel.client.remoraLinkLongResume()
+            } catch {
+                LLog.error("remora-link", "long-resume reconciliation failed", error: error)
+            }
         }
         lastBackgroundedAt = nil
 
@@ -186,6 +184,5 @@ final class AppLifecycleController {
             }
         }
 
-        AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
     }
 }

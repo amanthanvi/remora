@@ -569,7 +569,7 @@ pub(super) async fn refresh_thread_list_from_app_server(
     app_store: Arc<AppStoreReducer>,
     server_id: &str,
 ) -> Result<(), RpcError> {
-    // Multiplexed sessions (Alleycat) carry a separate command channel per
+    // Multiplexed sessions carry a separate command channel per
     // agent runtime. `thread/list` is not thread-scoped, so the default
     // dispatcher routes it to Codex only — pi and opencode threads would
     // never appear in the UI. Fan the request out across every runtime the

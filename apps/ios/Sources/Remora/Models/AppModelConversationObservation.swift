@@ -4,8 +4,8 @@ import Observation
 /// Root-level chrome state projected away from the full Rust snapshot.
 ///
 /// Streaming conversation payloads change frequently, but the app root only
-/// needs the active route, the approval overlay, and the pet's coarse runtime
-/// state. Keeping that payload behind an equality-gated revision prevents an
+/// needs the active route and approval overlay. Keeping that payload behind an
+/// equality-gated revision prevents an
 /// unrelated stream from invalidating the entire SwiftUI hierarchy.
 @MainActor
 @Observable
@@ -13,28 +13,24 @@ final class AppModelChromeObservation {
     private struct State: Equatable {
         var activeThread: ThreadKey?
         var pendingApproval: PendingApproval?
-        var petRuntime: PetOverlayRuntimeSnapshot?
     }
 
     private(set) var revision: UInt64 = 0
 
     @ObservationIgnored private var state = State(
         activeThread: nil,
-        pendingApproval: nil,
-        petRuntime: nil
+        pendingApproval: nil
     )
 
     var activeThread: ThreadKey? { state.activeThread }
     var pendingApproval: PendingApproval? { state.pendingApproval }
-    var petRuntime: PetOverlayRuntimeSnapshot? { state.petRuntime }
 
     func refresh(snapshot: AppSnapshotRecord?) {
         let nextState = State(
             activeThread: snapshot?.activeThread,
             pendingApproval: snapshot?.pendingApprovals.first {
                 $0.kind != .mcpElicitation
-            },
-            petRuntime: snapshot.map { PetOverlayRuntimeSnapshot(snapshot: $0) }
+            }
         )
         guard state != nextState else { return }
         state = nextState

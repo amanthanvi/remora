@@ -1301,27 +1301,13 @@ impl ServerSession {
     }
 
     /// Hint each remote-runtime transport that the host network may have
-    /// changed. iroh-backed transports (alleycat) use this to call
+    /// changed. Iroh-backed transports use this to call
     /// `Endpoint::network_change()` so QUIC re-evaluates paths instead of
     /// waiting for the idle timeout. TCP-based transports default to a
     /// no-op since the OS already surfaces those changes.
     pub async fn notify_network_change(&self) {
         for transport in &self.runtime_transports {
             transport.notify_network_change().await;
-        }
-    }
-
-    /// Force every remote-runtime transport to abandon its current
-    /// underlying connection. Use only when the application has
-    /// out-of-band knowledge the connection is dead (e.g. resumed from a
-    /// long iOS suspension where iroh's `network_change` hint can't
-    /// substitute for closing the connection — see
-    /// `RemoteTransport::close_current_connection`). The worker observes
-    /// the close via `client.next_event()` and rebuilds via the existing
-    /// reconnect path.
-    pub async fn close_current_connections(&self) {
-        for transport in &self.runtime_transports {
-            transport.close_current_connection().await;
         }
     }
 
@@ -1491,7 +1477,7 @@ impl ServerSession {
     }
 
     /// Send a method/params request to a specific runtime. Used by callers
-    /// that need to reach a non-Codex runtime (e.g. an Alleycat-hosted Pi or
+    /// that need to reach a non-Codex runtime (e.g. a remote Pi or
     /// Opencode tunnel). Falls back to the default channel when the
     /// `runtime_kind` is not registered for this session.
     pub async fn request_for_runtime(
@@ -3109,7 +3095,7 @@ mod tests {
                 ConnectionStage::Ready,
                 Duration::from_millis(1),
                 Duration::from_millis(generation),
-                "alleycat",
+                "managed",
                 &"codex".to_string(),
                 1,
                 ConnectionAttemptOutcome::Succeeded,

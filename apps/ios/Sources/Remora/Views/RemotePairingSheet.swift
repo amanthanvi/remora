@@ -10,6 +10,12 @@ enum RemoraLinkVisualTokens {
 
 struct RemotePairingSheet: View {
     static let pairCommand = "npx --yes remora-link@latest pair"
+    static let legacyRePairTitle = "Pair again with Remora Link"
+
+    static func legacyRePairMessage(hostDisplayName: String) -> String {
+        "\(hostDisplayName) uses a legacy invitation that Remora no longer accepts. "
+            + "Create a new Remora Link pairing code on the host, then scan or paste it here."
+    }
 
     static func supportsQRScanning(rendersAsMacApp: Bool) -> Bool {
         !rendersAsMacApp
@@ -229,13 +235,10 @@ struct RemotePairingSheet: View {
 
     private func legacyRePairView(hostDisplayName: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Pair again with Remora Link v2", systemImage: "arrow.triangle.2.circlepath")
+            Label(Self.legacyRePairTitle, systemImage: "arrow.triangle.2.circlepath")
                 .font(.system(.headline, design: .monospaced))
                 .foregroundStyle(linkText)
-            Text("\(hostDisplayName) was paired using the legacy v1 npx kittylitter flow. Legacy credentials cannot be upgraded in place.")
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(linkText.opacity(0.72))
-            Text(legacyIngressExplanation)
+            Text(Self.legacyRePairMessage(hostDisplayName: hostDisplayName))
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(linkText.opacity(0.72))
             ingressButtons(
@@ -547,13 +550,6 @@ struct RemotePairingSheet: View {
             return "QR scanning and clipboard paste follow the same authenticated inspection path."
         }
         return "Paste the host's pairing code to follow the authenticated inspection path."
-    }
-
-    private var legacyIngressExplanation: String {
-        if Self.supportsQRScanning(rendersAsMacApp: RemoraPlatform.rendersAsMacApp) {
-            return "Run the command above on the host, then scan or paste its new code."
-        }
-        return "Run the command above on the host, then paste its new code."
     }
 
     private func inspectClipboardCode() {

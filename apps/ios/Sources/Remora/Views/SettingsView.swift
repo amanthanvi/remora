@@ -41,7 +41,6 @@ struct SettingsView: View {
                     appearanceSection
                     fontSection
                     conversationSection
-                    petSection
                     experimentalSection
                     accountSection
                     remoraLinkHostsSection
@@ -238,36 +237,6 @@ struct SettingsView: View {
 
     // MARK: - Experimental Section
 
-    private var petSection: some View {
-        Section {
-            NavigationLink {
-                PetSettingsView()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Wake Pet")
-                            .remoraFont(.subheadline)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                        if let pet = PetOverlayController.shared.selectedPet {
-                            Text(pet.displayName)
-                                .remoraFont(.caption)
-                                .foregroundColor(RemoraTheme.textSecondary)
-                        }
-                    }
-                }
-            }
-            .listRowBackground(RemoraTheme.surface.opacity(0.6))
-        } header: {
-            Text("Pet")
-                .foregroundColor(RemoraTheme.textSecondary)
-        }
-    }
-
-    // MARK: - Experimental Section
-
     private var experimentalSection: some View {
         Section {
             NavigationLink {
@@ -433,7 +402,6 @@ struct SettingsView: View {
             saved.append(configuration.savedServer)
         }
         SavedServerStore.save(saved)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )
@@ -721,7 +689,7 @@ private struct SettingsServerConnectionEditor: View {
     }
 
     private var isSpecialPairedServer: Bool {
-        originalSavedServer?.alleycatNodeId != nil || originalSavedServer?.alleycatAgentWire == "ssh-bridge"
+        originalSavedServer?.sshBridgeRuntimeKinds != nil
     }
 
     var body: some View {

@@ -20,12 +20,6 @@ pub struct TerminalSize {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum TerminalBackendKind {
-    RemoteAlleycat {
-        node_id: String,
-        token: String,
-        relay: Option<String>,
-        shell: Option<String>,
-    },
     RemoteRemoraLink {
         host_id: String,
         shell: Option<String>,
@@ -1048,96 +1042,5 @@ mod tests {
     fn rejects_zero_sized_terminal() {
         let error = validate_size(TerminalSize { cols: 0, rows: 24 }).unwrap_err();
         assert!(matches!(error, TerminalError::InvalidSize { .. }));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a live alleycat daemon; set REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR"]
-    async fn live_remote_alleycat_terminal_round_trips_shell_io() {
-        let pair_json = match std::env::var("REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => {
-                eprintln!("skipping: REMORA_TERMINAL_LIVE_ALLEYCAT_PAIR is not set");
-                return;
-            }
-        };
-        let pair = crate::alleycat::parse_pair_payload(&pair_json).expect("parse pair payload");
-        let session = TerminalSession::open(
-            TerminalBackendKind::RemoteAlleycat {
-                node_id: pair.node_id,
-                token: pair.token,
-                relay: pair.relay,
-                shell: Some("/bin/sh".to_string()),
-            },
-            TerminalSize { cols: 77, rows: 31 },
-        )
-        .await
-        .expect("open remote shell terminal");
-
-        enum LiveEvent {
-            Bytes(Vec<u8>),
-            Exit(i32),
-        }
-
-        struct LiveListener {
-            tx: tokio::sync::mpsc::UnboundedSender<LiveEvent>,
-        }
-
-        impl TerminalOutputListener for LiveListener {
-            fn on_bytes(&self, data: Vec<u8>) {
-                let _ = self.tx.send(LiveEvent::Bytes(data));
-            }
-
-            fn on_exit(&self, code: i32) {
-                let _ = self.tx.send(LiveEvent::Exit(code));
-            }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        session.subscribe_output(Box::new(LiveListener { tx }));
-        session
-            .write_input(b"printf 'remote-mobile-ready\n'; stty size; exit 0\n".to_vec())
-            .await
-            .expect("write shell input");
-
-        let mut output = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-        let exit_code = loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                panic!(
-                    "timed out waiting for remote shell output; got {:?}",
-                    String::from_utf8_lossy(&output)
-                );
-            }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(LiveEvent::Bytes(bytes))) => output.extend(bytes),
-                Ok(Some(LiveEvent::Exit(code))) => {
-                    break code;
-                }
-                Ok(None) => panic!("remote terminal listener closed"),
-                Err(_) => panic!(
-                    "timed out waiting for remote shell output; got {:?}",
-                    String::from_utf8_lossy(&output)
-                ),
-            }
-            if String::from_utf8_lossy(&output).contains("remote-mobile-ready")
-                && String::from_utf8_lossy(&output).contains("31 77")
-            {
-                // Keep waiting for the shell/exit notification so the test
-                // proves the full lifecycle, not just stdout delivery.
-            }
-        };
-
-        let output = String::from_utf8_lossy(&output);
-        assert!(
-            output.contains("remote-mobile-ready"),
-            "expected command output, got {output:?}"
-        );
-        assert!(
-            output.contains("31 77"),
-            "expected stty size from remote PTY, got {output:?}"
-        );
-        assert_eq!(exit_code, 0);
-        session.close_session().await.ok();
     }
 }

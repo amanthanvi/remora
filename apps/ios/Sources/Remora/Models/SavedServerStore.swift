@@ -6,33 +6,32 @@ extension Notification.Name {
 
 @MainActor
 enum SavedServerStore {
-    private static let savedServersKey = "codex_saved_servers"
+    static let savedServersKey = "codex_saved_servers"
 
-    static func save(_ servers: [SavedServer]) {
+    static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
         guard let data = try? JSONEncoder().encode(servers) else { return }
-        UserDefaults.standard.set(data, forKey: savedServersKey)
+        defaults.set(data, forKey: savedServersKey)
         NotificationCenter.default.post(name: .remoraSavedServersDidChange, object: nil)
     }
 
-    static func load() -> [SavedServer] {
-        guard let data = UserDefaults.standard.data(forKey: savedServersKey) else { return [] }
+    static func load(from defaults: UserDefaults = .standard) -> [SavedServer] {
+        guard let data = defaults.data(forKey: savedServersKey) else { return [] }
         let decoded = (try? JSONDecoder().decode([SavedServer].self, from: data)) ?? []
         let migrated = decoded.compactMap { saved -> SavedServer? in
             guard saved.id != "local", saved.source != .local else { return nil }
+            guard !saved.containsLegacyV1Metadata
+                || saved.sshBridgeRuntimeKinds != nil
+                || saved.hasViableDirectOrSSHPath else {
+                return nil
+            }
             let server = saved.toDiscoveredServer()
             let restored = SavedServer
                 .from(server, rememberedByUser: saved.rememberedByUser)
-                .withAlleycatHost(saved.alleycatHost)
-                .withAlleycat(
-                    nodeId: saved.alleycatNodeId,
-                    relay: saved.alleycatRelay,
-                    agentName: saved.alleycatAgentName,
-                    agentWire: saved.alleycatAgentWire
-                )
-            return migrateDisplayNameForCompatibility(restored)
+                .withSSHBridge(runtimeKinds: saved.sshBridgeRuntimeKinds)
+            return restored
         }
         if migrated != decoded {
-            save(migrated)
+            save(migrated, to: defaults)
         }
         return migrated
     }
@@ -46,6 +45,7 @@ enum SavedServerStore {
                 server,
                 rememberedByUser: existing?.rememberedByUser ?? false
             )
+            .withSSHBridge(runtimeKinds: existing?.sshBridgeRuntimeKinds)
         )
         save(saved)
     }
@@ -54,41 +54,6 @@ enum SavedServerStore {
         var saved = load()
         saved.removeAll { entry in matches(server, entry) }
         saved.append(SavedServer.from(server, rememberedByUser: true))
-        save(saved)
-    }
-
-    /// Legacy pairing persistence path. Kept so old app builds can still
-    /// decode records; current host pairings use `rememberAlleycat`.
-    static func rememberAlleycat(_ server: DiscoveredServer, relayHost: String) {
-        var saved = load()
-        saved.removeAll { entry in matches(server, entry) }
-        saved.append(
-            SavedServer
-                .from(server, rememberedByUser: true)
-                .withAlleycatHost(relayHost)
-        )
-        save(saved)
-    }
-
-    static func rememberAlleycat(
-        _ server: DiscoveredServer,
-        nodeId: String,
-        relay: String?,
-        agentName: String,
-        agentWire: String
-    ) {
-        var saved = load()
-        saved.removeAll { entry in matches(server, entry) }
-        saved.append(
-            SavedServer
-                .from(server, rememberedByUser: true)
-                .withAlleycat(
-                    nodeId: nodeId,
-                    relay: relay,
-                    agentName: agentName,
-                    agentWire: agentWire
-                )
-        )
         save(saved)
     }
 
@@ -137,11 +102,7 @@ enum SavedServerStore {
             sshPortForwardingEnabled: old.sshPortForwardingEnabled,
             websocketURL: old.websocketURL,
             rememberedByUser: old.rememberedByUser,
-            alleycatHost: old.alleycatHost,
-            alleycatNodeId: old.alleycatNodeId,
-            alleycatRelay: old.alleycatRelay,
-            alleycatAgentName: old.alleycatAgentName,
-            alleycatAgentWire: old.alleycatAgentWire
+            sshBridgeRuntimeKinds: old.sshBridgeRuntimeKinds
         )
         save(saved)
     }
@@ -174,11 +135,7 @@ enum SavedServerStore {
             sshPortForwardingEnabled: existing.sshPortForwardingEnabled,
             websocketURL: existing.websocketURL,
             rememberedByUser: existing.rememberedByUser,
-            alleycatHost: existing.alleycatHost,
-            alleycatNodeId: existing.alleycatNodeId,
-            alleycatRelay: existing.alleycatRelay,
-            alleycatAgentName: existing.alleycatAgentName,
-            alleycatAgentWire: existing.alleycatAgentWire
+            sshBridgeRuntimeKinds: existing.sshBridgeRuntimeKinds
         )
         save(saved)
     }
@@ -204,25 +161,4 @@ enum SavedServerStore {
         return normalized.lowercased()
     }
 
-    static func migrateDisplayNameForCompatibility(_ server: SavedServer) -> SavedServer {
-        guard shouldReplaceLegacyAlleycatPlaceholder(server) else { return server }
-        return server.withName(alleycatFallbackDisplayName(server))
-    }
-
-    private static func shouldReplaceLegacyAlleycatPlaceholder(_ server: SavedServer) -> Bool {
-        guard server.alleycatNodeId != nil else { return false }
-        let name = server.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty || name.caseInsensitiveCompare("Alleycat Host") == .orderedSame
-    }
-
-    private static func alleycatFallbackDisplayName(_ server: SavedServer) -> String {
-        guard let nodeId = server.alleycatNodeId?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !nodeId.isEmpty else {
-            return "Remora Host"
-        }
-        if nodeId.count <= 16 {
-            return "Remora \(nodeId)"
-        }
-        return "Remora \(nodeId.prefix(8))...\(nodeId.suffix(8))"
-    }
 }

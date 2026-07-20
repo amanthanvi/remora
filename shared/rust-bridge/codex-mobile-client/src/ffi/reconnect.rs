@@ -351,7 +351,6 @@ pub struct ReconnectController {
     credential_provider: Arc<tokio::sync::Mutex<Option<Arc<dyn SshCredentialProvider>>>>,
     slingshot_credential_provider:
         Arc<tokio::sync::Mutex<Option<Arc<dyn SlingshotCredentialProvider>>>>,
-    multi_clanker_and_quic_enabled: Arc<std::sync::Mutex<bool>>,
     reconnect_coordinator: Arc<ReconnectCoordinator>,
 }
 
@@ -365,7 +364,6 @@ impl ReconnectController {
             saved_servers: Arc::new(RwLock::new(Vec::new())),
             credential_provider: Arc::new(tokio::sync::Mutex::new(None)),
             slingshot_credential_provider: Arc::new(tokio::sync::Mutex::new(None)),
-            multi_clanker_and_quic_enabled: Arc::new(std::sync::Mutex::new(false)),
             reconnect_coordinator: Arc::new(ReconnectCoordinator::new()),
         }
     }
@@ -406,13 +404,6 @@ impl ReconnectController {
         }
     }
 
-    pub fn set_multi_clanker_and_quic_enabled(&self, enabled: bool) {
-        match self.multi_clanker_and_quic_enabled.lock() {
-            Ok(mut guard) => *guard = enabled,
-            Err(e) => *e.into_inner() = enabled,
-        }
-    }
-
     pub fn sync_saved_servers(&self, servers: Vec<SavedServerRecord>) {
         match self.saved_servers.write() {
             Ok(mut guard) => *guard = servers,
@@ -425,10 +416,6 @@ impl ReconnectController {
         let saved_servers = Arc::clone(&self.saved_servers);
         let credential_provider = Arc::clone(&self.credential_provider);
         let slingshot_credential_provider = Arc::clone(&self.slingshot_credential_provider);
-        let multi_clanker_and_quic_enabled = match self.multi_clanker_and_quic_enabled.lock() {
-            Ok(guard) => *guard,
-            Err(e) => *e.into_inner(),
-        };
         let reconnect_coordinator = Arc::clone(&self.reconnect_coordinator);
 
         // Keep the full reconnect body off the foreign async executor stack.
@@ -441,7 +428,6 @@ impl ReconnectController {
                     saved_servers,
                     credential_provider,
                     slingshot_credential_provider,
-                    multi_clanker_and_quic_enabled,
                     reconnect_coordinator,
                 )
                 .await
@@ -458,10 +444,6 @@ impl ReconnectController {
         let saved_servers = Arc::clone(&self.saved_servers);
         let credential_provider = Arc::clone(&self.credential_provider);
         let slingshot_credential_provider = Arc::clone(&self.slingshot_credential_provider);
-        let multi_clanker_and_quic_enabled = match self.multi_clanker_and_quic_enabled.lock() {
-            Ok(guard) => *guard,
-            Err(e) => *e.into_inner(),
-        };
         let reconnect_coordinator = Arc::clone(&self.reconnect_coordinator);
         let server_id_for_error = server_id.clone();
 
@@ -474,7 +456,6 @@ impl ReconnectController {
                     saved_servers,
                     credential_provider,
                     slingshot_credential_provider,
-                    multi_clanker_and_quic_enabled,
                     reconnect_coordinator,
                     server_id,
                 )
@@ -542,7 +523,7 @@ impl ReconnectController {
     pub async fn on_app_became_active(&self) -> Vec<ReconnectResult> {
         self.note_app_became_active();
         // Hint iroh-backed sessions that the host network may have changed
-        // before we run the reconnect plan. This lets healthy alleycat
+        // before we run the reconnect plan. This lets healthy Remora Link
         // sessions migrate paths/refresh relays without going through the
         // (heavier) full reconnect path; reconnect_saved_servers is still
         // run for transports that can't recover on their own.
@@ -574,32 +555,6 @@ impl ReconnectController {
             .await
             .inspect_err(|error| {
                 warn!("ReconnectController: notify_network_change task failed: {error}");
-            });
-    }
-
-    /// Lifecycle hook for "I just resumed from a long background or a
-    /// push wake." iroh's `network_change` hint operates on the endpoint
-    /// discovery layer; it can't observe that our connection-level path
-    /// has been silently dead since the OS suspended us. After more than
-    /// ~iroh's per-path idle (15s), the existing `Connection` is almost
-    /// certainly toast and waiting on the 30s connection-idle timer for
-    /// the worker to notice would make the next user request hang up to
-    /// 30s. This hook short-circuits that wait by closing every active
-    /// alleycat `Connection` and letting the worker rebuild via the
-    /// existing reconnect path.
-    ///
-    /// Cheap: alleycat-only (no-op for SSH/WebSocket transports), and
-    /// the new `Connection` is opened on the same shared `Endpoint`.
-    pub async fn on_long_resume(&self) {
-        let inner = Arc::clone(&self.inner);
-        let _ = self
-            .rt
-            .spawn(async move {
-                inner.abandon_alleycat_connections().await;
-            })
-            .await
-            .inspect_err(|error| {
-                warn!("ReconnectController: on_long_resume task failed: {error}");
             });
     }
 
@@ -639,7 +594,6 @@ async fn reconnect_saved_servers_inner(
     slingshot_credential_provider: Arc<
         tokio::sync::Mutex<Option<Arc<dyn SlingshotCredentialProvider>>>,
     >,
-    multi_clanker_and_quic_enabled: bool,
     reconnect_coordinator: Arc<ReconnectCoordinator>,
 ) -> Vec<ReconnectResult> {
     let servers = match saved_servers.read() {
@@ -690,7 +644,6 @@ async fn reconnect_saved_servers_inner(
             credential.as_ref(),
             slingshot_credential.as_ref(),
             false,
-            multi_clanker_and_quic_enabled,
         ) {
             ReconnectPlanDecision::Plan(plan) => plans.push(plan),
             ReconnectPlanDecision::NoAction(outcome) => {
@@ -722,7 +675,6 @@ async fn reconnect_server_inner(
     slingshot_credential_provider: Arc<
         tokio::sync::Mutex<Option<Arc<dyn SlingshotCredentialProvider>>>,
     >,
-    multi_clanker_and_quic_enabled: bool,
     reconnect_coordinator: Arc<ReconnectCoordinator>,
     server_id: String,
 ) -> ReconnectResult {
@@ -773,7 +725,6 @@ async fn reconnect_server_inner(
             credential.as_ref(),
             slingshot_credential.as_ref(),
             false,
-            multi_clanker_and_quic_enabled,
         ) {
             ReconnectPlanDecision::Plan(plan) => {
                 execute_coordinated_plan(plan, inner, reconnect_coordinator).await
@@ -981,13 +932,7 @@ mod tests {
             ssh_port_forwarding_enabled: None,
             websocket_url: None,
             remembered_by_user: true,
-            alleycat_host: None,
-            alleycat_udp_port: None,
-            alleycat_node_id: None,
-            alleycat_token: None,
-            alleycat_relay: None,
-            alleycat_agent_name: None,
-            alleycat_agent_wire: None,
+            ssh_bridge_runtime_kinds: None,
         };
 
         assert_eq!(
@@ -1037,13 +982,7 @@ mod tests {
             ssh_port_forwarding_enabled: None,
             websocket_url: None,
             remembered_by_user: true,
-            alleycat_host: None,
-            alleycat_udp_port: None,
-            alleycat_node_id: None,
-            alleycat_token: None,
-            alleycat_relay: None,
-            alleycat_agent_name: None,
-            alleycat_agent_wire: None,
+            ssh_bridge_runtime_kinds: None,
         };
 
         assert_eq!(
