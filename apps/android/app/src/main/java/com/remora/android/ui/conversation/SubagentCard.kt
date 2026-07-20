@@ -171,7 +171,7 @@ fun SubagentCard(
                                     }
                                 }
                             },
-                            modifier = Modifier.size(28.dp),
+                            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                         ) {
                             Icon(
                                 Icons.Default.OpenInNew,

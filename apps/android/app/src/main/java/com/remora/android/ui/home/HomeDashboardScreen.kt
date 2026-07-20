@@ -54,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -129,15 +130,20 @@ fun HomeDashboardScreen(
     onStartVoice: (() -> Unit)? = null,
     onOpenSavedApp: ((String) -> Unit)? = null,
     onOpenTerminal: (() -> Unit)? = null,
+    focusSearchRequest: Int = 0,
+    onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val usesCompactHeader = configuration.screenWidthDp < 420
     val snapshot by appModel.snapshot.collectAsState()
     val scope = rememberCoroutineScope()
     val voiceController = remember { com.remora.android.state.VoiceRuntimeController.shared }
     val lifecycleController = remember { AppLifecycleController() }
 
     var showTipJar by remember { mutableStateOf(false) }
+    var showHeaderActionsMenu by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
     val appVersionLabel = remember { "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})" }
@@ -224,6 +230,9 @@ fun HomeDashboardScreen(
     // scope so the two paths stay aligned.
     var replyTargetSession by remember { mutableStateOf<AppSessionSummary?>(null) }
     var isComposerActive by remember { mutableStateOf(false) }
+    var isComposerInputFocused by remember { mutableStateOf(false) }
+    var isSearchInputFocused by remember { mutableStateOf(false) }
+    var isModelSheetOpen by remember { mutableStateOf(false) }
     // When the user taps a composer chip (model / project), a modal sheet
     // opens and the IME dismisses — which would otherwise cascade through
     // `HomeComposerBar.onActiveChange(false)` and collapse the composer
@@ -249,6 +258,32 @@ fun HomeDashboardScreen(
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
     var topChromeHeight by remember { mutableStateOf(0.dp) }
+
+    LaunchedEffect(focusSearchRequest) {
+        if (focusSearchRequest > 0) isSearchExpanded = true
+    }
+    LaunchedEffect(
+        isComposerInputFocused,
+        isSearchInputFocused,
+        isModelSheetOpen,
+        replyTargetSession,
+        confirmAction,
+        renameTarget,
+        showTipJar,
+    ) {
+        onInputFocusChanged(
+            isComposerInputFocused ||
+                isSearchInputFocused ||
+                isModelSheetOpen ||
+                replyTargetSession != null ||
+                confirmAction != null ||
+                renameTarget != null ||
+                showTipJar,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     fun zoomIconFor(level: Int): ImageVector = when (level) {
         // Matches iOS semantics: 1 = most compact (scan), 4 = most detail (deep).
@@ -554,15 +589,14 @@ fun HomeDashboardScreen(
             LaunchedEffect(Unit) {
                 com.remora.android.state.TipJarSupporterState.refresh(context)
             }
-            val leftBadges = tierIcons.take(2).filterNotNull()
-            val rightBadges = tierIcons.drop(2).filterNotNull()
+            val supporterIcons = tierIcons.filterNotNull()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = if (usesCompactHeader) 8.dp else 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onShowSettings, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onShowSettings, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                     Icon(
                         Icons.Default.Settings,
                         contentDescription = "Settings",
@@ -570,54 +604,112 @@ fun HomeDashboardScreen(
                         modifier = Modifier.size(20.dp),
                     )
                 }
-                if (savedAppsAll.isNotEmpty()) {
-                    IconButton(onClick = onShowApps, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Outlined.GridView,
-                            contentDescription = "Apps",
-                            tint = RemoraTheme.textSecondary,
-                            modifier = Modifier.size(20.dp),
-                        )
+                if (usesCompactHeader) {
+                    if (savedAppsAll.isNotEmpty() || onOpenTerminal != null) {
+                        Box {
+                            IconButton(
+                                onClick = { showHeaderActionsMenu = true },
+                                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                            ) {
+                                Icon(
+                                    Icons.Default.MoreVert,
+                                    contentDescription = "More home actions",
+                                    tint = RemoraTheme.textSecondary,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showHeaderActionsMenu,
+                                onDismissRequest = { showHeaderActionsMenu = false },
+                            ) {
+                                if (savedAppsAll.isNotEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("Apps") },
+                                        onClick = {
+                                            showHeaderActionsMenu = false
+                                            onShowApps()
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.GridView, contentDescription = null)
+                                        },
+                                    )
+                                }
+                                if (onOpenTerminal != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Terminal") },
+                                        onClick = {
+                                            showHeaderActionsMenu = false
+                                            onOpenTerminal?.invoke()
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.Terminal, contentDescription = null)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (savedAppsAll.isNotEmpty()) {
+                        IconButton(onClick = onShowApps, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
+                            Icon(
+                                Icons.Outlined.GridView,
+                                contentDescription = "Apps",
+                                tint = RemoraTheme.textSecondary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    if (onOpenTerminal != null) {
+                        IconButton(onClick = onOpenTerminal, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
+                            Icon(
+                                Icons.Outlined.Terminal,
+                                contentDescription = "Terminal",
+                                tint = RemoraTheme.textSecondary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
                 }
-                if (onOpenTerminal != null) {
-                    IconButton(onClick = onOpenTerminal, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Outlined.Terminal,
-                            contentDescription = "Terminal",
-                            tint = RemoraTheme.textSecondary,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    leftBadges.forEach { iconRes ->
-                        androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(iconRes),
-                            contentDescription = "Supporter",
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clickable { showTipJar = true },
-                        )
-                    }
-                    if (leftBadges.isNotEmpty()) Spacer(Modifier.width(4.dp))
-                    com.remora.android.ui.AnimatedLogo(size = 64.dp)
-                    if (rightBadges.isNotEmpty()) Spacer(Modifier.width(4.dp))
-                    rightBadges.forEach { iconRes ->
-                        androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(iconRes),
-                            contentDescription = "Supporter",
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clickable { showTipJar = true },
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        supporterIcons.firstOrNull()?.let { iconRes ->
+                            Box(
+                                modifier = Modifier
+                                    .size(RemoraTheme.minimumTouchTarget)
+                                    .clickable { showTipJar = true },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.res.painterResource(iconRes),
+                                    contentDescription = "${supporterIcons.size} supporter badge${if (supporterIcons.size == 1) "" else "s"}",
+                                    modifier = Modifier.size(28.dp),
+                                )
+                                if (supporterIcons.size > 1) {
+                                    Text(
+                                        text = "+${supporterIcons.size - 1}",
+                                        color = RemoraTheme.accent,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .background(RemoraTheme.surfaceLight, CircleShape)
+                                            .padding(horizontal = 3.dp, vertical = 1.dp),
+                                    )
+                                }
+                            }
+                        }
+                        com.remora.android.ui.AnimatedLogo(
+                            size = if (usesCompactHeader) 48.dp else 64.dp,
                         )
                     }
                 }
-                Spacer(Modifier.weight(1f))
                 // Zoom cycle button. Cycles 1→2→3→4→3→2→1 via direction flip at
                 // the bounds. Mirrors iOS HomeDashboardView.swift:186-203.
                 IconButton(
@@ -632,7 +724,7 @@ fun HomeDashboardScreen(
                         }
                         DashboardZoomPrefs.setLevel(context, next)
                     },
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         imageVector = zoomIconFor(zoomLevel),
@@ -727,6 +819,8 @@ fun HomeDashboardScreen(
                                     selectedSearchRuntimeKind = null
                                 }
                             },
+                            focusRequest = focusSearchRequest,
+                            onFocusChanged = { isSearchInputFocused = it },
                         )
                     }
                     androidx.compose.material3.IconButton(
@@ -735,7 +829,7 @@ fun HomeDashboardScreen(
                             searchQuery = ""
                             selectedSearchRuntimeKind = null
                         },
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                     ) {
                         Icon(
                             imageVector = androidx.compose.material.icons.Icons.Default.Close,
@@ -847,6 +941,7 @@ fun HomeDashboardScreen(
                                 serverId = serverForModels,
                                 disabled = serverForModels.isNullOrBlank(),
                                 onSheetStateChange = { open ->
+                                    isModelSheetOpen = open
                                     suppressComposerCollapse = open
                                 },
                             )
@@ -882,10 +977,11 @@ fun HomeDashboardScreen(
                             onActiveChange = { active ->
                                 if (active) {
                                     isComposerActive = true
-                                } else if (!suppressComposerCollapse) {
+                                } else if (!suppressComposerCollapse && !isModelSheetOpen) {
                                     isComposerActive = false
                                 }
                             },
+                            onInputFocusChanged = { isComposerInputFocused = it },
                         )
                     }
                     else -> {
@@ -919,7 +1015,7 @@ fun HomeDashboardScreen(
                                 androidx.compose.material3.IconButton(
                                     onClick = { onStartVoice() },
                                     modifier = Modifier
-                                        .size(44.dp)
+                                        .size(RemoraTheme.minimumTouchTarget)
                                         .onGloballyPositioned {
                                             coachmarkTargetBounds[CoachmarkTarget.Voice] = it.boundsInRoot()
                                         }
@@ -940,7 +1036,7 @@ fun HomeDashboardScreen(
                             androidx.compose.material3.IconButton(
                                 onClick = { isComposerActive = true },
                                 modifier = Modifier
-                                    .size(44.dp)
+                                    .size(RemoraTheme.minimumTouchTarget)
                                     .onGloballyPositioned {
                                         coachmarkTargetBounds[CoachmarkTarget.NewThread] = it.boundsInRoot()
                                     }
@@ -960,7 +1056,7 @@ fun HomeDashboardScreen(
                             androidx.compose.material3.IconButton(
                                 onClick = { isSearchExpanded = true },
                                 modifier = Modifier
-                                    .size(44.dp)
+                                    .size(RemoraTheme.minimumTouchTarget)
                                     .onGloballyPositioned {
                                         coachmarkTargetBounds[CoachmarkTarget.Search] = it.boundsInRoot()
                                     }

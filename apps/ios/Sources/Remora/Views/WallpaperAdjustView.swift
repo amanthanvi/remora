@@ -228,7 +228,7 @@ struct WallpaperAdjustView: View {
             HStack(spacing: 8) {
                 Image(systemName: isOn.wrappedValue ? "checkmark.square.fill" : "square")
                     .font(.system(size: 18))
-                    .foregroundStyle(isOn.wrappedValue ? RemoraTheme.accent : RemoraTheme.textMuted)
+                    .foregroundStyle(isOn.wrappedValue ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                 Text(label)
                     .remoraFont(size: 14)
                     .foregroundStyle(RemoraTheme.textPrimary)

@@ -45,6 +45,12 @@ enum RemoraTheme {
     static var textSystem: Color     { adaptive(light: light.textSystem, dark: dark.textSystem) }
     static var surface: Color        { adaptive(light: light.surface, dark: dark.surface) }
     static var surfaceLight: Color   { adaptive(light: light.surfaceLight, dark: dark.surfaceLight) }
+    static var accentForeground: Color {
+        adaptive(light: light.accentForeground, dark: dark.accentForeground)
+    }
+    static var accentForegroundOnSurface: Color {
+        adaptive(light: light.accentForegroundOnSurface, dark: dark.accentForegroundOnSurface)
+    }
     static var border: Color         { adaptive(light: light.border, dark: dark.border) }
     static var separator: Color      { adaptive(light: light.separator, dark: dark.separator) }
     static var danger: Color         { adaptive(light: light.danger, dark: dark.danger) }
@@ -52,6 +58,19 @@ enum RemoraTheme {
     static var warning: Color        { adaptive(light: light.warning, dark: dark.warning) }
     static var textOnAccent: Color   { adaptive(light: light.textOnAccent, dark: dark.textOnAccent) }
     static var codeBackground: Color { adaptive(light: light.codeBackground, dark: dark.codeBackground) }
+    static let textOnDarkOverlay = Color(hex: "#EAFBFF")
+
+    /// The app-chrome base is intentionally a single restrained ocean tone.
+    /// Depth comes from `surface` and `surfaceLight`, not decoration behind
+    /// the task content.
+    static var background: Color {
+        adaptive(light: light.background, dark: dark.background)
+    }
+
+    static func background(for colorScheme: ColorScheme) -> Color {
+        let theme = colorScheme == .dark ? dark : light
+        return Color(hex: theme.background)
+    }
 
     static var overlayScrim: Color {
         colorScheme == .dark
@@ -59,49 +78,13 @@ enum RemoraTheme {
             : Color.black.opacity(0.3)
     }
 
-    static var gradientColors: [Color] {
-        [
-            adaptive(light: light.background, dark: dark.background),
-            adaptive(
-                light: ResolvedTheme.adjustBrightness(light.background, by: -0.01),
-                dark: ResolvedTheme.adjustBrightness(dark.background, by: 0.02)
-            ),
-            adaptive(
-                light: ResolvedTheme.adjustBrightness(light.background, by: 0.01),
-                dark: ResolvedTheme.adjustBrightness(dark.background, by: -0.01)
-            ),
-        ]
-    }
+    /// Compatibility spelling retained while call sites migrate. Returning a
+    /// `Color` makes every existing root/background use solid and avoids a
+    /// broad visual churn patch.
+    static var backgroundGradient: Color { background }
 
-    static func gradientColors(for colorScheme: ColorScheme) -> [Color] {
-        let isDark = colorScheme == .dark
-        let theme = isDark ? dark : light
-        return gradientColors(for: theme, isDark: isDark)
-    }
-
-    private static func gradientColors(for theme: ResolvedTheme, isDark: Bool) -> [Color] {
-        let bg = theme.background
-        return [
-            Color(hex: bg),
-            Color(hex: ResolvedTheme.adjustBrightness(bg, by: isDark ? 0.02 : -0.01)),
-            Color(hex: ResolvedTheme.adjustBrightness(bg, by: isDark ? -0.01 : 0.01)),
-        ]
-    }
-
-    static var backgroundGradient: LinearGradient {
-        LinearGradient(
-            colors: gradientColors,
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    static func backgroundGradient(for colorScheme: ColorScheme) -> LinearGradient {
-        LinearGradient(
-            colors: gradientColors(for: colorScheme),
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+    static func backgroundGradient(for colorScheme: ColorScheme) -> Color {
+        background(for: colorScheme)
     }
 
     static var headerScrim: [Color] {
@@ -127,6 +110,11 @@ enum FontFamilyOption: String, CaseIterable, Identifiable {
 }
 
 enum RemoraFont {
+    private static let sfMonoLight = "SFMono-Light"
+    private static let sfMonoRegular = "SFMono-Regular"
+    private static let sfMonoMedium = "SFMono-Medium"
+    private static let sfMonoSemibold = "SFMono-Semibold"
+    private static let sfMonoBold = "SFMono-Bold"
     private static let berkeleyRegular = "BerkeleyMono-Regular"
     private static let berkeleyBold = "BerkeleyMono-Bold"
 
@@ -138,7 +126,7 @@ enum RemoraFont {
     static var markdownFontName: String {
         switch storedFamily {
         case .mono:
-            return preferredMonoFontName(weight: .regular) ?? "SFMono-Regular"
+            return resolvedMonoFontName(weight: .regular) ?? "SFMono-Regular"
         case .system:
             return ".AppleSystemUIFont"
         }
@@ -149,8 +137,15 @@ enum RemoraFont {
         weight: Font.Weight = .regular,
         scale: CGFloat = 1.0
     ) -> Font {
+        if storedFamily.isMono {
+            return monoFont(
+                size: style.defaultPointSize * scale,
+                weight: weight,
+                relativeTo: style
+            )
+        }
         let pointSize = UIFont.preferredFont(forTextStyle: style.uiTextStyle).pointSize * scale
-        return styled(size: pointSize, weight: weight, relativeTo: style)
+        return .system(size: pointSize, weight: weight)
     }
 
     static func styled(size: CGFloat, weight: Font.Weight = .regular, scale: CGFloat = 1.0) -> Font {
@@ -162,8 +157,11 @@ enum RemoraFont {
         weight: Font.Weight = .regular,
         scale: CGFloat = 1.0
     ) -> Font {
-        let pointSize = UIFont.preferredFont(forTextStyle: style.uiTextStyle).pointSize * scale
-        return monoFont(size: pointSize, weight: weight, relativeTo: style)
+        monoFont(
+            size: style.defaultPointSize * scale,
+            weight: weight,
+            relativeTo: style
+        )
     }
 
     static func monospaced(size: CGFloat, weight: Font.Weight = .regular, scale: CGFloat = 1.0) -> Font {
@@ -178,7 +176,7 @@ enum RemoraFont {
     }
 
     private static func monoFont(size: CGFloat, weight: Font.Weight, relativeTo style: Font.TextStyle?) -> Font {
-        if let fontName = preferredMonoFontName(weight: weight) {
+        if let fontName = resolvedMonoFontName(weight: weight) {
             if let style {
                 return .custom(fontName, size: size, relativeTo: style)
             }
@@ -187,30 +185,43 @@ enum RemoraFont {
         return .system(size: size, weight: weight, design: .monospaced)
     }
 
-    private static func preferredMonoFontName(weight: Font.Weight) -> String? {
-        let preferred = isBold(weight: weight) ? berkeleyBold : berkeleyRegular
-        if UIFont(name: preferred, size: 12) != nil {
-            return preferred
+    static func monoFontCandidates(weight: Font.Weight) -> [String] {
+        switch weight {
+        case .ultraLight, .thin, .light:
+            return [sfMonoLight, sfMonoRegular, berkeleyRegular]
+        case .medium:
+            return [sfMonoMedium, sfMonoRegular, berkeleyRegular]
+        case .semibold:
+            return [
+                sfMonoSemibold,
+                sfMonoBold,
+                sfMonoMedium,
+                sfMonoRegular,
+                berkeleyBold,
+                berkeleyRegular,
+            ]
+        case .bold, .heavy, .black:
+            return [
+                sfMonoBold,
+                sfMonoSemibold,
+                sfMonoMedium,
+                sfMonoRegular,
+                berkeleyBold,
+                berkeleyRegular,
+            ]
+        default:
+            return [sfMonoRegular, berkeleyRegular]
         }
-        if UIFont(name: berkeleyRegular, size: 12) != nil {
-            return berkeleyRegular
-        }
-        return nil
     }
 
-    private static func isBold(weight: Font.Weight) -> Bool {
-        switch weight {
-        case .semibold, .bold, .heavy, .black:
-            return true
-        default:
-            return false
-        }
+    static func resolvedMonoFontName(weight: Font.Weight) -> String? {
+        monoFontCandidates(weight: weight).first { UIFont(name: $0, size: 12) != nil }
     }
 
     static func uiMonoFont(size: CGFloat, bold: Bool = false) -> UIFont {
         let name = bold
-            ? preferredMonoFontName(weight: .bold) ?? "SFMono-Bold"
-            : preferredMonoFontName(weight: .regular) ?? "SFMono-Regular"
+            ? resolvedMonoFontName(weight: .bold) ?? "SFMono-Bold"
+            : resolvedMonoFontName(weight: .regular) ?? "SFMono-Regular"
         return UIFont(name: name, size: size) ?? UIFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .regular)
     }
 
@@ -298,10 +309,24 @@ extension View {
     }
 }
 
+extension Image {
+    /// Glyphs inside fixed-size controls are geometry, not typography. Inline
+    /// semantic symbols should continue to use `remoraFont` so they scale with
+    /// the adjacent text.
+    func remoraControlIconFont(size: CGFloat, weight: Font.Weight = .regular) -> some View {
+        font(.system(size: size, weight: weight))
+    }
+}
+
 private struct ScaledSizeFontModifier: ViewModifier {
     @Environment(\.textScale) private var textScale
-    let size: CGFloat
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 17
     let weight: Font.Weight
+
+    init(size: CGFloat, weight: Font.Weight) {
+        _size = ScaledMetric(wrappedValue: size, relativeTo: .body)
+        self.weight = weight
+    }
 
     func body(content: Content) -> some View {
         content.font(RemoraFont.styled(size: size, weight: weight, scale: textScale))
@@ -320,8 +345,13 @@ private struct ScaledStyleFontModifier: ViewModifier {
 
 private struct ScaledMonoFontModifier: ViewModifier {
     @Environment(\.textScale) private var textScale
-    let size: CGFloat
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 17
     let weight: Font.Weight
+
+    init(size: CGFloat, weight: Font.Weight) {
+        _size = ScaledMetric(wrappedValue: size, relativeTo: .body)
+        self.weight = weight
+    }
 
     func body(content: Content) -> some View {
         content.font(RemoraFont.monospaced(size: size, weight: weight, scale: textScale))
@@ -329,6 +359,22 @@ private struct ScaledMonoFontModifier: ViewModifier {
 }
 
 private extension Font.TextStyle {
+    var defaultPointSize: CGFloat {
+        switch self {
+        case .largeTitle: return 34
+        case .title: return 28
+        case .title2: return 22
+        case .title3: return 20
+        case .headline, .body: return 17
+        case .callout: return 16
+        case .subheadline: return 15
+        case .footnote: return 13
+        case .caption: return 12
+        case .caption2: return 11
+        @unknown default: return 17
+        }
+    }
+
     var uiTextStyle: UIFont.TextStyle {
         switch self {
         case .largeTitle: return .largeTitle
@@ -344,6 +390,26 @@ private extension Font.TextStyle {
         case .caption2: return .caption2
         @unknown default: return .body
         }
+    }
+}
+
+enum RemoraAccessibilityMetrics {
+    static let minimumHitTarget: CGFloat = 44
+}
+
+enum RemoraMotionPolicy {
+    static func animation(_ animation: Animation, reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : animation
+    }
+}
+
+extension View {
+    func remoraMinimumHitTarget() -> some View {
+        frame(
+            minWidth: RemoraAccessibilityMetrics.minimumHitTarget,
+            minHeight: RemoraAccessibilityMetrics.minimumHitTarget
+        )
+        .contentShape(Rectangle())
     }
 }
 

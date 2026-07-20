@@ -22,8 +22,8 @@ pub(crate) mod posix {
     /// `$_remora_bun_global_bin`. Requires `PROFILE_INIT` first.
     pub(crate) const PACKAGE_MANAGER_PROBE: &str = include_str!("posix/package_manager_probe.sh");
 
-    /// Find the newest existing `codex` binary on the remote. Placeholders:
-    /// `{{PROFILE_INIT}}`, `{{PACKAGE_MANAGER_PROBE}}`, `{{SHARED_LINES}}`.
+    /// Find the first allowed `codex` binary using deterministic PATH and
+    /// configured-location precedence. Placeholder: `{{SHARED_LINES}}`.
     pub(crate) const RESOLVE_CODEX_BINARY: &str =
         alleycat_bridge_core::codex_resolver::POSIX_RESOLVE_CODEX_BINARY;
 
@@ -77,7 +77,8 @@ pub(crate) mod posix {
 
 /// PowerShell snippets.
 pub(crate) mod powershell {
-    /// Find the newest existing `codex` executable on the remote.
+    /// Find the first allowed `codex` executable using deterministic command
+    /// and configured-location precedence.
     pub(crate) const RESOLVE_CODEX_BINARY: &str =
         alleycat_bridge_core::codex_resolver::POWERSHELL_RESOLVE_CODEX_BINARY;
 

@@ -110,7 +110,7 @@ struct ConversationTurnRow: View, Equatable {
 
             Text(verbatim: responsePreviewText)
                 .remoraFont(.body)
-                .foregroundColor(RemoraTheme.textSecondary.opacity(0.82))
+                .foregroundColor(RemoraTheme.textSecondary)
                 .lineLimit(2)
                 .truncationMode(.tail)
                 .multilineTextAlignment(.leading)

@@ -6,10 +6,12 @@
 
 mod backend;
 mod config;
+mod context;
 mod input;
 mod links;
 mod osc;
-mod remote_alleycat;
+mod remote_remora_link;
+pub(crate) mod remote_shell;
 mod renderer;
 mod selection;
 mod session;
@@ -17,8 +19,12 @@ mod ssh;
 mod ssh_known_hosts;
 
 pub use config::{
-    TerminalConfig, TerminalCursorStyle, TerminalPalette, TerminalThemePreset,
-    render_ghostty_conf, theme_palette,
+    TerminalConfig, TerminalCursorStyle, TerminalPalette, TerminalThemePreset, render_ghostty_conf,
+    theme_palette,
+};
+pub use context::{
+    TerminalContextCapabilities, TerminalTransportDescriptor, TerminalTransportKind,
+    ThreadTerminalContext, ThreadTerminalContextError,
 };
 pub use input::{
     TerminalKeyAction, TerminalKeyCode, TerminalKeyEvent, TerminalKeyMods, encode_text,
@@ -34,7 +40,8 @@ pub use renderer::{
 };
 pub use selection::{TerminalCellMetrics, TerminalCellRange};
 pub use session::{
-    TerminalBackendKind, TerminalError, TerminalOutputListener, TerminalSession, TerminalSize,
+    TerminalBackendKind, TerminalError, TerminalOutputEventListener, TerminalOutputListener,
+    TerminalOutputSnapshot, TerminalOutputStreamEvent, TerminalSession, TerminalSize,
 };
 pub use ssh::TerminalSshAuth;
 pub use ssh_known_hosts::{TerminalSshTrustBackend, TerminalSshTrustStore};

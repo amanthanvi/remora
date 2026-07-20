@@ -2,6 +2,7 @@ package com.remora.android.state
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.remora.android.ui.common.AgentRuntimeKind
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.codex_mobile_client.AppDiscoveredServer
@@ -29,11 +30,11 @@ data class SavedServer(
     val os: String? = null,
     val sshBanner: String? = null,
     val rememberedByUser: Boolean = false,
-    val alleycatHost: String? = null,
-    val alleycatNodeId: String? = null,
-    val alleycatRelay: String? = null,
-    val alleycatAgentName: String? = null,
-    val alleycatAgentWire: String? = null,
+    /**
+     * Null means this is not an SSH bridge, an empty list probes every supported
+     * runtime, and a non-empty list reconnects only the selected runtime kinds.
+     */
+    val sshBridgeRuntimeKinds: List<AgentRuntimeKind>? = null,
 ) {
     /** Stable key for deduplication across discovery cycles. */
     val deduplicationKey: String
@@ -66,11 +67,7 @@ data class SavedServer(
         os?.let { put("os", it) }
         sshBanner?.let { put("sshBanner", it) }
         put("rememberedByUser", rememberedByUser)
-        alleycatHost?.let { put("alleycatHost", it) }
-        alleycatNodeId?.let { put("alleycatNodeId", it) }
-        alleycatRelay?.let { put("alleycatRelay", it) }
-        alleycatAgentName?.let { put("alleycatAgentName", it) }
-        alleycatAgentWire?.let { put("alleycatAgentWire", it) }
+        sshBridgeRuntimeKinds?.let { put("sshBridgeRuntimeKinds", JSONArray(it)) }
     }
 
     val availableDirectCodexPorts: List<Int>
@@ -147,10 +144,13 @@ data class SavedServer(
             sshPortForwardingEnabled = null,
         )
 
-    fun normalizedForPersistence(): SavedServer = withPreferredConnection(
-        mode = resolvedPreferredConnectionMode,
-        codexPort = resolvedPreferredCodexPort ?: availableDirectCodexPorts.firstOrNull(),
-    )
+    fun normalizedForPersistence(): SavedServer =
+        withPreferredConnection(
+            mode = resolvedPreferredConnectionMode,
+            codexPort = resolvedPreferredCodexPort ?: availableDirectCodexPorts.firstOrNull(),
+        ).copy(
+            sshBridgeRuntimeKinds = sshBridgeRuntimeKinds?.normalizeRuntimeKinds(),
+        )
 
     fun toDiscoveredServer(): AppDiscoveredServer {
         val codexPort = if (hasCodexServer) (preferredCodexPort ?: port) else null
@@ -199,44 +199,63 @@ data class SavedServer(
             }
         }
 
-        fun fromJson(obj: JSONObject): SavedServer = SavedServer(
-            id = obj.getString("id"),
-            name = obj.optString("name", ""),
-            hostname = obj.optString("hostname", ""),
-            port = obj.optInt("port", 0),
-            codexPorts = buildList {
-                val ports = obj.optJSONArray("codexPorts")
-                if (ports != null) {
-                    for (index in 0 until ports.length()) {
-                        add(ports.optInt(index))
+        fun fromJson(obj: JSONObject): SavedServer {
+            val id = obj.getString("id")
+            val legacyAgentWire = obj.optString("alleycatAgentWire").trim()
+            val isHistoricalSshBridge = id.startsWith("ssh-bridge:") || legacyAgentWire == "ssh-bridge"
+            val sshBridgeRuntimeKinds = when {
+                obj.has("sshBridgeRuntimeKinds") && !obj.isNull("sshBridgeRuntimeKinds") ->
+                    obj.optJSONArray("sshBridgeRuntimeKinds")
+                        ?.toNormalizedRuntimeKinds()
+                        ?: emptyList()
+                obj.has("sshBridgeRuntimeKinds") -> null
+                isHistoricalSshBridge -> obj.optString("alleycatAgentName")
+                    .split(',')
+                    .toNormalizedRuntimeKinds()
+                else -> null
+            }
+
+            return SavedServer(
+                id = id,
+                name = obj.optString("name", ""),
+                hostname = obj.optString("hostname", ""),
+                port = obj.optInt("port", 0),
+                codexPorts = buildList {
+                    val ports = obj.optJSONArray("codexPorts")
+                    if (ports != null) {
+                        for (index in 0 until ports.length()) {
+                            add(ports.optInt(index))
+                        }
                     }
-                }
-            },
-            sshPort = if (obj.has("sshPort")) obj.getInt("sshPort") else null,
-            source = obj.optString("source", "manual"),
-            hasCodexServer = obj.optBoolean("hasCodexServer", false),
-            wakeMAC = if (obj.has("wakeMAC")) obj.getString("wakeMAC") else null,
-            preferredConnectionMode = obj.optString("preferredConnectionMode").ifBlank { null },
-            preferredCodexPort = if (obj.has("preferredCodexPort")) obj.getInt("preferredCodexPort") else null,
-            sshPortForwardingEnabled = if (obj.has("sshPortForwardingEnabled")) {
-                obj.optBoolean("sshPortForwardingEnabled")
-            } else {
-                null
-            },
-            websocketURL = if (obj.has("websocketURL")) obj.getString("websocketURL") else null,
-            os = if (obj.has("os")) obj.getString("os") else null,
-            sshBanner = if (obj.has("sshBanner")) obj.getString("sshBanner") else null,
-            rememberedByUser = if (obj.has("rememberedByUser")) {
-                obj.optBoolean("rememberedByUser")
-            } else {
-                true
-            },
-            alleycatHost = if (obj.has("alleycatHost")) obj.getString("alleycatHost") else null,
-            alleycatNodeId = obj.optString("alleycatNodeId").ifBlank { null },
-            alleycatRelay = obj.optString("alleycatRelay").ifBlank { null },
-            alleycatAgentName = obj.optString("alleycatAgentName").ifBlank { null },
-            alleycatAgentWire = obj.optString("alleycatAgentWire").ifBlank { null },
-        )
+                },
+                sshPort = if (obj.has("sshPort")) obj.getInt("sshPort") else null,
+                source = obj.optString("source", "manual"),
+                hasCodexServer = obj.optBoolean("hasCodexServer", false),
+                wakeMAC = if (obj.has("wakeMAC")) obj.getString("wakeMAC") else null,
+                preferredConnectionMode = obj.optString("preferredConnectionMode").ifBlank { null },
+                preferredCodexPort = if (obj.has("preferredCodexPort")) obj.getInt("preferredCodexPort") else null,
+                sshPortForwardingEnabled = if (obj.has("sshPortForwardingEnabled")) {
+                    obj.optBoolean("sshPortForwardingEnabled")
+                } else {
+                    null
+                },
+                websocketURL = if (obj.has("websocketURL")) obj.getString("websocketURL") else null,
+                os = if (obj.has("os")) obj.getString("os") else null,
+                sshBanner = if (obj.has("sshBanner")) obj.getString("sshBanner") else null,
+                rememberedByUser = if (obj.has("rememberedByUser")) {
+                    obj.optBoolean("rememberedByUser")
+                } else {
+                    true
+                },
+                sshBridgeRuntimeKinds = sshBridgeRuntimeKinds,
+            )
+        }
+
+        private fun JSONArray.toNormalizedRuntimeKinds(): List<AgentRuntimeKind> =
+            (0 until length()).map { optString(it) }.normalizeRuntimeKinds()
+
+        private fun List<String>.toNormalizedRuntimeKinds(): List<AgentRuntimeKind> =
+            normalizeRuntimeKinds()
 
         fun from(server: AppDiscoveredServer): SavedServer = SavedServer(
             id = server.id,
@@ -260,7 +279,7 @@ data class SavedServer(
     }
 }
 
-fun SavedServer.toRecord(context: Context? = null) = SavedServerRecord(
+fun SavedServer.toRecord() = SavedServerRecord(
     id = id,
     name = name,
     hostname = hostname,
@@ -275,20 +294,8 @@ fun SavedServer.toRecord(context: Context? = null) = SavedServerRecord(
     sshPortForwardingEnabled = sshPortForwardingEnabled,
     websocketUrl = websocketURL,
     rememberedByUser = rememberedByUser,
-    alleycatHost = alleycatHost,
-    alleycatUdpPort = alleycatUdpPort,
-    alleycatNodeId = alleycatNodeId,
-    alleycatToken = alleycatNodeId?.let { nodeId -> context?.let { AlleycatCredentialStore(it).loadToken(nodeId) } },
-    alleycatRelay = alleycatRelay,
-    alleycatAgentName = alleycatAgentName,
-    alleycatAgentWire = alleycatAgentWire,
+    sshBridgeRuntimeKinds = sshBridgeRuntimeKinds,
 )
-
-private val SavedServer.alleycatUdpPort: UShort?
-    get() {
-        if (alleycatHost == null || !id.startsWith("alleycat:")) return null
-        return id.substringAfterLast(':').toUShortOrNull()
-    }
 
 object SavedServerStore {
     private const val PREFS_NAME = "codex_saved_servers_prefs"
@@ -301,9 +308,17 @@ object SavedServerStore {
         val json = prefs(context).getString(KEY, null) ?: return emptyList()
         return try {
             val array = JSONArray(json)
-            val decoded = (0 until array.length()).map { SavedServer.fromJson(array.getJSONObject(it)) }
-            val migrated = decoded.map { migrateDisplayNameForCompatibility(it.normalizedForPersistence()) }
-            if (decoded != migrated) {
+            val decoded = (0 until array.length()).map { index ->
+                val objectValue = array.getJSONObject(index)
+                objectValue to SavedServer.fromJson(objectValue)
+            }
+            val retained = decoded.filterNot { (objectValue, _) -> isLegacyV1Only(objectValue) }
+            val migrated = retained.map { (_, server) -> server.normalizedForPersistence() }
+            val needsRewrite = retained.size != decoded.size ||
+                retained.any { (objectValue, _) -> LEGACY_V1_JSON_KEYS.any(objectValue::has) } ||
+                retained.any { (objectValue, server) -> runtimeKindsNeedRewrite(objectValue, server) } ||
+                retained.map { it.second } != migrated
+            if (needsRewrite) {
                 save(context, migrated)
             }
             migrated
@@ -330,64 +345,6 @@ object SavedServerStore {
         val existing = load(context).toMutableList()
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.add(server.copy(rememberedByUser = true))
-        save(context, existing)
-    }
-
-    /**
-     * Legacy relay-based persistence path. Current remote-host pairings use
-     * [rememberAlleycat].
-     */
-    fun rememberAlleycat(
-        context: Context,
-        serverId: String,
-        displayName: String,
-        relayHost: String,
-    ) {
-        val server = SavedServer(
-            id = serverId,
-            name = displayName,
-            hostname = relayHost,
-            port = 0,
-            codexPorts = emptyList(),
-            sshPort = null,
-            source = "manual",
-            hasCodexServer = true,
-            rememberedByUser = true,
-            alleycatHost = relayHost,
-        )
-        val existing = load(context).toMutableList()
-        existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
-        existing.add(server)
-        save(context, existing)
-    }
-
-    fun rememberAlleycat(
-        context: Context,
-        serverId: String,
-        displayName: String,
-        nodeId: String,
-        relay: String?,
-        agentName: String,
-        agentWire: String,
-    ) {
-        val server = SavedServer(
-            id = serverId,
-            name = displayName,
-            hostname = nodeId,
-            port = 0,
-            codexPorts = emptyList(),
-            sshPort = null,
-            source = "manual",
-            hasCodexServer = true,
-            rememberedByUser = true,
-            alleycatNodeId = nodeId,
-            alleycatRelay = relay,
-            alleycatAgentName = agentName,
-            alleycatAgentWire = agentWire,
-        )
-        val existing = load(context).toMutableList()
-        existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
-        existing.add(server)
         save(context, existing)
     }
 
@@ -438,15 +395,46 @@ object SavedServerStore {
         return withoutScope.lowercase()
     }
 
-    internal fun migrateDisplayNameForCompatibility(server: SavedServer): SavedServer {
-        val nodeId = server.alleycatNodeId?.trim()?.takeIf { it.isNotEmpty() } ?: return server
-        val name = server.name.trim()
-        if (name.isNotEmpty() && !name.equals("Alleycat Host", ignoreCase = true)) {
-            return server
-        }
-        return server.copy(name = "Remora ${shortNodeId(nodeId)}")
+    internal fun isLegacyV1Only(obj: JSONObject): Boolean {
+        val id = obj.optString("id")
+        val agentWire = obj.optString("alleycatAgentWire")
+        if (id.startsWith("ssh-bridge:") || agentWire == "ssh-bridge") return false
+
+        val hasLegacyPairingMarker = id.startsWith("alleycat:") ||
+            obj.has("alleycatHost") ||
+            obj.has("alleycatNodeId") ||
+            obj.has("alleycatRelay")
+        if (!hasLegacyPairingMarker) return false
+
+        val directPorts = obj.optJSONArray("codexPorts")
+        val hasDirectPort = (obj.optBoolean("hasCodexServer") && obj.optInt("port") > 0) ||
+            (directPorts != null && (0 until directPorts.length()).any { directPorts.optInt(it) > 0 }) ||
+            obj.optString("websocketURL").isNotBlank()
+        val hasSshPath = obj.optInt("sshPort") > 0 ||
+            obj.optString("source").equals("ssh", ignoreCase = true) ||
+            obj.optString("preferredConnectionMode") == "ssh" ||
+            obj.optBoolean("sshPortForwardingEnabled") ||
+            (!obj.optBoolean("hasCodexServer") && obj.optInt("port") > 0)
+        return !hasDirectPort && !hasSshPath
     }
 
-    private fun shortNodeId(raw: String): String =
-        if (raw.length <= 16) raw else raw.take(8) + "..." + raw.takeLast(8)
+    internal fun runtimeKindsNeedRewrite(obj: JSONObject, server: SavedServer): Boolean {
+        val normalized = server.sshBridgeRuntimeKinds
+        if (!obj.has("sshBridgeRuntimeKinds")) return normalized != null
+        if (obj.isNull("sshBridgeRuntimeKinds")) return true
+        val raw = obj.optJSONArray("sshBridgeRuntimeKinds") ?: return true
+        val values = (0 until raw.length()).map { raw.optString(it) }
+        return values != normalized
+    }
+
+    private val LEGACY_V1_JSON_KEYS = listOf(
+        "alleycatHost",
+        "alleycatNodeId",
+        "alleycatRelay",
+        "alleycatAgentName",
+        "alleycatAgentWire",
+    )
 }
+
+private fun List<String>.normalizeRuntimeKinds(): List<AgentRuntimeKind> =
+    map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()

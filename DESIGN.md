@@ -212,7 +212,7 @@ raised-surface roles rather than transparent glass.
 
 Pairing, server, and harness controls are signature product components. They
 must make host identity, transport state, selected runtime, and recovery action
-legible without exposing wire-level Alleycat branding as product identity.
+legible without exposing legacy wire branding as product identity.
 
 ## Do's and Don'ts
 

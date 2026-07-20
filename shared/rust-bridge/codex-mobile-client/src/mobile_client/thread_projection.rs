@@ -569,7 +569,7 @@ pub(super) async fn refresh_thread_list_from_app_server(
     app_store: Arc<AppStoreReducer>,
     server_id: &str,
 ) -> Result<(), RpcError> {
-    // Multiplexed sessions (Alleycat) carry a separate command channel per
+    // Multiplexed sessions carry a separate command channel per
     // agent runtime. `thread/list` is not thread-scoped, so the default
     // dispatcher routes it to Codex only — pi and opencode threads would
     // never appear in the UI. Fan the request out across every runtime the
@@ -584,18 +584,15 @@ pub(super) async fn refresh_thread_list_from_app_server(
         let mut cursor = None;
         loop {
             let response =
-                match request_thread_list_page_for_runtime(&session, runtime_kind.clone(), cursor)
+                request_thread_list_page_for_runtime(&session, runtime_kind.clone(), cursor)
                     .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
+                    .map_err(|error| {
                         warn!(
                             "thread/list failed for runtime {:?} on server {}: {}",
                             runtime_kind, server_id, error
                         );
-                        break;
-                    }
-                };
+                        error
+                    })?;
             let page = thread_list_page_to_thread_infos(response.data, &mut incoming_ids);
             app_store.upsert_thread_list_page_for_runtime(server_id, runtime_kind.clone(), &page);
 
@@ -607,6 +604,50 @@ pub(super) async fn refresh_thread_list_from_app_server(
     }
 
     app_store.finalize_thread_list_sync(server_id, &incoming_ids);
+    Ok(())
+}
+
+pub(crate) async fn refresh_runtime_thread_list_from_client(
+    client: &codex_app_server_client::AppServerClient,
+    app_store: Arc<AppStoreReducer>,
+    server_id: &str,
+    runtime_kind: AgentRuntimeKind,
+) -> Result<(), RpcError> {
+    let mut incoming_ids = HashSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let params = match cursor {
+            Some(cursor) => serde_json::json!({ "cursor": cursor }),
+            None => serde_json::json!({}),
+        };
+        let request: upstream::ClientRequest = serde_json::from_value(serde_json::json!({
+            "id": format!("remora-link-reconcile-{}", uuid::Uuid::new_v4()),
+            "method": "thread/list",
+            "params": params,
+        }))
+        .map_err(|error| RpcError::Deserialization(format!("build thread/list: {error}")))?;
+        let response = client
+            .request(request)
+            .await
+            .map_err(|error| RpcError::Transport(TransportError::SendFailed(error.to_string())))?
+            .map_err(|error| RpcError::Server {
+                code: error.code,
+                message: error.message,
+            })?;
+        let mut response = response;
+        normalize_empty_thread_list_cwds(&mut response);
+        let response =
+            serde_json::from_value::<upstream::ThreadListResponse>(response).map_err(|error| {
+                RpcError::Deserialization(format!("deserialize thread/list: {error}"))
+            })?;
+        let page = thread_list_page_to_thread_infos(response.data, &mut incoming_ids);
+        app_store.upsert_thread_list_page_for_runtime(server_id, runtime_kind.clone(), &page);
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    app_store.finalize_thread_list_sync_for_runtime(server_id, &runtime_kind, &incoming_ids);
     Ok(())
 }
 
@@ -701,6 +742,82 @@ pub(super) fn session_is_current(
             .get(server_id)
             .map(|current| Arc::ptr_eq(current, session))
             .unwrap_or(false),
+    }
+}
+
+#[cfg(test)]
+mod authoritative_thread_list_tests {
+    use super::*;
+    use crate::session::connection::TestRequestHandler;
+
+    fn cached_thread_info(id: &str) -> ThreadInfo {
+        ThreadInfo {
+            id: id.to_string(),
+            title: Some("Cached thread".to_string()),
+            model: None,
+            status: ThreadSummaryStatus::Idle,
+            preview: None,
+            cwd: Some("/tmp".to_string()),
+            path: None,
+            model_provider: None,
+            agent_nickname: None,
+            agent_role: None,
+            parent_thread_id: None,
+            forked_from_id: None,
+            agent_status: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_runtime_refresh_preserves_cached_sibling_threads() {
+        let server_id = "srv";
+        let config = ServerConfig {
+            server_id: server_id.to_string(),
+            display_name: "Server".to_string(),
+            host: "example.local".to_string(),
+            port: 0,
+            websocket_url: None,
+            is_local: false,
+            tls: false,
+        };
+        let app_store = Arc::new(AppStoreReducer::new());
+        let stale_key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: "pi-cached".to_string(),
+        };
+        let mut stale_thread =
+            ThreadSnapshot::from_info(server_id, cached_thread_info(stale_key.thread_id.as_str()));
+        stale_thread.agent_runtime_kind = "pi".to_string();
+        app_store.upsert_thread_snapshot(stale_thread);
+
+        let codex_handler: TestRequestHandler = Arc::new(|_| {
+            serde_json::to_value(upstream::ThreadListResponse {
+                data: Vec::new(),
+                next_cursor: None,
+                backwards_cursor: None,
+            })
+            .map_err(|error| RpcError::Deserialization(error.to_string()))
+        });
+        let failed_sibling_handler: TestRequestHandler =
+            Arc::new(|_| Err(RpcError::Transport(TransportError::Disconnected)));
+        let session = Arc::new(ServerSession::test_stub_with_runtime_handlers(
+            config,
+            vec![
+                ("codex".to_string(), codex_handler),
+                ("pi".to_string(), failed_sibling_handler),
+            ],
+        ));
+
+        let result =
+            refresh_thread_list_from_app_server(session, Arc::clone(&app_store), server_id).await;
+
+        assert!(result.is_err());
+        assert!(
+            app_store.snapshot().threads.contains_key(&stale_key),
+            "a failed sibling runtime must prevent global stale-thread pruning"
+        );
     }
 }
 

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -142,7 +143,7 @@ fun HeaderBar(
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
-            IconButton(onClick = onBack, modifier = Modifier.size(32.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back",
@@ -181,7 +182,9 @@ fun HeaderBar(
             Column(
                 modifier = Modifier
                     .weight(1f)
+                    .heightIn(min = RemoraTheme.minimumTouchTarget)
                     .clickable { onToggleModelSelector() },
+                verticalArrangement = Arrangement.Center,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -300,7 +303,7 @@ fun HeaderBar(
                     }
                 },
                 enabled = !isReloading,
-                modifier = Modifier.size(32.dp),
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
             ) {
                 if (isReloading) {
                     CircularProgressIndicator(
@@ -322,7 +325,7 @@ fun HeaderBar(
             if (onInfo != null) {
                 IconButton(
                     onClick = onInfo,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         Icons.Outlined.Info,

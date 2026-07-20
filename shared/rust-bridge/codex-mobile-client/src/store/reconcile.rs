@@ -572,7 +572,7 @@ fn merge_paged_turns(
         let group_turn_id = group.first().and_then(|item| item.source_turn_id.clone());
         let incoming_item_ids: HashSet<String> = group.iter().map(|item| item.id.clone()).collect();
 
-        // Preferred path for new Alleycat/Pi bridges: live stream items and
+        // Preferred path for runtime bridges: live stream items and
         // later replay items carry the same upstream item id. Replace the
         // sourceless live copy with the authoritative paged copy so metadata
         // such as `source_turn_id` is repaired without any content guessing.

@@ -157,7 +157,7 @@ struct UserBubble: View {
                             } label: {
                                 Text(expandedLongText ? "Show less" : "Show more")
                                     .remoraFont(.caption2, weight: .semibold)
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(expandedLongText ? "Show less user message" : "Show more user message")
@@ -741,10 +741,10 @@ struct MessageBubbleView: View {
             HStack(spacing: 6) {
                 Image(systemName: "info.circle.fill")
                     .remoraFont(size: 11, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Text(displayTitle.uppercased())
                     .remoraFont(.caption2, weight: .bold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 Spacer()
             }
 
@@ -879,7 +879,7 @@ private func remoraContentTheme(bodySize: CGFloat, codeSize: CGFloat) -> Markdow
         tightItemSpacing: 4
     )
 
-    theme.link = LinkStyle(color: RemoraTheme.accent, underline: false)
+    theme.link = LinkStyle(color: RemoraTheme.accentForeground, underline: false)
 
     theme.thematicBreak = ThematicBreakStyle(
         color: RemoraTheme.border,
@@ -950,7 +950,7 @@ private func remoraSystemTheme(bodySize: CGFloat, codeSize: CGFloat) -> Markdown
         tightItemSpacing: 3
     )
 
-    theme.link = LinkStyle(color: RemoraTheme.accent, underline: false)
+    theme.link = LinkStyle(color: RemoraTheme.accentForegroundOnSurface, underline: false)
 
     theme.thematicBreak = ThematicBreakStyle(
         color: RemoraTheme.border,

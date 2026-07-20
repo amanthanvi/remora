@@ -1,6 +1,32 @@
 import SwiftUI
 import UIKit
 
+private var remoraTerminalChromePalette: TerminalPalette {
+    themePalette(preset: .remoraDark)
+}
+
+private var remoraTerminalChromeBackground: Color {
+    Color(hex: remoraTerminalChromePalette.background)
+}
+
+private var remoraTerminalAccent: Color {
+    Color(hex: remoraTerminalChromePalette.cursor)
+}
+
+private var remoraTerminalChromeForeground: Color {
+    Color(hex: remoraTerminalChromePalette.foreground)
+}
+
+private var remoraTerminalFailure: Color {
+    let palette = remoraTerminalChromePalette
+    return Color(hex: palette.ansi.count > 1 ? palette.ansi[1] : palette.foreground)
+}
+
+private var remoraTerminalSecondaryText: Color {
+    let palette = remoraTerminalChromePalette
+    return Color(hex: palette.ansi.last ?? palette.foreground)
+}
+
 /// Full-screen terminal. The Ghostty surface fills the entire body —
 /// keystrokes go straight to the PTY via the hidden first-responder text
 /// field, and the Esc/Ctrl/Tab/arrows row docks above the system keyboard
@@ -10,12 +36,14 @@ import UIKit
 /// the SSH trust banner as a transient overlay when needed.
 struct TerminalScreen: View {
     let cwd: String?
-    var preferredAlleycatNodeId: String? = nil
+    var preferredRemoraLinkHostId: String? = nil
 
     @State private var controller = TerminalSessionController()
     @State private var backendOptions: [TerminalBackendOption] = []
     @State private var selectedBackendID: String?
     @State private var didStart = false
+    @State private var isVisible = false
+    @State private var backendOptionsRefreshGeneration: UInt64 = 0
     @State private var terminalGridSize = TerminalGridSize(cols: 80, rows: 24)
     @State private var terminalSurfaceSize: CGSize = .zero
     @State private var ghosttyRenderer = GhosttyTerminalRenderer()
@@ -27,8 +55,7 @@ struct TerminalScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    private var accent: Color { RemoraTheme.accentStrong }
-    private let alleycatServerIdPrefix = "alleycat:"
+    private var accent: Color { remoraTerminalAccent }
 
     var body: some View {
         GeometryReader { geometry in
@@ -43,30 +70,41 @@ struct TerminalScreen: View {
                 )
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
-            .background(Color.black)
+            .background(remoraTerminalChromeBackground)
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(remoraTerminalChromeBackground.ignoresSafeArea())
         .ignoresSafeArea(.container, edges: [.top, .bottom, .horizontal])
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .toolbar(.hidden, for: .navigationBar)
         .task {
+            isVisible = true
             attachOutputSink()
-            guard !didStart else { return }
+            if didStart {
+                await reconcileBackendOptions()
+                return
+            }
             didStart = true
-            let options = refreshBackendOptions()
+            let options = await refreshBackendOptions()
+            guard isVisible, !Task.isCancelled else { return }
             if let initial = initialBackend(from: options) {
                 selectedBackendID = initial.id
-                await controller.open(backend: initial.backend)
+                guard await openBackendIfVisible(initial.backend) else { return }
             }
+            guard isVisible, !Task.isCancelled else { return }
             applyConfigSettings()
         }
         .onReceive(NotificationCenter.default.publisher(for: .remoraSavedServersDidChange)) { _ in
-            reconcileBackendOptions()
+            Task { await reconcileBackendOptions() }
         }
         .onChange(of: appSnapshotRevision) { _, _ in
-            reconcileBackendOptions()
+            Task { await reconcileBackendOptions() }
+        }
+        .onChange(of: AppRuntimeController.shared.remoraLinkStatus) { _, _ in
+            Task { await reconcileBackendOptions() }
         }
         .onDisappear {
+            isVisible = false
+            backendOptionsRefreshGeneration &+= 1
             // End any active first-responder hold so the keyboard tears
             // down and SwiftUI releases first responder. Without this the
             // keyboard can linger after navigating back, leaving the
@@ -85,6 +123,7 @@ struct TerminalScreen: View {
             switch newPhase {
             case .active:
                 ghosttyRenderer.setOccluded(false)
+                Task { await reconcileBackendOptions() }
             case .inactive, .background:
                 ghosttyRenderer.setOccluded(true)
             @unknown default:
@@ -123,7 +162,7 @@ struct TerminalScreen: View {
         .padding(.horizontal, 14)
         .padding(.top, topInset + 8)
         .frame(height: topInset + 86)
-        .background(Color.black)
+        .background(remoraTerminalChromeBackground)
     }
 
     private func terminalHorizontalInsets(for geometry: GeometryProxy) -> (leading: CGFloat, trailing: CGFloat) {
@@ -185,9 +224,9 @@ struct TerminalScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            Text(selectedBackend?.subtitle ?? "Add remote terminal credentials")
+            Text(selectedBackend?.subtitle ?? "Pair a host or add SSH credentials")
                 .font(.custom("SFMono-Regular", size: 11))
-                .foregroundColor(.white.opacity(0.48))
+                .foregroundColor(remoraTerminalSecondaryText)
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -209,7 +248,7 @@ struct TerminalScreen: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
-        .background(Color.black)
+        .background(remoraTerminalChromeBackground)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Color.white.opacity(0.08))
@@ -240,10 +279,10 @@ struct TerminalScreen: View {
                 .font(.custom("SFMono-Regular", size: 11))
                 .lineLimit(1)
         }
-        .foregroundColor(phaseColor)
+        .foregroundColor(phaseChipForeground)
         .padding(.horizontal, 8)
         .frame(height: 22)
-        .background(phaseColor.opacity(0.12))
+        .background(phaseChipForeground.opacity(0.12))
         .clipShape(Capsule())
     }
 
@@ -304,7 +343,7 @@ struct TerminalScreen: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(displayText)
                                 .font(.custom("SFMono-Regular", size: storedFontSize))
-                                .foregroundColor(phaseColor)
+                                .foregroundColor(terminalOverlayStatusForeground)
                                 .textSelection(.enabled)
                             if let challenge = controller.sshTrustChallenge {
                                 Button {
@@ -312,7 +351,7 @@ struct TerminalScreen: View {
                                 } label: {
                                     Label("Trust \(challenge.fingerprint)", systemImage: "key.fill")
                                         .font(.custom("SFMono-Regular", size: 12))
-                                        .foregroundColor(.black)
+                                        .foregroundColor(remoraTerminalChromeBackground)
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                         .padding(.horizontal, 10)
@@ -364,10 +403,21 @@ struct TerminalScreen: View {
     }
 
     private var terminalSurfaceBackground: Color {
-        if storedThemeId == TerminalThemeChoice.remoraDark.rawValue {
-            return Color(hex: "#282C34")
-        }
         return Color(hex: themePalette(preset: TerminalThemeChoice.preset(forId: storedThemeId)).background)
+    }
+
+    /// Opaque palette text keeps transient status copy at WCAG AA contrast.
+    /// Light presets use ANSI black; dark presets use their canonical
+    /// foreground. Opacity is reserved for the chip decoration, not text.
+    private var terminalOverlayStatusForeground: Color {
+        let choice = TerminalThemeChoice(rawValue: storedThemeId) ?? .remoraDark
+        let palette = themePalette(preset: choice.preset)
+        switch choice {
+        case .catppuccinFrappeLight, .solarizedLight:
+            return Color(hex: palette.ansi.first ?? palette.foreground)
+        case .remoraDark, .catppuccinFrappe, .solarizedDark:
+            return Color(hex: palette.foreground)
+        }
     }
 
     private var displayText: String {
@@ -409,12 +459,15 @@ struct TerminalScreen: View {
         }
     }
 
-    private var phaseColor: Color {
+    /// The phase chip always sits on Remora's navy chrome, independently of
+    /// the selected terminal canvas. Each opaque role remains AA-readable on
+    /// the chip's matching 12% tint.
+    private var phaseChipForeground: Color {
         switch controller.phase {
-        case .idle, .connecting: return .white.opacity(0.45)
+        case .idle, .connecting: return remoraTerminalChromeForeground
         case .running: return accent
-        case .exited: return .white.opacity(0.5)
-        case .failed: return .red
+        case .exited: return remoraTerminalChromeForeground
+        case .failed: return remoraTerminalFailure
         }
     }
 
@@ -449,11 +502,11 @@ struct TerminalScreen: View {
     private func initialBackend(
         from options: [TerminalBackendOption]
     ) -> TerminalBackendOption? {
-        if let preferredNodeId = normalized(preferredAlleycatNodeId),
-           let match = options.first(where: { $0.alleycatNodeId == preferredNodeId }) {
-            return match
-        }
-        return options.first
+        RemoraLinkTerminalSupport.initialOption(
+            preferredHostId: preferredRemoraLinkHostId,
+            options: options,
+            hostId: \.remoraLinkHostId
+        )
     }
 
     private func selectBackend(_ option: TerminalBackendOption) {
@@ -463,7 +516,12 @@ struct TerminalScreen: View {
         ghosttyRenderer.clearScreen()
         nativeRendererHasOutput = false
         Task {
+            guard isVisible, !Task.isCancelled else { return }
             await controller.switchBackend(option.backend)
+            guard isVisible, !Task.isCancelled else {
+                controller.close()
+                return
+            }
         }
     }
 
@@ -490,54 +548,25 @@ struct TerminalScreen: View {
         }
     }
 
-    private func loadBackendOptions(cwd: String?) -> [TerminalBackendOption] {
-        var options: [TerminalBackendOption] = []
-        var seenNodeIds = Set<String>()
+    private func loadBackendOptions(cwd: String?) async -> [TerminalBackendOption] {
+        let remoraLinkOptions: [TerminalBackendOption]
+        do {
+            let hostSummaries = try await AppModel.shared.client.remoraLinkHosts()
+            guard isVisible, !Task.isCancelled else { return backendOptions }
+            remoraLinkOptions = RemoraLinkTerminalSupport.eligibleHosts(from: hostSummaries).map {
+                TerminalBackendOption.remoteRemoraLink(host: $0)
+            }
+        } catch {
+            guard isVisible, !Task.isCancelled else { return backendOptions }
+            // A transient custody/configuration failure must not tear down an
+            // already-running terminal. Keep the last authoritative catalog
+            // until a later lifecycle or snapshot refresh succeeds.
+            remoraLinkOptions = backendOptions.filter { $0.remoraLinkHostId != nil }
+        }
+        var options = remoraLinkOptions
         var seenSshKeys = Set<String>()
         let savedServers = SavedServerStore.load()
-        let savedByNodeId = savedServers.reduce(into: [String: SavedServer]()) { result, saved in
-            guard let nodeId = normalized(saved.alleycatNodeId),
-                  result[nodeId] == nil else {
-                return
-            }
-            result[nodeId] = saved
-        }
-        for server in AppModel.shared.snapshot?.servers ?? [] {
-            guard let nodeId = alleycatNodeId(fromServerId: server.serverId),
-                  seenNodeIds.insert(nodeId).inserted,
-                  let token = try? AlleycatCredentialStore.shared.loadToken(nodeId: nodeId),
-                  !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
-            }
-            let saved = savedByNodeId[nodeId]
-            options.append(
-                TerminalBackendOption.remoteAlleycat(
-                    name: normalized(saved?.name) ?? server.displayName,
-                    nodeId: nodeId,
-                    token: token,
-                    relay: normalized(saved?.alleycatRelay)
-                )
-            )
-        }
-        // Include non-remembered discovered records too: if they have a
-        // terminal-capable credential, the chooser should be able to switch
-        // to them while the app still knows about the connection.
         for saved in savedServers {
-            if let nodeId = normalized(saved.alleycatNodeId),
-               seenNodeIds.insert(nodeId).inserted,
-               let token = try? AlleycatCredentialStore.shared.loadToken(nodeId: nodeId),
-               !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                options.append(
-                    TerminalBackendOption.remoteAlleycat(
-                        name: saved.name,
-                        nodeId: nodeId,
-                        token: token,
-                        relay: normalized(saved.alleycatRelay)
-                    )
-                )
-                continue
-            }
-
             let host = saved.hostname
             let sshPort = saved.sshPort ?? 22
             let sshKey = "\(host.lowercased()):\(sshPort)"
@@ -561,14 +590,24 @@ struct TerminalScreen: View {
     }
 
     @discardableResult
-    private func refreshBackendOptions() -> [TerminalBackendOption] {
-        let options = loadBackendOptions(cwd: cwd)
+    private func refreshBackendOptions() async -> [TerminalBackendOption] {
+        guard isVisible, !Task.isCancelled else { return backendOptions }
+        backendOptionsRefreshGeneration &+= 1
+        let generation = backendOptionsRefreshGeneration
+        let options = await loadBackendOptions(cwd: cwd)
+        guard isVisible,
+              !Task.isCancelled,
+              generation == backendOptionsRefreshGeneration else {
+            return backendOptions
+        }
         backendOptions = options
         return options
     }
 
-    private func reconcileBackendOptions() {
-        let options = refreshBackendOptions()
+    private func reconcileBackendOptions() async {
+        guard isVisible, !Task.isCancelled else { return }
+        let options = await refreshBackendOptions()
+        guard isVisible, !Task.isCancelled else { return }
         guard let selectedBackendID,
               options.contains(where: { $0.id == selectedBackendID }) else {
             controller.close()
@@ -577,9 +616,19 @@ struct TerminalScreen: View {
                 return
             }
             self.selectedBackendID = replacement.id
-            Task { await controller.open(backend: replacement.backend) }
+            _ = await openBackendIfVisible(replacement.backend)
             return
         }
+    }
+
+    private func openBackendIfVisible(_ backend: TerminalBackendKind) async -> Bool {
+        guard isVisible, !Task.isCancelled else { return false }
+        await controller.open(backend: backend)
+        guard isVisible, !Task.isCancelled else {
+            controller.close()
+            return false
+        }
+        return true
     }
 
     private static func terminalSshAuth(from credential: SavedSSHCredential) -> TerminalSshAuth? {
@@ -596,12 +645,6 @@ struct TerminalScreen: View {
     private func normalized(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func alleycatNodeId(fromServerId serverId: String) -> String? {
-        let trimmed = serverId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(alleycatServerIdPrefix) else { return nil }
-        return normalized(String(trimmed.dropFirst(alleycatServerIdPrefix.count)))
     }
 
     private func applyConfigSettings() {
@@ -744,6 +787,8 @@ private struct TerminalConfigSheet: View {
                         .onChange(of: draftCursorBlink) { _, _ in applyDraft() }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(remoraTerminalChromeBackground.ignoresSafeArea())
             .navigationTitle("Terminal")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -761,6 +806,7 @@ private struct TerminalConfigSheet: View {
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     private func applyDraft() {
@@ -776,31 +822,21 @@ private struct TerminalBackendOption: Identifiable, Hashable {
     let title: String
     let subtitle: String
     let systemImage: String
-    let alleycatNodeId: String?
+    let remoraLinkHostId: String?
     let supportsResize: Bool
     let runningLabel: String
     let backend: TerminalBackendKind
 
-    static func remoteAlleycat(
-        name: String,
-        nodeId: String,
-        token: String,
-        relay: String?
-    ) -> TerminalBackendOption {
+    static func remoteRemoraLink(host: RemoraLinkTerminalHost) -> TerminalBackendOption {
         TerminalBackendOption(
-            id: "alleycat-\(nodeId)",
-            title: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Remote shell" : name,
-            subtitle: shortNodeId(nodeId),
+            id: "remora-link-\(host.hostId)",
+            title: host.displayName,
+            subtitle: shortHostId(host.hostId),
             systemImage: "server.rack",
-            alleycatNodeId: nodeId,
+            remoraLinkHostId: host.hostId,
             supportsResize: true,
             runningLabel: "remote",
-            backend: .remoteAlleycat(
-                nodeId: nodeId,
-                token: token,
-                relay: relay,
-                shell: nil
-            )
+            backend: host.backend
         )
     }
 
@@ -819,7 +855,7 @@ private struct TerminalBackendOption: Identifiable, Hashable {
             title: title,
             subtitle: "ssh \(username)@\(host):\(port)",
             systemImage: "terminal.fill",
-            alleycatNodeId: nil,
+            remoraLinkHostId: nil,
             supportsResize: true,
             runningLabel: "ssh",
             backend: .remoteSsh(
@@ -839,7 +875,7 @@ private struct TerminalBackendOption: Identifiable, Hashable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func shortNodeId(_ raw: String) -> String {
+    private static func shortHostId(_ raw: String) -> String {
         raw.count <= 16 ? raw : "\(raw.prefix(8))...\(raw.suffix(8))"
     }
 }

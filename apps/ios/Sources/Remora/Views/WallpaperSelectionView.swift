@@ -23,6 +23,7 @@ struct WallpaperSelectionView: View {
     @Environment(WallpaperManager.self) private var wallpaperManager
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let threadKey: ThreadKey?
     var serverId: String? = nil
@@ -73,7 +74,12 @@ struct WallpaperSelectionView: View {
                         state = value.translation.height
                     }
                     .onEnded { value in
-                        withAnimation(.interactiveSpring(response: 0.35, dampingFraction: 0.85)) {
+                        withAnimation(
+                            RemoraMotionPolicy.animation(
+                                .interactiveSpring(response: 0.35, dampingFraction: 0.85),
+                                reduceMotion: reduceMotion
+                            )
+                        ) {
                             let projected = value.predictedEndTranslation.height
                             if projected > 120 {
                                 // Snap down (collapsed)
@@ -99,8 +105,9 @@ struct WallpaperSelectionView: View {
                             .remoraFont(size: 15, weight: .medium)
                             .foregroundStyle(RemoraTheme.textPrimary)
                             .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
+                            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                             .modifier(GlassRectModifier(cornerRadius: 10))
+                            .contentShape(RoundedRectangle(cornerRadius: 10))
                     }
                     Spacer()
                 }
@@ -224,6 +231,7 @@ struct WallpaperSelectionView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .padding(.horizontal, 16)
             .padding(.bottom, 12)
 
@@ -254,6 +262,7 @@ struct WallpaperSelectionView: View {
                     }
                     .padding(.horizontal, 16)
                 }
+                .accessibilityLabel("Wallpaper themes")
 
                 Divider().overlay(RemoraTheme.separator)
 
@@ -262,7 +271,7 @@ struct WallpaperSelectionView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "photo.on.rectangle")
                             .font(.system(size: 16))
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                         Text("Choose Wallpaper from Photos")
                             .remoraFont(size: 14)
                             .foregroundStyle(RemoraTheme.textPrimary)
@@ -272,7 +281,10 @@ struct WallpaperSelectionView: View {
                             .foregroundStyle(RemoraTheme.textMuted)
                     }
                     .padding(.horizontal, 16)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                    .contentShape(Rectangle())
                 }
+                .accessibilityLabel("Choose wallpaper from Photos")
                 .onChange(of: selectedPhoto) { _, newItem in
                     Task { await loadPhoto(newItem) }
                 }
@@ -282,7 +294,7 @@ struct WallpaperSelectionView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "video.fill")
                             .font(.system(size: 16))
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                         Text("Choose Video from Photos")
                             .remoraFont(size: 14)
                             .foregroundStyle(RemoraTheme.textPrimary)
@@ -297,7 +309,10 @@ struct WallpaperSelectionView: View {
                         }
                     }
                     .padding(.horizontal, 16)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                    .contentShape(Rectangle())
                 }
+                .accessibilityLabel("Choose video from Photos")
                 .disabled(isProcessingVideo)
                 .onChange(of: selectedVideoItem) { _, newItem in
                     Task { await loadVideo(newItem) }
@@ -307,7 +322,7 @@ struct WallpaperSelectionView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "link")
                         .font(.system(size: 16))
-                        .foregroundStyle(RemoraTheme.accent)
+                        .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     TextField("Paste video URL", text: $videoURLText)
                         .remoraFont(size: 14)
                         .foregroundStyle(RemoraTheme.textPrimary)
@@ -322,9 +337,15 @@ struct WallpaperSelectionView: View {
                         } label: {
                             Text("Go")
                                 .remoraFont(size: 13, weight: .semibold)
-                                .foregroundStyle(RemoraTheme.accent)
+                                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
+                                .frame(
+                                    minWidth: RemoraAccessibilityMetrics.minimumHitTarget,
+                                    minHeight: RemoraAccessibilityMetrics.minimumHitTarget
+                                )
+                                .contentShape(Rectangle())
                         }
                         .disabled(isProcessingVideo)
+                        .accessibilityLabel("Load video URL")
                     }
                 }
                 .padding(.horizontal, 16)
@@ -350,7 +371,8 @@ struct WallpaperSelectionView: View {
     // MARK: - Thumbnails
 
     private var noWallpaperThumbnail: some View {
-        Button {
+        let isSelected = selectedThemeSlug == nil && previewConfig?.type == WallpaperType.none
+        return Button {
             previewConfig = WallpaperConfig(type: .none)
             selectedThemeSlug = nil
             selectedColor = nil
@@ -373,7 +395,7 @@ struct WallpaperSelectionView: View {
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(selectedThemeSlug == nil && previewConfig?.type == .none ? RemoraTheme.accent : RemoraTheme.border, lineWidth: 2)
+                        .stroke(isSelected ? RemoraTheme.accent : RemoraTheme.border, lineWidth: 2)
                 )
 
                 Text("None")
@@ -381,11 +403,17 @@ struct WallpaperSelectionView: View {
                     .foregroundStyle(RemoraTheme.textSecondary)
                     .lineLimit(1)
             }
+            .frame(minWidth: RemoraAccessibilityMetrics.minimumHitTarget)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("No wallpaper")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func themeThumbnail(for entry: ThemeIndexEntry) -> some View {
-        Button {
+        let isSelected = selectedThemeSlug == entry.slug
+        return Button {
             selectedThemeSlug = entry.slug
             selectedColor = nil
             customImage = nil
@@ -401,7 +429,7 @@ struct WallpaperSelectionView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(selectedThemeSlug == entry.slug ? RemoraTheme.accent : RemoraTheme.border, lineWidth: 2)
+                            .stroke(isSelected ? RemoraTheme.accent : RemoraTheme.border, lineWidth: 2)
                     )
 
                 Text(entry.name)
@@ -410,7 +438,12 @@ struct WallpaperSelectionView: View {
                     .lineLimit(1)
                     .frame(width: 68)
             }
+            .frame(minWidth: RemoraAccessibilityMetrics.minimumHitTarget)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(entry.name)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Color Picker
@@ -419,13 +452,13 @@ struct WallpaperSelectionView: View {
         HStack(spacing: 10) {
             Image(systemName: "paintpalette")
                 .font(.system(size: 16))
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             Text("Set a Color")
                 .remoraFont(size: 14)
                 .foregroundStyle(RemoraTheme.textPrimary)
             Spacer()
 
-            ColorPicker("", selection: Binding(
+            ColorPicker("Wallpaper color", selection: Binding(
                 get: { selectedColor ?? .black },
                 set: { color in
                     selectedColor = color
@@ -438,7 +471,10 @@ struct WallpaperSelectionView: View {
                 }
             ), supportsOpacity: false)
             .labelsHidden()
-            .frame(width: 30, height: 30)
+            .frame(
+                width: RemoraAccessibilityMetrics.minimumHitTarget,
+                height: RemoraAccessibilityMetrics.minimumHitTarget
+            )
         }
         .padding(.horizontal, 16)
     }
@@ -531,18 +567,22 @@ struct WallpaperSelectionView: View {
             // Granularity
             HStack(spacing: 0) {
                 ForEach(GranularityKind.allCases) { kind in
+                    let isSelected = selectedGranularity == kind
                     Button {
                         typingEffectConfig.granularity = kind.rawValue
                         persistTypingEffect()
                     } label: {
                         Text(kind.shortLabel)
-                            .remoraFont(size: 12, weight: selectedGranularity == kind ? .semibold : .regular)
-                            .foregroundStyle(selectedGranularity == kind ? RemoraTheme.textOnAccent : RemoraTheme.textSecondary)
+                            .remoraFont(size: 12, weight: isSelected ? .semibold : .regular)
+                            .foregroundStyle(isSelected ? RemoraTheme.textOnAccent : RemoraTheme.textSecondary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(selectedGranularity == kind ? RemoraTheme.accent : .clear)
+                            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                            .background(isSelected ? RemoraTheme.accent : .clear)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("\(kind.shortLabel) reveal granularity")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
             .background(RemoraTheme.surfaceLight.opacity(0.8))
@@ -553,18 +593,22 @@ struct WallpaperSelectionView: View {
             // Reveal mode
             HStack(spacing: 0) {
                 ForEach(["Linear", "Continuous"], id: \.self) { mode in
+                    let isSelected = typingEffectConfig.revealMode == mode
                     Button {
                         typingEffectConfig.revealMode = mode
                         persistTypingEffect()
                     } label: {
                         Text(mode)
-                            .remoraFont(size: 12, weight: typingEffectConfig.revealMode == mode ? .semibold : .regular)
-                            .foregroundStyle(typingEffectConfig.revealMode == mode ? RemoraTheme.textOnAccent : RemoraTheme.textSecondary)
+                            .remoraFont(size: 12, weight: isSelected ? .semibold : .regular)
+                            .foregroundStyle(isSelected ? RemoraTheme.textOnAccent : RemoraTheme.textSecondary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(typingEffectConfig.revealMode == mode ? RemoraTheme.accent : .clear)
+                            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
+                            .background(isSelected ? RemoraTheme.accent : .clear)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("\(mode) reveal mode")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
             .background(RemoraTheme.surfaceLight.opacity(0.8))
@@ -703,7 +747,7 @@ private enum WallpaperTab: String, CaseIterable, Identifiable {
 private struct StreamingEffectPreview: View {
     var config: TypingEffectConfig
     @State private var renderer: StreamingMarkdownRenderer
-    @State private var feedTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let sampleText = """
     Found the issue — the `SessionManager` was **dropping the refresh token** on every cold start because `loadCredentials()` ran before the keychain unlock callback.
@@ -729,43 +773,57 @@ private struct StreamingEffectPreview: View {
     }
 
     var body: some View {
-        StreamingMarkdownContentView(renderer: renderer)
-            .tokenReveal(TokenRevealConfig(
-                duration: max(config.revealDuration, 0.01),
-                mode: config.effectiveRevealMode
-            ))
-            .applyStreamingEffect(config.resolvedEffect)
-            .revealGranularity(config.effectiveGranularity)
+        Group {
+            if reduceMotion {
+                StreamingMarkdownContentView(renderer: renderer)
+            } else {
+                StreamingMarkdownContentView(renderer: renderer)
+                    .tokenReveal(TokenRevealConfig(
+                        duration: max(config.revealDuration, 0.01),
+                        mode: config.effectiveRevealMode
+                    ))
+                    .applyStreamingEffect(config.resolvedEffect)
+                    .revealGranularity(config.effectiveGranularity)
+            }
+        }
             .remoraContentMarkdown(
                 bodySize: 14,
                 codeSize: 14,
                 selectionEnabled: false
             )
-            .onAppear { startFeed() }
-            .onDisappear { feedTask?.cancel() }
+            .task(id: reduceMotion) {
+                await runFeed(reduceMotion: reduceMotion)
+            }
     }
 
-    private func startFeed() {
+    private func runFeed(reduceMotion: Bool) async {
         let text = Self.sampleText
-        feedTask = Task {
-            while !Task.isCancelled {
-                renderer.reset()
-                // Simulate realistic token arrival: 3-8 chars per chunk
-                // with variable inter-token delays.
-                var index = text.startIndex
-                while index < text.endIndex && !Task.isCancelled {
-                    let chunkSize = Int.random(in: 3...8)
-                    let batchEnd = text.index(index, offsetBy: chunkSize, limitedBy: text.endIndex) ?? text.endIndex
-                    let chunk = String(text[index..<batchEnd])
-                    await MainActor.run { renderer.append(chunk) }
-                    index = batchEnd
-                    let delay = Int.random(in: 20...60)
-                    try? await Task.sleep(for: .milliseconds(delay))
-                }
-                await MainActor.run { renderer.finish() }
-                try? await Task.sleep(for: .seconds(1.0))
+        await MainActor.run { renderer.reset() }
+        if reduceMotion {
+            await MainActor.run {
+                renderer.append(text)
+                renderer.finish()
             }
+            return
+        }
+
+        while !Task.isCancelled {
+            await MainActor.run { renderer.reset() }
+            // Simulate realistic token arrival: 3-8 chars per chunk
+            // with variable inter-token delays.
+            var index = text.startIndex
+            while index < text.endIndex && !Task.isCancelled {
+                let chunkSize = Int.random(in: 3...8)
+                let batchEnd = text.index(index, offsetBy: chunkSize, limitedBy: text.endIndex) ?? text.endIndex
+                let chunk = String(text[index..<batchEnd])
+                await MainActor.run { renderer.append(chunk) }
+                index = batchEnd
+                let delay = Int.random(in: 20...60)
+                try? await Task.sleep(for: .milliseconds(delay))
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { renderer.finish() }
+            try? await Task.sleep(for: .seconds(1.0))
         }
     }
 }
-

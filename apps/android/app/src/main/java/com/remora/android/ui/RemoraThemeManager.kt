@@ -231,7 +231,26 @@ internal fun colorFromHex(
     fallback: Color = Color.Transparent,
 ): Color {
     val normalized = hex?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
-    return runCatching { Color(android.graphics.Color.parseColor(normalized)) }.getOrElse { fallback }
+    if (!normalized.startsWith("#")) return fallback
+    val digits = normalized.drop(1)
+    if (digits.any { it !in '0'..'9' && it.lowercaseChar() !in 'a'..'f' }) return fallback
+    val argb =
+        when (digits.length) {
+            3 -> "FF" + digits.flatMap { listOf(it, it) }.joinToString("")
+            4 -> digits.flatMap { listOf(it, it) }.joinToString("")
+            6 -> "FF$digits"
+            8 -> digits
+            else -> return fallback
+        }
+    return runCatching {
+        val packed = argb.toLong(radix = 16)
+        Color(
+            red = ((packed shr 16) and 0xFF).toFloat() / 255f,
+            green = ((packed shr 8) and 0xFF).toFloat() / 255f,
+            blue = (packed and 0xFF).toFloat() / 255f,
+            alpha = ((packed shr 24) and 0xFF).toFloat() / 255f,
+        )
+    }.getOrElse { fallback }
 }
 
 object RemoraThemeManager {

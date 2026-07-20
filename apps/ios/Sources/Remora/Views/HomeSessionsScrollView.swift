@@ -42,6 +42,8 @@ struct HomeSessionsScrollView: UIViewRepresentable {
     /// Appearance settings. Pass this in from the caller with
     /// `@Environment(\.textScale) private var textScale`.
     @Environment(\.textScale) private var textScale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(ThemeManager.self) private var themeManager
     @Environment(WallpaperManager.self) private var wallpaperManager
 
@@ -69,6 +71,8 @@ struct HomeSessionsScrollView: UIViewRepresentable {
             topInset: topInset,
             bottomInset: bottomInset,
             textScale: textScale,
+            dynamicTypeSize: dynamicTypeSize,
+            reduceMotion: reduceMotion,
             themeManager: themeManager,
             wallpaperManager: wallpaperManager,
             callbacks: callbacks
@@ -174,6 +178,8 @@ final class HomeSessionsScrollUIView: UIView {
     /// intrinsic SwiftUI layout — shift with the user's text-size
     /// preference.
     private var lastTextScale: CGFloat = 0
+    private var lastDynamicTypeSize: DynamicTypeSize?
+    private(set) var reduceMotion = false
 
     var zoomCommit: ((Int) -> Void)?
 
@@ -289,6 +295,8 @@ final class HomeSessionsScrollUIView: UIView {
         topInset: CGFloat,
         bottomInset: CGFloat,
         textScale: CGFloat,
+        dynamicTypeSize: DynamicTypeSize,
+        reduceMotion: Bool,
         themeManager: ThemeManager,
         wallpaperManager: WallpaperManager,
         callbacks: HomeSessionsScrollView.Callbacks
@@ -296,6 +304,7 @@ final class HomeSessionsScrollUIView: UIView {
         let zoomChanged = self.zoomLevel != zoomLevel && !isPinching
         let enteredPageFit = zoomChanged && zoomLevel == 4
         self.zoomLevel = zoomLevel
+        self.reduceMotion = reduceMotion
         if !isPinching {
             self.continuousZoom = Double(zoomLevel)
         }
@@ -318,11 +327,14 @@ final class HomeSessionsScrollUIView: UIView {
         scrollView.verticalScrollIndicatorInsets = UIEdgeInsets(top: effectiveTopInset, left: 0, bottom: effectiveBottomInset, right: 0)
         refreshMascotFooterVisibility()
 
-        // Text scale change → blow out every row's height cache and
-        // propagate the new scale into each hosted SwiftUI tree.
+        // Either text-size source changing invalidates every measured row.
+        // Dynamic Type is explicit because UIKit-hosted SwiftUI rows do not
+        // inherit a parent environment override through this bridge.
         let textScaleChanged = abs(lastTextScale - textScale) > 0.001
-        if textScaleChanged {
+        let dynamicTypeChanged = lastDynamicTypeSize != dynamicTypeSize
+        if textScaleChanged || dynamicTypeChanged {
             lastTextScale = textScale
+            lastDynamicTypeSize = dynamicTypeSize
             for container in containers.values {
                 container.invalidateNaturalHeight()
             }
@@ -361,13 +373,15 @@ final class HomeSessionsScrollUIView: UIView {
                 pinned: pinned,
                 displayZoom: displayZoom,
                 textScale: textScale,
+                dynamicTypeSize: dynamicTypeSize,
+                reduceMotion: reduceMotion,
                 themeManager: themeManager,
                 wallpaperManager: wallpaperManager,
                 callbacks: callbacks
             )
         }
 
-        let layoutAnimated = zoomChanged || textScaleChanged
+        let layoutAnimated = !reduceMotion && (zoomChanged || textScaleChanged || dynamicTypeChanged)
         relayout(animated: layoutAnimated)
         updatePageBackgroundVisibility()
 
@@ -488,7 +502,9 @@ final class HomeSessionsScrollUIView: UIView {
         if visible {
             let playEntrance = !mascotFooterEntranceStarted
             mascotFooterEntranceStarted = true
-            mascotFooterHostingController.rootView = AnyView(HomeMascotFooterView(playEntrance: playEntrance))
+            mascotFooterHostingController.rootView = AnyView(
+                HomeMascotFooterView(playEntrance: playEntrance)
+            )
         } else {
             mascotFooterHostingController.rootView = AnyView(EmptyView())
         }
@@ -600,8 +616,12 @@ final class HomeSessionsScrollUIView: UIView {
         pinchStartZoom = continuousZoom
         pinchStartScale = g.scale
 
-        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
-            self.pinchVignette.alpha = 1
+        if reduceMotion {
+            pinchVignette.alpha = 1
+        } else {
+            UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
+                self.pinchVignette.alpha = 1
+            }
         }
 
         // Anchor: the row containing the midpoint between the two
@@ -716,12 +736,7 @@ final class HomeSessionsScrollUIView: UIView {
         // the snap feels like a single elastic motion instead of a linear
         // ease-out. SwiftUI stays at displayZoom=4 during the animation
         // so the content we're collapsing *to* is still fully rendered.
-        UIView.animate(
-            withDuration: 0.38, delay: 0,
-            usingSpringWithDamping: 0.82,
-            initialSpringVelocity: 0.3,
-            options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
-        ) {
+        let applySnap = {
             self.relayout(animated: false)
             if let newAnchorY = self.contentYForAnchor(
                 idx: self.pinchAnchorIdx,
@@ -740,7 +755,8 @@ final class HomeSessionsScrollUIView: UIView {
                     y: min(max(raw, minY), maxY)
                 )
             }
-        } completion: { _ in
+        }
+        let completeSnap = {
             self.isPinching = false
             self.refreshMascotFooterVisibility()
             self.updateScrollEnabled()
@@ -756,18 +772,37 @@ final class HomeSessionsScrollUIView: UIView {
             self.updatePageBackgroundVisibility()
         }
 
+        if reduceMotion {
+            applySnap()
+            completeSnap()
+        } else {
+            UIView.animate(
+                withDuration: 0.38, delay: 0,
+                usingSpringWithDamping: 0.82,
+                initialSpringVelocity: 0.3,
+                options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction],
+                animations: applySnap
+            ) { _ in
+                completeSnap()
+            }
+        }
+
         // Vignette + anchor highlight fade out together — slightly
         // faster than the snap so they're gone by the time the rows
         // settle.
-        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
-            self.pinchVignette.alpha = 0
+        if reduceMotion {
+            pinchVignette.alpha = 0
+        } else {
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                self.pinchVignette.alpha = 0
+            }
         }
         for (i, key) in order.enumerated() {
             guard let container = containers[key] else { continue }
             if i == pinchAnchorIdx {
-                container.setPinchHighlightAlpha(0, animated: true)
+                container.setPinchHighlightAlpha(0, animated: !reduceMotion)
             } else {
-                container.fadeOutPinchBlur()
+                container.fadeOutPinchBlur(duration: reduceMotion ? 0 : 0.25)
             }
         }
 
@@ -900,7 +935,7 @@ extension HomeSessionsScrollUIView: UIScrollViewDelegate {
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         guard !decelerate else { return }
         guard zoomLevel == 4, !isPinching else { return }
-        snapToNearestPage(animated: true)
+        snapToNearestPage(animated: !reduceMotion)
     }
 
     /// Belt-and-braces: if any path leaves us at a non-page offset
@@ -914,7 +949,7 @@ extension HomeSessionsScrollUIView: UIScrollViewDelegate {
         let drift = abs(relative.truncatingRemainder(dividingBy: page))
         // Within 0.5pt of an exact page boundary → already aligned.
         if drift > 0.5 && drift < (page - 0.5) {
-            snapToNearestPage(animated: true)
+            snapToNearestPage(animated: !reduceMotion)
         }
     }
 }
@@ -1161,6 +1196,8 @@ final class HomeRowContainer: UIView {
     private var cachedNaturalHeight: CGFloat?
     private var cachedMeasureWidth: CGFloat = 0
     private var textScale: CGFloat = 1.0
+    private var dynamicTypeSize: DynamicTypeSize = .large
+    private var reduceMotion = false
     private var themeManager: ThemeManager?
     private var wallpaperManager: WallpaperManager?
     private var pageBackgroundVisible = false
@@ -1440,6 +1477,8 @@ final class HomeRowContainer: UIView {
         pinned: Bool,
         displayZoom: Int,
         textScale: CGFloat,
+        dynamicTypeSize: DynamicTypeSize,
+        reduceMotion: Bool,
         themeManager: ThemeManager,
         wallpaperManager: WallpaperManager,
         callbacks: HomeSessionsScrollView.Callbacks
@@ -1451,6 +1490,8 @@ final class HomeRowContainer: UIView {
             self.pinned != pinned
         let zoomChanged = self.displayZoom != displayZoom
         let textScaleChanged = abs(self.textScale - textScale) > 0.001
+        let dynamicTypeChanged = self.dynamicTypeSize != dynamicTypeSize
+        let reduceMotionChanged = self.reduceMotion != reduceMotion
         let environmentChanged = self.themeManager !== themeManager ||
             self.wallpaperManager !== wallpaperManager
         self.session = session
@@ -1460,15 +1501,17 @@ final class HomeRowContainer: UIView {
         self.pinned = pinned
         self.displayZoom = displayZoom
         self.textScale = textScale
+        self.dynamicTypeSize = dynamicTypeSize
+        self.reduceMotion = reduceMotion
         self.themeManager = themeManager
         self.wallpaperManager = wallpaperManager
         self.callbacks = callbacks
 
-        if sessionChanged || textScaleChanged {
+        if sessionChanged || textScaleChanged || dynamicTypeChanged {
             cachedNaturalHeight = nil
             hostHeightByZoom.removeAll(keepingCapacity: true)
         }
-        if sessionChanged || stateChanged || zoomChanged || textScaleChanged {
+        if sessionChanged || stateChanged || zoomChanged || textScaleChanged || dynamicTypeChanged || reduceMotionChanged {
             refreshRootView()
             setNeedsLayout()
         }
@@ -1550,6 +1593,11 @@ final class HomeRowContainer: UIView {
             return
         }
         fadeLink?.invalidate()
+        if duration <= 0 {
+            fadeLink = nil
+            pinchBlurAnimator.fractionComplete = 0
+            return
+        }
         let start = CFAbsoluteTimeGetCurrent()
         let from = pinchBlurAnimator.fractionComplete
         let link = CADisplayLink(target: PinchBlurFadeTarget { [weak self] in
@@ -1631,9 +1679,11 @@ final class HomeRowContainer: UIView {
             onCancelTurn: { callbacks.onCancelTurn(sessionSnapshot) },
             onDelete: { callbacks.onDelete(sessionSnapshot) },
             onFork: { callbacks.onFork(sessionSnapshot) },
-            onShowPiP: { callbacks.onShowPiP(sessionSnapshot) }
+            onShowPiP: { callbacks.onShowPiP(sessionSnapshot) },
+            reduceMotion: reduceMotion
         )
         .environment(\.textScale, textScale)
+        .environment(\.dynamicTypeSize, dynamicTypeSize)
         hostingController.rootView = AnyView(content)
     }
 
@@ -1747,7 +1797,7 @@ final class HomeRowContainer: UIView {
                 let gen = UIImpactFeedbackGenerator(style: .heavy)
                 gen.impactOccurred(intensity: 0.9)
             }
-            reset(animated: true)
+            reset(animated: scrollHost?.reduceMotion != true)
         default:
             break
         }
@@ -1836,6 +1886,7 @@ struct HomeSessionRowContent: View {
     let onDelete: () -> Void
     let onFork: () -> Void
     let onShowPiP: () -> Void
+    let reduceMotion: Bool
 
     var body: some View {
         SessionCanvasLine(
@@ -1845,6 +1896,11 @@ struct HomeSessionRowContent: View {
             isCancelling: isCancelling,
             zoomLevel: zoomLevel
         )
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.disablesAnimations = true
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
         .contextMenu(menuItems: {
@@ -1898,17 +1954,17 @@ private struct SessionContextMenuPreview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(session.sessionTitle.isEmpty ? "Session" : session.sessionTitle)
-                .remoraFont(size: RemoraFont.conversationBodyPointSize, weight: .medium)
+                .remoraFont(.body, weight: .medium)
                 .foregroundStyle(RemoraTheme.textPrimary)
                 .lineLimit(2)
             if !session.serverDisplayName.isEmpty {
                 HStack(spacing: 5) {
                     Text(session.agentRuntimeKind.displayLabel)
                         .remoraMonoFont(size: 9, weight: .semibold)
-                        .foregroundStyle(RemoraTheme.accent.opacity(0.8))
+                        .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     Text(session.serverDisplayName)
                         .remoraMonoFont(size: 10)
-                        .foregroundStyle(RemoraTheme.textSecondary.opacity(0.75))
+                        .foregroundStyle(RemoraTheme.textSecondary)
                         .lineLimit(1)
                 }
             }

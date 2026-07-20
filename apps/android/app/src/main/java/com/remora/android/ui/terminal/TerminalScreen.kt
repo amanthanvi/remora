@@ -34,7 +34,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -43,6 +45,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,14 +64,15 @@ import androidx.compose.ui.unit.sp
 import com.remora.android.core.bridge.GhosttyRendererBridge
 import com.remora.android.core.bridge.GhosttyRendererStatus
 import com.remora.android.state.ActiveTerminalRegistry
-import com.remora.android.state.AlleycatCredentialStore
 import com.remora.android.state.AppModel
 import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SavedSshCredential
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
 import com.remora.android.state.TerminalSessionController
+import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.TerminalBackendKind
 import uniffi.codex_mobile_client.TerminalSshAuth
@@ -76,26 +80,74 @@ import uniffi.codex_mobile_client.TerminalSshAuth
 @Composable
 fun TerminalScreen(
     cwd: String? = null,
-    preferredAlleycatNodeId: String? = null,
+    preferredRemoraLinkHostId: String? = null,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val appModel = LocalAppModel.current
     val controller = remember { TerminalSessionController(scope) }
     val rendererStatus = remember { GhosttyRendererBridge.status() }
     var nativeRendererAvailable by remember {
         mutableStateOf(rendererStatus.canCreateAndroidSurface)
     }
-    val backendOptions = remember(cwd) { loadBackendOptions(context, cwd) }
-    var selectedBackendId by remember(preferredAlleycatNodeId) { mutableStateOf<String?>(null) }
-    val selectedBackend = backendOptions.firstOrNull { it.id == selectedBackendId }
-        ?: backendOptions.firstOrNull()
+    val remoraLinkAvailable by appModel.remoraLinkAvailable.collectAsState()
+    val remoraLinkJournalRevision by appModel.remoraLinkJournalBackend.revision.collectAsState()
+    var remoraLinkHosts by remember { mutableStateOf(emptyList<RemoraLinkTerminalHost>()) }
+    var remoraLinkHostsLoaded by remember { mutableStateOf(false) }
+    var remoraLinkRefreshGeneration by remember { mutableLongStateOf(0L) }
+    val backendOptions = remember(cwd, remoraLinkHosts) {
+        loadBackendOptions(context, cwd, remoraLinkHosts)
+    }
+    var selectedBackendId by remember(preferredRemoraLinkHostId) { mutableStateOf<String?>(null) }
+    val selectedBackend = selectedBackendId
+        ?.let { selectedId -> backendOptions.firstOrNull { it.id == selectedId } }
+        ?: if (remoraLinkHostsLoaded) {
+            initialBackendId(backendOptions, preferredRemoraLinkHostId)
+                ?.let { initialId -> backendOptions.firstOrNull { it.id == initialId } }
+        } else {
+            null
+        }
     var terminalGridSize by remember { mutableStateOf(TerminalGridSize(cols = 80, rows = 24)) }
     var showConfigSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         TerminalConfigPrefs.initialize(context)
+    }
+
+    LaunchedEffect(remoraLinkAvailable, remoraLinkJournalRevision) {
+        val generation = ++remoraLinkRefreshGeneration
+        remoraLinkHostsLoaded = false
+        if (!remoraLinkAvailable) {
+            remoraLinkHosts = emptyList()
+            if (selectedBackendId == null) {
+                selectedBackendId = initialBackendId(
+                    loadBackendOptions(context, cwd, emptyList()),
+                    preferredRemoraLinkHostId,
+                )
+            }
+            remoraLinkHostsLoaded = true
+            return@LaunchedEffect
+        }
+        val refreshedHosts: List<RemoraLinkTerminalHost>? = try {
+            appModel.withRemoraLinkV2 { it.remoraLinkHosts() }.remoraLinkTerminalHosts()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        if (generation != remoraLinkRefreshGeneration) return@LaunchedEffect
+        if (refreshedHosts != null) {
+            remoraLinkHosts = refreshedHosts
+        }
+        if (selectedBackendId == null) {
+            selectedBackendId = initialBackendId(
+                loadBackendOptions(context, cwd, refreshedHosts ?: remoraLinkHosts),
+                preferredRemoraLinkHostId,
+            )
+        }
+        remoraLinkHostsLoaded = true
     }
 
     val currentTerminalConfig = remember(
@@ -105,15 +157,12 @@ fun TerminalScreen(
     ) {
         TerminalConfigPrefs.currentConfig()
     }
-
-    LaunchedEffect(backendOptions, preferredAlleycatNodeId) {
-        if (backendOptions.none { it.id == selectedBackendId }) {
-            selectedBackendId = initialBackendId(backendOptions, preferredAlleycatNodeId)
-        }
+    val terminalVisuals = remember(currentTerminalConfig.theme) {
+        terminalPaletteVisuals(currentTerminalConfig.theme)
     }
 
     LaunchedEffect(selectedBackend?.id) {
-        selectedBackend?.let { controller.switchBackend(it.backend) }
+        selectedBackend?.let { controller.switchBackend(it.backend) } ?: controller.close()
     }
 
     DisposableEffect(controller) {
@@ -123,7 +172,7 @@ fun TerminalScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(TerminalVisualDefaults.chromeBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding(),
@@ -143,7 +192,7 @@ fun TerminalScreen(
         controller.errorMessage?.let { message ->
             Text(
                 text = message,
-                color = RemoraTheme.danger,
+                color = TerminalVisualDefaults.chromeDanger,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 12.sp,
                 modifier = Modifier
@@ -161,12 +210,12 @@ fun TerminalScreen(
             ) {
                 Text(
                     text = "Trust ${challenge.fingerprint}",
-                    color = Color.Black,
+                    color = TerminalVisualDefaults.chromeOnAccent,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 12.sp,
                     maxLines = 1,
                     modifier = Modifier
-                        .background(RemoraTheme.accent, RoundedCornerShape(8.dp))
+                        .background(TerminalVisualDefaults.chromeAccent, RoundedCornerShape(8.dp))
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 )
             }
@@ -184,7 +233,8 @@ fun TerminalScreen(
             terminalConfig = currentTerminalConfig,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .weight(1f)
+                .background(terminalVisuals.background),
         )
 
         val appSnapshot by AppModel.shared.snapshot.collectAsState()
@@ -235,8 +285,8 @@ private fun TerminalConfigSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color.Black,
-        contentColor = RemoraTheme.textPrimary,
+        containerColor = TerminalVisualDefaults.chromeBackground,
+        contentColor = TerminalVisualDefaults.chromeForeground,
     ) {
         Column(
             modifier = Modifier
@@ -246,7 +296,7 @@ private fun TerminalConfigSheet(
         ) {
             Text(
                 text = "Terminal",
-                color = RemoraTheme.textPrimary,
+                color = TerminalVisualDefaults.chromeForeground,
                 fontFamily = RemoraTheme.monoFont,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
@@ -256,14 +306,14 @@ private fun TerminalConfigSheet(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "Font size",
-                        color = RemoraTheme.textSecondary,
+                        color = TerminalVisualDefaults.chromeSecondary,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = 13.sp,
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
                         text = "${draftFontSize.toInt()} pt",
-                        color = RemoraTheme.textMuted,
+                        color = TerminalVisualDefaults.chromeMuted,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = 13.sp,
                     )
@@ -276,13 +326,20 @@ private fun TerminalConfigSheet(
                     },
                     valueRange = 10f..24f,
                     steps = 13,
+                    colors = SliderDefaults.colors(
+                        thumbColor = TerminalVisualDefaults.chromeAccent,
+                        activeTrackColor = TerminalVisualDefaults.chromeAccent,
+                        inactiveTrackColor = TerminalVisualDefaults.chromeMuted,
+                        activeTickColor = TerminalVisualDefaults.chromeBackground,
+                        inactiveTickColor = TerminalVisualDefaults.chromeForeground,
+                    ),
                 )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "Theme",
-                    color = RemoraTheme.textSecondary,
+                    color = TerminalVisualDefaults.chromeSecondary,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 13.sp,
                 )
@@ -295,7 +352,11 @@ private fun TerminalConfigSheet(
                     ) {
                         Text(
                             text = choice.title,
-                            color = if (selected) RemoraTheme.accent else RemoraTheme.textPrimary,
+                            color = if (selected) {
+                                TerminalVisualDefaults.chromeAccent
+                            } else {
+                                TerminalVisualDefaults.chromeForeground
+                            },
                             fontFamily = RemoraTheme.monoFont,
                             fontSize = 13.sp,
                             modifier = Modifier.weight(1f),
@@ -303,7 +364,7 @@ private fun TerminalConfigSheet(
                         if (selected) {
                             Text(
                                 text = "•",
-                                color = RemoraTheme.accent,
+                                color = TerminalVisualDefaults.chromeAccent,
                                 fontFamily = RemoraTheme.monoFont,
                                 fontSize = 16.sp,
                             )
@@ -318,7 +379,7 @@ private fun TerminalConfigSheet(
             ) {
                 Text(
                     text = "Cursor blink",
-                    color = RemoraTheme.textPrimary,
+                    color = TerminalVisualDefaults.chromeForeground,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 13.sp,
                 )
@@ -326,6 +387,13 @@ private fun TerminalConfigSheet(
                 Switch(
                     checked = TerminalConfigPrefs.cursorBlink,
                     onCheckedChange = { TerminalConfigPrefs.setCursorBlink(context, it) },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = TerminalVisualDefaults.chromeBackground,
+                        checkedTrackColor = TerminalVisualDefaults.chromeAccent,
+                        uncheckedThumbColor = TerminalVisualDefaults.chromeSecondary,
+                        uncheckedTrackColor = TerminalVisualDefaults.chromeSurface,
+                        uncheckedBorderColor = TerminalVisualDefaults.chromeMuted,
+                    ),
                 )
             }
         }
@@ -346,6 +414,11 @@ private fun TerminalOutputPane(
     modifier: Modifier = Modifier,
 ) {
     val outputScroll = rememberScrollState()
+    val paletteVisuals = remember(terminalConfig?.theme) {
+        terminalPaletteVisuals(
+            terminalConfig?.theme ?: TerminalThemeChoice.DEFAULT.toPreset(),
+        )
+    }
     LaunchedEffect(controller.output.length) {
         outputScroll.scrollTo(outputScroll.maxValue)
     }
@@ -373,7 +446,7 @@ private fun TerminalOutputPane(
         if (selectedBackend == null) {
             Text(
                 text = terminalEmptyMessage(),
-                color = RemoraTheme.textSecondary,
+                color = paletteVisuals.statusForeground,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -414,7 +487,7 @@ private fun TerminalOutputPane(
                         text = controller.output.ifEmpty {
                             ""
                         },
-                        color = RemoraTheme.accent,
+                        color = paletteVisuals.fallbackForeground,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = TerminalConfigPrefs.fontSize.sp,
                         lineHeight = (TerminalConfigPrefs.fontSize * 1.31f).sp,
@@ -480,6 +553,7 @@ private fun TerminalHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(TerminalVisualDefaults.chromeBackground)
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -487,12 +561,12 @@ private fun TerminalHeader(
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
-                tint = RemoraTheme.textPrimary,
+                tint = TerminalVisualDefaults.chromeForeground,
             )
         }
         Text(
             text = "Terminal",
-            color = RemoraTheme.textPrimary,
+            color = TerminalVisualDefaults.chromeForeground,
             fontFamily = RemoraTheme.monoFont,
             fontWeight = FontWeight.SemiBold,
             fontSize = 16.sp,
@@ -508,12 +582,12 @@ private fun TerminalHeader(
             Icon(
                 selectedBackend?.icon ?: Icons.Outlined.Storage,
                 contentDescription = null,
-                tint = RemoraTheme.accent,
+                tint = TerminalVisualDefaults.chromeAccent,
                 modifier = Modifier.size(16.dp),
             )
             Text(
                 text = selectedBackend?.title ?: "No backend",
-                color = RemoraTheme.accent,
+                color = TerminalVisualDefaults.chromeAccent,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(start = 6.dp),
@@ -522,19 +596,24 @@ private fun TerminalHeader(
         DropdownMenu(
             expanded = backendMenuExpanded,
             onDismissRequest = { backendMenuExpanded = false },
+            modifier = Modifier.background(TerminalVisualDefaults.chromeSurface),
         ) {
             backendOptions.forEach { option ->
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = option.title,
-                            color = RemoraTheme.textPrimary,
+                            color = TerminalVisualDefaults.chromeForeground,
                             fontFamily = RemoraTheme.monoFont,
                             fontSize = 13.sp,
                         )
                     },
                     leadingIcon = {
-                        Icon(option.icon, contentDescription = null, tint = RemoraTheme.accent)
+                        Icon(
+                            option.icon,
+                            contentDescription = null,
+                            tint = TerminalVisualDefaults.chromeAccent,
+                        )
                     },
                     onClick = {
                         backendMenuExpanded = false
@@ -553,7 +632,7 @@ private fun TerminalHeader(
         ) {
             Text(
                 text = "Aa",
-                color = RemoraTheme.accent,
+                color = TerminalVisualDefaults.chromeAccent,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 13.sp,
             )
@@ -582,7 +661,7 @@ private fun TerminalAccessoryRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.96f))
+            .background(TerminalVisualDefaults.chromeBackground)
             .horizontalScroll(scroll)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -618,7 +697,11 @@ private fun TerminalKey(
     ) {
         Text(
             text = label,
-            color = if (enabled) RemoraTheme.textSecondary else RemoraTheme.textMuted,
+            color = if (enabled) {
+                TerminalVisualDefaults.chromeSecondary
+            } else {
+                TerminalVisualDefaults.chromeMuted
+            },
             fontFamily = RemoraTheme.monoFont,
             fontSize = 12.sp,
         )
@@ -637,12 +720,12 @@ private fun phaseLabel(
     TerminalSessionController.Phase.FAILED -> "failed"
 }
 
-private fun phaseColor(phase: TerminalSessionController.Phase): Color = when (phase) {
-    TerminalSessionController.Phase.IDLE -> RemoraTheme.textMuted
-    TerminalSessionController.Phase.CONNECTING -> RemoraTheme.warning
-    TerminalSessionController.Phase.RUNNING -> RemoraTheme.accent
-    TerminalSessionController.Phase.EXITED -> RemoraTheme.textMuted
-    TerminalSessionController.Phase.FAILED -> RemoraTheme.danger
+internal fun phaseColor(phase: TerminalSessionController.Phase): Color = when (phase) {
+    TerminalSessionController.Phase.IDLE -> TerminalVisualDefaults.chromeForeground
+    TerminalSessionController.Phase.CONNECTING -> TerminalVisualDefaults.chromeWarning
+    TerminalSessionController.Phase.RUNNING -> TerminalVisualDefaults.chromeAccent
+    TerminalSessionController.Phase.EXITED -> TerminalVisualDefaults.chromeForeground
+    TerminalSessionController.Phase.FAILED -> TerminalVisualDefaults.chromeDanger
 }
 
 private data class TerminalBackendOption(
@@ -650,54 +733,38 @@ private data class TerminalBackendOption(
     val title: String,
     val runningLabel: String,
     val icon: ImageVector,
-    val alleycatNodeId: String? = null,
+    val remoraLinkHostId: String? = null,
     val supportsResize: Boolean,
     val backend: TerminalBackendKind,
 )
 
 private fun initialBackendId(
     options: List<TerminalBackendOption>,
-    preferredAlleycatNodeId: String?,
-): String? {
-    val preferred = normalized(preferredAlleycatNodeId)
-    return options.firstOrNull { it.alleycatNodeId == preferred }?.id
-        ?: options.firstOrNull()?.id
-}
+    preferredRemoraLinkHostId: String?,
+): String? = resolveInitialTerminalBackendId(
+    options = options.map { it.id to it.remoraLinkHostId },
+    preferredRemoraLinkHostId = preferredRemoraLinkHostId,
+)
 
 private fun loadBackendOptions(
     context: Context,
     cwd: String?,
+    remoraLinkHosts: List<RemoraLinkTerminalHost>,
 ): List<TerminalBackendOption> {
-    val options = mutableListOf<TerminalBackendOption>()
-    val credentialStore = AlleycatCredentialStore(context.applicationContext)
+    val options = remoraLinkHosts.mapTo(mutableListOf()) { host ->
+        TerminalBackendOption(
+            id = host.hostId,
+            title = host.displayName.trim().ifEmpty { "Remote shell" },
+            runningLabel = "remote shell",
+            icon = Icons.Outlined.Storage,
+            remoraLinkHostId = host.hostId,
+            supportsResize = true,
+            backend = host.backend,
+        )
+    }
     val sshCredentialStore = SshCredentialStore(context.applicationContext)
-    val seenNodeIds = mutableSetOf<String>()
     val seenSshKeys = mutableSetOf<String>()
     SavedServerStore.remembered(context).forEach { saved ->
-        val nodeId = normalized(saved.alleycatNodeId)
-        if (nodeId != null && seenNodeIds.add(nodeId)) {
-            val token = credentialStore.loadToken(nodeId)?.trim()?.takeIf { it.isNotEmpty() }
-            if (token != null) {
-                options.add(
-                    TerminalBackendOption(
-                        id = "alleycat-$nodeId",
-                        title = saved.name.trim().ifEmpty { "Remote shell" },
-                        runningLabel = "remote shell",
-                        icon = Icons.Outlined.Storage,
-                        alleycatNodeId = nodeId,
-                        supportsResize = true,
-                        backend = TerminalBackendKind.RemoteAlleycat(
-                            nodeId = nodeId,
-                            token = token,
-                            relay = normalized(saved.alleycatRelay),
-                            shell = null,
-                        ),
-                    ),
-                )
-                return@forEach
-            }
-        }
-
         val host = saved.hostname.takeIf { it.isNotBlank() } ?: return@forEach
         val sshPort = (saved.sshPort ?: 22).toInt()
         val key = "${host.lowercase()}:$sshPort"

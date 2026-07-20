@@ -82,7 +82,7 @@ struct ConversationComposerPopupOverlayView: View {
                                     HStack(spacing: 8) {
                                         Image(systemName: "puzzlepiece.extension.fill")
                                             .remoraFont(.caption)
-                                            .foregroundColor(RemoraTheme.accent)
+                                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(plugin.displayTitle)
                                                 .remoraFont(.footnote)

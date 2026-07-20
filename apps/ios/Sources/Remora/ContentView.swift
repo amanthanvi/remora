@@ -4,12 +4,11 @@ import UIKit
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(AppRuntimeController.self) private var appRuntime
     @Environment(ThemeManager.self) private var themeManager
     @State private var appState = AppState()
     @State private var stableSafeAreaInsets = StableSafeAreaInsets()
     @State private var conversationWarmup = ConversationWarmupCoordinator()
-    @State private var petOverlay = PetOverlayController.shared
+    @State private var actionCenter = RemoraActionCenter.shared
     @State private var composerBottomInset: CGFloat = 0
     @State private var splashDismissed = false
     @Environment(\.colorScheme) private var colorScheme
@@ -22,6 +21,9 @@ struct ContentView: View {
 
     var body: some View {
         @Bindable var bindableAppState = appState
+        @Bindable var bindableActionCenter = actionCenter
+        let chromeObservation = appModel.chromeObservation
+        let _ = chromeObservation.revision
 
         GeometryReader { geometry in
             ZStack {
@@ -87,6 +89,13 @@ struct ContentView: View {
             if forceDiscoveryForUITest {
                 appState.showServerPicker = true
             }
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["REMORA_UI_TEST_SHOW_COMMAND_PALETTE"] == "1" {
+                DispatchQueue.main.async {
+                    actionCenter.presentPalette()
+                }
+            }
+            #endif
         }
         .onChange(of: colorScheme) { _, nextColorScheme in
             // iOS toggles `colorScheme` while capturing light+dark
@@ -108,7 +117,7 @@ struct ContentView: View {
                 themeManager.syncSystemColorScheme(colorScheme)
             }
         }
-        .onChange(of: appModel.snapshot?.activeThread) { _, _ in
+        .onChange(of: chromeObservation.activeThread) { _, _ in
             appState.selectedModel = ""
             appState.selectedAgentRuntimeKind = nil
             appState.reasoningEffort = ""
@@ -135,11 +144,17 @@ struct ContentView: View {
                         .frame(width: 0, height: 0)
                 }
         }
-        #if targetEnvironment(macCatalyst)
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandShowSettings)) { _ in
-            appState.showSettings = true
+        .sheet(isPresented: $bindableActionCenter.isPalettePresented) {
+            CommandPaletteView()
+                .environment(appModel)
+                .environment(appState)
+                .environment(themeManager)
+                .environment(\.textScale, textScale)
+                .background {
+                    InterfaceStyleSynchronizer(style: themeManager.appearanceMode.userInterfaceStyle)
+                        .frame(width: 0, height: 0)
+                }
         }
-        #endif
     }
 
     private func standardHomeNavigationView(topInset: CGFloat, bottomInset: CGFloat) -> some View {
@@ -160,19 +175,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var standardOverlays: some View {
-        if petOverlay.visible, let pet = petOverlay.selectedPet {
-            PetOverlayView(
-                pet: pet,
-                state: petOverlay.avatarState(snapshot: appModel.snapshot),
-                message: petOverlay.avatarMessage(snapshot: appModel.snapshot),
-                reduceMotion: UIAccessibility.isReduceMotionEnabled
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-
-        if let approval = appModel.snapshot?.pendingApprovals.first(where: {
-            $0.kind != .mcpElicitation
-        }) {
+        if let approval = appModel.chromeObservation.pendingApproval {
             ApprovalPromptView(approval: approval) { decision in
                 Task {
                     try? await appModel.store.respondToApproval(

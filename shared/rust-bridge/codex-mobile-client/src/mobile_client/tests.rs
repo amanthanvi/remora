@@ -414,59 +414,6 @@ mod mobile_client_tests {
     }
 
     #[test]
-    fn alleycat_short_circuit_detects_missing_selected_runtime() {
-        let requested = vec![
-            (
-                "codex".to_string(),
-                AlleycatAgentInfo {
-                    name: "codex".to_string(),
-                    display_name: "Codex".to_string(),
-                    wire: AlleycatAgentWire::Websocket,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-            (
-                "droid".to_string(),
-                AlleycatAgentInfo {
-                    name: "droid".to_string(),
-                    display_name: "Droid".to_string(),
-                    wire: AlleycatAgentWire::Jsonl,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-            (
-                "amp".to_string(),
-                AlleycatAgentInfo {
-                    name: "amp".to_string(),
-                    display_name: "Amp".to_string(),
-                    wire: AlleycatAgentWire::Jsonl,
-                    available: true,
-                    presentation: None,
-                    capabilities: None,
-                },
-            ),
-        ];
-        let requested_kinds = alleycat_requested_runtime_kinds(&requested);
-
-        assert_eq!(alleycat_runtime_agent_names(&requested), "codex,droid,amp");
-        assert_eq!(
-            missing_runtime_kinds(&["codex".to_string()], &requested_kinds),
-            vec!["amp".to_string(), "droid".to_string()]
-        );
-        assert!(
-            missing_runtime_kinds(
-                &["codex".to_string(), "droid".to_string(), "amp".to_string()],
-                &requested_kinds
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
     fn thread_runtime_infers_claude_from_existing_thread_model() {
         let client = MobileClient::new();
         let key = ThreadKey {
@@ -1500,6 +1447,54 @@ mod mobile_client_tests {
     fn remote_oauth_callback_port_reads_localhost_redirect() {
         let auth_url = "https://auth.openai.com/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc";
         assert_eq!(remote_oauth_callback_port(auth_url).unwrap(), 1455);
+    }
+
+    #[tokio::test]
+    async fn failed_cold_repair_guard_preserves_the_live_session_and_oauth_tunnel() {
+        let client = MobileClient::new();
+        let server_id = "guard-race";
+        let session = Arc::new(ServerSession::test_stub(make_server_config(server_id)));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock should not be poisoned")
+            .insert(server_id.to_string(), Arc::clone(&session));
+        client.oauth_callback_tunnels.lock().await.insert(
+            server_id.to_string(),
+            OAuthCallbackTunnel {
+                login_id: "login-1".to_string(),
+                local_port: 1455,
+            },
+        );
+        let stale_guard = ColdReconnectGuard {
+            session: Arc::clone(&session),
+            generation: 0,
+        };
+
+        assert!(
+            !client
+                .replace_existing_session_with_guard(server_id, Some(&stale_guard))
+                .await,
+            "a non-multiplexed session cannot satisfy a cold-repair claim"
+        );
+        let current = client
+            .sessions
+            .read()
+            .expect("sessions lock should not be poisoned")
+            .get(server_id)
+            .cloned()
+            .expect("failed guard must preserve the current session");
+        assert!(Arc::ptr_eq(&current, &session));
+        assert!(
+            client
+                .oauth_callback_tunnels
+                .lock()
+                .await
+                .contains_key(server_id),
+            "failed guard must not tear down an in-progress OAuth callback"
+        );
+
+        session.disconnect().await;
     }
 
     #[test]

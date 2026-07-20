@@ -195,7 +195,7 @@ struct AppsListView: View {
                     _ = try? store.rename(id: app.id, title: trimmed)
                     renameTarget = nil
                 }
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             Spacer()

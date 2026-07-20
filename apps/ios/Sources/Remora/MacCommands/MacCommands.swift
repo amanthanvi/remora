@@ -1,58 +1,91 @@
-#if targetEnvironment(macCatalyst)
 import SwiftUI
 import UIKit
 
+#if targetEnvironment(macCatalyst)
 extension Notification.Name {
-    static let remoraCommandNewSession = Notification.Name("com.remora.command.newSession")
-    static let remoraCommandSendComposer = Notification.Name("com.remora.command.sendComposer")
-    static let remoraCommandNavigateBack = Notification.Name("com.remora.command.navigateBack")
-    static let remoraCommandNavigateForward = Notification.Name("com.remora.command.navigateForward")
     /// Posted with userInfo `["index": Int]` where `index` is 0-based.
     static let remoraCommandSelectSession = Notification.Name("com.remora.command.selectSession")
-    static let remoraCommandShowSettings = Notification.Name("com.remora.command.showSettings")
 }
+#endif
 
 struct RemoraCommands: Commands {
+    let actionCenter: RemoraActionCenter
     let appModel: AppModel
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Session") {
-                NotificationCenter.default.post(name: .remoraCommandNewSession, object: nil)
-            }
-            .keyboardShortcut("n", modifiers: [.command])
+            RemoraActionCommandButton(id: .newThread, actionCenter: actionCenter)
 
+            #if targetEnvironment(macCatalyst)
             Button("New Window") {
                 openNewWindow()
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
+            #endif
         }
 
+        CommandMenu("Navigate") {
+            RemoraActionCommandButton(id: .showCommandPalette, actionCenter: actionCenter)
+            RemoraActionCommandButton(id: .searchThreads, actionCenter: actionCenter)
+            Divider()
+            RemoraActionCommandButton(id: .navigateBack, actionCenter: actionCenter)
+            RemoraActionCommandButton(id: .navigateForward, actionCenter: actionCenter)
+        }
+
+        CommandMenu("Thread") {
+            RemoraActionCommandButton(id: .sendMessage, actionCenter: actionCenter)
+            Divider()
+            RemoraActionCommandButton(id: .previousThread, actionCenter: actionCenter)
+            RemoraActionCommandButton(id: .nextThread, actionCenter: actionCenter)
+        }
+
+        CommandMenu("Terminal") {
+            RemoraActionCommandButton(id: .openTerminal, actionCenter: actionCenter)
+        }
+
+        // Replace UIKit's built-in Cmd-, entry so the standard shortcut opens
+        // Remora's in-app settings sheet instead of competing with a second
+        // command that has undefined menu-builder precedence.
+        CommandGroup(replacing: .appSettings) {
+            RemoraActionCommandButton(id: .showSettings, actionCenter: actionCenter)
+        }
+
+        #if targetEnvironment(macCatalyst)
         SidebarCommands()
 
-        CommandMenu("Session") {
-            Button("Send") {
-                NotificationCenter.default.post(name: .remoraCommandSendComposer, object: nil)
-            }
-            .keyboardShortcut(.return, modifiers: [.command])
-
-            Button("Back") {
-                NotificationCenter.default.post(name: .remoraCommandNavigateBack, object: nil)
-            }
-            .keyboardShortcut("[", modifiers: [.command])
-
-            Button("Forward") {
-                NotificationCenter.default.post(name: .remoraCommandNavigateForward, object: nil)
-            }
-            .keyboardShortcut("]", modifiers: [.command])
-
-            Divider()
-
+        CommandMenu("Session Slots") {
             SessionShortcutsMenu(appModel: appModel)
         }
+        #endif
     }
 }
 
+private struct RemoraActionCommandButton: View {
+    let id: RemoraActionID
+    let actionCenter: RemoraActionCenter
+
+    var body: some View {
+        let item = actionCenter.item(for: id)
+        Group {
+            if let shortcut = item.definition.shortcut {
+                commandButton(item)
+                    .keyboardShortcut(shortcut.key, modifiers: shortcut.modifiers)
+            } else {
+                commandButton(item)
+            }
+        }
+    }
+
+    private func commandButton(_ item: RemoraActionItem) -> some View {
+        Button(item.definition.title) {
+            _ = actionCenter.perform(id, source: .keyboard)
+        }
+        .disabled(!item.availability.isEnabled)
+        .help(item.availability.disabledReason ?? item.definition.detail)
+    }
+}
+
+#if targetEnvironment(macCatalyst)
 private struct SessionShortcutsMenu: View {
     let appModel: AppModel
 

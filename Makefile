@@ -140,7 +140,7 @@ PACKAGE_CARGO_ENV := CARGO_INCREMENTAL=0
 # repo-wide sccache wrapper usable; sccache rejects explicitly enabled
 # incremental compilation. CI calls build-rust.sh directly with its own env.
 DEV_CARGO_ENV := env -u CARGO_INCREMENTAL
-UPDATE_ALLEYCAT_MAIN := $(ROOT)/tools/scripts/update-alleycat-main.sh
+UPDATE_REMORA_LINK := $(ROOT)/tools/scripts/update-remora-link.sh
 
 PATCH_FILES := \
 	$(PATCHES_DIR)/ios-exec-hook.patch \
@@ -195,8 +195,8 @@ $(shell mkdir -p $(STAMPS))
 	android android-fast android-emulator-fast android-emulator-run android-device-run android-debug android-install android-emulator-install \
 	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-test rust-host-dev rust-shellcheck \
 	ghostty-ios ghostty-android \
-	alleycat-main \
-	bindings bindings-swift bindings-kotlin \
+	update-remora-link \
+	bindings bindings-swift bindings-kotlin bindings-hardener-test \
 	sync patch unpatch sync-ghostty unpatch-ghostty xcgen \
 	ios-build ios-build-sim ios-build-sim-fast ios-build-device ios-build-device-fast \
 	test test-rust test-ios test-android \
@@ -349,30 +349,31 @@ android-device-run: android-fast
 
 rust-ios: rust-ios-package
 
-alleycat-main:
-	@$(UPDATE_ALLEYCAT_MAIN) --shared
+update-remora-link:
+	@test -n "$(REV)" || { echo "usage: make update-remora-link REV=<40-character commit>" >&2; exit 1; }
+	@$(UPDATE_REMORA_LINK) "$(REV)"
 
-rust-ios-package: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
+rust-ios-package: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Packaging Rust for iOS (device + simulator + xcframework)..."
 	@cd $(ROOT) && $(PACKAGE_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current $(CARGO_FEATURES)
 
-rust-ios-device-fast: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
+rust-ios-device-fast: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Building Rust for fast iOS device iteration (raw staticlib + headers)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current --fast-device $(CARGO_FEATURES)
 
-rust-ios-sim-fast: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
+rust-ios-sim-fast: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Building Rust for fast iOS simulator iteration (raw staticlib + headers)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current --fast-sim $(CARGO_FEATURES)
 
-rust-ios-macabi-fast: alleycat-main $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
+rust-ios-macabi-fast: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Building Rust for fast Mac Catalyst iteration (raw macabi staticlib + headers, host arch only)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current --fast-macabi $(CARGO_FEATURES)
 
-rust-check: patch alleycat-main
+rust-check: patch
 	@echo "==> cargo check (host, shared crates)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo check --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client
 
-rust-test: patch alleycat-main rust-shellcheck
+rust-test: patch rust-shellcheck
 	@echo "==> cargo test (host, shared crates)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
 
@@ -402,7 +403,7 @@ rust-shellcheck:
 rust-host-dev: rust-check rust-test
 
 rust-android: $(STAMP_RUST_ANDROID)
-$(STAMP_RUST_ANDROID): $(STAMP_SYNC) $(STAMP_BINDINGS_K) $(STAMP_GHOSTTY_ANDROID) $(ANDROID_RUST_SOURCES) tools/scripts/build-android-rust.sh Makefile | alleycat-main
+$(STAMP_RUST_ANDROID): $(STAMP_SYNC) $(STAMP_BINDINGS_K) $(STAMP_GHOSTTY_ANDROID) $(ANDROID_RUST_SOURCES) tools/scripts/build-android-rust.sh Makefile
 	@echo "==> Building Rust for Android..."
 	@cd $(ROOT) && $(ANDROID_ENV) ANDROID_ABIS="$(ANDROID_ABIS)" ANDROID_RUST_PROFILE="$(ANDROID_RUST_PROFILE)" $(DEV_CARGO_ENV) ./tools/scripts/build-android-rust.sh
 	@touch $@
@@ -439,7 +440,7 @@ help:
 		'make rust-ios-macabi-fast fast Rust Mac Catalyst lane (host-arch macabi staticlib only)' \
 		'make ghostty-ios        build pinned Ghostty iOS renderer artifacts' \
 		'make ghostty-android    build pinned Ghostty Android renderer artifacts (requires Android platform patch)' \
-		'make alleycat-main      refresh Alleycat git deps to latest dnakov/alleycat main' \
+		'make update-remora-link REV=<sha>  pin the reviewed Remora Alleycat fork revision' \
 		'make catalyst           full Mac Catalyst build (release+LTO macabi staticlib + xcodebuild)' \
 		'make catalyst-run       full Mac Catalyst build + launch' \
 		'make catalyst-fast      fast Mac Catalyst dev build (ios-dev profile, host arch)' \
@@ -449,7 +450,8 @@ help:
 		'make android-emulator-run  fast emulator build + install + launch on emulator; saves logcat under artifacts/android-emulator-run' \
 		'make android-device-run    fast Android dev build + install + launch with saved logcat under artifacts/android-device-run (override ANDROID_DEVICE_SERIAL; auto-uninstalls on versionCode downgrade; set ANDROID_REINSTALL_ON_SIGNATURE_MISMATCH=1 to also uninstall on signature mismatch)' \
 		'make rust-check         host cargo check for shared crates' \
-		'make rust-test          host cargo test for shared crates'
+		'make rust-test          host cargo test for shared crates' \
+		'make bindings-hardener-test  generated secret-binding hardener regression tests'
 
 sync: $(STAMP_SYNC)
 $(STAMP_SYNC):
@@ -481,8 +483,12 @@ unpatch-ghostty:
 
 bindings: bindings-swift bindings-kotlin
 
+bindings-hardener-test:
+	@echo "==> Testing generated secret-binding hardener..."
+	@python3 -m unittest discover -s $(RUST_DIR) -p 'test_harden_generated_secret_bindings.py' -v
+
 bindings-swift: $(STAMP_BINDINGS_S)
-$(STAMP_BINDINGS_S): $(STAMP_SYNC) $(BOUNDARY_SOURCES) | alleycat-main
+$(STAMP_BINDINGS_S): $(STAMP_SYNC) $(BOUNDARY_SOURCES)
 	@echo "==> Generating Swift bindings..."
 	@cd $(RUST_DIR) && ./generate-bindings.sh --swift-only
 	@mkdir -p $(IOS_GENERATED)/Headers
@@ -493,7 +499,7 @@ $(STAMP_BINDINGS_S): $(STAMP_SYNC) $(BOUNDARY_SOURCES) | alleycat-main
 	@touch $@
 
 bindings-kotlin: $(STAMP_BINDINGS_K)
-$(STAMP_BINDINGS_K): $(STAMP_SYNC) $(BOUNDARY_SOURCES) | alleycat-main
+$(STAMP_BINDINGS_K): $(STAMP_SYNC) $(BOUNDARY_SOURCES)
 	@echo "==> Generating Kotlin bindings..."
 	@cd $(RUST_DIR) && ./generate-bindings.sh --kotlin-only
 	@touch $@
@@ -590,9 +596,9 @@ android-emulator-install: android-emulator-fast
 	if [ -z "$$EMU" ]; then echo "ERROR: no emulator found"; exit 1; fi && \
 	adb -s "$$EMU" install -r $(ANDROID_APK)
 
-test: test-rust test-ios test-android
+test: bindings-hardener-test test-rust test-ios test-android
 
-test-rust: patch alleycat-main rust-shellcheck
+test-rust: patch rust-shellcheck
 	@echo "==> Running Rust tests..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
 
@@ -623,18 +629,12 @@ clean-rust:
 clean-ios:
 	@echo "==> Cleaning iOS artifacts..."
 	@rm -rf $(IOS_FW_DIR)/codex_mobile_client.xcframework $(IOS_FW_DIR)/GhosttyKit.xcframework $(IOS_GENERATED)
-	@# Purge the generated local-terminal rootfs left by pre-trim checkouts.
-	@rm -rf $(IOS_DIR)/Resources/fs
-	@rm -f $(STAMP_XCGEN) $(STAMP_BINDINGS_S) $(STAMPS)/alpine-fs-* $(STAMPS)/ghostty-ios-*
+	@rm -f $(STAMP_XCGEN) $(STAMP_BINDINGS_S) $(STAMPS)/ghostty-ios-*
 
 clean-android:
 	@echo "==> Cleaning Android artifacts..."
 	@rm -rf $(ANDROID_JNI)/arm64-v8a $(ANDROID_JNI)/x86_64 $(ANDROID_DIR)/core/bridge/src/main/cpp/include/ghostty.h
-	@# Purge generated local-terminal payloads left by pre-trim checkouts so Gradle cannot package them.
-	@rm -f $(ANDROID_DIR)/app/src/main/assets/alpine-fs.tar.gz $(ANDROID_DIR)/app/src/main/assets/alpine-fs.tgz $(ANDROID_DIR)/app/src/main/assets/alpine-fs.version
-	@rm -f $(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libproot.so $(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libproot_loader.so $(ANDROID_DIR)/app/src/main/jniLibs/x86_64/libproot.so $(ANDROID_DIR)/app/src/main/jniLibs/x86_64/libproot_loader.so
-	@rm -f $(ANDROID_DIR)/app/src/main/assets/licenses/proot-COPYING.txt $(ANDROID_DIR)/app/src/main/assets/licenses/talloc-COPYING.txt $(ANDROID_DIR)/app/src/main/assets/proot.version
-	@rm -f $(STAMP_BINDINGS_K) $(STAMPS)/rust-android-* $(STAMPS)/ghostty-android-* $(STAMPS)/android-alpine-fs-* $(STAMPS)/proot-android-*
+	@rm -f $(STAMP_BINDINGS_K) $(STAMPS)/rust-android-* $(STAMPS)/ghostty-android-*
 	@cd $(ANDROID_DIR) && ./gradlew clean 2>/dev/null || true
 
 rebuild-bindings:

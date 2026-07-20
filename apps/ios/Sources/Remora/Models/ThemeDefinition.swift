@@ -38,11 +38,20 @@ struct ThemeDefinition: Codable {
         }
     }
 
-    // VS Code allows #RRGGBBAA. Downstream color helpers assume 6-digit
-    // RGB, so strip the trailing alpha pair at the decode boundary.
+    // VS Code allows shorthand RGB/RGBA and #RRGGBBAA. Downstream color
+    // helpers assume 6-digit RGB, so normalize shorthand and strip alpha at
+    // the decode boundary.
     private static func sanitizeHex(_ raw: String) -> String {
-        guard raw.hasPrefix("#"), raw.count == 9 else { return raw }
-        return String(raw.prefix(7))
+        guard raw.hasPrefix("#") else { return raw }
+        switch raw.count {
+        case 4, 5:
+            let digits = Array(raw.dropFirst())
+            return "#" + String(digits.prefix(3).flatMap { [$0, $0] })
+        case 9:
+            return String(raw.prefix(7))
+        default:
+            return raw
+        }
     }
 
     // tokenColors are ignored — syntax highlighting is handled by Hairball
@@ -92,6 +101,8 @@ struct ResolvedTheme {
     let textBody: String
     let textSystem: String
     let accent: String
+    let accentForeground: String
+    let accentForegroundOnSurface: String
     let accentStrong: String
     let border: String
     let separator: String
@@ -112,24 +123,91 @@ struct ResolvedTheme {
 
         self.background = bg
         self.textPrimary = fg
-        self.surface = c["sideBar.background"] ?? Self.adjustBrightness(bg, by: d.type == .dark ? 0.03 : -0.02)
-        self.surfaceLight = c["activityBar.background"] ?? Self.adjustBrightness(self.surface, by: d.type == .dark ? 0.04 : -0.03)
-        self.textSecondary = c["sideBar.foreground"] ?? Self.dimColor(fg, factor: 0.55)
-        self.textMuted = c["editorLineNumber.foreground"] ?? Self.dimColor(fg, factor: 0.35)
-        self.textBody = Self.dimColor(fg, factor: 0.88)
-        self.textSystem = Self.dimColor(fg, factor: 0.7)
-        self.accent = c["textLink.foreground"] ?? c["button.background"] ?? (d.type == .dark ? "#B0B0B0" : "#4A4A4A")
+        let candidateSurface = c["sideBar.background"]
+            ?? Self.adjustBrightness(bg, by: d.type == .dark ? 0.03 : -0.02)
+        let candidateSurfaceLight = c["activityBar.background"]
+            ?? Self.adjustBrightness(candidateSurface, by: d.type == .dark ? 0.04 : -0.03)
+        let candidateChrome = [bg, candidateSurface, candidateSurfaceLight]
+
+        // App chrome mixes these three surfaces in ways VS Code itself does
+        // not. Reject a theme's sidebar/activity colors only when their
+        // luminance polarity makes one AA-readable semantic foreground
+        // mathematically impossible across the set (for example a white
+        // editor paired with nearly black sidebars). This keeps the bundled
+        // theme usable without proliferating context-fragile text roles.
+        if Self.hasSharedAAForeground(against: candidateChrome) {
+            self.surface = candidateSurface
+            self.surfaceLight = candidateSurfaceLight
+        } else {
+            let fallbackSurface = Self.adjustBrightness(bg, by: d.type == .dark ? 0.03 : -0.02)
+            let fallbackSurfaceLight = Self.adjustBrightness(
+                fallbackSurface,
+                by: d.type == .dark ? 0.04 : -0.03
+            )
+            if Self.hasSharedAAForeground(
+                against: [bg, fallbackSurface, fallbackSurfaceLight]
+            ) {
+                self.surface = fallbackSurface
+                self.surfaceLight = fallbackSurfaceLight
+            } else {
+                self.surface = bg
+                self.surfaceLight = bg
+            }
+        }
+
+        let chromeSurfaces = [self.background, self.surface, self.surfaceLight]
+
+        let rawSecondary = c["sideBar.foreground"] ?? Self.dimColor(fg, factor: 0.55)
+        self.textSecondary = Self.contrastSafeColor(
+            rawSecondary,
+            against: chromeSurfaces,
+            preferredTarget: fg
+        )
+        let rawMuted = c["editorLineNumber.foreground"] ?? Self.dimColor(fg, factor: 0.35)
+        self.textMuted = Self.contrastSafeColor(
+            rawMuted,
+            against: chromeSurfaces,
+            preferredTarget: fg
+        )
+        let rawBody = Self.dimColor(fg, factor: 0.88)
+        self.textBody = Self.contrastSafeColor(
+            rawBody,
+            against: [self.background],
+            preferredTarget: fg
+        )
+        let rawSystem = Self.dimColor(fg, factor: 0.7)
+        self.textSystem = Self.contrastSafeColor(
+            rawSystem,
+            against: chromeSurfaces,
+            preferredTarget: fg
+        )
+        self.accent = c["textLink.foreground"]
+            ?? c["button.background"]
+            ?? (d.type == .dark ? "#B0B0B0" : "#4A4A4A")
+        self.accentForeground = Self.contrastSafeColor(
+            self.accent,
+            against: [self.background],
+            preferredTarget: fg
+        )
+        self.accentForegroundOnSurface = Self.contrastSafeColor(
+            self.accent,
+            against: chromeSurfaces,
+            preferredTarget: fg
+        )
         self.accentStrong = c["button.background"] ?? c["textLink.foreground"] ?? self.accent
-        self.border = c["editorGroup.border"] ?? c["sideBar.border"] ?? Self.adjustBrightness(self.surface, by: d.type == .dark ? 0.05 : -0.05)
-        self.separator = c["panel.border"] ?? Self.adjustBrightness(bg, by: d.type == .dark ? 0.04 : -0.04)
+        self.border = c["editorGroup.border"]
+            ?? c["sideBar.border"]
+            ?? Self.adjustBrightness(self.surface, by: d.type == .dark ? 0.05 : -0.05)
+        self.separator = c["panel.border"]
+            ?? Self.adjustBrightness(bg, by: d.type == .dark ? 0.04 : -0.04)
         self.danger = d.type == .dark ? "#FF5555" : "#D32F2F"
         self.success = d.type == .dark ? "#6EA676" : "#2E7D32"
         self.warning = d.type == .dark ? "#E2A644" : "#A84400"
         self.codeBackground = bg
 
-        // Compute textOnAccent based on accent brightness
-        let accentBright = Self.brightness(of: self.accentStrong)
-        self.textOnAccent = accentBright > 0.5 ? "#0D0D0D" : "#FFFFFF"
+        // Selected controls use `accent`, not `accentStrong`, as their fill.
+        // Derive the semantic label from that exact rendered background.
+        self.textOnAccent = Self.contrastForeground(on: self.accent)
 
     }
 
@@ -138,6 +216,88 @@ struct ResolvedTheme {
     static func brightness(of hex: String) -> Double {
         let (r, g, b) = hexToRGB(hex)
         return 0.299 * r + 0.587 * g + 0.114 * b
+    }
+
+    /// Keep the theme's hue whenever possible, moving only as far toward its
+    /// own primary text (or a neutral endpoint) as needed to meet WCAG AA on
+    /// every standard app-chrome surface where these semantic roles appear.
+    static func contrastSafeColor(
+        _ candidate: String,
+        against backgrounds: [String],
+        preferredTarget: String,
+        minimumRatio: Double = 4.5
+    ) -> String {
+        guard minimumContrast(of: candidate, against: backgrounds) < minimumRatio else {
+            return candidate
+        }
+
+        let candidateRGB = hexToRGB(candidate)
+        let targets = [preferredTarget, "#000000", "#FFFFFF"]
+        var best: (hex: String, distance: Double)?
+
+        for target in targets {
+            guard minimumContrast(of: target, against: backgrounds) >= minimumRatio else {
+                continue
+            }
+            let targetRGB = hexToRGB(target)
+            for step in 1...1_000 {
+                let amount = Double(step) / 1_000
+                let blended = rgbToHex(
+                    candidateRGB.0 + (targetRGB.0 - candidateRGB.0) * amount,
+                    candidateRGB.1 + (targetRGB.1 - candidateRGB.1) * amount,
+                    candidateRGB.2 + (targetRGB.2 - candidateRGB.2) * amount
+                )
+                guard minimumContrast(of: blended, against: backgrounds) >= minimumRatio else {
+                    continue
+                }
+                let resolvedRGB = hexToRGB(blended)
+                let distance = pow(resolvedRGB.0 - candidateRGB.0, 2)
+                    + pow(resolvedRGB.1 - candidateRGB.1, 2)
+                    + pow(resolvedRGB.2 - candidateRGB.2, 2)
+                if best == nil || distance < best!.distance {
+                    best = (blended, distance)
+                }
+                break
+            }
+        }
+
+        return best?.hex ?? contrastForeground(on: backgrounds.first ?? "#000000")
+    }
+
+    static func contrastForeground(on background: String, minimumRatio: Double = 4.5) -> String {
+        let nearBlack = "#0D0D0D"
+        let white = "#FFFFFF"
+        let nearBlackRatio = contrastRatio(nearBlack, background)
+        let whiteRatio = contrastRatio(white, background)
+        if max(nearBlackRatio, whiteRatio) >= minimumRatio {
+            return nearBlackRatio >= whiteRatio ? nearBlack : white
+        }
+        return contrastRatio("#000000", background) >= whiteRatio ? "#000000" : white
+    }
+
+    static func contrastRatio(_ foreground: String, _ background: String) -> Double {
+        let first = relativeLuminance(foreground)
+        let second = relativeLuminance(background)
+        return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+    }
+
+    private static func minimumContrast(of foreground: String, against backgrounds: [String]) -> Double {
+        backgrounds.map { contrastRatio(foreground, $0) }.min() ?? .infinity
+    }
+
+    private static func hasSharedAAForeground(against backgrounds: [String]) -> Bool {
+        minimumContrast(of: "#000000", against: backgrounds) >= 4.5
+            || minimumContrast(of: "#FFFFFF", against: backgrounds) >= 4.5
+    }
+
+    private static func relativeLuminance(_ hex: String) -> Double {
+        let (r, g, b) = hexToRGB(hex)
+        func linear(_ channel: Double) -> Double {
+            channel <= 0.04045
+                ? channel / 12.92
+                : pow((channel + 0.055) / 1.055, 2.4)
+        }
+        return (0.2126 * linear(r)) + (0.7152 * linear(g)) + (0.0722 * linear(b))
     }
 
     static func adjustBrightness(_ hex: String, by amount: Double) -> String {
@@ -168,7 +328,11 @@ struct ResolvedTheme {
         let r = Double((int >> 16) & 0xFF) / 255
         let g = Double((int >> 8) & 0xFF) / 255
         let b = Double(int & 0xFF) / 255
-        return (r, g, b)
+        return (
+            r,
+            g,
+            b
+        )
     }
 
     static func rgbToHex(_ r: Double, _ g: Double, _ b: Double) -> String {

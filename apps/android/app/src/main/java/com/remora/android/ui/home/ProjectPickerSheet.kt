@@ -217,7 +217,7 @@ private fun ProjectRow(
                 if (serverName != null) {
                     Text(
                         text = serverName,
-                        color = RemoraTheme.accent.copy(alpha = 0.75f),
+                        color = RemoraTheme.accent,
                         fontSize = RemoraTextStyle.caption2.scaled,
                         fontFamily = RemoraTheme.monoFont,
                         maxLines = 1,
@@ -234,4 +234,3 @@ private fun ProjectRow(
         }
     }
 }
-

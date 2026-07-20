@@ -10,15 +10,20 @@ private struct LoadingStageText: View {
         "Launching…",
     ]
     @State private var index = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Text(Self.stages[index])
             .remoraFont(.caption, weight: .medium)
             .foregroundStyle(RemoraTheme.textSecondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .transition(.opacity)
+            .transition(reduceMotion ? .identity : .opacity)
             .id(index)
-            .task {
+            .task(id: reduceMotion) {
+                guard !reduceMotion else {
+                    index = 0
+                    return
+                }
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                     if Task.isCancelled { return }
@@ -38,6 +43,7 @@ struct MinigameOverlayView: View {
     let onRetry: () -> Void
 
     @State private var skeletonShimmer: CGFloat = -1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,7 +80,10 @@ struct MinigameOverlayView: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(RemoraTheme.textSecondary)
-                    .frame(width: 32, height: 32)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -114,20 +123,36 @@ struct MinigameOverlayView: View {
         .padding(20)
     }
 
+    @ViewBuilder
     private func shimmerBar(height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(LinearGradient(
-                colors: [
-                    RemoraTheme.textSecondary.opacity(0.18),
-                    RemoraTheme.accent.opacity(0.4),
-                    RemoraTheme.textSecondary.opacity(0.18),
-                ],
-                startPoint: UnitPoint(x: skeletonShimmer - 0.3, y: 0.5),
-                endPoint: UnitPoint(x: skeletonShimmer + 0.3, y: 0.5)
-            ))
-            .frame(height: height)
-            .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false), value: skeletonShimmer)
-            .onAppear { skeletonShimmer = 2 }
+        if reduceMotion {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(RemoraTheme.textSecondary.opacity(0.18))
+                .frame(height: height)
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [
+                        RemoraTheme.textSecondary.opacity(0.18),
+                        RemoraTheme.accent.opacity(0.4),
+                        RemoraTheme.textSecondary.opacity(0.18),
+                    ],
+                    startPoint: UnitPoint(x: skeletonShimmer - 0.3, y: 0.5),
+                    endPoint: UnitPoint(x: skeletonShimmer + 0.3, y: 0.5)
+                ))
+                .frame(height: height)
+                .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false), value: skeletonShimmer)
+                .task {
+                    var resetTransaction = Transaction()
+                    resetTransaction.disablesAnimations = true
+                    withTransaction(resetTransaction) {
+                        skeletonShimmer = -1
+                    }
+                    await Task.yield()
+                    guard !Task.isCancelled, !reduceMotion else { return }
+                    skeletonShimmer = 2
+                }
+        }
     }
 
     private func failureCard(message: String) -> some View {
@@ -144,12 +169,13 @@ struct MinigameOverlayView: View {
             Button(action: onRetry) {
                 Text("Try again")
                     .remoraFont(.caption, weight: .semibold)
-                    .foregroundStyle(RemoraTheme.accent)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
                     .overlay(
                         Capsule().stroke(RemoraTheme.accent.opacity(0.5), lineWidth: 1)
                     )
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             Spacer()

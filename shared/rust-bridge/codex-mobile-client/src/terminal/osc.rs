@@ -190,6 +190,19 @@ impl OscParser {
         }
     }
 
+    /// Reset parser and derived semantic state before replaying an
+    /// authoritative terminal snapshot.
+    pub fn reset(&mut self) {
+        self.state = ParserState::Ground;
+        self.payload.clear();
+        self.payload_overflow = false;
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.pending_link = None;
+        *self.semantic.lock().unwrap() = TerminalSemanticState::default();
+        self.notify();
+    }
+
     /// Feed a chunk of bytes. Bytes that are not part of an in-progress
     /// OSC sequence advance the cursor estimate but are not modified. The
     /// caller is responsible for forwarding the same bytes to Ghostty.
@@ -647,10 +660,7 @@ mod tests {
     fn osc7_st_terminated_sets_cwd() {
         let (mut parser, semantic, _) = fresh_parser();
         parser.feed(b"\x1b]7;file://host/var/log\x1b\\");
-        assert_eq!(
-            semantic.lock().unwrap().cwd.as_deref(),
-            Some("/var/log")
-        );
+        assert_eq!(semantic.lock().unwrap().cwd.as_deref(), Some("/var/log"));
     }
 
     #[test]
@@ -666,10 +676,7 @@ mod tests {
         parser.feed(b"\x1b]0;hello\x07");
         assert_eq!(semantic.lock().unwrap().title.as_deref(), Some("hello"));
         parser.feed(b"\x1b]2;new title\x1b\\");
-        assert_eq!(
-            semantic.lock().unwrap().title.as_deref(),
-            Some("new title")
-        );
+        assert_eq!(semantic.lock().unwrap().title.as_deref(), Some("new title"));
     }
 
     #[test]
@@ -755,10 +762,7 @@ mod tests {
         parser.feed(b"\x1b]7;file://h");
         parser.feed(b"/etc/foo");
         parser.feed(b"\x07");
-        assert_eq!(
-            semantic.lock().unwrap().cwd.as_deref(),
-            Some("/etc/foo")
-        );
+        assert_eq!(semantic.lock().unwrap().cwd.as_deref(), Some("/etc/foo"));
     }
 
     #[test]
@@ -767,10 +771,19 @@ mod tests {
         parser.feed(b"\x1b]0;title");
         parser.feed(b"\x1b");
         parser.feed(b"\\");
-        assert_eq!(
-            semantic.lock().unwrap().title.as_deref(),
-            Some("title")
-        );
+        assert_eq!(semantic.lock().unwrap().title.as_deref(), Some("title"));
+    }
+
+    #[test]
+    fn reset_clears_semantics_and_discards_partial_sequence() {
+        let (mut parser, semantic, _) = fresh_parser();
+        parser.feed(b"\x1b]7;file://host/tmp\x07\x1b]0;stale");
+        assert_eq!(semantic.lock().unwrap().cwd.as_deref(), Some("/tmp"));
+
+        parser.reset();
+        parser.feed(b" title\x07");
+
+        assert_eq!(*semantic.lock().unwrap(), TerminalSemanticState::default());
     }
 
     #[test]
@@ -821,10 +834,9 @@ mod tests {
         }
         let (mut parser, _semantic, listeners) = fresh_parser();
         let calls = Arc::new(Mutex::new(Vec::new()));
-        listeners
-            .lock()
-            .unwrap()
-            .push(Arc::new(Capturing { calls: calls.clone() }));
+        listeners.lock().unwrap().push(Arc::new(Capturing {
+            calls: calls.clone(),
+        }));
         parser.feed(b"\x1b]7;file://h/tmp\x07");
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 1);
@@ -865,10 +877,9 @@ mod tests {
         }
         let (mut parser, _semantic, listeners) = fresh_parser();
         let calls = Arc::new(Mutex::new(0));
-        listeners
-            .lock()
-            .unwrap()
-            .push(Arc::new(Counting { calls: calls.clone() }));
+        listeners.lock().unwrap().push(Arc::new(Counting {
+            calls: calls.clone(),
+        }));
         parser.feed(b"\x1b]7;file://h/tmp\x07");
         parser.feed(b"\x1b]7;file://h/tmp\x07");
         // Second OSC 7 with identical cwd should not re-notify.

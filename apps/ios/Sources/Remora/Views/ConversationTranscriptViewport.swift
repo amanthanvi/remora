@@ -151,7 +151,7 @@ struct ConversationMessageList: View {
                                 } label: {
                                     Text("Load earlier messages")
                                         .remoraFont(.caption, weight: .semibold)
-                                        .foregroundColor(RemoraTheme.accent)
+                                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
                                 }

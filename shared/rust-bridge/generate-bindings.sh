@@ -22,8 +22,6 @@ if [[ -z "${RUSTC_WRAPPER:-}" ]] && [[ "${CARGO_INCREMENTAL:-}" != "1" ]] && com
     export RUSTC_WRAPPER="$(command -v sccache)"
 fi
 
-"$WORKSPACE_DIR/../../tools/scripts/update-alleycat-main.sh" --shared
-
 PROFILE="debug"
 GENERATE_SWIFT=1
 GENERATE_KOTLIN=1
@@ -104,6 +102,20 @@ if [[ "$GENERATE_KOTLIN" -eq 1 ]]; then
         --language kotlin \
         --out-dir "$OUT_KOTLIN"
 fi
+
+echo "==> Hardening generated relay-secret transfer buffers"
+HARDEN_ARGS=()
+if [[ "$GENERATE_SWIFT" -eq 1 ]]; then
+    HARDEN_ARGS+=(
+        --swift "$OUT_SWIFT/codex_mobile_client.swift"
+        --verify-swift-runtime
+        --swift-library-dir "$DYLIB_PATH"
+    )
+fi
+if [[ "$GENERATE_KOTLIN" -eq 1 ]]; then
+    HARDEN_ARGS+=(--kotlin "$OUT_KOTLIN/uniffi/codex_mobile_client/codex_mobile_client.kt")
+fi
+python3 "$SCRIPT_DIR/harden-generated-secret-bindings.py" "${HARDEN_ARGS[@]}"
 
 echo "==> Done. Generated bindings:"
 if [[ "$GENERATE_SWIFT" -eq 1 && "$GENERATE_KOTLIN" -eq 1 ]]; then

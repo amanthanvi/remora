@@ -95,7 +95,7 @@ internal fun ServerSettingsRow(
             }
             IconButton(
                 onClick = { showMenu = true },
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
             ) {
                 Icon(
                     Icons.Default.MoreVert,
@@ -199,8 +199,8 @@ internal fun ServerEditSheet(
             return null
         }
 
-        if (originalSaved?.alleycatNodeId != null || originalSaved?.alleycatAgentWire == "ssh-bridge") {
-            // Paired server — only name is editable
+        if (originalSaved?.sshBridgeRuntimeKinds != null) {
+            // SSH bridge runtime selection is established during discovery.
             return originalSaved.copy(name = name)
         }
 
@@ -332,16 +332,14 @@ internal fun ServerEditSheet(
         existing.removeAll { it.id == saved.id }
         existing.add(saved)
         SavedServerStore.save(context, existing)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(true)
         appModel.reconnectController.syncSavedServers(
-            existing.filter { it.rememberedByUser }.map { it.toRecord(context) }
+            existing.filter { it.rememberedByUser }.map { it.toRecord() }
         )
         appModel.store.renameServer(saved.id, saved.name)
     }
 
     suspend fun reconnect(serverId: String) {
-        val servers = SavedServerStore.load(context).map { it.toRecord(context) }
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(true)
+        val servers = SavedServerStore.load(context).map { it.toRecord() }
         appModel.reconnectController.syncSavedServers(servers)
         val result = appModel.reconnectController.reconnectServer(serverId)
         if (result.needsLocalAuthRestore) {
@@ -461,9 +459,9 @@ internal fun ServerEditSheet(
                 item {
                     SectionHeader(connectionMode.formHeader)
 
-                    if (originalSaved?.alleycatNodeId != null || originalSaved?.alleycatAgentWire == "ssh-bridge") {
+                    if (originalSaved?.sshBridgeRuntimeKinds != null) {
                         Text(
-                            "This paired server uses saved pairing metadata. Edit its display name here, or remove and add it again to change the pairing.",
+                            "This SSH bridge uses saved runtime selection. Edit its display name here, or remove and add it again to change the selection.",
                             color = RemoraTheme.textSecondary,
                             fontSize = 12.sp,
                         )
@@ -606,7 +604,7 @@ internal fun ServerEditSheet(
                             ) {
                                 Text("Save", color = RemoraTheme.onAccentStrong)
                             }
-                            if (server.isLocal || (originalSaved?.alleycatNodeId == null && originalSaved?.alleycatAgentWire != "ssh-bridge")) {
+                            if (server.isLocal || originalSaved?.sshBridgeRuntimeKinds == null) {
                                 Button(
                                     onClick = {
                                         validationError = null

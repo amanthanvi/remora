@@ -4,6 +4,162 @@ import Observation
 
 final class AppModelConversationObservationTests: XCTestCase {
     @MainActor
+    func testChromeProjectionIgnoresStreamingPayloadButPublishesChromeChanges() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let observation = AppModelChromeObservation()
+
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+        let initialRevision = observation.revision
+
+        var notificationCount = 0
+        withObservationTracking {
+            _ = observation.revision
+        } onChange: {
+            notificationCount += 1
+        }
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "A streamed token")
+        ]
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision)
+        XCTAssertEqual(notificationCount, 0)
+
+        let approval = makePendingApproval(id: "approval")
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey,
+            pendingApprovals: [approval]
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision + 1)
+        XCTAssertEqual(notificationCount, 1)
+        XCTAssertEqual(observation.pendingApproval, approval)
+    }
+
+    @MainActor
+    func testNavigationProjectionIgnoresConversationActivityButPublishesRouteTargets() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let selectedSummary = makeSessionSummary(
+            key: selectedKey,
+            cwd: "/selected",
+            preview: "Initial"
+        )
+        var otherSummary = makeSessionSummary(
+            key: otherKey,
+            cwd: "/other",
+            preview: "Initial"
+        )
+        let observation = AppModelNavigationObservation()
+
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: selectedKey
+        ))
+        let initialRevision = observation.revision
+
+        var notificationCount = 0
+        withObservationTracking {
+            _ = observation.revision
+        } onChange: {
+            notificationCount += 1
+        }
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "New response text")
+        ]
+        otherSummary.preview = "New response text"
+        otherSummary.hasActiveTurn = true
+        otherSummary.recentToolLog = [
+            AppToolLogEntry(tool: "shell", detail: "Streaming", status: "running")
+        ]
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision)
+        XCTAssertEqual(notificationCount, 0)
+        XCTAssertEqual(observation.threadKey(threadId: otherKey.threadId), otherKey)
+
+        otherSummary.cwd = "/moved"
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision + 1)
+        XCTAssertEqual(notificationCount, 1)
+        XCTAssertEqual(observation.sessionTarget(for: otherKey)?.cwd, "/moved")
+    }
+
+    @MainActor
+    func testAppModelRoutesSnapshotsThroughStableChromeAndNavigationProjections() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let selectedSummary = makeSessionSummary(key: selectedKey, cwd: "/selected")
+        var otherSummary = makeSessionSummary(key: otherKey, cwd: "/other")
+        let appModel = AppModel()
+
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: selectedKey
+        ))
+        let chromeObservation = appModel.chromeObservation
+        let navigationObservation = appModel.navigationObservation
+        let chromeRevision = chromeObservation.revision
+        let navigationRevision = navigationObservation.revision
+        let snapshotRevision = appModel.snapshotRevision
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "Streaming")
+        ]
+        otherSummary.preview = "Streaming"
+        otherSummary.hasActiveTurn = true
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertTrue(appModel.chromeObservation === chromeObservation)
+        XCTAssertTrue(appModel.navigationObservation === navigationObservation)
+        XCTAssertEqual(appModel.snapshotRevision, snapshotRevision + 1)
+        XCTAssertEqual(chromeObservation.revision, chromeRevision)
+        XCTAssertEqual(navigationObservation.revision, navigationRevision)
+
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            sessionSummaries: [selectedSummary, otherSummary],
+            activeThread: otherKey
+        ))
+
+        XCTAssertEqual(chromeObservation.revision, chromeRevision + 1)
+        XCTAssertEqual(navigationObservation.revision, navigationRevision + 1)
+        XCTAssertEqual(chromeObservation.activeThread, otherKey)
+        XCTAssertEqual(navigationObservation.activeThread, otherKey)
+    }
+
+    @MainActor
     func testUnrelatedThreadUpdateDoesNotAdvanceRevision() {
         let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
         let otherKey = ThreadKey(serverId: "server", threadId: "other")
@@ -231,16 +387,21 @@ final class AppModelConversationObservationTests: XCTestCase {
 
 private func makeSnapshot(
     threads: [AppThreadSnapshot],
-    agentDirectoryVersion: UInt64 = 0
+    agentDirectoryVersion: UInt64 = 0,
+    sessionSummaries: [AppSessionSummary] = [],
+    activeThread: ThreadKey? = nil,
+    pendingApprovals: [PendingApproval] = [],
+    pendingUserInputs: [PendingUserInputRequest] = [],
+    servers: [AppServerSnapshot]? = nil
 ) -> AppSnapshotRecord {
     AppSnapshotRecord(
-        servers: [makeServer()],
+        servers: servers ?? [makeServer()],
         threads: threads,
-        sessionSummaries: [],
+        sessionSummaries: sessionSummaries,
         agentDirectoryVersion: agentDirectoryVersion,
-        activeThread: nil,
-        pendingApprovals: [],
-        pendingUserInputs: [],
+        activeThread: activeThread,
+        pendingApprovals: pendingApprovals,
+        pendingUserInputs: pendingUserInputs,
         voiceSession: AppVoiceSessionSnapshot(
             activeThread: nil,
             sessionId: nil,
@@ -336,5 +497,81 @@ private func makePendingInput(key: ThreadKey, id: String) -> PendingUserInputReq
         questions: [],
         requesterAgentNickname: nil,
         requesterAgentRole: nil
+    )
+}
+
+private func makePendingApproval(id: String) -> PendingApproval {
+    PendingApproval(
+        id: id,
+        serverId: "server",
+        kind: .command,
+        threadId: "selected",
+        turnId: "turn",
+        itemId: "item",
+        command: "echo ok",
+        path: nil,
+        grantRoot: nil,
+        cwd: "/tmp",
+        reason: nil
+    )
+}
+
+private func makeSessionSummary(
+    key: ThreadKey,
+    cwd: String,
+    preview: String = ""
+) -> AppSessionSummary {
+    AppSessionSummary(
+        key: key,
+        agentRuntimeKind: "codex",
+        serverDisplayName: "Server",
+        serverHost: "server.local",
+        title: key.threadId,
+        preview: preview,
+        cwd: cwd,
+        model: "",
+        modelProvider: "",
+        parentThreadId: nil,
+        forkedFromId: nil,
+        agentNickname: nil,
+        agentRole: nil,
+        agentDisplayLabel: nil,
+        agentStatus: .unknown,
+        updatedAt: nil,
+        hasActiveTurn: false,
+        isResumed: false,
+        isSubagent: false,
+        isFork: false,
+        lastResponsePreview: nil,
+        lastResponseTurnId: nil,
+        lastUserMessage: nil,
+        lastToolLabel: nil,
+        recentToolLog: [],
+        lastTurnStartMs: nil,
+        lastTurnEndMs: nil,
+        stats: nil,
+        tokenUsage: nil,
+        goal: nil
+    )
+}
+
+private func makeObservationHydratedAssistantItem(
+    id: String,
+    text: String
+) -> HydratedConversationItem {
+    HydratedConversationItem(
+        id: id,
+        content: .assistant(
+            HydratedAssistantMessageData(
+                text: text,
+                agentNickname: nil,
+                agentRole: nil,
+                phase: nil
+            )
+        ),
+        sourceTurnId: "turn",
+        sourceTurnIndex: 0,
+        timestamp: 1,
+        isFromUserTurnBoundary: false
     )
 }

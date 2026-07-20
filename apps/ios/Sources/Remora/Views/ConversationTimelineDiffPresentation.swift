@@ -119,7 +119,7 @@ struct ConversationPinnedContextStrip: View {
                     HStack(spacing: 8) {
                         Image(systemName: completed == total && total > 0 ? "checkmark.circle.fill" : "checklist")
                             .remoraFont(size: 11, weight: .semibold)
-                            .foregroundColor(completed == total && total > 0 ? RemoraTheme.success : RemoraTheme.accent)
+                            .foregroundColor(completed == total && total > 0 ? RemoraTheme.success : RemoraTheme.accentForegroundOnSurface)
                         Text(summary)
                             .remoraFont(.caption, weight: .semibold)
                             .foregroundColor(RemoraTheme.textPrimary)
@@ -257,7 +257,7 @@ struct DiffIndicatorLabel: View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.left.arrow.right")
                 .remoraFont(size: 11, weight: .semibold)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
             if stats.hasChanges {
                 HStack(spacing: 6) {

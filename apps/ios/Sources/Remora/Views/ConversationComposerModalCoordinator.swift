@@ -261,7 +261,7 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
                             }
                             Spacer(minLength: 12)
                             Text(currentRuntimeSupportsPermissionOverrides ? (usesThreadDefaults ? "Using defaults" : "Custom override") : "Runtime managed")
-                                .foregroundStyle(usesThreadDefaults ? RemoraTheme.textSecondary : RemoraTheme.accentStrong)
+                                .foregroundStyle(usesThreadDefaults ? RemoraTheme.textSecondary : RemoraTheme.accentForegroundOnSurface)
                                 .remoraFont(size: 11, weight: .semibold)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -357,7 +357,7 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showPermissionsSheet = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }
@@ -367,7 +367,7 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "info.circle.fill")
-                    .foregroundStyle(RemoraTheme.accentStrong)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                 Text("Runtime-managed permissions")
                     .foregroundStyle(RemoraTheme.textPrimary)
                     .remoraFont(.subheadline, weight: .semibold)
@@ -511,7 +511,7 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
                     Spacer(minLength: 0)
                     if isSelected {
                         Image(systemName: "checkmark")
-                            .foregroundStyle(RemoraTheme.accentStrong)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                             .imageScale(.small)
                     }
                 }
@@ -571,11 +571,11 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Reload") { Task { await onLoadExperimentalFeatures() } }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showExperimentalSheet = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }
@@ -603,7 +603,7 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
                                     if skill.enabled {
                                         Text("enabled")
                                             .remoraFont(.caption2)
-                                            .foregroundColor(RemoraTheme.accent)
+                                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     }
                                 }
                                 Text(skill.description)
@@ -626,11 +626,11 @@ struct ConversationComposerModalCoordinator<Content: View>: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Reload") { Task { await onLoadSkills(true, true) } }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showSkillsSheet = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }

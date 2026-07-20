@@ -274,7 +274,7 @@ fun SessionCanvasRow(
                 ) {
                     Text(
                         text = com.remora.android.state.PathDisplay.display(session.cwd.orEmpty(), isLocal, context),
-                        color = RemoraTheme.textMuted.copy(alpha = 0.7f),
+                        color = RemoraTheme.textMuted,
                         fontFamily = RemoraTheme.monoFont,
                         fontSize = 10f.scaled,
                         maxLines = 2,
@@ -481,7 +481,7 @@ private fun GoalLine(goal: uniffi.codex_mobile_client.AppThreadGoal) {
         )
         Text(
             text = goal.objective,
-            color = RemoraTheme.textSecondary.copy(alpha = 0.85f),
+            color = RemoraTheme.textSecondary,
             fontFamily = RemoraTheme.monoFont,
             fontSize = 10f.scaled,
             maxLines = 1,
@@ -491,7 +491,7 @@ private fun GoalLine(goal: uniffi.codex_mobile_client.AppThreadGoal) {
         if (goal.tokensUsed > 0) {
             Text(
                 text = "T ${formatHomeGoalTokens(goal.tokensUsed)}",
-                color = RemoraTheme.textMuted.copy(alpha = 0.7f),
+                color = RemoraTheme.textMuted,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 10f.scaled,
             )
@@ -499,7 +499,7 @@ private fun GoalLine(goal: uniffi.codex_mobile_client.AppThreadGoal) {
         if (goal.timeUsedSeconds > 0) {
             Text(
                 text = formatHomeGoalSeconds(goal.timeUsedSeconds),
-                color = RemoraTheme.textMuted.copy(alpha = 0.7f),
+                color = RemoraTheme.textMuted,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 10f.scaled,
             )
@@ -547,7 +547,7 @@ private fun ForkRune(lineage: ThreadLineage) {
     ) {
         Text(
             text = "⊢", // ⊢ — visually similar to a branch glyph, no Material extended icons needed.
-            color = RemoraTheme.textSecondary.copy(alpha = 0.85f),
+            color = RemoraTheme.textSecondary,
             fontFamily = RemoraTheme.monoFont,
             fontSize = 9f.scaled,
             fontWeight = FontWeight.SemiBold,
@@ -579,14 +579,14 @@ private fun LineageBreadcrumb(lineage: ThreadLineage) {
             if (idx > 0) {
                 Text(
                     text = " › ",
-                    color = RemoraTheme.textMuted.copy(alpha = 0.55f),
+                    color = RemoraTheme.textMuted,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 9f.scaled,
                 )
             }
             Text(
                 text = ancestor.title,
-                color = RemoraTheme.textMuted.copy(alpha = 0.85f),
+                color = RemoraTheme.textMuted,
                 fontFamily = RemoraTheme.monoFont,
                 fontSize = 9f.scaled,
                 maxLines = 1,
@@ -595,7 +595,7 @@ private fun LineageBreadcrumb(lineage: ThreadLineage) {
         }
         Text(
             text = " ›",
-            color = RemoraTheme.textMuted.copy(alpha = 0.55f),
+            color = RemoraTheme.textMuted,
             fontFamily = RemoraTheme.monoFont,
             fontSize = 9f.scaled,
         )
@@ -647,7 +647,7 @@ private fun SiblingPillsRow(lineage: ThreadLineage, currentKey: ThreadKey) {
                 Text(
                     text = member.title,
                     color = if (isCurrent) RemoraTheme.accent
-                        else RemoraTheme.textSecondary.copy(alpha = 0.85f),
+                        else RemoraTheme.textSecondary,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = 10f.scaled,
                     fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,

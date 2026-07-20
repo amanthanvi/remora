@@ -30,12 +30,9 @@ pub(crate) async fn open_backend(
 ) -> Result<OpenBackendResult, TerminalError> {
     validate_size(size)?;
     match kind {
-        TerminalBackendKind::RemoteAlleycat {
-            node_id,
-            token,
-            relay,
-            shell,
-        } => super::remote_alleycat::open(node_id, token, relay, shell, size).await,
+        TerminalBackendKind::RemoteRemoraLink { host_id, shell } => {
+            super::remote_remora_link::open(host_id, shell, size).await
+        }
         TerminalBackendKind::RemoteSsh {
             host,
             port,

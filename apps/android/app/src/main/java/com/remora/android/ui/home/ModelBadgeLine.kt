@@ -49,21 +49,21 @@ fun ModelBadgeLine(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            BadgeText(text = timeAgo, color = RemoraTheme.textMuted.copy(alpha = 0.8f))
+            BadgeText(text = timeAgo, color = RemoraTheme.textMuted)
             SeparatorDot()
             Icon(
                 imageVector = Icons.Outlined.Storage,
                 contentDescription = null,
-                tint = RemoraTheme.accent.copy(alpha = 0.5f),
+                tint = RemoraTheme.accent,
                 modifier = Modifier.size(10.dp),
             )
             BadgeText(
                 text = HomeDashboardSupport.runtimeLabel(session.agentRuntimeKind),
-                color = RemoraTheme.accent.copy(alpha = 0.75f),
+                color = RemoraTheme.accent,
             )
             BadgeText(
                 text = session.serverDisplayName,
-                color = RemoraTheme.accent.copy(alpha = 0.6f),
+                color = RemoraTheme.accent,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -72,20 +72,20 @@ fun ModelBadgeLine(
                 AgentIconView(kind = session.agentRuntimeKind, sizeDp = 12)
                 BadgeText(
                     text = model,
-                    color = RemoraTheme.textSecondary.copy(alpha = 0.7f),
+                    color = RemoraTheme.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
             if (session.isFork) {
                 SeparatorDot()
-                BadgeText(text = "fork", color = RemoraTheme.warning.copy(alpha = 0.8f))
+                BadgeText(text = "fork", color = RemoraTheme.warning)
             }
             if (session.isSubagent && agentLabel != null) {
                 SeparatorDot()
                 BadgeText(
                     text = agentLabel,
-                    color = RemoraTheme.accent.copy(alpha = 0.6f),
+                    color = RemoraTheme.accent,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -122,7 +122,7 @@ private fun BadgeText(
 private fun SeparatorDot() {
     Text(
         text = "\u00b7",
-        color = RemoraTheme.textMuted.copy(alpha = 0.5f),
+        color = RemoraTheme.textMuted,
         fontFamily = RemoraTheme.monoFont,
         fontSize = BADGE_FONT_SP.scaled,
     )

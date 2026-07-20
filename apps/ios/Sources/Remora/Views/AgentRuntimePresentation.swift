@@ -161,7 +161,7 @@ struct AgentMonogramView: View {
                 )
             Text(monogramLetter)
                 .font(.system(size: size * 0.6, weight: .semibold, design: .monospaced))
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
         }
         .frame(width: size, height: size)
     }
@@ -175,7 +175,7 @@ struct BetaBadge: View {
     var body: some View {
         Text("BETA")
             .remoraFont(.caption2)
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .overlay(

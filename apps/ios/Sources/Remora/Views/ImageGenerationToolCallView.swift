@@ -63,7 +63,7 @@ struct ImageGenerationToolCallView: View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles")
                 .remoraFont(size: 12, weight: .semibold)
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
 
             Text(summary)
                 .remoraFont(size: summaryFontSize)
@@ -173,7 +173,7 @@ struct ImageGenerationToolCallView: View {
                     } label: {
                         Text(promptExpanded ? "Show less" : "Show more")
                             .remoraFont(.caption2, weight: .medium)
-                            .foregroundColor(RemoraTheme.accent)
+                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     }
                     .buttonStyle(.plain)
                 }
@@ -238,7 +238,7 @@ private struct ImageGenerationLoadingTile: View {
 
                 Image(systemName: "sparkles")
                     .remoraFont(size: 19, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .scaleEffect(pulse ? 1.06 : 0.96)
             }
 

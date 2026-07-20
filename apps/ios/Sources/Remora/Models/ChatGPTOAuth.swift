@@ -457,13 +457,14 @@ enum ChatGPTOAuth {
             "keys": jsonObjectKeys(data).joined(separator: ",")
         ])
         guard (200...299).contains(http.statusCode) else {
+            let diagnosticBody = oauthErrorResponseMetadata(responseText)
             LLog.warn("auth", "ChatGPT token exchange failed", fields: [
                 "status": http.statusCode,
-                "body": redactedOAuthResponsePreview(responseText)
+                "body": diagnosticBody
             ])
             throw ChatGPTOAuthError.tokenExchangeFailed(
                 status: http.statusCode,
-                message: String(responseText.prefix(300))
+                message: diagnosticBody
             )
         }
 
@@ -499,13 +500,14 @@ enum ChatGPTOAuth {
             "keys": jsonObjectKeys(data).joined(separator: ",")
         ])
         guard (200...299).contains(http.statusCode) else {
+            let diagnosticBody = oauthErrorResponseMetadata(responseText)
             LLog.warn("auth", "ChatGPT access-token exchange failed", fields: [
                 "status": http.statusCode,
-                "body": redactedOAuthResponsePreview(responseText)
+                "body": diagnosticBody
             ])
             throw ChatGPTOAuthError.tokenExchangeFailed(
                 status: http.statusCode,
-                message: String(responseText.prefix(300))
+                message: diagnosticBody
             )
         }
 
@@ -562,35 +564,84 @@ enum ChatGPTOAuth {
         return components.queryItems?.first(where: { $0.name == name })?.value
     }
 
-    private static func jsonObjectKeys(_ data: Data) -> [String] {
-        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    static func jsonObjectKeys(_ data: Data) -> [String] {
+        guard
+            !containsTrailingJSONComma(data),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
             return []
         }
-        return payload.keys.sorted()
+        return safeOAuthDiagnosticKeys(payload.keys)
     }
 
-    private static func redactedOAuthResponsePreview(_ text: String) -> String {
+    static func oauthErrorResponseMetadata(_ text: String) -> String {
         guard
             let data = text.data(using: .utf8),
-            var payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            !containsTrailingJSONComma(data),
+            let payload = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         else {
-            return String(text.prefix(300))
+            return "<non-JSON response omitted>"
         }
-        for key in payload.keys where isSensitiveOAuthKey(key) {
-            payload[key] = "<redacted>"
+
+        let metadata: String
+        if let object = payload as? [String: Any] {
+            let keys = safeOAuthDiagnosticKeys(object.keys)
+            metadata = "<JSON object response omitted; keys=\(keys.isEmpty ? "none" : keys.joined(separator: ","))>"
+        } else if let array = payload as? [Any] {
+            metadata = "<JSON array response omitted; count=\(array.count)>"
+        } else {
+            metadata = "<JSON scalar response omitted>"
         }
-        guard
-            let redacted = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
-            let rendered = String(data: redacted, encoding: .utf8)
-        else {
-            return String(text.prefix(300))
-        }
-        return String(rendered.prefix(300))
+        return String(metadata.prefix(300))
     }
 
-    private static func isSensitiveOAuthKey(_ key: String) -> Bool {
-        let normalized = key.replacingOccurrences(of: "_", with: "").lowercased()
-        return normalized.contains("token") || normalized.contains("authorization")
+    private static func containsTrailingJSONComma(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        var index = 0
+        var insideString = false
+        var escaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if insideString {
+                if escaped {
+                    escaped = false
+                } else if byte == 0x5C {
+                    escaped = true
+                } else if byte == 0x22 {
+                    insideString = false
+                }
+            } else if byte == 0x22 {
+                insideString = true
+            } else if byte == 0x2C {
+                var lookahead = index + 1
+                while lookahead < bytes.count,
+                      bytes[lookahead] == 0x20
+                        || bytes[lookahead] == 0x09
+                        || bytes[lookahead] == 0x0A
+                        || bytes[lookahead] == 0x0D {
+                    lookahead += 1
+                }
+                if lookahead < bytes.count,
+                   bytes[lookahead] == 0x7D || bytes[lookahead] == 0x5D {
+                    return true
+                }
+            }
+            index += 1
+        }
+        return false
+    }
+
+    private static func safeOAuthDiagnosticKeys<S: Sequence>(_ keys: S) -> [String] where S.Element == String {
+        let allowedKeys: Set<String> = [
+            "access_token", "code", "error", "error_description", "error_uri", "expires_in",
+            "id_token", "message", "refresh_token", "request_id", "scope", "status", "token_type", "type"
+        ]
+        let normalized = Set(keys.map { key -> String in
+            let candidate = key.lowercased()
+            return allowedKeys.contains(candidate) ? candidate : "<other>"
+        }).sorted()
+        guard normalized.count > 12 else { return normalized }
+        return Array(normalized.prefix(12)) + ["<truncated>"]
     }
 
     private static func resolveAccountID(

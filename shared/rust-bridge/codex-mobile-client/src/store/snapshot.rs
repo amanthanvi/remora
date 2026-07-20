@@ -333,7 +333,9 @@ pub enum AppTerminalSessionPhase {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TerminalSessionSnapshot {
     pub id: String,
-    pub backend_kind: crate::terminal::TerminalBackendKind,
+    /// Non-secret route identity. Credential-bearing backend configuration is
+    /// input-only and is never retained in canonical or UniFFI-visible state.
+    pub context: crate::terminal::ThreadTerminalContext,
     pub phase: AppTerminalSessionPhase,
     pub cols: u16,
     pub rows: u16,

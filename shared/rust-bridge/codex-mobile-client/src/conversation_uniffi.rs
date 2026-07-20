@@ -145,6 +145,7 @@ pub struct HydratedCommandActionData {
 pub struct HydratedFileChangeEntryData {
     pub path: String,
     pub kind: String,
+    pub move_path: Option<String>,
     pub diff: String,
     pub additions: u32,
     pub deletions: u32,

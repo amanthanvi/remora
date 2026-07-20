@@ -39,6 +39,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -99,6 +100,7 @@ fun HomeComposerBar(
     onThreadCreated: (ThreadKey) -> Unit,
     onLoginRequired: (String) -> Unit = {},
     onActiveChange: ((Boolean) -> Unit)? = null,
+    onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
@@ -114,6 +116,13 @@ fun HomeComposerBar(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isFocused, showExpanded, showAttachMenu) {
+        onInputFocusChanged(isFocused || showExpanded || showAttachMenu)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onInputFocusChanged(false) }
+    }
 
     // Auto-focus on first composition so the parent's `isComposerActive`
     // flag stays true (it's derived from internal isFocused/text/etc.). Without
@@ -304,15 +313,21 @@ fun HomeComposerBar(
                         onClick = { attachedImage = null },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .size(22.dp)
-                            .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+                            .size(RemoraTheme.minimumTouchTarget),
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Remove attachment",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp),
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Remove attachment",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.weight(1f))
@@ -346,7 +361,7 @@ fun HomeComposerBar(
             if (!isRecording && !isTranscribing && !isSubmitting) {
                 IconButton(
                     onClick = { showAttachMenu = true },
-                    modifier = Modifier.size(36.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
@@ -395,7 +410,7 @@ fun HomeComposerBar(
                                     }
                                 }
                             },
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Stop,
@@ -420,7 +435,7 @@ fun HomeComposerBar(
                             onClick = {
                                 micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                             },
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Mic,
@@ -439,7 +454,7 @@ fun HomeComposerBar(
                     onClick = sendCurrent,
                     enabled = canSend && !isRecording && !isTranscribing,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(RemoraTheme.minimumTouchTarget)
                         .clip(CircleShape)
                         .background(
                             if (canSend && !isRecording && !isTranscribing) {
@@ -584,7 +599,7 @@ private fun HomeFileAttachmentRow(
         }
         IconButton(
             onClick = onRemove,
-            modifier = Modifier.size(28.dp),
+            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
         ) {
             Icon(
                 imageVector = Icons.Default.Close,

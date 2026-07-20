@@ -494,7 +494,7 @@ private struct ConversationCommandOutputViewport: View {
                     } label: {
                         Text(expandedLongOutput ? "Show less" : "Show more")
                             .remoraFont(.caption2, weight: .semibold)
-                            .foregroundColor(RemoraTheme.accent)
+                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(expandedLongOutput ? "Show less command output" : "Show more command output")

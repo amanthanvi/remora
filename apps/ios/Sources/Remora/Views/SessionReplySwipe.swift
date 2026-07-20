@@ -26,7 +26,7 @@ struct SessionReplySwipeWrapper<Content: View>: View {
                 Text("reply")
                     .remoraMonoFont(size: 12, weight: .semibold)
             }
-            .foregroundStyle(RemoraTheme.accent)
+            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             .padding(.leading, 16)
             .opacity(revealOpacity)
 

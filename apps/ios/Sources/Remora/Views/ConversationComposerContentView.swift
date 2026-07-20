@@ -132,8 +132,15 @@ struct ConversationComposerContentView: View {
                                 .remoraFont(.body)
                                 .foregroundColor(.white)
                                 .background(Circle().fill(Color.black.opacity(0.6)))
+                                .frame(
+                                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                                )
+                                .contentShape(Circle())
                         }
+                        .buttonStyle(.plain)
                         .offset(x: 4, y: -4)
+                        .accessibilityLabel("Remove image attachment")
                     }
 
                     Spacer()
@@ -247,7 +254,7 @@ private struct ConversationComposerFileChipStrip: View {
                     HStack(spacing: 5) {
                         Image(systemName: "doc")
                             .remoraFont(size: 10, weight: .semibold)
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(file.label)
                                 .remoraFont(.caption, weight: .semibold)
@@ -264,9 +271,17 @@ private struct ConversationComposerFileChipStrip: View {
                         } label: {
                             Image(systemName: "xmark")
                                 .remoraFont(size: 9, weight: .bold)
-                                .foregroundStyle(RemoraTheme.accent)
-                                .padding(3)
-                                .background(Circle().fill(RemoraTheme.accent.opacity(0.18)))
+                                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
+                                .frame(
+                                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                                )
+                                .background(
+                                    Circle()
+                                        .fill(RemoraTheme.accent.opacity(0.18))
+                                        .frame(width: 24, height: 24)
+                                )
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Remove file \(file.label)")
@@ -294,19 +309,27 @@ private struct ConversationComposerPluginChipStrip: View {
                     HStack(spacing: 4) {
                         Image(systemName: "puzzlepiece.extension.fill")
                             .remoraFont(size: 10, weight: .semibold)
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                         Text(plugin.displayTitle)
                             .remoraFont(.caption, weight: .semibold)
-                            .foregroundStyle(RemoraTheme.accent)
+                            .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                             .lineLimit(1)
                         Button {
                             onRemove(plugin)
                         } label: {
                             Image(systemName: "xmark")
                                 .remoraFont(size: 9, weight: .bold)
-                                .foregroundStyle(RemoraTheme.accent)
-                                .padding(3)
-                                .background(Circle().fill(RemoraTheme.accent.opacity(0.18)))
+                                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
+                                .frame(
+                                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                                )
+                                .background(
+                                    Circle()
+                                        .fill(RemoraTheme.accent.opacity(0.18))
+                                        .frame(width: 24, height: 24)
+                                )
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Remove plugin \(plugin.displayTitle)")
@@ -337,7 +360,7 @@ struct ConversationComposerModeChip: View {
     }
 
     private var foreground: Color {
-        mode == .plan ? Color.black : RemoraTheme.textPrimary
+        mode == .plan ? RemoraTheme.textOnAccent : RemoraTheme.textPrimary
     }
 
     private var background: Color {
@@ -354,15 +377,20 @@ struct ConversationComposerModeChip: View {
             }
             .foregroundStyle(foreground)
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .background(Capsule().fill(background))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Collaboration mode")
+        .accessibilityValue(label)
+        .accessibilityHint("Opens the mode picker")
     }
 }
 
 private struct ConversationComposerPlanProgressView: View {
     let progress: AppPlanProgressSnapshot
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = true
 
     private var completedCount: Int {
@@ -386,7 +414,7 @@ private struct ConversationComposerPlanProgressView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
             Button {
-                withAnimation(.snappy(duration: 0.18)) {
+                withAnimation(RemoraMotionPolicy.animation(.snappy(duration: 0.18), reduceMotion: reduceMotion)) {
                     isExpanded.toggle()
                 }
             } label: {
@@ -400,7 +428,7 @@ private struct ConversationComposerPlanProgressView: View {
 
             if isExpanded {
                 expandedContent
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -415,7 +443,7 @@ private struct ConversationComposerPlanProgressView: View {
         Group {
             Image(systemName: "list.bullet.clipboard")
                 .remoraFont(size: 12, weight: .semibold)
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
             Text(isExpanded ? "Plan Progress" : "Plan")
                 .remoraFont(.caption, weight: .semibold)
                 .foregroundStyle(RemoraTheme.textPrimary)
@@ -518,6 +546,7 @@ private struct ConversationComposerGoalRowView: View {
     @State private var draftObjective = ""
     @State private var draftBudget = ""
     @State private var pulsing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var animatedProgress: Double = 0
 
     private let cornerRadius: CGFloat = 12
@@ -585,15 +614,18 @@ private struct ConversationComposerGoalRowView: View {
         }
         .onAppear {
             animatedProgress = budgetProgress ?? 0
-            if goal.status == .active { pulsing = true }
+            pulsing = goal.status == .active && !reduceMotion
         }
         .onChange(of: budgetProgress ?? 0) { _, new in
-            withAnimation(.spring(response: 0.55, dampingFraction: 0.85)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.85)) {
                 animatedProgress = new
             }
         }
         .onChange(of: goal.status) { _, new in
-            pulsing = (new == .active)
+            pulsing = new == .active && !reduceMotion
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            pulsing = goal.status == .active && !shouldReduceMotion
         }
     }
 
@@ -603,11 +635,11 @@ private struct ConversationComposerGoalRowView: View {
                 Circle()
                     .fill(statusTint)
                     .frame(width: 6, height: 6)
-                    .opacity(goal.status == .active ? (pulsing ? 0.35 : 1.0) : 1.0)
+                    .opacity(goal.status == .active && !reduceMotion ? (pulsing ? 0.35 : 1.0) : 1.0)
                     .animation(
-                        goal.status == .active
+                        goal.status == .active && !reduceMotion
                             ? .easeInOut(duration: 1.1).repeatForever(autoreverses: true)
-                            : .default,
+                            : nil,
                         value: pulsing
                     )
 
@@ -667,9 +699,12 @@ private struct ConversationComposerGoalRowView: View {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .remoraFont(size: 12, weight: .bold)
+                .remoraControlIconFont(size: 12, weight: .bold)
                 .foregroundColor(RemoraTheme.textSecondary)
-                .frame(width: 24, height: 22)
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
                 .contentShape(Rectangle())
         }
         .accessibilityLabel("Goal actions")
@@ -812,7 +847,7 @@ private struct ConversationComposerGoalRowView: View {
             if goal.tokensUsed > 0 && goal.timeUsedSeconds > 0 {
                 Text("·")
                     .remoraMonoFont(size: 10, weight: .semibold)
-                    .foregroundColor(RemoraTheme.textMuted.opacity(0.6))
+                    .foregroundColor(RemoraTheme.textMuted)
             }
             if goal.timeUsedSeconds > 0 {
                 HStack(spacing: 3) {

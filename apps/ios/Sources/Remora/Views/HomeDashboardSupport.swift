@@ -275,8 +275,7 @@ enum HomeDashboardSupport {
     }
 
     private static func sourceLabel(for saved: SavedServer) -> String {
-        if saved.alleycatAgentWire == "ssh-bridge" { return "ssh" }
-        if saved.alleycatNodeId != nil { return "paired" }
+        if saved.sshBridgeRuntimeKinds != nil { return "ssh" }
         if saved.websocketURL != nil { return "remote" }
         if saved.preferredConnectionMode == .ssh { return "ssh" }
         switch saved.source {
@@ -295,8 +294,8 @@ enum HomeDashboardSupport {
 
     private static func savedAgentRuntimes(for saved: SavedServer) -> [AgentRuntimeInfo] {
         let kinds: [AgentRuntimeKind]
-        if saved.alleycatAgentWire == "ssh-bridge" || saved.alleycatNodeId != nil {
-            kinds = parseRuntimeKinds(saved.alleycatAgentName)
+        if let bridgeKinds = saved.sshBridgeRuntimeKinds {
+            kinds = bridgeKinds
         } else {
             // Direct Codex connections have a single known runtime —
             // the codex app-server itself. Use the cached metadata id
@@ -317,24 +316,6 @@ enum HomeDashboardSupport {
                 available: true
             )
         }
-    }
-
-    private static func parseRuntimeKinds(_ raw: String?) -> [AgentRuntimeKind] {
-        let parsed = (raw ?? "")
-            .split(separator: ",")
-            .compactMap { token -> AgentRuntimeKind? in
-                let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                if trimmed.isEmpty { return nil }
-                switch trimmed {
-                case "pi.dev", "pidev": return "pi"
-                case "ampcode", "amp-code", "amp_code", "amp code": return "amp"
-                case "open-code", "open_code", "open code": return "opencode"
-                case "claude-code", "claude_code", "claude code": return "claude"
-                case "factory", "factory-droid", "factory_droid", "factory droid": return "droid"
-                default: return trimmed
-                }
-            }
-        return parsed.isEmpty ? ["codex"] : parsed
     }
 
     static func serverSubtitle(for server: HomeDashboardServer) -> String {

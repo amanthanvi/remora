@@ -2,123 +2,570 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-struct RemotePairingTarget: Equatable {
-    let serverId: String
-    let nodeId: String
-    let displayName: String
-    let params: AppAlleycatPairPayload
-    let agentName: String
-    let agentWire: AppAlleycatAgentWire
+enum RemoraLinkVisualTokens {
+    static var semanticSuccess: Color {
+        RemoraPalette.success.color(for: .dark)
+    }
 }
 
 struct RemotePairingSheet: View {
+    static let pairCommand = "npx --yes remora-link@latest pair"
+    static let legacyRePairTitle = "Pair again with Remora Link"
+
+    static func legacyRePairMessage(hostDisplayName: String) -> String {
+        "\(hostDisplayName) uses a legacy invitation that Remora no longer accepts. "
+            + "Create a new Remora Link pairing code on the host, then scan or paste it here."
+    }
+
+    static func supportsQRScanning(rendersAsMacApp: Bool) -> Bool {
+        !rendersAsMacApp
+    }
+
     let appModel: AppModel
     let startScanningOnAppear: Bool
-    let onConnected: (RemotePairingTarget) -> Void
+    let resumeHost: AppRemoraLinkHostSummary?
+    let onPaired: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var displayName: String = ""
-    @State private var parsedParams: AppAlleycatPairPayload?
-    @State private var agents: [AppAlleycatAgentInfo] = []
-    @State private var selectedAgentNames: Set<String> = []
-    @State private var isLoadingAgents = false
-    @State private var parseError: String?
-    @State private var agentError: String?
-    @State private var isConnecting = false
-    @State private var connectError: String?
+    @State private var model: RemoraLinkPairingModel
     @State private var showScanner = false
     @State private var didRequestInitialScan = false
     @State private var cameraDenied = false
-    // pasteJSON / showPaste are used by the Mac paste-JSON UI
-    // (Catalyst + iOS-on-Mac) and the iOS QR fallback.
-    @State private var pasteJSON: String = ""
-    @State private var showPaste: Bool = false
-
-    private let alleycat = RustAlleycatBridge.shared
+    @State private var copiedCommand = false
+    @State private var reportedSuccessHostId: String?
 
     init(
         appModel: AppModel,
         startScanningOnAppear: Bool = false,
-        onConnected: @escaping (RemotePairingTarget) -> Void
+        resumeHost: AppRemoraLinkHostSummary? = nil,
+        onPaired: @escaping (String) -> Void = { _ in }
     ) {
         self.appModel = appModel
         self.startScanningOnAppear = startScanningOnAppear
-        self.onConnected = onConnected
+        self.resumeHost = resumeHost
+        self.onPaired = onPaired
+        _model = State(initialValue: RemoraLinkPairingModel(client: appModel.client))
     }
 
     var body: some View {
         NavigationStack {
             ZStack {
-                RemoraTheme.backgroundGradient.ignoresSafeArea()
-                Form {
-                    pairingSection
-                    if let params = parsedParams {
-                        previewSection(params: params)
-                        agentSection
+                Color(red: 2 / 255, green: 8 / 255, blue: 44 / 255)
+                    .ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header
+                        stateContent
                     }
-                    if let parseError {
-                        errorSection(parseError, color: RemoraTheme.warning)
-                    }
-                    if let agentError {
-                        errorSection(agentError, color: RemoraTheme.warning)
-                    }
-                    connectSection
-                    if let connectError {
-                        errorSection(connectError, color: RemoraTheme.danger)
-                    }
+                    .padding(20)
+                    .frame(maxWidth: 620)
+                    .frame(maxWidth: .infinity)
                 }
-                .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
             }
-            .navigationTitle("Add Remote Host")
+            .navigationTitle("Remora Link")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                    Button(closeButtonTitle) { dismiss() }
+                        .foregroundStyle(linkCyan)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .accessibilityHint(closeAccessibilityHint)
                 }
             }
         }
+        .preferredColorScheme(.dark)
         .onAppear {
+            model.updateAvailability(AppRuntimeController.shared.remoraLinkStatus)
+            if let resumeHost, let pending = resumeHost.pendingApproval {
+                model.resume(hostId: resumeHost.hostId, pendingApproval: pending)
+            } else {
+                requestInitialScanIfNeeded()
+            }
+        }
+        .onChange(of: AppRuntimeController.shared.remoraLinkStatus) { _, status in
+            model.updateAvailability(status)
             requestInitialScanIfNeeded()
         }
-        // QR scanner cover + camera-denied alert are applied
-        // unconditionally; on Mac builds (Catalyst + iOS-on-Mac) the
-        // pairing section never triggers `requestCameraAndScan`, so
-        // neither presentation ever fires.
+        .onChange(of: model.state) { _, state in
+            guard case .success(let success) = state,
+                  reportedSuccessHostId != success.hostId else { return }
+            reportedSuccessHostId = success.hostId
+            onPaired(success.hostId)
+        }
         .fullScreenCover(isPresented: $showScanner) {
             QRScannerScreen(
                 onScan: { scanned in
                     showScanner = false
-                    handleScannedPayload(scanned)
+                    model.inspect(codeText: scanned)
                 },
-                onCancel: {
-                    showScanner = false
-                    if startScanningOnAppear, parsedParams == nil {
-                        dismiss()
-                    }
-                },
+                onCancel: { showScanner = false },
                 onPermissionDenied: {
                     showScanner = false
                     cameraDenied = true
                 }
             )
         }
-        .alert(
-            "Camera Access Needed",
-            isPresented: $cameraDenied,
-            actions: {
-                Button("Open Settings") { openAppSettings() }
-                Button("Cancel", role: .cancel) {}
-            },
-            message: {
-                Text("Allow camera access in Settings to scan a Remora pairing QR code.")
+        .alert("Camera Access Needed", isPresented: $cameraDenied) {
+            Button("Open Settings") { openAppSettings() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Allow camera access in Settings to scan a Remora Link pairing code.")
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                RemoraLogo(size: 48)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connect a host")
+                        .font(.system(.title2, design: .monospaced, weight: .bold))
+                        .foregroundStyle(linkText)
+                    Text("Private, end-to-end Remora Link")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(linkText.opacity(0.68))
+                }
             }
-        )
+            commandCard
+        }
+    }
+
+    private var commandCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("On the host, run")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.68))
+            HStack(spacing: 10) {
+                Text(Self.pairCommand)
+                    .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                    .foregroundStyle(linkText)
+                    .textSelection(.enabled)
+                Spacer(minLength: 8)
+                Button {
+                    UIPasteboard.general.string = Self.pairCommand
+                    copiedCommand = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(1.4))
+                        copiedCommand = false
+                    }
+                } label: {
+                    Image(systemName: copiedCommand ? "checkmark" : "doc.on.doc")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(linkCyan)
+                .accessibilityLabel(copiedCommand ? "Pairing command copied" : "Copy pairing command")
+            }
+        }
+        .padding(16)
+        .background(cardBackground)
+    }
+
+    @ViewBuilder
+    private var stateContent: some View {
+        switch model.state {
+        case .availability(let availability):
+            availabilityView(availability)
+        case .ingress:
+            ingressView
+        case .inspecting:
+            progressCard(title: "Checking code", detail: "Authenticating the host invitation…")
+        case let .legacyRePair(_, hostDisplayName):
+            legacyRePairView(hostDisplayName: hostDisplayName)
+        case .offer(let offer):
+            offerView(offer)
+        case .accepting:
+            progressCard(title: "Starting pairing", detail: "Creating this device's secure host credential…")
+        case .awaiting(let pending):
+            awaitingView(pending)
+        case .cancelling:
+            progressCard(title: "Cancelling", detail: "Stopping this pending enrollment…")
+        case .outcomeUnknown(let message):
+            outcomeUnknownView(message)
+        case .success(let success):
+            successView(success)
+        case .failure(let message):
+            failureView(message)
+        }
+    }
+
+    private var ingressView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Use either method")
+                .font(.system(.headline, design: .monospaced))
+                .foregroundStyle(linkText)
+            Text(ingressExplanation)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.68))
+
+            ingressButtons(
+                scanTitle: "Scan QR",
+                pasteTitle: "Paste Code",
+                pasteAction: inspectClipboardCode
+            )
+        }
+        .padding(18)
+        .background(cardBackground)
+    }
+
+    private func availabilityView(_ availability: RemoraLinkPairingAvailability) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            switch availability {
+            case .configuring:
+                ProgressView().tint(linkCyan)
+                Text("Preparing secure device storage…")
+            case .unavailable:
+                Image(systemName: "lock.trianglebadge.exclamationmark")
+                    .font(.title2)
+                    .foregroundStyle(linkText)
+                Text("Remora Link is unavailable")
+                    .font(.system(.headline, design: .monospaced))
+                Text("Secure device storage could not be configured. Reopen Remora or try again after unlocking this device.")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.68))
+            }
+        }
+        .foregroundStyle(linkText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(cardBackground)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func legacyRePairView(hostDisplayName: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(Self.legacyRePairTitle, systemImage: "arrow.triangle.2.circlepath")
+                .font(.system(.headline, design: .monospaced))
+                .foregroundStyle(linkText)
+            Text(Self.legacyRePairMessage(hostDisplayName: hostDisplayName))
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.72))
+            ingressButtons(
+                scanTitle: "Scan New Code",
+                pasteTitle: "Paste New Code",
+                pasteAction: inspectClipboardCode
+            )
+        }
+        .padding(18)
+        .background(cardBackground)
+    }
+
+    private func offerView(_ offer: AppRemoraLinkOffer) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(offer.hostDisplayName)
+                    .font(.system(.title3, design: .monospaced, weight: .bold))
+                    .foregroundStyle(linkText)
+                Text("Authenticated host offer")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.65))
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("THIS DEVICE")
+                    .sectionCaptionStyle()
+                TextField("Device name", text: $model.deviceDisplayName)
+                    .font(.system(.body, design: .monospaced))
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 48)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel("This device's display name")
+                Text("\(model.deviceNameByteCount)/80 bytes")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(model.deviceNameByteCount <= 80 ? linkText.opacity(0.55) : linkText)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RUNTIMES")
+                    .sectionCaptionStyle()
+                ForEach(offer.runtimeOffers, id: \.runtimeId) { runtime in
+                    selectionRow(
+                        title: runtime.displayName,
+                        subtitle: runtime.recommended ? "Recommended" : nil,
+                        selected: model.selectedRuntimeIds.contains(runtime.runtimeId),
+                        enabled: runtime.available
+                    ) { model.toggleRuntime(runtime.runtimeId) }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("PERMISSIONS")
+                    .sectionCaptionStyle()
+                ForEach(offer.maximumScopes, id: \.self) { scope in
+                    selectionRow(
+                        title: scope.displayName,
+                        subtitle: offer.requiredScopes.contains(scope) ? "Required by host" : scope.explanation,
+                        selected: model.selectedScopes.contains(scope),
+                        enabled: !offer.requiredScopes.contains(scope)
+                    ) { model.toggleScope(scope) }
+                }
+            }
+
+            if offer.confirmationMode == .interactive {
+                Label("The host will ask you to compare and approve a security code.", systemImage: "checkmark.shield")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.72))
+            }
+
+            actionButton("Pair This Device", systemImage: "link") { model.acceptOffer() }
+                .disabled(!model.canAcceptOffer)
+                .opacity(model.canAcceptOffer ? 1 : 0.45)
+        }
+        .padding(18)
+        .background(cardBackground)
+    }
+
+    private func awaitingView(_ pending: RemoraLinkPendingPairing) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Waiting for host approval", systemImage: "person.badge.shield.checkmark")
+                .font(.system(.headline, design: .monospaced))
+                .foregroundStyle(linkText)
+            Text("Compare this security code with the one shown on the host:")
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.72))
+            Text(pending.sas)
+                .font(.system(.largeTitle, design: .monospaced, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(linkCyan)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityLabel("Security code \(pending.sas)")
+            ProgressView().tint(linkCyan).frame(maxWidth: .infinity)
+            Text("You can close this sheet and continue later from Settings › Remora Link Hosts. Closing is not cancellation.")
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.72))
+            Button("Cancel Pairing", role: .destructive) { model.cancelPairing() }
+                .font(.system(.body, design: .monospaced, weight: .semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .accessibilityHint("Cancels the pending enrollment; closing this sheet does not")
+        }
+        .padding(18)
+        .background(cardBackground)
+    }
+
+    private func outcomeUnknownView(_ message: String) -> some View {
+        messageCard(
+            icon: "questionmark.diamond",
+            title: "Outcome unknown",
+            message: message,
+            color: linkText,
+            actionTitle: "Check Hosts"
+        ) { dismiss() }
+    }
+
+    private func successView(_ success: RemoraLinkPairingSuccess) -> some View {
+        messageCard(
+            icon: "checkmark.seal.fill",
+            title: success.wasAlreadyPaired ? "Already paired" : "Host paired",
+            message: "\(success.selectedRuntimeIds.count) runtime\(success.selectedRuntimeIds.count == 1 ? "" : "s") available through Remora Link.",
+            color: RemoraLinkVisualTokens.semanticSuccess,
+            actionTitle: "Done"
+        ) { dismiss() }
+    }
+
+    private func failureView(_ message: String) -> some View {
+        messageCard(
+            icon: "exclamationmark.triangle",
+            title: "Pairing couldn't continue",
+            message: message,
+            color: linkText,
+            actionTitle: "Try Another Code"
+        ) { model.startOver() }
+    }
+
+    private func progressCard(title: String, detail: String) -> some View {
+        VStack(spacing: 14) {
+            ProgressView().tint(linkCyan).controlSize(.large)
+            Text(title)
+                .font(.system(.headline, design: .monospaced))
+                .foregroundStyle(linkText)
+            Text(detail)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.68))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(cardBackground)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func messageCard(
+        icon: String,
+        title: String,
+        message: String,
+        color: Color,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 34)).foregroundStyle(color)
+            Text(title)
+                .font(.system(.headline, design: .monospaced))
+                .foregroundStyle(linkText)
+            Text(message)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.72))
+                .multilineTextAlignment(.center)
+            actionButton(actionTitle, systemImage: nil, action: action)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(20)
+        .background(cardBackground)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func primaryIngressButton(
+        title: String,
+        systemImage: String,
+        accessibilityHint: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: systemImage).font(.title2)
+                Text(title).font(.system(.subheadline, design: .monospaced, weight: .semibold))
+            }
+            .foregroundStyle(Color(red: 2 / 255, green: 8 / 255, blue: 44 / 255))
+            .frame(maxWidth: .infinity, minHeight: 88)
+            .background(linkCyan, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(accessibilityHint)
+    }
+
+    @ViewBuilder
+    private func ingressButtons(
+        scanTitle: String,
+        pasteTitle: String,
+        pasteAction: @escaping () -> Void
+    ) -> some View {
+        if Self.supportsQRScanning(rendersAsMacApp: RemoraPlatform.rendersAsMacApp) {
+            HStack(spacing: 12) {
+                primaryIngressButton(
+                    title: scanTitle,
+                    systemImage: "qrcode.viewfinder",
+                    accessibilityHint: "Opens the camera to scan a Remora Link pairing code"
+                ) { requestCameraAndScan() }
+                primaryIngressButton(
+                    title: pasteTitle,
+                    systemImage: "doc.on.clipboard",
+                    accessibilityHint: "Inspects the Remora Link code currently on the clipboard",
+                    action: pasteAction
+                )
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("QR scanning isn't available in the Mac app. Paste the pairing code from the host instead.")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+                primaryIngressButton(
+                    title: pasteTitle,
+                    systemImage: "doc.on.clipboard",
+                    accessibilityHint: "Inspects the Remora Link code currently on the clipboard",
+                    action: pasteAction
+                )
+            }
+        }
+    }
+
+    private func selectionRow(
+        title: String,
+        subtitle: String?,
+        selected: Bool,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(selected ? linkCyan : linkText.opacity(0.5))
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(.subheadline, design: .monospaced, weight: .semibold))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(linkText.opacity(0.62))
+                    }
+                }
+                Spacer()
+                if !enabled && !selected {
+                    Text("Unavailable")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(linkText.opacity(0.5))
+                }
+            }
+            .foregroundStyle(linkText)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    private func actionButton(
+        _ title: String,
+        systemImage: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack {
+                if let systemImage { Image(systemName: systemImage) }
+                Text(title)
+            }
+            .font(.system(.body, design: .monospaced, weight: .bold))
+            .foregroundStyle(Color(red: 2 / 255, green: 8 / 255, blue: 44 / 255))
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .background(linkCyan, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var closeButtonTitle: String {
+        if case .awaiting = model.state { return "Close" }
+        return "Cancel"
+    }
+
+    private var closeAccessibilityHint: String {
+        if case .awaiting = model.state {
+            return "Closes this sheet without cancelling the pending pairing"
+        }
+        return "Closes Remora Link pairing"
+    }
+
+    private var linkCyan: Color { Color(red: 13 / 255, green: 213 / 255, blue: 240 / 255) }
+    private var linkText: Color { Color(red: 234 / 255, green: 251 / 255, blue: 255 / 255) }
+    private var cardBackground: some ShapeStyle { Color.white.opacity(0.065) }
+
+    private var ingressExplanation: String {
+        if Self.supportsQRScanning(rendersAsMacApp: RemoraPlatform.rendersAsMacApp) {
+            return "QR scanning and clipboard paste follow the same authenticated inspection path."
+        }
+        return "Paste the host's pairing code to follow the authenticated inspection path."
+    }
+
+    private func inspectClipboardCode() {
+        model.startOver()
+        guard let code = UIPasteboard.general.string else {
+            model.inspect(codeText: "")
+            return
+        }
+        model.inspect(codeText: code)
     }
 
     private func requestInitialScanIfNeeded() {
-        guard !RemoraPlatform.rendersAsMacApp else { return }
-        guard startScanningOnAppear, !didRequestInitialScan, parsedParams == nil else { return }
+        guard !RemoraPlatform.rendersAsMacApp,
+              startScanningOnAppear,
+              !didRequestInitialScan,
+              case .ingress = model.state else { return }
         didRequestInitialScan = true
         Task { @MainActor in
             await Task.yield()
@@ -126,374 +573,15 @@ struct RemotePairingSheet: View {
         }
     }
 
-    private var pairingSection: some View {
-        Section {
-            // Mac (Catalyst + iOS-on-Mac) shows paste-JSON only; iOS shows
-            // QR scanning first, with paste available as a production fallback
-            // for users who already copied the pairing payload.
-            if RemoraPlatform.rendersAsMacApp {
-                pasteJSONPairingControls
-            } else {
-                qrPairingControls
-            }
-        } header: {
-            Text("Pairing")
-                .foregroundColor(RemoraTheme.textSecondary)
-        }
-        .listRowBackground(RemoraTheme.surface.opacity(0.6))
-    }
-
-    @ViewBuilder
-    private var pasteJSONPairingControls: some View {
-        Text("Run \(Self.pairCommandLabel) on the host you want to connect to, then paste the JSON it prints below.")
-            .remoraFont(.caption)
-            .foregroundColor(RemoraTheme.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-
-        pasteJSONEntryControls(minHeight: 110)
-    }
-
-    @ViewBuilder
-    private var qrPairingControls: some View {
-        Button {
-            requestCameraAndScan()
-        } label: {
-            HStack {
-                Image(systemName: "qrcode.viewfinder")
-                    .foregroundColor(RemoraTheme.accent)
-                Text(parsedParams == nil ? "Scan Pairing QR" : "Rescan QR")
-                    .remoraFont(.subheadline)
-                    .foregroundColor(RemoraTheme.accent)
-            }
-        }
-
-        DisclosureGroup(
-            isExpanded: $showPaste,
-            content: {
-                pasteJSONEntryControls(minHeight: 90)
-            },
-            label: {
-                Text("Paste Pairing JSON")
-                    .remoraFont(.footnote)
-                    .foregroundColor(RemoraTheme.textSecondary)
-            }
-        )
-    }
-
-    @ViewBuilder
-    private func pasteJSONEntryControls(minHeight: CGFloat) -> some View {
-        TextEditor(text: $pasteJSON)
-            .remoraFont(.caption)
-            .foregroundColor(RemoraTheme.textPrimary)
-            .scrollContentBackground(.hidden)
-            .frame(minHeight: minHeight)
-            .overlay(alignment: .topLeading) {
-                if pasteJSON.isEmpty {
-                    Text(#"{"v":1,"node_id":"...","token":"...","relay":"https://..."}"#)
-                        .remoraFont(.caption)
-                        .foregroundColor(RemoraTheme.textMuted)
-                        .padding(.top, 8)
-                        .padding(.leading, 4)
-                        .allowsHitTesting(false)
-                }
-            }
-
-        HStack {
-            Button("Paste from Clipboard") {
-                if let clipboard = UIPasteboard.general.string {
-                    pasteJSON = clipboard
-                }
-            }
-            .remoraFont(.footnote)
-            .foregroundColor(RemoraTheme.accent)
-
-            Spacer()
-
-            Button(parsedParams == nil ? "Parse JSON" : "Reparse JSON") {
-                handleScannedPayload(pasteJSON)
-            }
-            .remoraFont(.footnote)
-            .foregroundColor(RemoraTheme.accent)
-            .disabled(pasteJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
-    }
-
-    private static let pairCommandLabel = "npx kittylitter"
-
-    private func previewSection(params: AppAlleycatPairPayload) -> some View {
-        Section {
-            previewRow(label: "node", value: shortNodeId(params.nodeId))
-            previewRow(label: "protocol", value: "v\(params.v)")
-            if let relay = params.relay, !relay.isEmpty {
-                previewRow(label: "relay", value: relay)
-            }
-            if let hostName = params.hostName, !hostName.isEmpty {
-                previewRow(label: "host", value: hostName)
-            }
-            TextField("display name (optional)", text: $displayName)
-                .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.textPrimary)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-        } header: {
-            Text("Scanned Host")
-                .foregroundColor(RemoraTheme.textSecondary)
-        }
-        .listRowBackground(RemoraTheme.surface.opacity(0.6))
-    }
-
-    private var agentSection: some View {
-        Section {
-            if isLoadingAgents {
-                HStack {
-                    ProgressView().tint(RemoraTheme.accent)
-                    Text("Loading agents")
-                        .remoraFont(.caption)
-                        .foregroundColor(RemoraTheme.textSecondary)
-                }
-            } else if agents.isEmpty {
-                Text("No agents are available on this host.")
-                    .remoraFont(.caption)
-                    .foregroundColor(RemoraTheme.textMuted)
-            } else {
-                ForEach(agents, id: \.name) { agent in
-                    Button {
-                        guard agent.available else { return }
-                        toggleAgentSelection(agent)
-                    } label: {
-                        HStack(spacing: 10) {
-                            AgentIconView(kind: agent.name.lowercased(), size: 22)
-                                .opacity(agent.available ? 1 : 0.45)
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(agent.displayName)
-                                        .remoraFont(.subheadline)
-                                        .foregroundColor(agent.available ? RemoraTheme.textPrimary : RemoraTheme.textMuted)
-                                    if AgentRuntimeKind.isBetaAgentName(agent.name, displayName: agent.displayName) {
-                                        BetaBadge()
-                                    }
-                                }
-                                Text(wireLabel(agent.wire))
-                                    .remoraFont(.caption)
-                                    .foregroundColor(RemoraTheme.textSecondary)
-                            }
-                            Spacer()
-                            if selectedAgentNames.contains(agent.name) {
-                                Image(systemName: "checkmark.square.fill")
-                                    .foregroundColor(RemoraTheme.accent)
-                            } else if !agent.available {
-                                Text("Unavailable")
-                                    .remoraFont(.caption)
-                                    .foregroundColor(RemoraTheme.textMuted)
-                            } else {
-                                Image(systemName: "square")
-                                    .foregroundColor(RemoraTheme.textMuted)
-                            }
-                        }
-                    }
-                    .disabled(!agent.available)
-                }
-            }
-        } header: {
-            HStack {
-                Text("Agents")
-                Spacer()
-                if !availableAgents.isEmpty {
-                    Button(selectedAgents.count == availableAgents.count ? "None" : "All") {
-                        if selectedAgents.count == availableAgents.count {
-                            selectedAgentNames = []
-                        } else {
-                            selectedAgentNames = Set(availableAgents.map(\.name))
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundColor(RemoraTheme.accent)
-                }
-            }
-                .foregroundColor(RemoraTheme.textSecondary)
-        }
-        .listRowBackground(RemoraTheme.surface.opacity(0.6))
-    }
-
-    private func previewRow(label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.textSecondary)
-            Spacer()
-            Text(value)
-                .remoraFont(.caption)
-                .foregroundColor(RemoraTheme.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    private var connectSection: some View {
-        Section {
-            Button {
-                connect()
-            } label: {
-                HStack {
-                    if isConnecting {
-                        ProgressView().tint(RemoraTheme.accent)
-                    }
-                    Text("Connect")
-                        .foregroundColor(RemoraTheme.accent)
-                        .remoraFont(.subheadline)
-                }
-            }
-            .disabled(!canConnect)
-        }
-        .listRowBackground(RemoraTheme.surface.opacity(0.6))
-    }
-
-    private func errorSection(_ message: String, color: Color) -> some View {
-        Section {
-            Text(message)
-                .remoraFont(.caption)
-                .foregroundColor(color)
-        }
-        .listRowBackground(RemoraTheme.surface.opacity(0.6))
-    }
-
-    private var availableAgents: [AppAlleycatAgentInfo] {
-        agents.filter(\.available)
-    }
-
-    private var selectedAgents: [AppAlleycatAgentInfo] {
-        agents.filter { $0.available && selectedAgentNames.contains($0.name) }
-    }
-
-    private var canConnect: Bool {
-        !isConnecting && !isLoadingAgents && parsedParams != nil && !selectedAgents.isEmpty
-    }
-
-    private func toggleAgentSelection(_ agent: AppAlleycatAgentInfo) {
-        if selectedAgentNames.contains(agent.name) {
-            selectedAgentNames.remove(agent.name)
-        } else {
-            selectedAgentNames.insert(agent.name)
-        }
-    }
-
-    private func handleScannedPayload(_ raw: String) {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        do {
-            let params = try alleycat.parsePairPayload(json: trimmed)
-            parsedParams = params
-            displayName = suggestedDisplayName(for: params)
-            parseError = nil
-            connectError = nil
-            agentError = nil
-            agents = []
-            selectedAgentNames = []
-            loadAgents(params: params)
-        } catch {
-            parsedParams = nil
-            agents = []
-            selectedAgentNames = []
-            parseError = error.localizedDescription
-        }
-    }
-
-    private func loadAgents(params: AppAlleycatPairPayload) {
-        isLoadingAgents = true
-        Task {
-            do {
-                let loaded = try await appModel.serverBridge.listAlleycatAgents(params: params)
-                await MainActor.run {
-                    guard parsedParams?.nodeId == params.nodeId else { return }
-                    agents = loaded
-                    selectedAgentNames = Set(
-                        loaded
-                            .filter { $0.available && !AgentRuntimeKind.isBetaAgentName($0.name, displayName: $0.displayName) }
-                            .map(\.name)
-                    )
-                    isLoadingAgents = false
-                    agentError = nil
-                }
-            } catch {
-                await MainActor.run {
-                    guard parsedParams?.nodeId == params.nodeId else { return }
-                    agents = []
-                    selectedAgentNames = []
-                    isLoadingAgents = false
-                    agentError = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func connect() {
-        guard let params = parsedParams, let fallbackAgent = selectedAgents.first else { return }
-        let trimmedDisplay = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedName = trimmedDisplay.isEmpty ? suggestedDisplayName(for: params) : trimmedDisplay
-        let selectedNames = selectedAgents.map(\.name)
-        let serverId = "alleycat:\(params.nodeId)"
-
-        isConnecting = true
-        connectError = nil
-
-        Task {
-            do {
-                let result = try await appModel.serverBridge.connectRemoteOverAlleycat(
-                    serverId: serverId,
-                    displayName: resolvedName,
-                    params: params,
-                    agentName: fallbackAgent.name,
-                    selectedAgentNames: selectedNames,
-                    wire: fallbackAgent.wire
-                )
-                do {
-                    try AlleycatCredentialStore.shared.saveToken(params.token, nodeId: params.nodeId)
-                } catch {
-                    NSLog("[PAIRING_CREDENTIALS] keychain save failed: %@", error.localizedDescription)
-                }
-                // The first successful host pairing triggers the iroh
-                // endpoint bind. Persist the freshly-generated device
-                // secret key so the next cold launch reuses the same
-                // `EndpointId`.
-                await MainActor.run {
-                    AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
-                }
-
-                await MainActor.run {
-                    isConnecting = false
-                    onConnected(
-                        RemotePairingTarget(
-                            serverId: result.serverId,
-                            nodeId: result.nodeId,
-                            displayName: resolvedName,
-                            params: params,
-                            agentName: result.agentName,
-                            agentWire: fallbackAgent.wire
-                        )
-                    )
-                }
-            } catch {
-                await MainActor.run {
-                    isConnecting = false
-                    connectError = error.localizedDescription
-                }
-            }
-        }
-    }
-
     private func requestCameraAndScan() {
-        let status = AVCaptureDevice.authorizationStatus(for: .video)
-        switch status {
+        guard !RemoraPlatform.rendersAsMacApp else { return }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             showScanner = true
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 Task { @MainActor in
-                    if granted {
-                        showScanner = true
-                    } else {
-                        cameraDenied = true
-                    }
+                    if granted { showScanner = true } else { cameraDenied = true }
                 }
             }
         case .denied, .restricted:
@@ -507,29 +595,34 @@ struct RemotePairingSheet: View {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
     }
+}
 
-    private func suggestedDisplayName(for params: AppAlleycatPairPayload) -> String {
-        let hostName = params.hostName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !hostName.isEmpty {
-            return hostName
-        }
-        return "Remora \(shortNodeId(params.nodeId))"
+private extension Text {
+    func sectionCaptionStyle() -> some View {
+        font(.system(.caption, design: .monospaced, weight: .bold))
+            .foregroundStyle(Color(red: 234 / 255, green: 251 / 255, blue: 255 / 255).opacity(0.6))
+            .tracking(1.2)
     }
+}
 
-    private func shortNodeId(_ raw: String) -> String {
-        if raw.count <= 16 { return raw }
-        return "\(raw.prefix(8))...\(raw.suffix(8))"
-    }
-
-    private func wireLabel(_ wire: AppAlleycatAgentWire) -> String {
-        switch wire {
-        case .websocket:
-            return "websocket"
-        case .jsonl:
-            return "jsonl"
+private extension AppRemoraLinkScope {
+    var displayName: String {
+        switch self {
+        case .inspectRuntimes: return "View runtimes"
+        case .connectRuntime: return "Connect to runtimes"
+        case .restartRuntime: return "Restart runtimes"
+        case .selfRevoke: return "Revoke this device"
         }
     }
 
+    var explanation: String {
+        switch self {
+        case .inspectRuntimes: return "See runtimes offered by this host"
+        case .connectRuntime: return "Open sessions on selected runtimes"
+        case .restartRuntime: return "Restart an unavailable runtime"
+        case .selfRevoke: return "Ask the host to invalidate this device"
+        }
+    }
 }
 
 // MARK: - QR Scanner
@@ -539,138 +632,69 @@ private struct QRScannerScreen: View {
     let onCancel: () -> Void
     let onPermissionDenied: () -> Void
 
-    private static let pairCommand = "npx kittylitter"
-
     @State private var copied = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            QRCaptureSheet(
-                onScan: onScan,
-                onCancel: onCancel,
-                onPermissionDenied: onPermissionDenied
-            )
-            .ignoresSafeArea()
-
+            QRCaptureSheet(onScan: onScan, onCancel: onCancel, onPermissionDenied: onPermissionDenied)
+                .ignoresSafeArea()
             LinearGradient(
-                colors: [Color.black.opacity(0.55), Color.black.opacity(0.0)],
+                colors: [Color.black.opacity(0.62), .clear],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 320)
+            .frame(height: 340)
             .frame(maxHeight: .infinity, alignment: .top)
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
             VStack(spacing: 16) {
-                topBar
+                HStack {
+                    Spacer()
+                    Button("Cancel", action: onCancel)
+                        .font(.system(.body, design: .monospaced, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 64, minHeight: 44)
+                        .background(.black.opacity(0.5), in: Capsule())
+                }
                 instructionsCard
                 Spacer()
-                framingHint
+                Text("Hold steady — the QR code is detected automatically.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Capsule())
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 24)
-        }
-    }
-
-    private var topBar: some View {
-        HStack {
-            Spacer()
-            Button(action: onCancel) {
-                Text("Cancel")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.45), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("remora.pairing.scanner.cancelButton")
+            .padding(16)
         }
     }
 
     private var instructionsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Pair with Remora")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.white)
-
-            stepRow(number: "1", title: "On the host you want to connect to, run:")
-            commandRow
-            stepRow(number: "2", title: "Point this camera at the QR code it prints.")
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.black.opacity(0.55))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 0.8)
-        )
-    }
-
-    private func stepRow(number: String, title: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(.black)
-                .frame(width: 20, height: 20)
-                .background(RemoraTheme.accent, in: Circle())
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundColor(.white.opacity(0.92))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var commandRow: some View {
-        HStack(spacing: 10) {
-            Text(Self.pairCommand)
-                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(.white.opacity(0.12))
-                )
-            Button(action: copyCommand) {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.14), in: Circle())
+            Text("Pair with Remora Link")
+                .font(.system(.headline, design: .monospaced, weight: .bold))
+            Text("Run this on the host, then scan its QR code:")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.78))
+            HStack(spacing: 10) {
+                Text(RemotePairingSheet.pairCommand)
+                    .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    UIPasteboard.general.string = RemotePairingSheet.pairCommand
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(copied ? "Pairing command copied" : "Copy pairing command")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("remora.pairing.scanner.copyCommandButton")
         }
-        .padding(.leading, 30)
-    }
-
-    private var framingHint: some View {
-        Text("Hold steady — the QR code is detected automatically.")
-            .font(.system(size: 12))
-            .foregroundColor(.white.opacity(0.75))
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(.black.opacity(0.4), in: Capsule())
-    }
-
-    private func copyCommand() {
-        UIPasteboard.general.string = Self.pairCommand
-        withAnimation(.easeOut(duration: 0.15)) { copied = true }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.4))
-            withAnimation(.easeOut(duration: 0.15)) { copied = false }
-        }
+        .foregroundStyle(.white)
+        .padding(16)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -682,7 +706,6 @@ private struct QRCaptureSheet: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> QRScannerViewController {
         let controller = QRScannerViewController()
         controller.onScan = onScan
-        controller.onCancel = onCancel
         controller.onPermissionDenied = onPermissionDenied
         return controller
     }
@@ -692,12 +715,11 @@ private struct QRCaptureSheet: UIViewControllerRepresentable {
 
 private final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onScan: ((String) -> Void)?
-    var onCancel: (() -> Void)?
     var onPermissionDenied: (() -> Void)?
 
     private let captureSession = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
-    private let metadataQueue = DispatchQueue(label: "com.remora.pairing.qrscanner")
+    private let metadataQueue = DispatchQueue(label: "com.remora.remora-link.qr-scanner")
     private var didReportScan = false
 
     override func viewDidLoad() {
@@ -716,9 +738,7 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        if captureSession.isRunning {
-            captureSession.stopRunning()
-        }
+        if captureSession.isRunning { captureSession.stopRunning() }
     }
 
     override func viewDidLayoutSubviews() {
@@ -727,32 +747,22 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
     }
 
     private func configureSession() {
-        guard let device = AVCaptureDevice.default(for: .video) else {
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device),
+              captureSession.canAddInput(input) else {
             onPermissionDenied?()
             return
         }
-        guard let input = try? AVCaptureDeviceInput(device: device) else {
-            onPermissionDenied?()
-            return
-        }
-        if captureSession.canAddInput(input) {
-            captureSession.addInput(input)
-        } else {
-            onPermissionDenied?()
-            return
-        }
+        captureSession.addInput(input)
 
         let output = AVCaptureMetadataOutput()
-        if captureSession.canAddOutput(output) {
-            captureSession.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: metadataQueue)
-            if output.availableMetadataObjectTypes.contains(.qr) {
-                output.metadataObjectTypes = [.qr]
-            }
-        } else {
+        guard captureSession.canAddOutput(output) else {
             onPermissionDenied?()
             return
         }
+        captureSession.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: metadataQueue)
+        if output.availableMetadataObjectTypes.contains(.qr) { output.metadataObjectTypes = [.qr] }
 
         let preview = AVCaptureVideoPreviewLayer(session: captureSession)
         preview.videoGravity = .resizeAspectFill
@@ -765,12 +775,10 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
-        guard !didReportScan else { return }
-        guard let payload = metadataObjects
-            .compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
-            .first(where: { $0.type == .qr })?
-            .stringValue
-        else { return }
+        guard !didReportScan,
+              let payload = metadataObjects
+                .compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
+                .first(where: { $0.type == .qr })?.stringValue else { return }
         didReportScan = true
         DispatchQueue.main.async { [weak self] in
             self?.captureSession.stopRunning()

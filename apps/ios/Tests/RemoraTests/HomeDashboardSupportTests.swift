@@ -93,30 +93,6 @@ final class HomeDashboardSupportTests: XCTestCase {
         XCTAssertFalse(discovered.hasCodexServer)
     }
 
-    func testLegacyPairingPlaceholderMigratesToNeutralRemoraName() {
-        let saved = SavedServer(
-            id: "alleycat:node-1",
-            name: "Alleycat Host",
-            hostname: "0123456789abcdef0123456789abcdef",
-            port: 0,
-            codexPorts: [],
-            sshPort: nil,
-            source: .manual,
-            hasCodexServer: true,
-            wakeMAC: nil,
-            preferredConnectionMode: nil,
-            preferredCodexPort: nil,
-            sshPortForwardingEnabled: nil,
-            websocketURL: nil,
-            rememberedByUser: true,
-            alleycatNodeId: "0123456789abcdef0123456789abcdef"
-        )
-
-        let migrated = SavedServerStore.migrateDisplayNameForCompatibility(saved)
-
-        XCTAssertEqual(migrated.name, "Remora 01234567...89abcdef")
-    }
-
     func testHomeDashboardModelRefreshesWhenObservedSnapshotChanges() async {
         let appModel = AppModel()
         let model = HomeDashboardModel()
@@ -257,26 +233,23 @@ final class HomeDashboardSupportTests: XCTestCase {
         XCTAssertEqual(result.first?.sessionTitle, "Renamed thread")
     }
 
-    func testOfflineAlleycatServerShowsSavedDroidRuntime() {
+    func testOfflineSSHBridgeServerShowsSelectedRuntime() {
         let saved = SavedServer(
-            id: "alleycat:node-abc",
+            id: "ssh:factory-host",
             name: "Factory Host",
-            hostname: "node-abc",
-            port: 0,
+            hostname: "factory-host.local",
+            port: nil,
             codexPorts: [],
-            sshPort: nil,
-            source: .manual,
+            sshPort: 22,
+            source: .ssh,
             hasCodexServer: true,
             wakeMAC: nil,
-            preferredConnectionMode: nil,
+            preferredConnectionMode: .ssh,
             preferredCodexPort: nil,
             sshPortForwardingEnabled: nil,
             websocketURL: nil,
             rememberedByUser: true,
-            alleycatNodeId: "node-abc",
-            alleycatRelay: nil,
-            alleycatAgentName: "codex,droid",
-            alleycatAgentWire: "jsonl"
+            sshBridgeRuntimeKinds: [.codex, .droid]
         )
 
         let result = HomeDashboardSupport.sortedConnectedServers(
@@ -285,7 +258,7 @@ final class HomeDashboardSupportTests: XCTestCase {
             activeServerId: nil
         )
 
-        XCTAssertEqual(result.first?.sourceLabel, "paired")
+        XCTAssertEqual(result.first?.sourceLabel, "ssh")
         XCTAssertEqual(result.first?.agentRuntimes.map(\.kind), [.codex, .droid])
     }
 

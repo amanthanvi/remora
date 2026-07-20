@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,6 +44,7 @@ fun ProjectChip(
             .clip(RoundedCornerShape(20.dp))
             .background(RemoraTheme.surface.copy(alpha = 0.9f))
             .border(0.8.dp, RemoraTheme.textMuted.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+            .heightIn(min = RemoraTheme.minimumTouchTarget)
             .clickable(enabled = !disabled, onClick = onTap)
             .padding(horizontal = 10.dp, vertical = 5.dp)
             .alpha(if (disabled) 0.5f else 1f),

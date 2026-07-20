@@ -9,59 +9,127 @@ final class AppRuntimeController {
     static let shared = AppRuntimeController()
 
     @ObservationIgnored private weak var appModel: AppModel?
-    @ObservationIgnored private let reachability = NetworkReachabilityObserver()
+    @ObservationIgnored private let reachability: any RemoraLinkReachabilityObserving
+    @ObservationIgnored private let remoraLinkAdapters: RemoraLinkNativeAdapters
+    @ObservationIgnored private let remoraLinkConfigurator: RemoraLinkConfigurator
+    @ObservationIgnored private weak var remoraLinkClient: AppClient?
+    @ObservationIgnored private weak var remoraLinkConfigurationClient: AppClient?
+    @ObservationIgnored private weak var remoraLinkConfiguredClient: AppClient?
+    @ObservationIgnored private var remoraLinkConfigurationTask: Task<Void, Never>?
+    @ObservationIgnored private var remoraLinkRetryRequested = false
+    @ObservationIgnored private var hasStartedReachability = false
+
+    private(set) var remoraLinkStatus: RemoraLinkNativeConfigurationStatus = .notConfigured
+
+    init(
+        reachability: (any RemoraLinkReachabilityObserving)? = nil,
+        remoraLinkAdapters: RemoraLinkNativeAdapters = .shared,
+        remoraLinkConfigurator: @escaping RemoraLinkConfigurator = { client, adapters in
+            try await client.configureRemoraLink(
+                journal: adapters.journal,
+                transportIdentity: adapters.transportIdentity,
+                deviceKeys: adapters.deviceKeys
+            )
+        }
+    ) {
+        self.reachability = reachability ?? NetworkReachabilityObserver()
+        self.remoraLinkAdapters = remoraLinkAdapters
+        self.remoraLinkConfigurator = remoraLinkConfigurator
+    }
 
     func bind(appModel: AppModel, voiceRuntime: VoiceRuntimeController) {
         self.appModel = appModel
         reachability.bind(appModel: appModel)
+        startReachabilityIfNeeded()
+        configureRemoraLinkIfNeeded(client: appModel.client)
+    }
+
+    func startReachabilityIfNeeded() {
+        guard !hasStartedReachability else { return }
+        hasStartedReachability = true
         reachability.start()
-        do {
-            if let bytes = try AlleycatCredentialStore.shared.loadDeviceSecretKey() {
-                appModel.client.setAlleycatSecretKey(secretKeyBytes: bytes)
+    }
+
+    func configureRemoraLinkIfNeeded(client: AppClient) {
+        remoraLinkClient = client
+        if remoraLinkStatus == .configuring {
+            remoraLinkRetryRequested = true
+            return
+        }
+        if remoraLinkStatus == .available, remoraLinkConfiguredClient === client {
+            return
+        }
+
+        remoraLinkStatus = .configuring
+        remoraLinkConfigurationClient = client
+        let adapters = remoraLinkAdapters
+        let configurator = remoraLinkConfigurator
+        remoraLinkConfigurationTask = Task { [weak self, client, adapters] in
+            do {
+                try await configurator(client, adapters)
+                guard !Task.isCancelled else {
+                    self?.finishRemoraLinkConfiguration(succeeded: false, client: client)
+                    return
+                }
+                self?.finishRemoraLinkConfiguration(succeeded: true, client: client)
+            } catch {
+                self?.finishRemoraLinkConfiguration(succeeded: false, client: client)
+                NSLog("[REMORA_LINK_V2] native custody unavailable: %@", error.localizedDescription)
             }
-        } catch {
-            NSLog("[PAIRING_DEVICE_KEY] load failed: %@", error.localizedDescription)
         }
     }
 
-    /// Catalyst-side mirror of the iOS persist hook. Called from the
-    /// lifecycle stub after reconnect cycles so freshly-generated
-    /// device secret keys land in the keychain.
-    func persistAlleycatSecretKeyIfNeeded() {
-        guard let appModel else { return }
-        guard let data = appModel.client.alleycatSecretKey() else { return }
-        do {
-            let existing = try AlleycatCredentialStore.shared.loadDeviceSecretKey()
-            if existing == data { return }
-            try AlleycatCredentialStore.shared.saveDeviceSecretKey(data)
-        } catch {
-            NSLog("[PAIRING_DEVICE_KEY] save failed: %@", error.localizedDescription)
+    private func finishRemoraLinkConfiguration(succeeded: Bool, client: AppClient) {
+        guard remoraLinkConfigurationClient === client else { return }
+        remoraLinkConfigurationTask = nil
+        remoraLinkConfigurationClient = nil
+        let latestClient = remoraLinkClient
+        let clientChanged = latestClient.map { $0 !== client } ?? false
+        let shouldRetryAfterFailure = remoraLinkRetryRequested
+        remoraLinkRetryRequested = false
+
+        if succeeded {
+            remoraLinkConfiguredClient = client
+            if clientChanged, let latestClient {
+                remoraLinkStatus = .unavailable
+                configureRemoraLinkIfNeeded(client: latestClient)
+            } else {
+                remoraLinkStatus = .available
+            }
+            return
+        }
+
+        remoraLinkStatus = .unavailable
+        if (clientChanged || shouldRetryAfterFailure), let latestClient {
+            configureRemoraLinkIfNeeded(client: latestClient)
         }
     }
 
-    /// Best-effort graceful shutdown of the iroh endpoint. Wired from
-    /// `applicationWillTerminate` on Catalyst (NSApplicationDelegate
-    /// fires this reliably; iOS proper does not on swipe-up-to-kill).
-    func shutdownAlleycatEndpoint() async {
-        guard let appModel else { return }
-        await appModel.client.shutdownAlleycatEndpoint()
+    func retryRemoraLinkOnForegroundIfNeeded() {
+        switch remoraLinkStatus {
+        case .configuring:
+            remoraLinkRetryRequested = true
+        case .unavailable:
+            if let remoraLinkClient {
+                configureRemoraLinkIfNeeded(client: remoraLinkClient)
+            }
+        case .notConfigured, .available:
+            break
+        }
     }
 
     func reconnectSavedServers() async {
         guard let appModel else { return }
         let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         await appModel.reconnectController.notifyNetworkChange()
         _ = await appModel.reconnectController.reconnectSavedServers()
         await appModel.refreshSnapshot()
-        persistAlleycatSecretKeyIfNeeded()
     }
 
     func reconnectServer(serverId: String) async {
         guard let appModel else { return }
         let servers = SavedServerStore.reconnectRecords()
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
         await appModel.refreshSnapshot()
@@ -72,6 +140,7 @@ final class AppRuntimeController {
     func appDidBecomeInactive() {}
 
     func appDidBecomeActive() {
+        retryRemoraLinkOnForegroundIfNeeded()
         guard !hasRecoveredOnForeground else { return }
         hasRecoveredOnForeground = true
         let backgroundDuration = lastBackgroundedAt.map { Date().timeIntervalSince($0) }
@@ -86,7 +155,11 @@ final class AppRuntimeController {
                let duration = backgroundDuration,
                duration > Self.longResumeThreshold
             {
-                await appModel.reconnectController.onLongResume()
+                do {
+                    _ = try await appModel.client.remoraLinkLongResume()
+                } catch {
+                    LLog.error("remora-link", "long-resume reconciliation failed", error: error)
+                }
             }
             await self.reconnectSavedServers()
         }

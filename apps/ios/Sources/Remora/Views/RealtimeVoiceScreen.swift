@@ -197,13 +197,13 @@ struct RealtimeVoiceScreen: View {
         VStack(spacing: 16) {
             HStack(spacing: 8) {
                 VoiceScreenPulsingDot(
-                    color: phaseColor,
+                    color: phaseDecorativeColor,
                     isActive: phase == .listening || phase == .speaking
                 )
 
                 Text(phase.displayTitle.uppercased())
                     .font(RemoraFont.monospaced(.caption, weight: .bold))
-                    .foregroundColor(phaseColor)
+                    .foregroundColor(phaseForegroundColor)
                     .tracking(2)
             }
 
@@ -221,7 +221,7 @@ struct RealtimeVoiceScreen: View {
             if visibleTranscriptEntries.isEmpty {
                 AudioWaveformView(
                     level: Float(phase == .listening ? inputLevel : outputLevel),
-                    tint: phaseColor
+                    tint: phaseDecorativeColor
                 )
                 .frame(width: 180, height: 40)
                 .opacity(phase == .connecting ? 0.3 : 0.8)
@@ -416,7 +416,7 @@ struct RealtimeVoiceScreen: View {
         .padding(.vertical, 12)
     }
 
-    private var phaseColor: Color {
+    private var phaseDecorativeColor: Color {
         switch phase {
         case .connecting:
             return Color(hex: glowPalette.accent)
@@ -428,11 +428,23 @@ struct RealtimeVoiceScreen: View {
             return RemoraTheme.danger
         }
     }
+
+    private var phaseForegroundColor: Color {
+        switch phase {
+        case .connecting, .listening:
+            return Color(hex: glowPalette.accentForeground)
+        case .speaking, .thinking, .handoff:
+            return Color(hex: glowPalette.warning)
+        case .error:
+            return RemoraTheme.danger
+        }
+    }
 }
 
 struct GlowPalette: Equatable {
     let background: String
     let accent: String
+    let accentForeground: String
     let accentStrong: String
     let warning: String
     let success: String
@@ -443,6 +455,7 @@ struct GlowPalette: Equatable {
         return GlowPalette(
             background: theme.background,
             accent: theme.accent,
+            accentForeground: theme.accentForeground,
             accentStrong: theme.accentStrong,
             warning: theme.warning,
             success: theme.success,

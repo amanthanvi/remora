@@ -20,10 +20,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import com.remora.android.background.BackgroundAwareness
 import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.AppModel
 import com.remora.android.state.OpenAIApiKeyStore
-import com.remora.android.state.PetOverlayController
 import com.remora.android.ui.AnimatedSplashScreen
 import com.remora.android.ui.ExperimentalFeatures
 import com.remora.android.ui.RemoraApp
@@ -38,12 +38,10 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_SERVER_ID = "remora.open.serverId"
         const val EXTRA_OPEN_THREAD_ID = "remora.open.threadId"
-        const val EXTRA_OPEN_PET_SETTINGS = "remora.openPetSettings"
     }
 
     private var appModel: AppModel? = null
     private val lifecycleController = AppLifecycleController()
-    private var openPetSettingsRequest by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called before super.onCreate to hand off the system splash
@@ -55,7 +53,6 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         OpenAIApiKeyStore(applicationContext).applyToEnvironment()
         ExperimentalFeatures.initialize(applicationContext)
-        PetOverlayController.initialize(applicationContext)
 
         try {
             appModel = AppModel.init(this)
@@ -73,10 +70,7 @@ class MainActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize()) {
                     val model = appModel
                     if (model != null) {
-                        RemoraApp(
-                            appModel = model,
-                            openPetSettingsRequest = openPetSettingsRequest,
-                        )
+                        RemoraApp(appModel = model)
                     } else {
                         Text(
                             text = "Remora couldn't finish starting.",
@@ -117,15 +111,15 @@ class MainActivity : ComponentActivity() {
         }
 
         handleOpenThreadIntent(intent)
-        consumeOverlayNavigationIntent(intent)
     }
 
     override fun onResume() {
         super.onResume()
         val model = appModel ?: return
         lifecycleScope.launch {
-            lifecycleController.onResume(this@MainActivity, model)
-            PetOverlayController.syncOverlayService(this@MainActivity)
+            BackgroundAwareness.onForeground(this@MainActivity) {
+                lifecycleController.onResume(this@MainActivity, model)
+            }
         }
     }
 
@@ -139,7 +133,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleOpenThreadIntent(intent)
-        consumeOverlayNavigationIntent(intent)
     }
 
     override fun onDestroy() {
@@ -170,14 +163,6 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra(EXTRA_OPEN_SERVER_ID)
         intent.removeExtra(EXTRA_OPEN_THREAD_ID)
         return ThreadKey(serverId = serverId, threadId = threadId)
-    }
-
-    private fun consumeOverlayNavigationIntent(intent: Intent?) {
-        intent ?: return
-        if (intent.getBooleanExtra(EXTRA_OPEN_PET_SETTINGS, false)) {
-            openPetSettingsRequest += 1
-            intent.removeExtra(EXTRA_OPEN_PET_SETTINGS)
-        }
     }
 
 }

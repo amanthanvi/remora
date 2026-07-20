@@ -112,7 +112,7 @@ composer.
 ## Settings — Server Connection Editor (iOS + Android)
 
 Tapping a saved server row in Settings opens the inline editor. Local servers are
-name-only; alleycat-paired servers are name-only; everything else allows
+name-only; Remora Link paired servers are name-only; everything else allows
 mode + host/port/wake-MAC + URL editing. Save persists, Save & Reconnect
 disconnects and re-establishes the chosen transport.
 
@@ -120,7 +120,7 @@ disconnects and re-establishes the chosen transport.
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Tap saved server row opens editor          | `SettingsServerSheet.edit` opens `SettingsServerConnectionEditor` form sheet                             | Tap or row-menu "Edit" opens `ServerEditSheet` ModalBottomSheet                                                  |
 | Local server: only name editable           | Editor displays "managed automatically" copy; only Save & Restart action shown                           | Same — `ServerEditSheet` shows the same copy and uses "Save & Restart"                                           |
-| Alleycat-paired server: only name editable | Editor shows paired-pairing-metadata copy; mode picker hidden                                            | Same — mode picker hidden, message visible                                                                       |
+| Remora Link paired server: only name editable | Editor shows paired-pairing-metadata copy; mode picker hidden                                         | Same — mode picker hidden, message visible                                                                       |
 | Switch to Direct Codex + Save & Reconnect  | Persists, disconnects, calls `serverBridge.connectRemoteServer`                                          | Same — `reconnectController.reconnectServer` reconnects via persisted record                                     |
 | Switch to WebSocket + Save & Reconnect     | Persists, disconnects, calls `serverBridge.connectRemoteUrlServer` with `ws://` or `wss://`              | Same — record stores `websocketURL`; reconnect dispatches via Rust `ReconnectController`                         |
 | Switch to SSH + Save & Reconnect           | Persists, dismisses editor, opens `SSHLoginSheet`; connect uses `serverBridge.startRemoteOverSshConnect` | Persists, dismisses editor, opens shared `SSHLoginDialog`; connect uses `serverBridge.startRemoteOverSshConnect` |

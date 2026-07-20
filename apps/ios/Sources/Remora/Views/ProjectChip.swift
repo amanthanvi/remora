@@ -10,7 +10,7 @@ struct ProjectChip: View {
             HStack(spacing: 6) {
                 Image(systemName: "folder")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(project != nil ? RemoraTheme.accent : RemoraTheme.textMuted)
+                    .foregroundStyle(project != nil ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                 Text(label)
                     .remoraMonoFont(size: 12, weight: .semibold)
                     .foregroundStyle(project != nil ? RemoraTheme.textPrimary : RemoraTheme.textSecondary)
@@ -22,6 +22,7 @@ struct ProjectChip: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .contentShape(Capsule())
+            .remoraMinimumHitTarget()
         }
         .buttonStyle(.plain)
         .modifier(GlassCapsuleModifier(interactive: true))

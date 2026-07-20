@@ -1,0 +1,8 @@
+target
+.local
+.git
+*.sqlite3
+*.key
+*.token
+config.local.toml
+config.self-hosted.toml

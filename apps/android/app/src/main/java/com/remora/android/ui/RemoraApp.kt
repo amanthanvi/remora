@@ -3,6 +3,7 @@ package com.remora.android.ui
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -14,22 +15,25 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onKeyEvent
 import com.remora.android.state.AppModel
 import com.remora.android.state.LocalAccountLoginRequiredException
 import com.remora.android.state.NetworkDiscovery
-import com.remora.android.state.PetOverlayController
-import com.remora.android.state.AlleycatCredentialStore
-import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.VoiceRuntimeController
 import com.remora.android.state.connectionModeLabel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import com.remora.android.ui.conversation.ApprovalOverlay
 import com.remora.android.ui.conversation.ConversationInfoScreen
@@ -38,16 +42,24 @@ import com.remora.android.ui.discovery.DiscoveryScreen
 import com.remora.android.ui.home.HomeDashboardScreen
 import com.remora.android.ui.home.HomeDashboardSupport
 import com.remora.android.ui.home.ProjectPickerSheet
-import com.remora.android.ui.pets.PetOverlayView
 import com.remora.android.state.SavedProjectStore
 import com.remora.android.ui.settings.AccountSheet
 import com.remora.android.ui.settings.SettingsSheet
-import com.remora.android.ui.settings.SettingsStartDestination
 import com.remora.android.ui.sessions.DirectoryPickerServerOption
 import com.remora.android.ui.sessions.DirectoryPickerSheet
 import com.remora.android.ui.sessions.SessionLaunchSupport
 import com.remora.android.ui.sessions.SessionsUiState
 import com.remora.android.ui.terminal.TerminalScreen
+import com.remora.android.ui.terminal.RemoraLinkTerminalHost
+import com.remora.android.ui.terminal.remoraLinkTerminalHost
+import com.remora.android.ui.workflow.AdaptiveNavigationMode
+import com.remora.android.ui.workflow.AdaptiveWorkflowScaffold
+import com.remora.android.ui.workflow.CommandPaletteSheet
+import com.remora.android.ui.workflow.WorkflowActionCatalog
+import com.remora.android.ui.workflow.WorkflowActionContext
+import com.remora.android.ui.workflow.WorkflowActionId
+import com.remora.android.ui.workflow.actionForKeyEvent
+import com.remora.android.ui.workflow.neighboringThread
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.ApprovalKind
 import uniffi.codex_mobile_client.PendingUserInputRequest
@@ -90,7 +102,6 @@ val LocalDismissedUserInputs = staticCompositionLocalOf<DismissedUserInputState>
 @Composable
 fun RemoraApp(
     appModel: AppModel,
-    openPetSettingsRequest: Int = 0,
 ) {
     val context = LocalContext.current
 
@@ -101,7 +112,6 @@ fun RemoraApp(
         com.remora.android.ui.home.DashboardZoomPrefs.initialize(context)
         ExperimentalFeatures.initialize(context)
         com.remora.android.state.DebugSettings.initialize(context)
-        PetOverlayController.initialize(context)
     }
 
     // Read currentStep so Compose tracks it as a dependency and recomposes on change.
@@ -116,18 +126,30 @@ fun RemoraApp(
         val scope = androidx.compose.runtime.rememberCoroutineScope()
 
         // Navigation state
-        var navStack by remember { mutableStateOf<List<Route>>(listOf(Route.Home)) }
+        var navStack by rememberSaveable(stateSaver = RouteStackSaver) {
+            mutableStateOf<List<Route>>(listOf(Route.Home))
+        }
+        val navigationWasRestored = rememberSaveable(saver = NavigationRestorationMarkerSaver) {
+            false
+        }
         val currentRoute = navStack.lastOrNull() ?: Route.Home
         val sessionsUiState = remember { SessionsUiState() }
+        val rootFocusRequester = remember { FocusRequester() }
+        var homeWorkflowBlocked by remember { mutableStateOf(false) }
+        var conversationWorkflowBlocked by remember { mutableStateOf(false) }
+        var navigationPaneInputFocused by remember { mutableStateOf(false) }
+        var navigationMode by remember { mutableStateOf(AdaptiveNavigationMode.COMPACT) }
+        var focusSearchRequest by remember { mutableIntStateOf(0) }
+        var hasObservedInitialActiveThread by remember { mutableStateOf(false) }
 
         // Global sheet state
         var showDiscovery by remember { mutableStateOf(false) }
         var showSettings by remember { mutableStateOf(false) }
-        var settingsStartDestination by remember { mutableStateOf(SettingsStartDestination.TopLevel) }
         var showAccountForServer by remember { mutableStateOf<String?>(null) }
         var directoryPickerServerId by remember { mutableStateOf<String?>(null) }
         var directoryPickerForProject by remember { mutableStateOf(false) }
         var showProjectPicker by remember { mutableStateOf(false) }
+        var showCommandPalette by remember { mutableStateOf(false) }
 
         // Home selection state
         var selectedServerId by remember {
@@ -184,12 +206,6 @@ fun RemoraApp(
         val networkDiscovery = remember { NetworkDiscovery(appModel.discovery) }
         val voiceController = remember { VoiceRuntimeController.shared }
 
-        LaunchedEffect(openPetSettingsRequest) {
-            if (openPetSettingsRequest <= 0) return@LaunchedEffect
-            settingsStartDestination = SettingsStartDestination.Pets
-            showSettings = true
-        }
-
         // Navigate helpers
         val navigate = remember {
             { route: Route -> navStack = navStack + route }
@@ -198,7 +214,7 @@ fun RemoraApp(
             { if (navStack.size > 1) navStack = navStack.dropLast(1) }
         }
         val navigateToConversation = remember {
-            { key: ThreadKey -> navStack = listOf(Route.Home, Route.Conversation(key)) }
+            { key: ThreadKey -> navStack = conversationStack(key) }
         }
         val connectedServerOptions = remember(snapshot) {
             snapshot?.let { snap ->
@@ -247,8 +263,94 @@ fun RemoraApp(
             }
         }
 
-        val interceptSystemBack =
+        val terminalEnabled = ExperimentalFeatures.isEnabled(RemoraFeature.TERMINAL)
+        val workflowSessions = remember(snapshot) {
+            snapshot?.sessionSummaries
+                ?.distinctBy { it.key.serverId to it.key.threadId }
+                ?.sortedByDescending { it.updatedAt ?: 0L }
+                ?: emptyList()
+        }
+        val orderedThreadKeys = remember(workflowSessions) { workflowSessions.map { it.key } }
+
+        fun currentWorkflowActionContext(): WorkflowActionContext = WorkflowActionContext(
+            route = navStack.lastOrNull() ?: Route.Home,
+            canNavigateBack = navStack.size > 1,
+            connectedServerCount = connectedServerOptions.size,
+            terminalEnabled = terminalEnabled,
+            orderedThreadKeys = orderedThreadKeys,
+        )
+
+        fun executeWorkflowAction(id: WorkflowActionId): String? {
+            val contextNow = currentWorkflowActionContext()
+            val action = WorkflowActionCatalog.action(id, contextNow)
+            if (!action.enabled) {
+                return action.disabledReason ?: "That action is not available right now"
+            }
+            when (id) {
+                WorkflowActionId.HOME -> navStack = listOf(Route.Home)
+                WorkflowActionId.BACK -> navigateBack()
+                WorkflowActionId.SEARCH_THREADS -> {
+                    if (navigationMode != AdaptiveNavigationMode.EXPANDED || currentRoute == Route.Home) {
+                        navStack = listOf(Route.Home)
+                    }
+                    focusSearchRequest += 1
+                }
+                WorkflowActionId.NEXT_THREAD,
+                WorkflowActionId.PREVIOUS_THREAD,
+                -> {
+                    val direction = if (id == WorkflowActionId.NEXT_THREAD) 1 else -1
+                    val key = neighboringThread(
+                        orderedThreadKeys = orderedThreadKeys,
+                        current = currentRoute.threadKeyOrNull,
+                        direction = direction,
+                    ) ?: return "No neighboring thread is available"
+                    navigateToConversation(key)
+                }
+                WorkflowActionId.NEW_THREAD -> openDirectoryPicker()
+                WorkflowActionId.OPEN_TERMINAL -> navigate(Route.Terminal())
+                WorkflowActionId.OPEN_SETTINGS -> showSettings = true
+                WorkflowActionId.SHOW_COMMAND_PALETTE -> showCommandPalette = true
+                WorkflowActionId.OPEN_REVIEW,
+                WorkflowActionId.OPEN_FILES,
+                -> return action.disabledReason ?: "That surface is not available yet"
+            }
+            return null
+        }
+
+        val workflowActionContext = currentWorkflowActionContext()
+        val workflowActions = WorkflowActionCatalog.actions(workflowActionContext)
+        val visibleApprovals = snapshot?.pendingApprovals.orEmpty().filter {
+            it.kind != ApprovalKind.MCP_ELICITATION
+        }
+        val visibleUserInputs = snapshot?.pendingUserInputs.orEmpty().filter {
+            val currentThreadKey = currentRoute.threadKeyOrNull
+            currentThreadKey != null &&
+                it.isRelevantToThread(currentThreadKey) &&
+                !dismissedUserInputs.isDismissed(it.id)
+        }
+        val globalInputBlocked = homeWorkflowBlocked ||
+            conversationWorkflowBlocked ||
+            navigationPaneInputFocused ||
+            currentRoute is Route.Terminal ||
+            currentRoute is Route.SavedApp ||
+            visibleApprovals.isNotEmpty() ||
+            visibleUserInputs.isNotEmpty() ||
+            showCommandPalette ||
             showDiscovery ||
+            showSettings ||
+            showAccountForServer != null ||
+            directoryPickerServerId != null ||
+            showProjectPicker
+
+        LaunchedEffect(globalInputBlocked) {
+            if (!globalInputBlocked) {
+                runCatching { rootFocusRequester.requestFocus() }
+            }
+        }
+
+        val interceptSystemBack =
+            showCommandPalette ||
+                showDiscovery ||
                 showSettings ||
                 showAccountForServer != null ||
                 directoryPickerServerId != null ||
@@ -257,6 +359,7 @@ fun RemoraApp(
 
         BackHandler(enabled = interceptSystemBack) {
             when {
+                showCommandPalette -> showCommandPalette = false
                 showAccountForServer != null -> showAccountForServer = null
                 directoryPickerServerId != null -> directoryPickerServerId = null
                 showProjectPicker -> showProjectPicker = false
@@ -274,17 +377,35 @@ fun RemoraApp(
         // for real "open a thread" actions (e.g. voice session handoff).
         LaunchedEffect(snapshot?.activeThread) {
             val activeKey = snapshot?.activeThread ?: return@LaunchedEffect
-            val alreadyShowing = when (val route = currentRoute) {
-                is Route.Conversation -> route.key == activeKey
-                is Route.RealtimeVoice -> route.key == activeKey
-                else -> false
+            val isInitialObservation = !hasObservedInitialActiveThread
+            hasObservedInitialActiveThread = true
+            if (
+                shouldPreserveRestoredRoute(
+                    navigationWasRestored = navigationWasRestored,
+                    isInitialActiveThreadObservation = isInitialObservation,
+                    currentRoute = currentRoute,
+                )
+            ) {
+                return@LaunchedEffect
             }
+            val alreadyShowing = currentRoute.threadKeyOrNull == activeKey
             if (!alreadyShowing) {
-                navStack = listOf(Route.Home, Route.Conversation(activeKey))
+                navStack = conversationStack(activeKey)
             }
         }
 
-        val rootModifier = if (currentRoute is Route.Conversation || currentRoute is Route.Terminal) {
+        val workflowKeyboardModifier = Modifier
+            .onKeyEvent { event ->
+                val actionId = actionForKeyEvent(
+                    event = event,
+                    globalInputBlocked = globalInputBlocked,
+                ) ?: return@onKeyEvent false
+                executeWorkflowAction(actionId) == null
+            }
+            .focusRequester(rootFocusRequester)
+            .focusable()
+
+        val rootModifier = (if (currentRoute is Route.Conversation || currentRoute is Route.Terminal) {
             Modifier
                 .fillMaxSize()
                 .background(RemoraTheme.background)
@@ -293,10 +414,26 @@ fun RemoraApp(
                 .fillMaxSize()
                 .background(RemoraTheme.background)
                 .systemBarsPadding()
-        }
+        }).then(workflowKeyboardModifier)
 
         Box(modifier = rootModifier) {
-            when (val route = currentRoute) {
+            AdaptiveWorkflowScaffold(
+                route = currentRoute,
+                sessions = workflowSessions,
+                actions = workflowActions,
+                terminalEnabled = terminalEnabled,
+                focusSearchRequest = focusSearchRequest,
+                onHome = { executeWorkflowAction(WorkflowActionId.HOME) },
+                onNewThread = { executeWorkflowAction(WorkflowActionId.NEW_THREAD) },
+                onSearch = { executeWorkflowAction(WorkflowActionId.SEARCH_THREADS) },
+                onShowPalette = { executeWorkflowAction(WorkflowActionId.SHOW_COMMAND_PALETTE) },
+                onOpenTerminal = { executeWorkflowAction(WorkflowActionId.OPEN_TERMINAL) },
+                onShowSettings = { executeWorkflowAction(WorkflowActionId.OPEN_SETTINGS) },
+                onOpenThread = navigateToConversation,
+                onNavigationModeChanged = { navigationMode = it },
+                onInputFocusChanged = { navigationPaneInputFocused = it },
+            ) {
+                when (val route = currentRoute) {
                 is Route.Home -> {
                     HomeDashboardScreen(
                         onOpenConversation = navigateToConversation,
@@ -341,6 +478,8 @@ fun RemoraApp(
                         } else {
                             null
                         },
+                        focusSearchRequest = focusSearchRequest,
+                        onInputFocusChanged = { homeWorkflowBlocked = it },
                     )
                 }
 
@@ -363,6 +502,7 @@ fun RemoraApp(
                         onInfo = { navigate(Route.ConversationInfo(route.key)) },
                         onShowDirectoryPicker = { openDirectoryPicker(route.key.serverId) },
                         onOpenSavedApp = { appId -> navigate(Route.SavedApp(appId)) },
+                        onComposerFocusChanged = { conversationWorkflowBlocked = it },
                     )
                 }
 
@@ -411,7 +551,7 @@ fun RemoraApp(
                         onBack = navigateBack,
                         onChangeWallpaper = { navigate(Route.ServerWallpaperSelection(route.serverId)) },
                         onOpenShell = remoteShellLauncher(
-                            context = context,
+                            appModel = appModel,
                             serverId = route.serverId,
                             terminalEnabled = ExperimentalFeatures.isEnabled(RemoraFeature.TERMINAL),
                             navigate = navigate,
@@ -474,48 +614,30 @@ fun RemoraApp(
 
                 is Route.Terminal -> {
                     TerminalScreen(
-                        preferredAlleycatNodeId = route.preferredAlleycatNodeId,
+                        preferredRemoraLinkHostId = route.preferredRemoraLinkHostId,
                         onBack = navigateBack,
                     )
                 }
-            }
-
-            val pet = PetOverlayController.selectedPet
-            if (pet != null && PetOverlayController.shouldShowInAppOverlay(context)) {
-                PetOverlayView(
-                    pet = pet,
-                    state = PetOverlayController.avatarState(snapshot),
-                    message = PetOverlayController.avatarMessage(snapshot),
-                    reducedMotion = context.animationsDisabled(),
-                    modifier = Modifier.align(Alignment.TopStart),
-                )
+                }
             }
 
             // Global approval overlay
-            val approvals = snapshot?.pendingApprovals.orEmpty().filter {
-                it.kind != ApprovalKind.MCP_ELICITATION
-            }
-            val currentThreadKey = when (val route = currentRoute) {
-                is Route.Conversation -> route.key
-                is Route.ConversationInfo -> route.key
-                is Route.WallpaperSelection -> route.key
-                is Route.WallpaperAdjust -> route.key
-                is Route.RealtimeVoice -> route.key
-                else -> null
-            }
-            val userInputs = snapshot?.pendingUserInputs.orEmpty().filter {
-                currentThreadKey != null &&
-                    it.isRelevantToThread(currentThreadKey) &&
-                    !dismissedUserInputs.isDismissed(it.id)
-            }
-            if (approvals.isNotEmpty() || userInputs.isNotEmpty()) {
+            if (visibleApprovals.isNotEmpty() || visibleUserInputs.isNotEmpty()) {
                 ApprovalOverlay(
-                    approvals = approvals,
-                    userInputs = userInputs,
+                    approvals = visibleApprovals,
+                    userInputs = visibleUserInputs,
                     appStore = appModel.store,
                     onDismissUserInput = { id -> dismissedUserInputs.dismiss(id) },
                 )
             }
+        }
+
+        if (showCommandPalette) {
+            CommandPaletteSheet(
+                actions = workflowActions,
+                onExecute = ::executeWorkflowAction,
+                onDismiss = { showCommandPalette = false },
+            )
         }
 
         // Discovery bottom sheet
@@ -563,17 +685,13 @@ fun RemoraApp(
                 SettingsSheet(
                     onDismiss = {
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                     },
                     onOpenAccount = { serverId ->
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                         showAccountForServer = serverId
                     },
-                    initialSubScreen = settingsStartDestination,
                     onOpenApps = {
                         showSettings = false
-                        settingsStartDestination = SettingsStartDestination.TopLevel
                         navigate(Route.Apps)
                     },
                 )
@@ -682,21 +800,46 @@ fun RemoraApp(
     }
 }
 
+@Composable
 private fun remoteShellLauncher(
-    context: android.content.Context,
+    appModel: AppModel,
     serverId: String,
     terminalEnabled: Boolean,
     navigate: (Route) -> Unit,
 ): (() -> Unit)? {
-    if (!terminalEnabled) return null
-    val saved = SavedServerStore.remembered(context).firstOrNull { it.id == serverId } ?: return null
-    val nodeId = saved.alleycatNodeId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    val token = AlleycatCredentialStore(context.applicationContext)
-        .loadToken(nodeId)
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-        ?: return null
-    return { navigate(Route.Terminal(preferredAlleycatNodeId = nodeId)) }
+    val remoraLinkAvailable by appModel.remoraLinkAvailable.collectAsState()
+    val remoraLinkJournalRevision by appModel.remoraLinkJournalBackend.revision.collectAsState()
+    var terminalHost by remember(serverId) { mutableStateOf<RemoraLinkTerminalHost?>(null) }
+    var refreshGeneration by remember(serverId) { mutableLongStateOf(0L) }
+
+    LaunchedEffect(
+        appModel,
+        serverId,
+        terminalEnabled,
+        remoraLinkAvailable,
+        remoraLinkJournalRevision,
+    ) {
+        val generation = ++refreshGeneration
+        terminalHost = null
+        val refreshedHost = if (terminalEnabled && remoraLinkAvailable) {
+            try {
+                appModel.withRemoraLinkV2 { it.remoraLinkHosts() }
+                    .remoraLinkTerminalHost(serverId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+        if (generation == refreshGeneration) {
+            terminalHost = refreshedHost
+        }
+    }
+
+    val hostId = terminalHost?.hostId ?: return null
+    return { navigate(Route.Terminal(preferredRemoraLinkHostId = hostId)) }
 }
 
 private fun PendingUserInputRequest.isRelevantToThread(threadKey: ThreadKey): Boolean {

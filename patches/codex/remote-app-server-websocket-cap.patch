@@ -38,7 +38,7 @@ index dd9c083e49..e35e15af60 100644
 +///
 +/// Upstream's `connect()` only knows how to talk WebSocket frames (over TCP or UDS). Remora needs
 +/// to drive the same JSON-RPC handshake/dispatcher loop over (a) WebSocket-over-SSH-tunneled-stream
-+/// and (b) raw JSON-line streams to non-Codex servers (Pi/alleycat).
++/// and (b) raw JSON-line streams to non-Codex servers.
 +///
 +/// The trait makes the worker loop generic over wire so both transports share the dispatch logic.
 +pub trait JsonRpcWire: Send + 'static {
@@ -220,7 +220,7 @@ index dd9c083e49..e35e15af60 100644
 +
 +    /// Remora extension: drive a remote app-server session over any caller-provided
 +    /// [`JsonRpcWire`]. Remora uses this with its own `JsonLineWire` for raw-stream
-+    /// JSON-RPC transports (alleycat jsonl, SSH-bridge bootstrap).
++    /// JSON-RPC transports (JSON-line and SSH-bridge bootstrap).
 +    pub async fn connect_with_wire<W>(
 +        args: RemoteAppServerConnectArgs,
 +        label: String,

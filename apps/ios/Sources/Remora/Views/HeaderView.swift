@@ -1,10 +1,19 @@
 import SafariServices
 import SwiftUI
 
+enum HeaderToolbarLayout: Equatable {
+    case expanded
+    case compact
+    case iconOnly
+}
+
 struct HeaderView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppModel.self) private var appModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.textScale) private var textScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let thread: AppThreadSnapshot
     @State private var pulsing = false
     @AppStorage("fastMode") private var fastMode = false
@@ -32,14 +41,19 @@ struct HeaderView: View {
             appState.showModelSelector.toggle()
         } label: {
             expandedHeaderLabel
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: isRegularSurface ? 320 : 240, alignment: .center)
+                .padding(.horizontal, toolbarLayout == .expanded ? 12 : 4)
+                .padding(.vertical, toolbarLayout == .expanded ? 6 : 0)
+                .frame(maxWidth: isRegularSurface ? 320 : 240, alignment: .center)
+                .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
         }
         .layoutPriority(-1)
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
         .accessibilityIdentifier("header.modelPickerButton")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Model and thread settings")
+        .accessibilityValue(headerAccessibilityValue)
+        .accessibilityHint("Opens the model selector")
         .popover(
             isPresented: Binding(
                 get: { appState.showModelSelector },
@@ -58,10 +72,75 @@ struct HeaderView: View {
         }
     }
 
+    static func toolbarLayout(
+        dynamicTypeSize: DynamicTypeSize,
+        textScale: CGFloat
+    ) -> HeaderToolbarLayout {
+        if dynamicTypeSize.isAccessibilitySize || textScale >= 1.5 {
+            return .iconOnly
+        }
+        if dynamicTypeSize == .xxLarge || dynamicTypeSize == .xxxLarge || textScale > 1 {
+            return .compact
+        }
+        return .expanded
+    }
+
+    private var toolbarLayout: HeaderToolbarLayout {
+        Self.toolbarLayout(dynamicTypeSize: dynamicTypeSize, textScale: textScale)
+    }
+
     private var expandedHeaderLabel: some View {
-        VStack(spacing: 2) {
-            primaryHeaderRow
-            secondaryHeaderRow
+        Group {
+            switch toolbarLayout {
+            case .expanded:
+                VStack(spacing: 2) {
+                    primaryHeaderRow
+                    secondaryHeaderRow
+                }
+            case .compact:
+                accessibilityHeaderRow
+            case .iconOnly:
+                iconOnlyHeaderRow
+            }
+        }
+    }
+
+    private var accessibilityHeaderRow: some View {
+        HStack(spacing: 5) {
+            statusDot
+
+            if fastMode {
+                Image(systemName: "bolt.fill")
+                    .remoraControlIconFont(size: 10, weight: .semibold)
+                    .foregroundColor(RemoraTheme.warning)
+            }
+
+            Text(sessionModelLabel)
+                .remoraFont(.caption, weight: .semibold)
+                .foregroundColor(RemoraTheme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "chevron.down")
+                .remoraControlIconFont(size: 9, weight: .semibold)
+                .foregroundColor(RemoraTheme.textSecondary)
+                .rotationEffect(.degrees(appState.showModelSelector ? 180 : 0))
+        }
+    }
+
+    private var iconOnlyHeaderRow: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Image(systemName: fastMode ? "bolt.horizontal.circle.fill" : "slider.horizontal.3")
+                .remoraControlIconFont(size: 17, weight: .semibold)
+                .foregroundColor(
+                    fastMode ? RemoraTheme.warning : RemoraTheme.accentForegroundOnSurface
+                )
+                .frame(
+                    width: RemoraAccessibilityMetrics.minimumHitTarget,
+                    height: RemoraAccessibilityMetrics.minimumHitTarget
+                )
+
+            statusDot
+                .padding(7)
         }
     }
 
@@ -71,7 +150,7 @@ struct HeaderView: View {
 
             if fastMode {
                 Image(systemName: "bolt.fill")
-                    .font(RemoraFont.styled(size: 10, weight: .semibold))
+                    .remoraFont(size: 10, weight: .semibold)
                     .foregroundColor(RemoraTheme.warning)
             }
 
@@ -82,11 +161,11 @@ struct HeaderView: View {
                 .foregroundColor(RemoraTheme.textSecondary)
                 .allowsTightening(true)
             Image(systemName: "chevron.down")
-                .font(RemoraFont.styled(size: 10, weight: .semibold))
+                .remoraFont(size: 10, weight: .semibold)
                 .foregroundColor(RemoraTheme.textSecondary)
                 .rotationEffect(.degrees(appState.showModelSelector ? 180 : 0))
         }
-        .font(RemoraFont.styled(size: 14, weight: .semibold))
+        .remoraFont(size: 14, weight: .semibold)
         .lineLimit(1)
         .minimumScaleFactor(isRegularSurface ? 1.0 : 0.75)
     }
@@ -94,15 +173,15 @@ struct HeaderView: View {
     private var secondaryHeaderRow: some View {
         HStack(spacing: 6) {
             Text(sessionDirectoryLabel)
-                .font(RemoraFont.styled(size: 11, weight: .semibold))
+                .remoraFont(size: 11, weight: .semibold)
                 .foregroundColor(RemoraTheme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             if thread.collaborationMode == .plan {
                 Text("plan")
-                    .font(RemoraFont.styled(size: 11, weight: .bold))
-                    .foregroundColor(.black)
+                    .remoraFont(size: 11, weight: .bold)
+                    .foregroundColor(RemoraTheme.textOnAccent)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(RemoraTheme.accent)
@@ -111,7 +190,7 @@ struct HeaderView: View {
 
             if headerPermissionPreset == .fullAccess {
                 Image(systemName: "lock.open.fill")
-                    .font(RemoraFont.styled(size: 10, weight: .semibold))
+                    .remoraFont(size: 10, weight: .semibold)
                     .foregroundColor(RemoraTheme.danger)
             }
 
@@ -122,13 +201,21 @@ struct HeaderView: View {
         Circle()
             .fill(statusDotColor)
             .frame(width: 6, height: 6)
-            .opacity(shouldPulse ? (pulsing ? 0.3 : 1.0) : 1.0)
+            .opacity(shouldPulse && !reduceMotion ? (pulsing ? 0.3 : 1.0) : 1.0)
             .animation(
-                shouldPulse ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default,
+                shouldPulse && !reduceMotion
+                    ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                    : nil,
                 value: pulsing
             )
             .onChange(of: shouldPulse) { _, pulse in
-                pulsing = pulse
+                pulsing = pulse && !reduceMotion
+            }
+            .onChange(of: reduceMotion) { _, shouldReduceMotion in
+                pulsing = shouldPulse && !shouldReduceMotion
+            }
+            .onAppear {
+                pulsing = shouldPulse && !reduceMotion
             }
     }
 
@@ -179,7 +266,7 @@ struct HeaderView: View {
         let threadModel = thread.displayModelLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         if !threadModel.isEmpty { return threadModel }
 
-        return "remora"
+        return "Remora"
     }
 
     private var sessionReasoningLabel: String {
@@ -214,6 +301,37 @@ struct HeaderView: View {
         }
 
         return "~"
+    }
+
+    private var headerAccessibilityValue: String {
+        var components = [
+            "\(sessionModelLabel) model",
+            "\(sessionReasoningLabel) reasoning",
+            sessionDirectoryLabel,
+            headerPermissionPreset.title,
+            headerTransportAccessibilityLabel,
+            fastMode ? "Fast mode on" : "Fast mode off",
+        ]
+        if thread.collaborationMode == .plan {
+            components.append("Plan mode")
+        }
+        return components.joined(separator: ", ")
+    }
+
+    private var headerTransportAccessibilityLabel: String {
+        guard let server else { return "Server status unavailable" }
+        switch server.transportState {
+        case .connecting:
+            return "Server connecting"
+        case .unresponsive:
+            return "Server unresponsive"
+        case .connected:
+            return "Server connected"
+        case .disconnected:
+            return "Server disconnected"
+        case .unknown:
+            return "Server status unknown"
+        }
     }
 
     private var selectedModelBinding: Binding<String> {
@@ -358,7 +476,10 @@ struct ConversationToolbarControls: View {
                 infoButton
             }
         }
-        .frame(width: 28, height: 28)
+        .frame(
+            width: RemoraAccessibilityMetrics.minimumHitTarget,
+            height: RemoraAccessibilityMetrics.minimumHitTarget
+        )
         .contentShape(Rectangle())
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
@@ -409,8 +530,12 @@ struct ConversationToolbarControls: View {
                 .tint(RemoraTheme.accent)
         } else {
             Image(systemName: "arrow.clockwise")
-                .font(RemoraFont.styled(size: 16, weight: .semibold))
-                .foregroundColor(server?.isConnected == true ? RemoraTheme.accent : RemoraTheme.textMuted)
+                .remoraControlIconFont(size: 16, weight: .semibold)
+                .foregroundColor(
+                    server?.isConnected == true
+                        ? RemoraTheme.accentForegroundOnSurface
+                        : RemoraTheme.textMuted
+                )
         }
     }
 
@@ -419,8 +544,8 @@ struct ConversationToolbarControls: View {
             onInfo?()
         } label: {
             Image(systemName: "info.circle")
-                .font(RemoraFont.styled(size: 16, weight: .semibold))
-                .foregroundColor(RemoraTheme.accent)
+                .remoraControlIconFont(size: 16, weight: .semibold)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
         }
         .accessibilityIdentifier("header.infoButton")
     }
@@ -648,7 +773,7 @@ struct InlineModelSelectorView: View {
                                         if model.isDefault {
                                             Text("default")
                                                 .remoraFont(.caption2, weight: .medium)
-                                                .foregroundColor(RemoraTheme.accent)
+                                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 1)
                                                 .background(RemoraTheme.accent.opacity(0.15))
@@ -667,7 +792,7 @@ struct InlineModelSelectorView: View {
                                 ) {
                                     Image(systemName: "checkmark")
                                         .remoraFont(size: 12, weight: .medium)
-                                        .foregroundColor(RemoraTheme.accent)
+                                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -707,7 +832,11 @@ struct InlineModelSelectorView: View {
                                     .padding(.vertical, 5)
                                     .background(effort.reasoningEffort.wireValue == reasoningEffort ? RemoraTheme.accent : RemoraTheme.surfaceLight)
                                     .clipShape(Capsule())
+                                    .remoraMinimumHitTarget()
                             }
+                            .accessibilityAddTraits(
+                                effort.reasoningEffort.wireValue == reasoningEffort ? .isSelected : []
+                            )
                         }
                     }
                     .padding(.horizontal, 16)
@@ -737,12 +866,14 @@ struct InlineModelSelectorView: View {
                         Text("Plan")
                             .remoraFont(.caption2, weight: .medium)
                     }
-                    .foregroundColor(effectiveCollaborationMode == .plan ? .black : RemoraTheme.textPrimary)
+                    .foregroundColor(effectiveCollaborationMode == .plan ? RemoraTheme.textOnAccent : RemoraTheme.textPrimary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(effectiveCollaborationMode == .plan ? RemoraTheme.accent : RemoraTheme.surfaceLight)
                     .clipShape(Capsule())
+                    .remoraMinimumHitTarget()
                 }
+                .accessibilityAddTraits(effectiveCollaborationMode == .plan ? .isSelected : [])
 
                 Button {
                     fastMode.toggle()
@@ -758,7 +889,9 @@ struct InlineModelSelectorView: View {
                     .padding(.vertical, 5)
                     .background(fastMode ? RemoraTheme.warning : RemoraTheme.surfaceLight)
                     .clipShape(Capsule())
+                    .remoraMinimumHitTarget()
                 }
+                .accessibilityAddTraits(fastMode ? .isSelected : [])
 
                 if selectedRuntimeSupportsPermissionOverrides {
                     Button {
@@ -779,7 +912,9 @@ struct InlineModelSelectorView: View {
                         .padding(.vertical, 5)
                         .background(isFullAccess ? RemoraTheme.danger : RemoraTheme.surfaceLight)
                         .clipShape(Capsule())
+                        .remoraMinimumHitTarget()
                     }
+                    .accessibilityAddTraits(isFullAccess ? .isSelected : [])
                 }
 
                 Spacer()
@@ -820,6 +955,7 @@ struct InlineModelSelectorView: View {
                 Button { modelSearchQuery = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(RemoraTheme.textMuted)
+                        .remoraMinimumHitTarget()
                 }
                 .buttonStyle(.plain)
             }
@@ -974,7 +1110,7 @@ struct ModelSelectorSheet: View {
                                     if model.isDefault {
                                         Text("default")
                                             .remoraFont(.caption2, weight: .medium)
-                                            .foregroundColor(RemoraTheme.accent)
+                                            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 1)
                                             .background(RemoraTheme.accent.opacity(0.15))
@@ -993,7 +1129,7 @@ struct ModelSelectorSheet: View {
                             ) {
                                 Image(systemName: "checkmark")
                                     .remoraFont(size: 12, weight: .medium)
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                             }
                         }
                         .padding(.horizontal, 20)
@@ -1023,7 +1159,11 @@ struct ModelSelectorSheet: View {
                                         .padding(.vertical, 5)
                                         .background(effort.reasoningEffort.wireValue == reasoningEffort ? RemoraTheme.accent : RemoraTheme.surfaceLight)
                                         .clipShape(Capsule())
+                                        .remoraMinimumHitTarget()
                                 }
+                                .accessibilityAddTraits(
+                                    effort.reasoningEffort.wireValue == reasoningEffort ? .isSelected : []
+                                )
                             }
                         }
                         .padding(.horizontal, 20)
@@ -1048,7 +1188,9 @@ struct ModelSelectorSheet: View {
                         .padding(.vertical, 5)
                         .background(fastMode ? RemoraTheme.warning : RemoraTheme.surfaceLight)
                         .clipShape(Capsule())
+                        .remoraMinimumHitTarget()
                     }
+                    .accessibilityAddTraits(fastMode ? .isSelected : [])
                     Spacer()
                 }
                 .padding(.horizontal, 20)
@@ -1088,6 +1230,7 @@ struct ModelSelectorSheet: View {
                 Button { modelSearchQuery = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(RemoraTheme.textMuted)
+                        .remoraMinimumHitTarget()
                 }
                 .buttonStyle(.plain)
             }
@@ -1203,8 +1346,10 @@ private struct RuntimeFilterPill: View {
             .padding(.vertical, 5)
             .background(selected ? RemoraTheme.accent : RemoraTheme.surfaceLight)
             .clipShape(Capsule())
+            .remoraMinimumHitTarget()
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

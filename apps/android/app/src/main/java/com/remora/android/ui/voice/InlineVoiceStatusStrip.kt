@@ -2,20 +2,20 @@ package com.remora.android.ui.voice
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.remora.android.ui.RemoraTheme
@@ -46,88 +47,101 @@ fun InlineVoiceStatusStrip(
     val scaledInputLevel = if (isListening) max(0.08f, inputLevel) else max(0f, inputLevel)
     val scaledOutputLevel = if (isSpeaking) max(0.08f, outputLevel) else max(0f, outputLevel)
 
-    Row(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .background(RemoraTheme.surface.copy(alpha = 0.6f))
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .background(RemoraTheme.surface.copy(alpha = 0.6f)),
     ) {
-        // YOU indicator
+        val showWaveforms = maxWidth >= 420.dp
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(5.dp)
-                    .background(
-                        if (isListening) RemoraTheme.accent else RemoraTheme.textMuted.copy(alpha = 0.4f),
-                        CircleShape,
-                    ),
-            )
-            Text(
-                text = "YOU",
-                color = if (isListening) RemoraTheme.textPrimary else RemoraTheme.textMuted,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = RemoraTheme.monoFont,
-            )
-            AudioWaveform(
-                level = scaledInputLevel,
-                tint = RemoraTheme.accent,
-                modifier = Modifier.size(width = 48.dp, height = 14.dp),
-            )
-        }
-
-        // CODEX indicator
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(5.dp)
-                    .background(
-                        if (isSpeaking) RemoraTheme.warning else RemoraTheme.textMuted.copy(alpha = 0.4f),
-                        CircleShape,
-                    ),
-            )
-            Text(
-                text = "CODEX",
-                color = if (isSpeaking) RemoraTheme.textPrimary else RemoraTheme.textMuted,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = RemoraTheme.monoFont,
-            )
-            AudioWaveform(
-                level = scaledOutputLevel,
-                tint = RemoraTheme.warning,
-                modifier = Modifier.size(width = 48.dp, height = 14.dp),
-            )
-        }
-
-        Spacer(Modifier.weight(1f))
-
-        // Speaker toggle
-        Icon(
-            Icons.Default.VolumeUp,
-            contentDescription = "Toggle speaker",
-            tint = RemoraTheme.textPrimary,
             modifier = Modifier
-                .size(16.dp)
-                .clickable(onClick = onToggleSpeaker),
-        )
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (showWaveforms) 8.dp else 6.dp),
+        ) {
+            // YOU indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .background(
+                            if (isListening) RemoraTheme.accent else RemoraTheme.textMuted.copy(alpha = 0.4f),
+                            CircleShape,
+                        ),
+                )
+                Text(
+                    text = "YOU",
+                    color = if (isListening) RemoraTheme.textPrimary else RemoraTheme.textMuted,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                if (showWaveforms) {
+                    AudioWaveform(
+                        level = scaledInputLevel,
+                        tint = RemoraTheme.accent,
+                        modifier = Modifier.size(width = 48.dp, height = 14.dp),
+                    )
+                }
+            }
 
-        // Phase label
-        Text(
-            text = phaseLabel(phase),
-            color = phaseColor(phase),
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = RemoraTheme.monoFont,
-        )
+            // CODEX indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .background(
+                            if (isSpeaking) RemoraTheme.warning else RemoraTheme.textMuted.copy(alpha = 0.4f),
+                            CircleShape,
+                        ),
+                )
+                Text(
+                    text = "CODEX",
+                    color = if (isSpeaking) RemoraTheme.textPrimary else RemoraTheme.textMuted,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                if (showWaveforms) {
+                    AudioWaveform(
+                        level = scaledOutputLevel,
+                        tint = RemoraTheme.warning,
+                        modifier = Modifier.size(width = 48.dp, height = 14.dp),
+                    )
+                }
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            Text(
+                text = phaseLabel(phase),
+                color = phaseColor(phase),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = RemoraTheme.monoFont,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            IconButton(
+                onClick = onToggleSpeaker,
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+            ) {
+                Icon(
+                    Icons.Default.VolumeUp,
+                    contentDescription = "Toggle speaker",
+                    tint = RemoraTheme.textPrimary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
 

@@ -41,9 +41,9 @@ struct SettingsView: View {
                     appearanceSection
                     fontSection
                     conversationSection
-                    petSection
                     experimentalSection
                     accountSection
+                    remoraLinkHostsSection
                     serversSection
                 }
                 .scrollContentBackground(.hidden)
@@ -53,7 +53,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .sheet(item: $activeServerSheet) { sheet in
@@ -109,7 +109,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "paintbrush")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Appearance")
                         .remoraFont(.subheadline)
@@ -130,7 +130,7 @@ struct SettingsView: View {
             Toggle(isOn: $collapseTurns) {
                 HStack(spacing: 10) {
                     Image(systemName: "rectangle.compress.vertical")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Collapse Turns")
@@ -184,7 +184,7 @@ struct SettingsView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -223,7 +223,7 @@ struct SettingsView: View {
                         if fontFamily == option.rawValue {
                             Image(systemName: "checkmark")
                                 .remoraFont(.subheadline, weight: .semibold)
-                                .foregroundColor(RemoraTheme.accentStrong)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         }
                     }
                 }
@@ -237,36 +237,6 @@ struct SettingsView: View {
 
     // MARK: - Experimental Section
 
-    private var petSection: some View {
-        Section {
-            NavigationLink {
-                PetSettingsView()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(RemoraTheme.accent)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Wake Pet")
-                            .remoraFont(.subheadline)
-                            .foregroundColor(RemoraTheme.textPrimary)
-                        if let pet = PetOverlayController.shared.selectedPet {
-                            Text(pet.displayName)
-                                .remoraFont(.caption)
-                                .foregroundColor(RemoraTheme.textSecondary)
-                        }
-                    }
-                }
-            }
-            .listRowBackground(RemoraTheme.surface.opacity(0.6))
-        } header: {
-            Text("Pet")
-                .foregroundColor(RemoraTheme.textSecondary)
-        }
-    }
-
-    // MARK: - Experimental Section
-
     private var experimentalSection: some View {
         Section {
             NavigationLink {
@@ -274,7 +244,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "flask")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Experimental Features")
                         .remoraFont(.subheadline)
@@ -297,7 +267,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkles")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Support Remora")
                         .remoraFont(.subheadline)
@@ -323,6 +293,36 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Remora Link Hosts
+
+    private var remoraLinkHostsSection: some View {
+        Section {
+            NavigationLink {
+                RemoraLinkHostsSettingsView(appModel: appModel)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "link.badge.plus")
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remora Link Hosts")
+                            .remoraFont(.subheadline)
+                            .foregroundColor(RemoraTheme.textPrimary)
+                        Text("Pairing trust, revocation, and cleanup")
+                            .remoraFont(.caption)
+                            .foregroundColor(RemoraTheme.textSecondary)
+                    }
+                }
+                .frame(minHeight: 44)
+            }
+            .accessibilityHint("Shows hosts paired through Remora Link")
+            .listRowBackground(RemoraTheme.surface.opacity(0.6))
+        } header: {
+            Text("Remora Link")
+                .foregroundColor(RemoraTheme.textSecondary)
+        }
+    }
+
     // MARK: - Servers Section
 
     private var serversSection: some View {
@@ -340,7 +340,7 @@ struct SettingsView: View {
                         } label: {
                             HStack {
                                 Image(systemName: conn.isLocal ? "iphone" : "server.rack")
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     .frame(width: 20)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(conn.displayName)
@@ -370,11 +370,11 @@ struct SettingsView: View {
             } label: {
                 HStack {
                     Image(systemName: "plus.circle.fill")
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 20)
                     Text("Add Server")
                         .remoraFont(.footnote)
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                     Spacer()
                 }
             }
@@ -402,7 +402,6 @@ struct SettingsView: View {
             saved.append(configuration.savedServer)
         }
         SavedServerStore.save(saved)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )
@@ -690,7 +689,7 @@ private struct SettingsServerConnectionEditor: View {
     }
 
     private var isSpecialPairedServer: Bool {
-        originalSavedServer?.alleycatNodeId != nil || originalSavedServer?.alleycatAgentWire == "ssh-bridge"
+        originalSavedServer?.sshBridgeRuntimeKinds != nil
     }
 
     var body: some View {
@@ -709,7 +708,7 @@ private struct SettingsServerConnectionEditor: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .alert("Invalid Server", isPresented: Binding(
@@ -802,14 +801,14 @@ private struct SettingsServerConnectionEditor: View {
             Button("Save") {
                 submit(reconnect: false)
             }
-            .foregroundColor(RemoraTheme.accent)
+            .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             .remoraFont(.subheadline)
 
             if !isSpecialPairedServer {
                 Button("Save & Reconnect") {
                     submit(reconnect: true)
                 }
-                .foregroundColor(RemoraTheme.accent)
+                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 .remoraFont(.subheadline)
             }
         }
@@ -998,7 +997,7 @@ private struct SettingsConnectionAccountSection: View {
                         Text("Login with ChatGPT")
                             .remoraFont(.subheadline)
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 .disabled(isAuthWorking)
                 .listRowBackground(RemoraTheme.surface.opacity(0.6))

@@ -13,9 +13,9 @@ struct HomeNavigationView: View {
     @Environment(VoiceRuntimeController.self) private var voiceRuntime
     @Environment(AppState.self) private var appState
     @Environment(ConversationWarmupCoordinator.self) private var conversationWarmup
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @State private var experimentalFeatures = ExperimentalFeatures.shared
+    @State private var actionCenter = RemoraActionCenter.shared
     @State private var homeDashboardModel = HomeDashboardModel()
     @State private var savedAppsStore = SavedAppsStore.shared
     @State private var navigationPath: [HomeNavigationRoute] = []
@@ -31,33 +31,9 @@ struct HomeNavigationView: View {
     @State private var hasSeededInitialConversationRoute = false
     @State private var pendingWallpaperConfig: WallpaperConfig?
     @State private var pendingWallpaperImage: UIImage?
+    @State private var navigationMode: RemoraNavigationMode = .compact
     let topInset: CGFloat
     let bottomInset: CGFloat
-
-    private enum HomeNavigationRoute: Hashable {
-        case sessions(serverId: String, title: String)
-        case conversation(ThreadKey)
-        case realtimeVoice(ThreadKey)
-        case conversationInfo(ThreadKey)
-        case wallpaperSelection(ThreadKey)
-        case wallpaperAdjust(ThreadKey)
-        case serverInfo(serverId: String)
-        case serverWallpaperSelection(serverId: String)
-        case serverWallpaperAdjust(serverId: String)
-        case replayRecording(URL)
-        /// Hero composer landing in the detail pane. Pushed by the sidebar
-        /// "+" button on regular-width surfaces. On send, replaces itself
-        /// with `.conversation(key)` so the bottom composer visually
-        /// inherits the hero composer's position.
-        case newThread
-        /// Saved apps list — always-visible.
-        case appsList
-        /// Saved-app detail, pushed when the user taps a home-screen thread
-        /// that has saved apps (or when routed from the AppsList).
-        case savedApp(appId: String)
-        /// Remote terminal backed by the shared Rust terminal session.
-        case terminal(preferredAlleycatNodeId: String?)
-    }
 
     private var connectedServerOptions: [DirectoryPickerServerOption] {
         homeDashboardModel.connectedServers.filter(\.canLaunchSessions).map { server in
@@ -78,8 +54,31 @@ struct HomeNavigationView: View {
         return nil
         #else
         guard experimentalFeatures.isEnabled(.terminal) else { return nil }
-        return { navigationPath.append(.terminal(preferredAlleycatNodeId: nil)) }
+        return { navigationPath.append(.terminal(preferredRemoraLinkHostId: nil)) }
         #endif
+    }
+
+    private var visibleConversationKey: ThreadKey? {
+        navigationPath.last?.conversationKey
+    }
+
+    private var actionContext: RemoraActionNavigationContext {
+        let navigationObservation = appModel.navigationObservation
+        let activeKey = navigationObservation.activeThread
+        let sessions = navigationObservation.sessionTargets
+        let terminalOwnsKeyboard = navigationPath.last?.ownsTerminalKeyboard == true
+        return RemoraActionNavigationContext(
+            canStartThread: defaultNewSessionServerId(
+                preferredServerId: homeDashboardModel.selectedServerId
+            ) != nil,
+            canSearchThreads: navigationMode == .split || navigationPath.isEmpty,
+            canNavigateBack: !navigationPath.isEmpty,
+            canNavigateForward: activeKey != nil && visibleConversationKey != activeKey,
+            canCycleThreads: sessions.count > 1,
+            canOpenTerminal: terminalLauncher != nil,
+            isConversationVisible: visibleConversationKey != nil,
+            terminalOwnsKeyboard: terminalOwnsKeyboard
+        )
     }
 
     private var pinnedThreadHydrationSignature: String {
@@ -87,25 +86,24 @@ struct HomeNavigationView: View {
             .map { "\($0.serverId)/\($0.threadId)" }
             .joined(separator: "|")
         let pinnedSet = Set(homeDashboardModel.pinnedKeys)
-        let servers = appModel.snapshot?.servers
+        let servers = appModel.navigationObservation.servers
             .map { "\($0.serverId)=\(String(describing: $0.transportState)):\($0.port)" }
-            .joined(separator: "|") ?? ""
-        let sessions = appModel.snapshot?.sessionSummaries
+            .joined(separator: "|")
+        let sessions = appModel.navigationObservation.sessionTargets
             .compactMap { summary -> String? in
                 guard pinnedSet.contains(PinnedThreadKey(threadKey: summary.key)) else { return nil }
                 return "\(homeHydrationId(summary.key)):\(summary.isResumed)"
             }
             .joined(separator: "|")
-            ?? ""
         return "\(pins)|\(servers)|\(sessions)"
     }
 
     @ViewBuilder
-    private var rootNavigationContent: some View {
-        if RemoraPlatform.isRegularSurface(horizontalSizeClass: horizontalSizeClass) {
+    private func rootNavigationContent(for mode: RemoraNavigationMode) -> some View {
+        if mode == .split {
             splitRoot
         } else {
-            primaryNavigationStack
+            primaryNavigationStack(isEmbeddedInSplit: false)
         }
     }
 
@@ -120,19 +118,11 @@ struct HomeNavigationView: View {
                 // sidebar frosted-glass look with subtle vibrancy.
                 .containerBackground(.ultraThinMaterial, for: .navigation)
         } detail: {
-            primaryNavigationStack
+            primaryNavigationStack(isEmbeddedInSplit: true)
         }
     }
 
-    /// Whether the primary navigation stack is embedded as the detail pane
-    /// of a `NavigationSplitView`. In that case the sidebar already hosts
-    /// `HomeDashboardView`, so the detail pane's root should be an empty
-    /// welcome surface instead of a second dashboard rendering.
-    private var isEmbeddedInSplit: Bool {
-        RemoraPlatform.isRegularSurface(horizontalSizeClass: horizontalSizeClass)
-    }
-
-    private var primaryNavigationStack: some View {
+    private func primaryNavigationStack(isEmbeddedInSplit: Bool) -> some View {
         NavigationStack(path: $navigationPath) {
             Group {
                 if isHomeRouteActive {
@@ -251,8 +241,8 @@ struct HomeNavigationView: View {
                     .toolbar(.hidden, for: .navigationBar)
                     .background(RemoraTheme.backgroundGradient.ignoresSafeArea())
                 case let .serverInfo(serverId):
-                    ConversationInfoView(
-                        threadKey: nil,
+                    RemoraLinkServerInfoDestination(
+                        appModel: appModel,
                         serverId: serverId,
                         onOpenWallpaper: { navigationPath.append(.serverWallpaperSelection(serverId: serverId)) },
                         onOpenShell: remoteShellLauncher(for: serverId)
@@ -288,10 +278,10 @@ struct HomeNavigationView: View {
                     AppsListView()
                 case .savedApp(let appId):
                     SavedAppDetailView(appId: appId)
-                case let .terminal(preferredAlleycatNodeId):
+                case let .terminal(preferredRemoraLinkHostId):
                     TerminalScreen(
                         cwd: preferredTerminalWorkingDirectory(),
-                        preferredAlleycatNodeId: preferredAlleycatNodeId
+                        preferredRemoraLinkHostId: preferredRemoraLinkHostId
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -300,18 +290,48 @@ struct HomeNavigationView: View {
     }
 
     var body: some View {
-        rootNavigationContent
+        let navigationObservation = appModel.navigationObservation
+        let _ = navigationObservation.revision
+
+        GeometryReader { geometry in
+            let resolvedMode = RemoraNavigationLayoutPolicy.mode(for: geometry.size)
+            rootNavigationContent(for: resolvedMode)
+                .onAppear {
+                    navigationMode = resolvedMode
+                }
+                .onChange(of: resolvedMode) { _, nextMode in
+                    // Route state is deliberately untouched. The selected
+                    // detail therefore survives Stage Manager, rotation, and
+                    // split-screen threshold crossings.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        navigationMode = nextMode
+                    }
+                }
+        }
         .task {
             homeDashboardModel.bind(appModel: appModel)
             updateHomeDashboardActivity()
             hydratePinnedThreadsIfNeeded()
-            seedInitialConversationIfNeeded(activeKey: appModel.snapshot?.activeThread)
+            seedInitialConversationIfNeeded(activeKey: navigationObservation.activeThread)
+            syncActionContext()
         }
-        .onChange(of: appModel.snapshot?.activeThread) { _, newKey in
+        .onChange(of: navigationObservation.activeThread) { _, newKey in
             seedInitialConversationIfNeeded(activeKey: newKey)
         }
         .onChange(of: navigationPath.count) { _, _ in
             updateHomeDashboardActivity()
+            syncActionContext()
+        }
+        .onChange(of: navigationPath.last) { _, _ in
+            syncActionContext()
+        }
+        .onChange(of: navigationMode) { _, _ in
+            syncActionContext()
+        }
+        .onChange(of: actionContext) { _, _ in
+            syncActionContext()
         }
         .onChange(of: pinnedThreadHydrationSignature) { _, _ in
             hydratePinnedThreadsIfNeeded()
@@ -325,7 +345,7 @@ struct HomeNavigationView: View {
         .onChange(of: SavedAppsNavigation.shared.pendingConversationThreadId) { _, newThreadId in
             guard let newThreadId else { return }
             _ = SavedAppsNavigation.shared.consumeConversationRequest()
-            guard let key = appModel.snapshot?.threads.first(where: { $0.key.threadId == newThreadId })?.key else {
+            guard let key = navigationObservation.threadKey(threadId: newThreadId) else {
                 return
             }
             // Pop the saved-app detail off the stack, then push the conversation.
@@ -334,25 +354,16 @@ struct HomeNavigationView: View {
             }
             openConversation(key)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .remoraActionRequested)) { notification in
+            guard let request = notification.object as? RemoraActionRequest else { return }
+            handleActionRequest(request)
+        }
         #if targetEnvironment(macCatalyst)
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandNewSession)) { _ in
-            handleNewSessionTap()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandNavigateBack)) { _ in
-            if !navigationPath.isEmpty { navigationPath.removeLast() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .remoraCommandNavigateForward)) { _ in
-            if let activeKey = appModel.snapshot?.activeThread,
-               navigationPath.last != .conversation(activeKey) {
-                navigationPath.append(.conversation(activeKey))
-            }
-        }
         .onReceive(NotificationCenter.default.publisher(for: .remoraCommandSelectSession)) { notification in
             guard let index = notification.userInfo?["index"] as? Int,
-                  let summaries = appModel.snapshot?.sessionSummaries,
-                  summaries.indices.contains(index) else { return }
+                  navigationObservation.sessionTargets.indices.contains(index) else { return }
             Task { @MainActor in
-                await openSessionAtIndex(summaries[index])
+                _ = await openSessionAtIndex(navigationObservation.sessionTargets[index])
             }
         }
         #endif
@@ -420,9 +431,91 @@ struct HomeNavigationView: View {
     private func defaultNewSessionServerId(preferredServerId: String? = nil) -> String? {
         SessionLaunchSupport.defaultConnectedServerId(
             connectedServerIds: connectedServerOptions.map(\.id),
-            activeThreadKey: appModel.snapshot?.activeThread,
+            activeThreadKey: appModel.navigationObservation.activeThread,
             preferredServerId: preferredServerId
         )
+    }
+
+    private func syncActionContext() {
+        actionCenter.updateNavigationContext(actionContext)
+    }
+
+    private func handleActionRequest(_ request: RemoraActionRequest) {
+        // SwiftUI can coalesce route and snapshot observation. Refresh the
+        // catalog from the view's current values before accepting a request
+        // that may have been issued from an older palette row or menu state.
+        syncActionContext()
+        guard request.contextRevision == actionCenter.contextRevision,
+              actionCenter.item(for: request.id).availability.isEnabled else {
+            request.finish(errorMessage: "The active destination changed. Choose the action again.")
+            return
+        }
+
+        switch request.id {
+        case .showCommandPalette:
+            actionCenter.presentPalette()
+            request.finish()
+        case .newThread:
+            openNewThread()
+            request.finish()
+        case .searchThreads:
+            if navigationMode == .compact {
+                navigationPath.removeAll()
+            }
+            homeInputMode = .search
+            request.finish()
+        case .navigateBack:
+            popCurrentRoute()
+            request.finish()
+        case .navigateForward:
+            guard let activeKey = appModel.navigationObservation.activeThread else {
+                request.finish(errorMessage: "There is no active thread to open.")
+                return
+            }
+            navigationPath = HomeNavigationPathPolicy.selectingConversation(
+                activeKey,
+                in: navigationPath,
+                mode: navigationMode
+            )
+            request.finish()
+        case .previousThread:
+            cycleThread(by: -1, request: request)
+        case .nextThread:
+            cycleThread(by: 1, request: request)
+        case .sendMessage:
+            // The focused composer is the deepest handler and completes the
+            // request after it has revalidated its own input state.
+            break
+        case .openTerminal:
+            terminalLauncher?()
+            request.finish()
+        case .showSettings:
+            appState.showSettings = true
+            request.finish()
+        }
+    }
+
+    private func cycleThread(by offset: Int, request: RemoraActionRequest) {
+        let sessions = appModel.navigationObservation.sessionTargets
+        guard sessions.count > 1 else {
+            request.finish(errorMessage: "Open at least two threads to cycle between them.")
+            return
+        }
+
+        let currentKey = visibleConversationKey ?? appModel.navigationObservation.activeThread
+        let currentIndex = currentKey.flatMap { key in
+            sessions.firstIndex(where: { $0.key == key })
+        } ?? (offset > 0 ? -1 : 0)
+        let targetIndex = (currentIndex + offset + sessions.count) % sessions.count
+        let target = sessions[targetIndex]
+
+        Task { @MainActor in
+            let errorMessage = await openSessionAtIndex(
+                target,
+                reportsError: request.source != .palette
+            )
+            request.finish(errorMessage: errorMessage)
+        }
     }
 
     private func createAndSelectProject(serverId: String, cwd: String) {
@@ -526,23 +619,10 @@ struct HomeNavigationView: View {
     }
 
     private func remoteShellLauncher(for serverId: String) -> (() -> Void)? {
-        guard experimentalFeatures.isEnabled(.terminal),
-              let nodeId = savedAlleycatNodeId(for: serverId) else {
-            return nil
-        }
+        guard experimentalFeatures.isEnabled(.terminal) else { return nil }
         return {
-            navigationPath.append(.terminal(preferredAlleycatNodeId: nodeId))
+            navigationPath.append(.terminal(preferredRemoraLinkHostId: serverId))
         }
-    }
-
-    private func savedAlleycatNodeId(for serverId: String) -> String? {
-        guard let saved = SavedServerStore.rememberedServers().first(where: { $0.id == serverId }),
-              let nodeId = normalizedNonEmpty(saved.alleycatNodeId),
-              let token = try? AlleycatCredentialStore.shared.loadToken(nodeId: nodeId),
-              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        return nodeId
     }
 
     private func normalizedNonEmpty(_ value: String?) -> String? {
@@ -557,8 +637,13 @@ struct HomeNavigationView: View {
         navigationPath.append(.sessions(serverId: server.id, title: server.displayName))
     }
 
-    private func openSessionAtIndex(_ summary: AppSessionSummary) async {
-        guard openingRecentSessionKey == nil else { return }
+    private func openSessionAtIndex(
+        _ summary: AppModelNavigationObservation.SessionTarget,
+        reportsError: Bool = true
+    ) async -> String? {
+        guard openingRecentSessionKey == nil else {
+            return "Another thread is still opening."
+        }
         openingRecentSessionKey = summary.key
         actionErrorMessage = nil
         defer { openingRecentSessionKey = nil }
@@ -576,8 +661,12 @@ struct HomeNavigationView: View {
             )
             appModel.activateThread(nextKey)
             replaceTopConversation(with: nextKey)
+            return nil
         } catch {
-            actionErrorMessage = error.localizedDescription
+            if reportsError {
+                actionErrorMessage = error.localizedDescription
+            }
+            return error.localizedDescription
         }
     }
 
@@ -673,7 +762,7 @@ struct HomeNavigationView: View {
             guard !hasSeededInitialConversationRoute,
                   !isStartingVoice,
                   navigationPath.isEmpty,
-                  appModel.snapshot?.activeThread == activeKey else {
+                  appModel.navigationObservation.activeThread == activeKey else {
                 return
             }
             hasSeededInitialConversationRoute = true
@@ -722,8 +811,11 @@ struct HomeNavigationView: View {
     private func openConversation(_ key: ThreadKey) {
         hasSeededInitialConversationRoute = true
         appState.showModelSelector = false
-        guard navigationPath.last != .conversation(key) else { return }
-        navigationPath.append(.conversation(key))
+        navigationPath = HomeNavigationPathPolicy.selectingConversation(
+            key,
+            in: navigationPath,
+            mode: navigationMode
+        )
     }
 
     private func openRealtimeVoice(_ key: ThreadKey) {
@@ -750,10 +842,12 @@ struct HomeNavigationView: View {
 
     private func replaceTopConversation(with key: ThreadKey) {
         hasSeededInitialConversationRoute = true
-        if case .conversation = navigationPath.last {
-            navigationPath.removeLast()
-        }
-        openConversation(key)
+        appState.showModelSelector = false
+        navigationPath = HomeNavigationPathPolicy.replacingTopConversation(
+            with: key,
+            in: navigationPath,
+            mode: navigationMode
+        )
     }
 
     /// Ambient hero-composer rendering for the split-view detail root. No
@@ -784,7 +878,7 @@ struct HomeNavigationView: View {
     /// `.newThread` as a destination; on split it's a no-op because the
     /// detail root already *is* the hero view (just pop back to it).
     private func openNewThread() {
-        if isEmbeddedInSplit {
+        if navigationMode == .split {
             if !navigationPath.isEmpty {
                 navigationPath.removeAll()
             }
@@ -835,6 +929,9 @@ struct HomeNavigationView: View {
             onOpenProjectPicker: { showProjectPicker = true },
             onThreadCreated: { key in homeDashboardModel.pinThread(key) },
             onShowSettings: { appState.showSettings = true },
+            onShowCommandPalette: {
+                _ = actionCenter.perform(.showCommandPalette, source: .toolbar)
+            },
             onShowApps: savedAppsStore.apps.isEmpty ? nil : { navigationPath.append(.appsList) },
             onShowTerminal: terminalLauncher,
             onPinThread: pinThread,
@@ -858,6 +955,7 @@ struct HomeNavigationView: View {
             onInputModeChange: { mode in
                 homeInputMode = mode
             },
+            requestedInputMode: homeInputMode,
             onSearchThreads: loadSearchThreads
         )
     }
@@ -878,6 +976,9 @@ struct HomeNavigationView: View {
             onOpenProjectPicker: { showProjectPicker = true },
             onThreadCreated: { key in homeDashboardModel.pinThread(key) },
             onShowSettings: { appState.showSettings = true },
+            onShowCommandPalette: {
+                _ = actionCenter.perform(.showCommandPalette, source: .toolbar)
+            },
             onShowApps: savedAppsStore.apps.isEmpty ? nil : { navigationPath.append(.appsList) },
             onShowTerminal: terminalLauncher,
             onPinThread: pinThread,
@@ -900,6 +1001,7 @@ struct HomeNavigationView: View {
             onInputModeChange: { mode in
                 homeInputMode = mode
             },
+            requestedInputMode: homeInputMode,
             onSearchThreads: loadSearchThreads
         )
     }
@@ -962,7 +1064,7 @@ struct HomeNavigationView: View {
 
     private func hydratePinnedThreadsIfNeeded() {
         let connectedServerIds = Set(
-            (appModel.snapshot?.servers ?? [])
+            appModel.navigationObservation.servers
                 .filter(\.isConnected)
                 .map(\.serverId)
         )
@@ -972,7 +1074,7 @@ struct HomeNavigationView: View {
             let key = pin.threadKey
             guard connectedServerIds.contains(key.serverId) else { continue }
             let id = homeHydrationId(key)
-            if appModel.snapshot?.sessionSummary(for: key)?.isResumed == true { continue }
+            if appModel.navigationObservation.sessionTarget(for: key)?.isResumed == true { continue }
             guard !hydratingPinnedHomeThreadIds.contains(id) else { continue }
             hydratingPinnedHomeThreadIds.insert(id)
 
@@ -1195,7 +1297,6 @@ struct HomeNavigationView: View {
 
     private func renameServer(_ serverId: String, newName: String) {
         SavedServerStore.rename(serverId: serverId, newName: newName)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )
@@ -1282,5 +1383,55 @@ struct HomeNavigationView: View {
             return thread.serverDisplayName
         }
         return "Sessions"
+    }
+}
+
+private struct RemoraLinkServerInfoDestination: View {
+    private struct RefreshKey: Hashable {
+        let serverId: String
+        let snapshotRevision: UInt64
+        let remoraLinkAvailable: Bool
+        let terminalEnabled: Bool
+    }
+
+    let appModel: AppModel
+    let serverId: String
+    let onOpenWallpaper: () -> Void
+    let onOpenShell: (() -> Void)?
+
+    @State private var eligibility = RemoraLinkTerminalEligibilityState()
+
+    private var refreshKey: RefreshKey {
+        RefreshKey(
+            serverId: serverId,
+            snapshotRevision: appModel.snapshotRevision,
+            remoraLinkAvailable: AppRuntimeController.shared.remoraLinkStatus == .available,
+            terminalEnabled: onOpenShell != nil
+        )
+    }
+
+    var body: some View {
+        ConversationInfoView(
+            threadKey: nil,
+            serverId: serverId,
+            onOpenWallpaper: onOpenWallpaper,
+            onOpenShell: eligibility.canOpenShell ? onOpenShell : nil
+        )
+        .onChange(of: refreshKey, initial: true) { _, key in
+            beginEligibilityRefresh(for: key)
+        }
+        .onDisappear {
+            eligibility.invalidate()
+        }
+    }
+
+    private func beginEligibilityRefresh(for key: RefreshKey) {
+        let generation = eligibility.beginRequest()
+        guard key.remoraLinkAvailable, key.terminalEnabled else { return }
+        Task {
+            guard let hosts = try? await appModel.client.remoraLinkHosts() else { return }
+            guard !Task.isCancelled, refreshKey == key else { return }
+            eligibility.apply(hosts: hosts, serverId: key.serverId, generation: generation)
+        }
     }
 }

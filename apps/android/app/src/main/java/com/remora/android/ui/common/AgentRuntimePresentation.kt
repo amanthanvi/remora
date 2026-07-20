@@ -24,12 +24,12 @@ import uniffi.codex_mobile_client.AppAgentMetadata
 
 /**
  * Bridge alias: Rust exposes agent identity as an opaque `String` (the
- * lowercase id alleycat advertises). The legacy `AgentRuntimeKind`
+ * lowercase id the remote host advertises). The legacy `AgentRuntimeKind`
  * name is preserved as a type alias so call sites compile; ALL agent
  * metadata — label, icon, BETA badge, sort order, capability flags —
  * comes from `AgentMetadataStore` keyed by id. There is no hardcoded
  * catalog of agent names in remora, so adding a new agent only
- * requires an entry in the alleycat manifest.
+ * requires an entry in the remote-host manifest.
  */
 typealias AgentRuntimeKind = String
 
@@ -63,7 +63,7 @@ val AgentRuntimeKind.runtimeSortIndex: Int
 
 /**
  * BETA badge driven by `presentation.is_beta`. Codex is always stable,
- * including cold-start SSH/alleycat paths before metadata is cached; other
+ * including cold-start SSH paths before metadata is cached; other
  * unknown agents stay beta by default until metadata says otherwise.
  */
 val AgentRuntimeKind.isBeta: Boolean
@@ -102,7 +102,7 @@ private fun AgentRuntimeKind.titlecased(): String {
 /**
  * Renders an agent's icon from the local drawable catalog
  * (`R.drawable.agent_<id>`) when one is bundled, falling back to a
- * monogram letter chip. Use this everywhere — new alleycat-advertised
+ * monogram letter chip. Use this everywhere — newly advertised
  * agents stay renderable without needing a remora release first.
  */
 @Composable

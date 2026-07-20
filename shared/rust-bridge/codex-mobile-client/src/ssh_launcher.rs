@@ -71,7 +71,7 @@ fn build_posix_command(spec: &ProcessSpec) -> io::Result<String> {
                 command.push_str(&quoted_cwd);
                 command.push_str(" || exit $?; fi; ");
             }
-            ProcessRole::ToolCommand => {
+            ProcessRole::ToolCommand | ProcessRole::Probe => {
                 command.push_str("cd ");
                 command.push_str(&quoted_cwd);
                 command.push_str(" && ");

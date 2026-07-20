@@ -50,7 +50,7 @@ struct SSHLoginSheet: View {
                     Section {
                         HStack(spacing: 12) {
                             Image(systemName: "terminal")
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(server.name)
                                     .remoraFont(.subheadline)
@@ -155,7 +155,7 @@ struct SSHLoginSheet: View {
                                     ProgressView().tint(RemoraTheme.accent)
                                 }
                                 Text("Connect")
-                                    .foregroundColor(RemoraTheme.accent)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     .remoraFont(.subheadline)
                             }
                         }
@@ -179,7 +179,7 @@ struct SSHLoginSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }

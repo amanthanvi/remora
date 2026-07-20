@@ -10,7 +10,7 @@ Cross-platform build, run, and desktop-driver helpers live here.
 - `loop-ios.sh`: repeats the supported iOS build/run lanes for local iteration.
 - `run-android.sh`: installs, launches, and captures Logcat for an emulator or device.
 - `switch-app-identity.sh`: switches local app IDs between `com.remora.app` and `com.<your-identifier>.remora` for Android+iOS (`--to your-identifier --identifier <name>`), with optional `--team-id` for iOS signing. For iOS it updates `apps/ios/project.yml` and regenerates `apps/ios/Remora.xcodeproj` via `xcodegen` (no direct `.xcodeproj` edits).
-- `update-alleycat-main.sh`: refreshes the shared Rust Alleycat dependencies.
+- `update-remora-link.sh`: explicitly pins the shared Rust dependencies to a reviewed commit from Remora's Alleycat maintenance fork.
 
 Common `codex-desktop-controller.mjs` flows:
 

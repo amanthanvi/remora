@@ -273,7 +273,7 @@ private struct ThemePickerRow: View {
             case .checkmark:
                 Image(systemName: "checkmark")
                     .remoraFont(size: 12, weight: .semibold)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
             }
         }
         .contentShape(Rectangle())
@@ -355,7 +355,7 @@ private struct ThemePickerSheet: View {
                     Button("Done") {
                         dismiss()
                     }
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }

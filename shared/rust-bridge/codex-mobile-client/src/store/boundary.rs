@@ -14,6 +14,7 @@ use super::snapshot::{
     AppConnectionProgressSnapshot, AppQueuedFollowUpPreview, AppSnapshot, AppVoiceSessionSnapshot,
     ServerHealthSnapshot, ServerSnapshot, ThreadSnapshot,
 };
+use super::{AgentActivityPhase, activity::project_agent_activity_phase};
 
 const LOCAL_USER_MESSAGE_ITEM_PREFIX: &str = "local-user-message:";
 
@@ -92,6 +93,8 @@ pub struct AppThreadSnapshot {
     pub hydrated_conversation_items: Vec<HydratedConversationItem>,
     pub queued_follow_ups: Vec<AppQueuedFollowUpPreview>,
     pub active_turn_id: Option<String>,
+    #[uniffi(default = None)]
+    pub activity_phase: Option<AgentActivityPhase>,
     pub active_plan_progress: Option<AppPlanProgressSnapshot>,
     pub pending_plan_implementation_prompt: Option<AppPlanImplementationPromptSnapshot>,
     pub context_tokens_used: Option<u64>,
@@ -121,6 +124,8 @@ pub struct AppThreadStateRecord {
     pub effective_sandbox_policy: Option<crate::types::AppSandboxPolicy>,
     pub queued_follow_ups: Vec<AppQueuedFollowUpPreview>,
     pub active_turn_id: Option<String>,
+    #[uniffi(default = None)]
+    pub activity_phase: Option<AgentActivityPhase>,
     pub active_plan_progress: Option<AppPlanProgressSnapshot>,
     pub pending_plan_implementation_prompt: Option<AppPlanImplementationPromptSnapshot>,
     pub context_tokens_used: Option<u64>,
@@ -415,6 +420,8 @@ pub struct AppSessionSummary {
     pub agent_status: AppSubagentStatus,
     pub updated_at: Option<i64>,
     pub has_active_turn: bool,
+    #[uniffi(default = None)]
+    pub activity_phase: Option<AgentActivityPhase>,
     pub is_resumed: bool,
     pub is_subagent: bool,
     pub is_fork: bool,
@@ -578,6 +585,7 @@ fn app_thread_snapshot_from_state(
             })
             .collect(),
         active_turn_id: thread.active_turn_id.clone(),
+        activity_phase: project_agent_activity_phase(snapshot, thread),
         active_plan_progress: thread.active_plan_progress.clone(),
         pending_plan_implementation_prompt: plan_implementation_prompt_for_thread(snapshot, thread),
         context_tokens_used: thread.context_tokens_used,
@@ -615,6 +623,7 @@ fn app_thread_state_record_from_state(
             })
             .collect(),
         active_turn_id: thread.active_turn_id.clone(),
+        activity_phase: project_agent_activity_phase(snapshot, thread),
         active_plan_progress: thread.active_plan_progress.clone(),
         pending_plan_implementation_prompt: plan_implementation_prompt_for_thread(snapshot, thread),
         context_tokens_used: thread.context_tokens_used,
@@ -651,7 +660,13 @@ pub(crate) fn session_summaries_from_snapshot(snapshot: &AppSnapshot) -> Vec<App
     let mut session_summaries = snapshot
         .threads
         .values()
-        .map(|thread| app_session_summary(thread, snapshot.servers.get(&thread.key.server_id)))
+        .map(|thread| {
+            app_session_summary(
+                snapshot,
+                thread,
+                snapshot.servers.get(&thread.key.server_id),
+            )
+        })
         .collect::<Vec<_>>();
     sort_session_summaries(&mut session_summaries);
     session_summaries
@@ -680,6 +695,7 @@ pub(crate) fn empty_session_summary(key: ThreadKey) -> AppSessionSummary {
         agent_status: AppSubagentStatus::Unknown,
         updated_at: None,
         has_active_turn: false,
+        activity_phase: None,
         is_resumed: false,
         is_subagent: false,
         is_fork: false,
@@ -697,6 +713,7 @@ pub(crate) fn empty_session_summary(key: ThreadKey) -> AppSessionSummary {
 }
 
 pub(crate) fn app_session_summary(
+    snapshot: &AppSnapshot,
     thread: &ThreadSnapshot,
     server: Option<&ServerSnapshot>,
 ) -> AppSessionSummary {
@@ -779,6 +796,7 @@ pub(crate) fn app_session_summary(
             .unwrap_or(AppSubagentStatus::Unknown),
         updated_at: thread.info.updated_at,
         has_active_turn: thread_has_active_turn(thread),
+        activity_phase: project_agent_activity_phase(snapshot, thread),
         is_resumed: thread.is_resumed,
         is_subagent,
         is_fork,
@@ -1346,7 +1364,8 @@ pub(crate) fn project_thread_update(
         return Ok(None);
     };
     let thread_snapshot = app_thread_snapshot_from_state(snapshot, thread)?;
-    let session_summary = app_session_summary(thread, snapshot.servers.get(&key.server_id));
+    let session_summary =
+        app_session_summary(snapshot, thread, snapshot.servers.get(&key.server_id));
     let agent_directory_version = current_agent_directory_version(snapshot);
     Ok(Some((
         thread_snapshot,
@@ -1363,7 +1382,8 @@ pub(crate) fn project_thread_state_update(
         return Ok(None);
     };
     let thread_state = app_thread_state_record_from_state(snapshot, thread)?;
-    let session_summary = app_session_summary(thread, snapshot.servers.get(&key.server_id));
+    let session_summary =
+        app_session_summary(snapshot, thread, snapshot.servers.get(&key.server_id));
     let agent_directory_version = current_agent_directory_version(snapshot);
     Ok(Some((
         thread_state,
@@ -1410,6 +1430,7 @@ pub(crate) fn current_agent_directory_version(snapshot: &AppSnapshot) -> u64 {
             .hash(&mut hasher);
         thread.info.updated_at.hash(&mut hasher);
         thread_has_active_turn(thread).hash(&mut hasher);
+        project_agent_activity_phase(snapshot, thread).hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1454,6 +1475,7 @@ fn agent_directory_version(session_summaries: &[AppSessionSummary]) -> u64 {
         summary.agent_status.hash(&mut hasher);
         summary.updated_at.hash(&mut hasher);
         summary.has_active_turn.hash(&mut hasher);
+        summary.activity_phase.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1489,8 +1511,8 @@ mod tests {
     };
     use crate::store::{AppSnapshot, ThreadSnapshot};
     use crate::types::{
-        AgentRuntimeKind, AppModeKind, AppPlanImplementationPromptSnapshot,
-        PendingUserInputRequest, ThreadInfo, ThreadKey, ThreadSummaryStatus,
+        AppModeKind, AppPlanImplementationPromptSnapshot, PendingUserInputRequest, ThreadInfo,
+        ThreadKey, ThreadSummaryStatus,
     };
 
     #[test]
@@ -1597,13 +1619,14 @@ mod tests {
         );
 
         assert!(thread.active_turn_id.is_none());
-        let summary = app_session_summary(&thread, None);
+        let summary = app_session_summary(&AppSnapshot::default(), &thread, None);
         assert!(summary.has_active_turn);
     }
 
     #[test]
     fn app_session_summary_keeps_title_distinct_from_preview() {
         let summary = app_session_summary(
+            &AppSnapshot::default(),
             &ThreadSnapshot::from_info(
                 "srv",
                 ThreadInfo {

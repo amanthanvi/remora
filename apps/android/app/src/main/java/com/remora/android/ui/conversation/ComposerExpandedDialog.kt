@@ -81,7 +81,7 @@ fun ComposerExpandedDialog(
                 ) {
                     IconButton(
                         onClick = onDismiss,
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                     ) {
                         Icon(
                             imageVector = Icons.Default.CloseFullscreen,
@@ -97,7 +97,7 @@ fun ComposerExpandedDialog(
                                 onDismiss()
                             },
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(RemoraTheme.minimumTouchTarget)
                                 .clip(CircleShape)
                                 .background(RemoraTheme.accent, CircleShape),
                         ) {

@@ -56,7 +56,7 @@ fun TurnStopwatchChip(
     }
 
     val label = formatStopwatch(elapsed)
-    val tint = RemoraTheme.textMuted.copy(alpha = 0.7f)
+    val tint = RemoraTheme.textMuted
 
     Row(
         modifier = modifier,

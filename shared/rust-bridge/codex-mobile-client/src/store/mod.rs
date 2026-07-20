@@ -1,4 +1,5 @@
 pub mod actions;
+mod activity;
 pub mod agent_metadata;
 pub mod boundary;
 pub mod reconcile;
@@ -7,7 +8,10 @@ pub mod snapshot;
 pub mod updates;
 mod voice;
 
-pub use agent_metadata::{AgentMetadataStore, AppAgentMetadata};
+pub use activity::AgentActivityPhase;
+pub use agent_metadata::{
+    AgentMetadataStore, AppAgentCapabilities, AppAgentMetadata, AppAgentPresentation,
+};
 
 pub(crate) use boundary::project_thread_snapshot;
 pub use boundary::{

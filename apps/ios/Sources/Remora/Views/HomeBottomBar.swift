@@ -18,6 +18,7 @@ enum HomeInputMode: Hashable {
 }
 
 struct HomeBottomBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var mode: HomeInputMode
     @Binding var searchQuery: String
     var collapseSuppressed = false
@@ -96,7 +97,13 @@ struct HomeBottomBar: View {
             }
             .padding(.horizontal, mode == .collapsed ? 14 : 0)
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: mode)
+        .animation(
+            RemoraMotionPolicy.animation(
+                .spring(response: 0.42, dampingFraction: 0.82),
+                reduceMotion: reduceMotion
+            ),
+            value: mode
+        )
     }
 
     private var plusButton: some View {
@@ -106,7 +113,7 @@ struct HomeBottomBar: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                 .frame(width: buttonSize, height: buttonSize)
                 .contentShape(Capsule())
         }
@@ -188,7 +195,7 @@ struct HomeBottomBar: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(RemoraTheme.accent)
+                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
 
             TextField("search threads", text: $searchQuery)
                 .textFieldStyle(.plain)
@@ -208,13 +215,16 @@ struct HomeBottomBar: View {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(RemoraTheme.textSecondary)
-                    .frame(width: 32, height: 32)
+                    .frame(
+                        width: RemoraAccessibilityMetrics.minimumHitTarget,
+                        height: RemoraAccessibilityMetrics.minimumHitTarget
+                    )
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .frame(height: buttonSize)
+        .frame(minHeight: buttonSize)
         .modifier(GlassCapsuleModifier(interactive: false))
         .overlay(
             Capsule(style: .continuous)
@@ -235,7 +245,12 @@ struct HomeBottomBar: View {
     }
 
     private func setMode(_ next: HomeInputMode) {
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+        withAnimation(
+            RemoraMotionPolicy.animation(
+                .spring(response: 0.42, dampingFraction: 0.82),
+                reduceMotion: reduceMotion
+            )
+        ) {
             mode = next
         }
     }

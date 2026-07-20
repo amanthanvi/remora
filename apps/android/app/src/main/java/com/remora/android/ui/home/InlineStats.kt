@@ -60,7 +60,7 @@ fun InlineStats(
                     Icon(
                         imageVector = Icons.Outlined.SubdirectoryArrowRight,
                         contentDescription = null,
-                        tint = RemoraTheme.textMuted.copy(alpha = 0.7f),
+                        tint = RemoraTheme.textMuted,
                         modifier = Modifier.size(size),
                     )
                 },
@@ -73,7 +73,7 @@ fun InlineStats(
                     Icon(
                         imageVector = Icons.Outlined.Code,
                         contentDescription = null,
-                        tint = RemoraTheme.textMuted.copy(alpha = 0.7f),
+                        tint = RemoraTheme.textMuted,
                         modifier = Modifier.size(size),
                     )
                 },
@@ -87,13 +87,13 @@ fun InlineStats(
             ) {
                 Text(
                     text = "+$additions",
-                    color = RemoraTheme.accent.copy(alpha = 0.7f),
+                    color = RemoraTheme.accent,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = CHIP_FONT_SP.scaled,
                 )
                 Text(
                     text = "-$deletions",
-                    color = RemoraTheme.danger.copy(alpha = 0.6f),
+                    color = RemoraTheme.danger,
                     fontFamily = RemoraTheme.monoFont,
                     fontSize = CHIP_FONT_SP.scaled,
                 )
@@ -109,9 +109,9 @@ fun InlineStats(
         if (tokenUsage != null && window != null && window > 0L) {
             val pct = ((tokenUsage.totalTokens.toDouble() / window.toDouble()) * 100.0).toInt()
             val color = if (pct > 80) {
-                RemoraTheme.warning.copy(alpha = 0.8f)
+                RemoraTheme.warning
             } else {
-                RemoraTheme.textMuted.copy(alpha = 0.7f)
+                RemoraTheme.textMuted
             }
             Text(
                 text = "$pct%",
@@ -135,7 +135,7 @@ private fun IconCountChip(
         icon(10.dp)
         Text(
             text = "$count",
-            color = RemoraTheme.textMuted.copy(alpha = 0.7f),
+            color = RemoraTheme.textMuted,
             fontFamily = RemoraTheme.monoFont,
             fontSize = CHIP_FONT_SP.scaled,
         )

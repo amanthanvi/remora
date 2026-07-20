@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,12 +26,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -54,14 +57,19 @@ fun ThreadSearchBar(
     isExpanded: Boolean,
     onQueryChange: (String) -> Unit,
     onExpandChange: (Boolean) -> Unit,
+    focusRequest: Int = 0,
+    onFocusChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(isExpanded) {
+    LaunchedEffect(isExpanded, focusRequest) {
         if (isExpanded) {
             focusRequester.requestFocus()
         }
+    }
+    DisposableEffect(Unit) {
+        onDispose { onFocusChanged(false) }
     }
 
     Row(
@@ -93,6 +101,7 @@ fun ThreadSearchBar(
                     else RemoraTheme.textMuted.copy(alpha = 0.25f),
                     shape = CircleShape,
                 )
+                .heightIn(min = RemoraTheme.minimumTouchTarget)
                 .clickable(enabled = !isExpanded) { onExpandChange(true) }
                 .padding(
                     horizontal = if (isExpanded) 12.dp else 12.dp,
@@ -113,8 +122,9 @@ fun ThreadSearchBar(
                     value = query,
                     onValueChange = onQueryChange,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
+                        .weight(1f)
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { onFocusChanged(it.isFocused) },
                     textStyle = TextStyle(
                         color = RemoraTheme.textPrimary,
                         fontSize = RemoraTextStyle.code.scaled,
@@ -142,7 +152,7 @@ fun ThreadSearchBar(
                         onQueryChange("")
                         onExpandChange(false)
                     },
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
                 ) {
                     Icon(
                         Icons.Default.Close,

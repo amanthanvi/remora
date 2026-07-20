@@ -5,9 +5,9 @@ Remora is a native iOS and Android client for
 servers, manages sessions, and shares mobile runtime logic through a Rust core.
 See [CONTEXT.md](CONTEXT.md) for the product boundary and architecture glossary.
 
-This repository contains the app sources, shared runtime, and developer build
-tooling. Store distribution automation and hosted push infrastructure are
-intentionally not included.
+This repository contains the app sources, shared runtime, developer build
+tooling, and the self-hostable Remora relay foundation. Store distribution
+automation and managed service deployment are intentionally not included.
 
 ## Quick Start
 
@@ -56,16 +56,16 @@ Session state, streaming, hydration, discovery, and auth logic belong in Rust.
 
 Remora supports embedded and remote Codex app-server sessions, ChatGPT OAuth,
 WebRTC voice, and remote terminals over SSH or paired hosts rendered by Ghostty.
-The embedded app-server is not an on-device shell: Remora does not bundle
-an on-device Linux wrapper, Alpine rootfs, or proot. Hosted push/proxy
-infrastructure, Watch, CarPlay, Live Activities, and store-release automation
-are intentionally out of scope.
+The embedded app-server is not an on-device shell; terminal sessions always run
+on a remote host. Opaque background wakeups are reconciled against durable
+state; notification payloads are never a source of truth or an approval
+surface. Watch, CarPlay, the full Live Activity
+extension, and store-release automation remain out of scope.
 
-Remote pairing should use upstream Alleycat, for example:
-
-```bash
-npx kittylitter
-```
+New remote pairing uses Remora Link. During development, build the native host
+from the reviewed source revision recorded in the Rust lockfile. The
+`npx remora-link` launcher will become the default bootstrap after its first
+trusted npm publication.
 
 ## License
 

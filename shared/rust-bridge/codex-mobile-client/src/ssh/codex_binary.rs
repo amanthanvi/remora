@@ -11,7 +11,7 @@
 
 use crate::shell_quoting::{cmd_quote, posix_quote as shell_quote, powershell_quote as ps_quote};
 
-use super::{PACKAGE_MANAGER_PROBE, PROFILE_INIT, RemoteShell};
+use super::RemoteShell;
 
 #[derive(Debug, Clone)]
 pub(crate) enum RemoteCodexBinary {
@@ -33,14 +33,7 @@ pub(super) fn resolve_codex_binary_script_posix() -> String {
     let template = crate::local_server::remora_codex_resolver_snippet(
         crate::ssh_scripts::posix::RESOLVE_CODEX_BINARY,
     );
-    crate::ssh_scripts::render(
-        &template,
-        &[
-            ("PROFILE_INIT", PROFILE_INIT),
-            ("PACKAGE_MANAGER_PROBE", PACKAGE_MANAGER_PROBE),
-            ("SHARED_LINES", &shared_lines),
-        ],
-    )
+    crate::ssh_scripts::render(&template, &[("SHARED_LINES", &shared_lines)])
 }
 
 pub(super) fn resolve_codex_binary_script_powershell() -> String {

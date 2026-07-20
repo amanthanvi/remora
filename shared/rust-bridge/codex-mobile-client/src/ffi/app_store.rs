@@ -250,6 +250,7 @@ mod tests {
                 changes: vec![HydratedFileChangeEntryData {
                     path: "src/lib.rs".to_string(),
                     kind: "update".to_string(),
+                    move_path: None,
                     diff: "@@ -1 +1\n-old\n+new\n".to_string(),
                     additions: 1,
                     deletions: 1,
@@ -667,6 +668,20 @@ impl AppStore {
         id: String,
     ) -> Option<crate::store::TerminalSessionSnapshot> {
         self.inner.app_store.terminal_session_snapshot(&id)
+    }
+
+    /// Resolve a non-secret canonical route for opening or attaching a
+    /// terminal to a thread. Passing a server-wide or foreign session id
+    /// fails closed instead of inheriting the currently visible thread.
+    pub fn resolve_thread_terminal_context(
+        &self,
+        key: crate::types::ThreadKey,
+        terminal_session_id: Option<String>,
+    ) -> Result<crate::terminal::ThreadTerminalContext, crate::terminal::ThreadTerminalContextError>
+    {
+        self.inner
+            .app_store
+            .resolve_thread_terminal_context(&key, terminal_session_id.as_deref())
     }
 
     /// Write `bytes` to the currently-active terminal session, if any.

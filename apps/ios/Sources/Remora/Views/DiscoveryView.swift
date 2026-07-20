@@ -10,7 +10,7 @@ struct DiscoveryView: View {
     @State private var pendingSSHServer: DiscoveredServer?
     @State private var sshAgentContext: SSHBridgeAgentContext?
     @State private var showManualEntry = false
-    @State private var showAlleycatSheet = false
+    @State private var showRemoraLinkSheet = false
     @State private var showSlingshotHosts = false
     @State private var slingshotEnvironments: [AppSlingshotEnvironment] = []
     @State private var slingshotIsLoading = false
@@ -152,10 +152,9 @@ struct DiscoveryView: View {
         .sheet(isPresented: $showSlingshotHosts) {
             slingshotHostsSheet
         }
-        .sheet(isPresented: $showAlleycatSheet) {
-            RemotePairingSheet(appModel: appModel, startScanningOnAppear: true) { result in
-                showAlleycatSheet = false
-                Task { await connectAlleycatTarget(result) }
+        .sheet(isPresented: $showRemoraLinkSheet) {
+            RemotePairingSheet(appModel: appModel, startScanningOnAppear: true) { _ in
+                Task { await appModel.refreshSnapshot() }
             }
         }
         .onChange(of: showManualEntry) { _, isPresented in
@@ -249,15 +248,15 @@ struct DiscoveryView: View {
                     .padding(.top, 8)
 
                 chooserCard(
-                    title: "Pair with Remora",
-                    subtitle: "Run npx kittylitter on the host, then scan the QR code it prints.",
+                    title: "Remora Link",
+                    subtitle: "Run npx --yes remora-link@latest pair on the host, then scan or paste its code.",
                     badge: "RECOMMENDED",
                     icon: "qrcode.viewfinder",
                     supportedAgents: Self.remoraAgents,
                     isRecommended: true,
                     accessibilityID: "discovery.chooser.remora"
                 ) {
-                    showAlleycatSheet = true
+                    showRemoraLinkSheet = true
                 }
 
                 chooserCard(
@@ -325,7 +324,7 @@ struct DiscoveryView: View {
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: icon)
                         .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .frame(width: 36, height: 36)
                         .background(
                             Circle()
@@ -341,7 +340,7 @@ struct DiscoveryView: View {
                             if let badge {
                                 Text(badge)
                                     .remoraFont(.caption2, weight: .semibold)
-                                    .foregroundColor(RemoraTheme.accentStrong)
+                                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                     .tracking(0.5)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -499,7 +498,7 @@ struct DiscoveryView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: serverIconName(for: server))
-                    .foregroundColor(server.hasCodexServer ? RemoraTheme.accent : RemoraTheme.textSecondary)
+                    .foregroundColor(server.hasCodexServer ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textSecondary)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(server.name)
@@ -933,49 +932,6 @@ struct DiscoveryView: View {
         }
     }
 
-    /// Called by the pairing sheet after it has already opened a
-    /// fully connected ServerSession. Persist the stable node/agent metadata
-    /// and navigate; the token stays in Keychain.
-    private func connectAlleycatTarget(_ result: RemotePairingTarget) async {
-        let synthesized = DiscoveredServer(
-            id: result.serverId,
-            name: result.displayName,
-            hostname: result.nodeId,
-            port: nil,
-            codexPorts: [],
-            sshPort: nil,
-            source: .manual,
-            hasCodexServer: true,
-            wakeMAC: nil,
-            sshPortForwardingEnabled: false,
-            websocketURL: nil,
-            preferredConnectionMode: nil,
-            preferredCodexPort: nil,
-            os: nil,
-            sshBanner: nil
-        )
-        SavedServerStore.rememberAlleycat(
-            synthesized,
-            nodeId: result.nodeId,
-            relay: result.params.relay,
-            agentName: result.agentName,
-            agentWire: alleycatWireStorageValue(result.agentWire)
-        )
-        await appModel.refreshSnapshot()
-        if appModel.snapshot?.servers.first(where: { $0.serverId == result.serverId })?.health == .connected {
-            navigateAfterConnect(synthesized)
-        }
-    }
-
-    private func alleycatWireStorageValue(_ wire: AppAlleycatAgentWire) -> String {
-        switch wire {
-        case .websocket:
-            return "websocket"
-        case .jsonl:
-            return "jsonl"
-        }
-    }
-
     private func connectViaSSH(
         server: DiscoveredServer,
         host: String,
@@ -1180,7 +1136,7 @@ struct DiscoveryView: View {
                                 Button("Retry") {
                                     Task { await loadSlingshotEnvironments() }
                                 }
-                                .foregroundColor(RemoraTheme.accent)
+                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                                 .remoraFont(.footnote, weight: .semibold)
                             }
                         } else if slingshotEnvironments.isEmpty {
@@ -1219,11 +1175,11 @@ struct DiscoveryView: View {
                         Task { await loadSlingshotEnvironments() }
                     }
                     .disabled(slingshotIsLoading)
-                    .foregroundColor(RemoraTheme.accent)
+                    .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { showSlingshotHosts = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
             .task {
@@ -1237,7 +1193,7 @@ struct DiscoveryView: View {
     private func slingshotEnvironmentRow(_ environment: AppSlingshotEnvironment) -> some View {
         HStack(spacing: 12) {
             Image(systemName: slingshotIconName(for: environment))
-                .foregroundColor(environment.online ? RemoraTheme.accent : RemoraTheme.textMuted)
+                .foregroundColor(environment.online ? RemoraTheme.accentForegroundOnSurface : RemoraTheme.textMuted)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(environment.displayName)
@@ -1411,7 +1367,7 @@ struct DiscoveryView: View {
                         Button(manualConnectionMode.primaryButtonTitle) {
                             submitManualEntry()
                         }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                         .remoraFont(.subheadline)
                     }
                     .listRowBackground(RemoraTheme.surface.opacity(0.6))
@@ -1423,7 +1379,7 @@ struct DiscoveryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Cancel") { showManualEntry = false }
-                        .foregroundColor(RemoraTheme.accent)
+                        .foregroundColor(RemoraTheme.accentForegroundOnSurface)
                 }
             }
         }

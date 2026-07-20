@@ -101,7 +101,10 @@ struct VoiceCallView: View {
                     Image(systemName: "ladybug.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(RemoraTheme.textSecondary)
-                        .frame(width: 34, height: 34)
+                        .frame(
+                            width: RemoraAccessibilityMetrics.minimumHitTarget,
+                            height: RemoraAccessibilityMetrics.minimumHitTarget
+                        )
                         .background(Circle().fill(RemoraTheme.surface.opacity(0.92)))
                 }
                 .buttonStyle(.plain)
@@ -120,7 +123,10 @@ struct VoiceCallView: View {
 
                 Text(session.phase.displayTitle)
                     .font(RemoraFont.monospaced(.caption, weight: .semibold))
-                    .foregroundColor(phaseColor(session.phase))
+                    .foregroundColor(RemoraTheme.textOnDarkOverlay)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color(hex: "#02082C")))
 
                 Spacer(minLength: 0)
             }
@@ -183,27 +189,20 @@ struct VoiceCallView: View {
             }
             .foregroundColor(session.route.supportsSpeakerToggle ? RemoraTheme.textPrimary : RemoraTheme.textMuted)
             .padding(.horizontal, 10)
-            .padding(.vertical, 9)
+            .frame(minHeight: RemoraAccessibilityMetrics.minimumHitTarget)
             .background(Capsule().fill(RemoraTheme.surface.opacity(0.92)))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .disabled(!session.route.supportsSpeakerToggle)
+        .accessibilityLabel("Audio route")
+        .accessibilityValue(session.route.label)
+        .accessibilityHint(session.route.supportsSpeakerToggle ? "Switches between speaker and receiver" : "This route cannot be changed")
     }
 
     private func visualWaveformLevel(_ rawLevel: Float, active: Bool) -> Float {
         let scaled = min(1, rawLevel * 3.1)
         return active ? max(0.08, scaled) : max(0, scaled)
-    }
-
-    private func phaseColor(_ phase: VoiceSessionPhase) -> Color {
-        switch phase {
-        case .connecting, .thinking, .handoff:
-            return RemoraTheme.warning
-        case .listening, .speaking:
-            return RemoraTheme.accent
-        case .error:
-            return RemoraTheme.danger
-        }
     }
 
     private func routeIcon(_ route: VoiceSessionAudioRoute) -> String {
@@ -701,10 +700,10 @@ private struct VoiceCreditsEntryRow: View {
     let entry: VoiceTranscriptEntry
     let textScale: CGFloat
 
-    private var titleColor: Color {
+    private var titleForegroundColor: Color {
         switch entry.kind {
         case .user, .liveUser:
-            return RemoraTheme.accent
+            return RemoraTheme.accentForeground
         case .assistant, .liveAssistant:
             return RemoraTheme.warning
         case .reasoning:
@@ -735,7 +734,7 @@ private struct VoiceCreditsEntryRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(entry.title)
                 .font(RemoraFont.monospaced(.caption, weight: .bold, scale: textScale))
-                .foregroundColor(titleColor)
+                .foregroundColor(titleForegroundColor)
 
             if !entry.body.isEmpty {
                 Group {

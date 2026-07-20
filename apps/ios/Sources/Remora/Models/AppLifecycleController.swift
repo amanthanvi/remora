@@ -8,6 +8,7 @@ private let appLifecycleSignpostLog = OSLog(
 
 @MainActor
 final class AppLifecycleController {
+    private static let maximumBackgroundThreadRefreshes = 4
     private var backgroundedTurnKeys: Set<ThreadKey> = []
     private var hasRecoveredCurrentForegroundSession = false
     private var hasEnteredBackgroundSinceLaunch = false
@@ -19,16 +20,13 @@ final class AppLifecycleController {
 
     func reconnectSavedServers(appModel: AppModel) async {
         let servers = SavedServerStore.reconnectRecords(rememberedOnly: true)
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: servers)
         await appModel.reconnectController.notifyNetworkChange()
         _ = await appModel.reconnectController.reconnectSavedServers()
         await appModel.refreshSnapshot()
-        AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
     }
 
     func reconnectServer(serverId: String, appModel: AppModel) async {
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(servers: SavedServerStore.reconnectRecords())
         _ = await appModel.reconnectController.reconnectServer(serverId: serverId)
         await appModel.refreshSnapshot()
@@ -58,9 +56,8 @@ final class AppLifecycleController {
 
     func appDidBecomeActive(
         appModel: AppModel,
-        hasActiveVoiceSession: Bool
+        hasActiveVoiceSession _: Bool
     ) {
-        guard !hasActiveVoiceSession else { return }
         guard !hasRecoveredCurrentForegroundSession else { return }
         hasRecoveredCurrentForegroundSession = true
 
@@ -101,19 +98,67 @@ final class AppLifecycleController {
         return keys
     }
 
+    /// Bounded by `BackgroundAwarenessController` to 27 seconds. The cursor is
+    /// only a wake high-water hint; success is determined by authenticated
+    /// reconnect/snapshot work, never by APNs delivery.
+    func reconcileBackgroundAwareness(
+        appModel: AppModel,
+        expectedCursor _: UInt64
+    ) async -> AuthenticatedBackgroundStateResult {
+        let previousSnapshot = appModel.snapshot
+
+        appModel.reconnectController.syncSavedServers(
+            servers: SavedServerStore.reconnectRecords(rememberedOnly: true)
+        )
+        await appModel.reconnectController.notifyNetworkChange()
+        let reconnectResults = await appModel.reconnectController.reconnectSavedServers()
+        guard reconnectResults.allSatisfy(\.success) else { return .failed }
+        guard await appModel.refreshSnapshotAuthoritative() else { return .failed }
+        guard !Task.isCancelled else { return .failed }
+
+        let activeKey = appModel.snapshot?.activeThread
+        let trackedKeys = appModel.snapshot?.threadsWithTrackedTurns.map(\.key) ?? []
+        var refreshKeys: [ThreadKey] = []
+        if let activeKey {
+            refreshKeys.append(activeKey)
+        }
+        for key in trackedKeys where !refreshKeys.contains(key) {
+            refreshKeys.append(key)
+        }
+
+        for key in refreshKeys.prefix(Self.maximumBackgroundThreadRefreshes) {
+            guard !Task.isCancelled else { return .failed }
+            do {
+                try await appModel.forceRefreshThreadAuthoritative(key: key)
+            } catch {
+                LLog.error(
+                    "background-awareness",
+                    "authoritative wake reconciliation failed"
+                )
+                return .failed
+            }
+        }
+
+        guard await appModel.refreshSnapshotAuthoritative() else { return .failed }
+        return previousSnapshot != appModel.snapshot ? .changed : .unchanged
+    }
+
     private func performForegroundRecovery(
         appModel: AppModel,
         needsInitialReconnect: Bool,
         keysToRefresh: Set<ThreadKey>
     ) async {
-        appModel.reconnectController.setMultiClankerAndQuicEnabled(enabled: true)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords(rememberedOnly: true)
         )
 
         let backgroundDuration = lastBackgroundedAt.map { Date().timeIntervalSince($0) }
         if let duration = backgroundDuration, duration > Self.longResumeThreshold {
-            await appModel.reconnectController.onLongResume()
+            do {
+                _ = try await appModel.client.remoraLinkLongResume()
+            } catch {
+                LLog.error("remora-link", "long-resume reconciliation failed", error: error)
+            }
         }
         lastBackgroundedAt = nil
 
@@ -139,6 +184,5 @@ final class AppLifecycleController {
             }
         }
 
-        AppRuntimeController.shared.persistAlleycatSecretKeyIfNeeded()
     }
 }

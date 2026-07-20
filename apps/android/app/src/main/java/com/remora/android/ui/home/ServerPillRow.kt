@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -118,6 +119,7 @@ private fun ServerPill(
                     else RemoraTheme.textPrimary.copy(alpha = 0.35f),
                     shape = RoundedCornerShape(20.dp),
                 )
+                .heightIn(min = RemoraTheme.minimumTouchTarget)
                 .combinedClickable(
                     onClick = onTap,
                     onLongClick = { showMenu = true },
@@ -249,6 +251,7 @@ private fun AddServerPill(
             .clip(RoundedCornerShape(20.dp))
             .background(RemoraTheme.textPrimary.copy(alpha = 0.06f))
             .border(0.6.dp, RemoraTheme.accent.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
+            .heightIn(min = RemoraTheme.minimumTouchTarget)
             .clickable(onClick = onTap)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,

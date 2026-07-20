@@ -35,7 +35,7 @@ struct CollaborationModeSelectorSheet: View {
                             Spacer()
                             if preset.kind == selectedMode {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(RemoraTheme.accent)
+                                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
                             }
                         }
                     }

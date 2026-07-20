@@ -15,7 +15,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Neutral Remora splash surface using the shared black, green, and mono visual system. */
+/** Neutral Remora splash surface using the shared deep-ocean and mono visual system. */
 @Composable
 fun AnimatedSplashScreen() {
     Box(

@@ -14,11 +14,16 @@ Remora keeps mobile parity for:
 - the `codex-debug-cli` and `codex-tui` developer clients.
 
 The embedded app-server is a retained Codex runtime. It is not a local terminal.
-Remora does not bundle an on-device shell, Linux rootfs, or proot.
+Terminal sessions always run on a remote host.
 
-The repository intentionally excludes hosted push/proxy infrastructure, Watch
-and complications, CarPlay, Live Activities, store release/distribution
-automation, Fastlane, and store-feedback triage.
+The repository includes a self-hostable Remora relay foundation and opaque
+mobile background-awareness clients. Push is a lossy wake hint over durable,
+sequenced Rust-owned state; it never carries prompts, transcripts, credentials,
+or approval actions. A managed hosted deployment and provider credentials are
+operational concerns outside this checkout. Live Activity support remains a
+typed bounded-status projection until its dedicated extension is implemented
+and verified. Watch and complications, CarPlay, store release/distribution
+automation, Fastlane, and store-feedback triage remain excluded.
 
 ## Architecture and Ownership
 
@@ -34,10 +39,20 @@ automation, Fastlane, and store-feedback triage.
 Remora is the only product identity. Upstream protocol identifiers remain only
 where changing them would break host compatibility:
 
-- `ALLEYCAT_*` constants and the `alleycat/1` ALPN;
-- the upstream host-bootstrap command already shown in the README and pairing
-  UI;
-- precise terminal input protocol terminology in implementation comments.
+- `ALLEYCAT_*` constants and the legacy `alleycat/1` ALPN;
+- the historical SSH-bridge dependency identity required by retained bridge
+  crates;
+- the time-bounded `_alleycat_seq` replay fallback accepted from the pinned
+  host while `_remora_link_seq` is the canonical v2 field;
+- the old `npx kittylitter` bootstrap string only where needed to detect or
+  explain an existing installation during the re-pair transition;
+- precise terminal Kitty protocol terminology in implementation comments;
+- exact legacy secret identifiers and Android backup exclusions retained as an
+  idempotent purge tombstone until direct upgrades from v1-writing builds are
+  no longer supported;
+- exact retired saved-server keys and host-ID prefix used only to migrate or
+  discard v1 records, after which surviving records are rewritten without
+  those keys.
 
 These are transport details, not UI branding. New product copy, persistence
 keys, package names, and symbols use Remora naming.
@@ -54,7 +69,9 @@ keys, package names, and symbols use Remora naming.
 | `ThreadKey` | Stable `(serverId, threadId)` identity for a conversation. |
 | `DiscoveryBridge` | Rust utility surface for discovery merge, ranking, dedupe, and probing policy. |
 | `SshBridge` | Rust utility surface for SSH connection, trust, forwarding, and remote bootstrap. |
-| Alleycat | Upstream remote-host pairing and transport protocol. |
+| Legacy pairing v1 | The retired bearer-token host pairing protocol. It is retained only for detection and explicit re-pair guidance. |
+| Remora Link | Remora-owned host daemon and v2 pairing/transport boundary. It detects and launches installed harnesses but never installs them. |
+| Remora relay | Durable sequenced event/outbox service for hosted or self-hosted deployments; APNs/FCM remain non-authoritative wake hints. |
 | Remote terminal | A shell on a paired or SSH-connected host; there is no on-device terminal backend. |
 | Ghostty | Retained renderer/input engine for remote terminal surfaces on iOS and Android. |
 | WebRTC voice | Native peer connection and audio processing on each platform, with signaling and shared state in Rust. |
@@ -66,9 +83,9 @@ keys, package names, and symbols use Remora naming.
 The minimum cross-platform gate is:
 
 ```bash
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rebuild-bindings
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make rust-test
-REMORA_SKIP_ALLEYCAT_UPDATE=1 make ios-sim-fast
+make rebuild-bindings
+make rust-test
+make ios-sim-fast
 cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 

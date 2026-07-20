@@ -73,8 +73,9 @@ pub async fn probe_local_server(port: u16) -> bool {
     }
 }
 
-/// Resolve a local `codex` binary using Alleycat's shared newest-version
-/// resolver, which is also used by SSH bootstrap and the Alleycat daemon.
+/// Resolve a local `codex` binary using the maintenance fork's shared,
+/// deterministic candidate precedence, also used by SSH bootstrap and the
+/// host daemon.
 pub fn resolve_codex_binary_local() -> Option<PathBuf> {
     alleycat_bridge_core::codex_resolver::resolve_latest_codex_binary(Path::new("codex"))
 }
