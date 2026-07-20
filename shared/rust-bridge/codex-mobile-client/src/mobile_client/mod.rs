@@ -1469,6 +1469,15 @@ impl MobileClient {
     /// Otherwise removing a disconnected server pill from the UI would be a
     /// no-op because the snapshot would still carry it.
     pub fn disconnect_server(&self, server_id: &str) {
+        if server_id.starts_with("remora-link:") {
+            let configured = match self.remora_link.read() {
+                Ok(value) => value.clone(),
+                Err(error) => error.into_inner().clone(),
+            };
+            if let Some(configured) = configured {
+                configured.close_shells_for_host(server_id);
+            }
+        }
         let session = self.sessions_write().remove(server_id);
         self.clear_direct_resume_markers_for_server(server_id);
         match self.alleycat_restart_targets.lock() {

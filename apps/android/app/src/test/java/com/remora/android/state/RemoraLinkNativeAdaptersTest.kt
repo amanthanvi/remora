@@ -44,10 +44,12 @@ class RemoraLinkNativeAdaptersTest {
         )
 
         assertSame(AppRemoraLinkJournalLoad.Missing, adapter.load())
+        assertEquals(0uL, adapter.revision.value)
         assertEquals(
             AppRemoraLinkJournalWriteOutcome.STORED,
             adapter.compareAndSwap(null, AppRemoraLinkJournalSnapshot(1uL, byteArrayOf(7))),
         )
+        assertEquals(1uL, adapter.revision.value)
         val loaded = adapter.load() as AppRemoraLinkJournalLoad.Loaded
         assertEquals(1uL, loaded.snapshot.revision)
         assertArrayEquals(byteArrayOf(7), loaded.snapshot.payload)
@@ -55,6 +57,7 @@ class RemoraLinkNativeAdaptersTest {
             AppRemoraLinkJournalWriteOutcome.CONFLICT,
             adapter.compareAndSwap(null, AppRemoraLinkJournalSnapshot(1uL, byteArrayOf(8))),
         )
+        assertEquals(1uL, adapter.revision.value)
         assertEquals(
             AppRemoraLinkJournalWriteOutcome.UNAVAILABLE,
             adapter.compareAndSwap(1uL, AppRemoraLinkJournalSnapshot(9uL, byteArrayOf(9))),

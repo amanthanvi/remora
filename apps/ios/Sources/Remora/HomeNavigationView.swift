@@ -54,7 +54,7 @@ struct HomeNavigationView: View {
         return nil
         #else
         guard experimentalFeatures.isEnabled(.terminal) else { return nil }
-        return { navigationPath.append(.terminal(preferredAlleycatNodeId: nil)) }
+        return { navigationPath.append(.terminal(preferredRemoraLinkHostId: nil)) }
         #endif
     }
 
@@ -241,8 +241,8 @@ struct HomeNavigationView: View {
                     .toolbar(.hidden, for: .navigationBar)
                     .background(RemoraTheme.backgroundGradient.ignoresSafeArea())
                 case let .serverInfo(serverId):
-                    ConversationInfoView(
-                        threadKey: nil,
+                    RemoraLinkServerInfoDestination(
+                        appModel: appModel,
                         serverId: serverId,
                         onOpenWallpaper: { navigationPath.append(.serverWallpaperSelection(serverId: serverId)) },
                         onOpenShell: remoteShellLauncher(for: serverId)
@@ -278,10 +278,10 @@ struct HomeNavigationView: View {
                     AppsListView()
                 case .savedApp(let appId):
                     SavedAppDetailView(appId: appId)
-                case let .terminal(preferredAlleycatNodeId):
+                case let .terminal(preferredRemoraLinkHostId):
                     TerminalScreen(
                         cwd: preferredTerminalWorkingDirectory(),
-                        preferredAlleycatNodeId: preferredAlleycatNodeId
+                        preferredRemoraLinkHostId: preferredRemoraLinkHostId
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -619,23 +619,10 @@ struct HomeNavigationView: View {
     }
 
     private func remoteShellLauncher(for serverId: String) -> (() -> Void)? {
-        guard experimentalFeatures.isEnabled(.terminal),
-              let nodeId = savedAlleycatNodeId(for: serverId) else {
-            return nil
-        }
+        guard experimentalFeatures.isEnabled(.terminal) else { return nil }
         return {
-            navigationPath.append(.terminal(preferredAlleycatNodeId: nodeId))
+            navigationPath.append(.terminal(preferredRemoraLinkHostId: serverId))
         }
-    }
-
-    private func savedAlleycatNodeId(for serverId: String) -> String? {
-        guard let saved = SavedServerStore.rememberedServers().first(where: { $0.id == serverId }),
-              let nodeId = normalizedNonEmpty(saved.alleycatNodeId),
-              let token = try? AlleycatCredentialStore.shared.loadToken(nodeId: nodeId),
-              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        return nodeId
     }
 
     private func normalizedNonEmpty(_ value: String?) -> String? {
@@ -1397,5 +1384,55 @@ struct HomeNavigationView: View {
             return thread.serverDisplayName
         }
         return "Sessions"
+    }
+}
+
+private struct RemoraLinkServerInfoDestination: View {
+    private struct RefreshKey: Hashable {
+        let serverId: String
+        let snapshotRevision: UInt64
+        let remoraLinkAvailable: Bool
+        let terminalEnabled: Bool
+    }
+
+    let appModel: AppModel
+    let serverId: String
+    let onOpenWallpaper: () -> Void
+    let onOpenShell: (() -> Void)?
+
+    @State private var eligibility = RemoraLinkTerminalEligibilityState()
+
+    private var refreshKey: RefreshKey {
+        RefreshKey(
+            serverId: serverId,
+            snapshotRevision: appModel.snapshotRevision,
+            remoraLinkAvailable: AppRuntimeController.shared.remoraLinkStatus == .available,
+            terminalEnabled: onOpenShell != nil
+        )
+    }
+
+    var body: some View {
+        ConversationInfoView(
+            threadKey: nil,
+            serverId: serverId,
+            onOpenWallpaper: onOpenWallpaper,
+            onOpenShell: eligibility.canOpenShell ? onOpenShell : nil
+        )
+        .onChange(of: refreshKey, initial: true) { _, key in
+            beginEligibilityRefresh(for: key)
+        }
+        .onDisappear {
+            eligibility.invalidate()
+        }
+    }
+
+    private func beginEligibilityRefresh(for key: RefreshKey) {
+        let generation = eligibility.beginRequest()
+        guard key.remoraLinkAvailable, key.terminalEnabled else { return }
+        Task {
+            guard let hosts = try? await appModel.client.remoraLinkHosts() else { return }
+            guard !Task.isCancelled, refreshKey == key else { return }
+            eligibility.apply(hosts: hosts, serverId: key.serverId, generation: generation)
+        }
     }
 }

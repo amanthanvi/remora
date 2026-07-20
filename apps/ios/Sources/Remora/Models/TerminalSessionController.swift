@@ -68,18 +68,24 @@ final class TerminalSessionController {
                     size: terminalSize
                 )
             }
-            sessionId = id
-            appStore.setActiveTerminalId(id: id)
-            guard let session = appStore.terminalSessionHandle(id: id) else {
-                phase = .failed("Session disappeared after open")
-                sessionId = nil
+            guard generation == eventGeneration else {
+                try? await appStore.closeTerminalSession(id: id)
                 return
             }
+            guard let session = appStore.terminalSessionHandle(id: id) else {
+                try? await appStore.closeTerminalSession(id: id)
+                guard generation == eventGeneration else { return }
+                phase = .failed("Session disappeared after open")
+                return
+            }
+            sessionId = id
+            appStore.setActiveTerminalId(id: id)
             let listener = TerminalOutputRelay(owner: self, generation: generation)
             outputSubscription = session.subscribeOutputEvents(listener: listener)
             outputListener = listener
             phase = .running
         } catch {
+            guard generation == eventGeneration else { return }
             sessionId = nil
             if let challenge = Self.sshHostTrustChallenge(from: error, backend: backend) {
                 sshTrustChallenge = challenge
@@ -197,12 +203,13 @@ final class TerminalSessionController {
         outputSubscription = nil
         outputListener?.deactivate()
         outputListener = nil
-        guard let id = sessionId else { return }
+        let id = sessionId
         sessionId = nil
+        phase = .idle
+        guard let id else { return }
         if appStore.activeTerminalId() == id {
             appStore.setActiveTerminalId(id: nil)
         }
-        phase = .idle
         Task.detached(priority: .utility) { [appStore] in
             try? await appStore.closeTerminalSession(id: id)
         }

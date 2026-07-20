@@ -45,6 +45,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,14 +64,15 @@ import androidx.compose.ui.unit.sp
 import com.remora.android.core.bridge.GhosttyRendererBridge
 import com.remora.android.core.bridge.GhosttyRendererStatus
 import com.remora.android.state.ActiveTerminalRegistry
-import com.remora.android.state.AlleycatCredentialStore
 import com.remora.android.state.AppModel
 import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SavedSshCredential
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
 import com.remora.android.state.TerminalSessionController
+import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.TerminalBackendKind
 import uniffi.codex_mobile_client.TerminalSshAuth
@@ -78,26 +80,74 @@ import uniffi.codex_mobile_client.TerminalSshAuth
 @Composable
 fun TerminalScreen(
     cwd: String? = null,
-    preferredAlleycatNodeId: String? = null,
+    preferredRemoraLinkHostId: String? = null,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val appModel = LocalAppModel.current
     val controller = remember { TerminalSessionController(scope) }
     val rendererStatus = remember { GhosttyRendererBridge.status() }
     var nativeRendererAvailable by remember {
         mutableStateOf(rendererStatus.canCreateAndroidSurface)
     }
-    val backendOptions = remember(cwd) { loadBackendOptions(context, cwd) }
-    var selectedBackendId by remember(preferredAlleycatNodeId) { mutableStateOf<String?>(null) }
-    val selectedBackend = backendOptions.firstOrNull { it.id == selectedBackendId }
-        ?: backendOptions.firstOrNull()
+    val remoraLinkAvailable by appModel.remoraLinkAvailable.collectAsState()
+    val remoraLinkJournalRevision by appModel.remoraLinkJournalBackend.revision.collectAsState()
+    var remoraLinkHosts by remember { mutableStateOf(emptyList<RemoraLinkTerminalHost>()) }
+    var remoraLinkHostsLoaded by remember { mutableStateOf(false) }
+    var remoraLinkRefreshGeneration by remember { mutableLongStateOf(0L) }
+    val backendOptions = remember(cwd, remoraLinkHosts) {
+        loadBackendOptions(context, cwd, remoraLinkHosts)
+    }
+    var selectedBackendId by remember(preferredRemoraLinkHostId) { mutableStateOf<String?>(null) }
+    val selectedBackend = selectedBackendId
+        ?.let { selectedId -> backendOptions.firstOrNull { it.id == selectedId } }
+        ?: if (remoraLinkHostsLoaded) {
+            initialBackendId(backendOptions, preferredRemoraLinkHostId)
+                ?.let { initialId -> backendOptions.firstOrNull { it.id == initialId } }
+        } else {
+            null
+        }
     var terminalGridSize by remember { mutableStateOf(TerminalGridSize(cols = 80, rows = 24)) }
     var showConfigSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         TerminalConfigPrefs.initialize(context)
+    }
+
+    LaunchedEffect(remoraLinkAvailable, remoraLinkJournalRevision) {
+        val generation = ++remoraLinkRefreshGeneration
+        remoraLinkHostsLoaded = false
+        if (!remoraLinkAvailable) {
+            remoraLinkHosts = emptyList()
+            if (selectedBackendId == null) {
+                selectedBackendId = initialBackendId(
+                    loadBackendOptions(context, cwd, emptyList()),
+                    preferredRemoraLinkHostId,
+                )
+            }
+            remoraLinkHostsLoaded = true
+            return@LaunchedEffect
+        }
+        val refreshedHosts: List<RemoraLinkTerminalHost>? = try {
+            appModel.withRemoraLinkV2 { it.remoraLinkHosts() }.remoraLinkTerminalHosts()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        if (generation != remoraLinkRefreshGeneration) return@LaunchedEffect
+        if (refreshedHosts != null) {
+            remoraLinkHosts = refreshedHosts
+        }
+        if (selectedBackendId == null) {
+            selectedBackendId = initialBackendId(
+                loadBackendOptions(context, cwd, refreshedHosts ?: remoraLinkHosts),
+                preferredRemoraLinkHostId,
+            )
+        }
+        remoraLinkHostsLoaded = true
     }
 
     val currentTerminalConfig = remember(
@@ -111,14 +161,8 @@ fun TerminalScreen(
         terminalPaletteVisuals(currentTerminalConfig.theme)
     }
 
-    LaunchedEffect(backendOptions, preferredAlleycatNodeId) {
-        if (backendOptions.none { it.id == selectedBackendId }) {
-            selectedBackendId = initialBackendId(backendOptions, preferredAlleycatNodeId)
-        }
-    }
-
     LaunchedEffect(selectedBackend?.id) {
-        selectedBackend?.let { controller.switchBackend(it.backend) }
+        selectedBackend?.let { controller.switchBackend(it.backend) } ?: controller.close()
     }
 
     DisposableEffect(controller) {
@@ -689,54 +733,38 @@ private data class TerminalBackendOption(
     val title: String,
     val runningLabel: String,
     val icon: ImageVector,
-    val alleycatNodeId: String? = null,
+    val remoraLinkHostId: String? = null,
     val supportsResize: Boolean,
     val backend: TerminalBackendKind,
 )
 
 private fun initialBackendId(
     options: List<TerminalBackendOption>,
-    preferredAlleycatNodeId: String?,
-): String? {
-    val preferred = normalized(preferredAlleycatNodeId)
-    return options.firstOrNull { it.alleycatNodeId == preferred }?.id
-        ?: options.firstOrNull()?.id
-}
+    preferredRemoraLinkHostId: String?,
+): String? = resolveInitialTerminalBackendId(
+    options = options.map { it.id to it.remoraLinkHostId },
+    preferredRemoraLinkHostId = preferredRemoraLinkHostId,
+)
 
 private fun loadBackendOptions(
     context: Context,
     cwd: String?,
+    remoraLinkHosts: List<RemoraLinkTerminalHost>,
 ): List<TerminalBackendOption> {
-    val options = mutableListOf<TerminalBackendOption>()
-    val credentialStore = AlleycatCredentialStore(context.applicationContext)
+    val options = remoraLinkHosts.mapTo(mutableListOf()) { host ->
+        TerminalBackendOption(
+            id = host.hostId,
+            title = host.displayName.trim().ifEmpty { "Remote shell" },
+            runningLabel = "remote shell",
+            icon = Icons.Outlined.Storage,
+            remoraLinkHostId = host.hostId,
+            supportsResize = true,
+            backend = host.backend,
+        )
+    }
     val sshCredentialStore = SshCredentialStore(context.applicationContext)
-    val seenNodeIds = mutableSetOf<String>()
     val seenSshKeys = mutableSetOf<String>()
     SavedServerStore.remembered(context).forEach { saved ->
-        val nodeId = normalized(saved.alleycatNodeId)
-        if (nodeId != null && seenNodeIds.add(nodeId)) {
-            val token = credentialStore.loadToken(nodeId)?.trim()?.takeIf { it.isNotEmpty() }
-            if (token != null) {
-                options.add(
-                    TerminalBackendOption(
-                        id = "alleycat-$nodeId",
-                        title = saved.name.trim().ifEmpty { "Remote shell" },
-                        runningLabel = "remote shell",
-                        icon = Icons.Outlined.Storage,
-                        alleycatNodeId = nodeId,
-                        supportsResize = true,
-                        backend = TerminalBackendKind.RemoteAlleycat(
-                            nodeId = nodeId,
-                            token = token,
-                            relay = normalized(saved.alleycatRelay),
-                            shell = null,
-                        ),
-                    ),
-                )
-                return@forEach
-            }
-        }
-
         val host = saved.hostname.takeIf { it.isNotBlank() } ?: return@forEach
         val sshPort = (saved.sshPort ?: 22).toInt()
         val key = "${host.lowercase()}:$sshPort"

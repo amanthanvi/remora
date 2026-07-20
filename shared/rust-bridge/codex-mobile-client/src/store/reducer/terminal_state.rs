@@ -313,6 +313,29 @@ mod tests {
     }
 
     #[test]
+    fn v2_terminal_snapshot_never_retains_host_id_or_shell_choice() {
+        let reducer = AppStoreReducer::new();
+        reducer.open_terminal_session_record(
+            "terminal-v2".to_string(),
+            TerminalBackendKind::RemoteRemoraLink {
+                host_id: "remora-link:sensitive-endpoint-id".to_string(),
+                shell: Some("/private/bin/zsh".to_string()),
+            },
+            80,
+            24,
+        );
+
+        let stored = reducer.terminal_session_snapshot("terminal-v2").unwrap();
+        let boundary_debug = format!("{stored:?}");
+        assert_eq!(
+            stored.context.transport.unwrap().kind,
+            TerminalTransportKind::RemoraLink
+        );
+        assert!(!boundary_debug.contains("sensitive-endpoint-id"));
+        assert!(!boundary_debug.contains("/private/bin/zsh"));
+    }
+
+    #[test]
     fn unscoped_or_foreign_terminal_cannot_attach_to_thread() {
         let reducer = AppStoreReducer::new();
         reducer.sync_thread_list("server", &[thread_info("thread-a")]);

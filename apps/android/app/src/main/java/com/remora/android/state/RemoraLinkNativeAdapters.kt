@@ -38,15 +38,24 @@ class AndroidRemoraLinkJournalBackend internal constructor(
 ) : AppRemoraLinkJournalBackend {
     constructor(context: android.content.Context) : this(RemoraLinkJournalStore(context))
 
+    private val _revision = MutableStateFlow<ULong?>(null)
+    val revision: StateFlow<ULong?> = _revision.asStateFlow()
+
     override suspend fun load(): AppRemoraLinkJournalLoad = onIo {
         when (val status = store.load()) {
-            RemoraLinkJournalLoadStatus.Missing -> AppRemoraLinkJournalLoad.Missing
-            is RemoraLinkJournalLoadStatus.Loaded -> AppRemoraLinkJournalLoad.Loaded(
-                AppRemoraLinkJournalSnapshot(
-                    revision = status.snapshot.revision,
-                    payload = status.snapshot.opaquePayload,
-                ),
-            )
+            RemoraLinkJournalLoadStatus.Missing -> {
+                _revision.value = 0uL
+                AppRemoraLinkJournalLoad.Missing
+            }
+            is RemoraLinkJournalLoadStatus.Loaded -> {
+                _revision.value = status.snapshot.revision
+                AppRemoraLinkJournalLoad.Loaded(
+                    AppRemoraLinkJournalSnapshot(
+                        revision = status.snapshot.revision,
+                        payload = status.snapshot.opaquePayload,
+                    ),
+                )
+            }
             RemoraLinkJournalLoadStatus.Corrupt,
             RemoraLinkJournalLoadStatus.StorageFailure,
             -> AppRemoraLinkJournalLoad.Unavailable
@@ -62,7 +71,10 @@ class AndroidRemoraLinkJournalBackend internal constructor(
             opaquePayload = replacement.payload,
         )
         when (store.compareAndSwap(expectedRevision, ownedReplacement)) {
-            RemoraLinkJournalCasStatus.STORED -> AppRemoraLinkJournalWriteOutcome.STORED
+            RemoraLinkJournalCasStatus.STORED -> {
+                _revision.value = replacement.revision
+                AppRemoraLinkJournalWriteOutcome.STORED
+            }
             RemoraLinkJournalCasStatus.CONFLICT -> AppRemoraLinkJournalWriteOutcome.CONFLICT
             RemoraLinkJournalCasStatus.CORRUPT,
             RemoraLinkJournalCasStatus.STORAGE_FAILURE,

@@ -16,6 +16,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,11 +32,10 @@ import com.remora.android.state.AppModel
 import com.remora.android.state.LocalAccountLoginRequiredException
 import com.remora.android.state.NetworkDiscovery
 import com.remora.android.state.PetOverlayController
-import com.remora.android.state.AlleycatCredentialStore
-import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.VoiceRuntimeController
 import com.remora.android.state.connectionModeLabel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import com.remora.android.ui.conversation.ApprovalOverlay
 import com.remora.android.ui.conversation.ConversationInfoScreen
@@ -54,6 +54,8 @@ import com.remora.android.ui.sessions.DirectoryPickerSheet
 import com.remora.android.ui.sessions.SessionLaunchSupport
 import com.remora.android.ui.sessions.SessionsUiState
 import com.remora.android.ui.terminal.TerminalScreen
+import com.remora.android.ui.terminal.RemoraLinkTerminalHost
+import com.remora.android.ui.terminal.remoraLinkTerminalHost
 import com.remora.android.ui.workflow.AdaptiveNavigationMode
 import com.remora.android.ui.workflow.AdaptiveWorkflowScaffold
 import com.remora.android.ui.workflow.CommandPaletteSheet
@@ -562,7 +564,7 @@ fun RemoraApp(
                         onBack = navigateBack,
                         onChangeWallpaper = { navigate(Route.ServerWallpaperSelection(route.serverId)) },
                         onOpenShell = remoteShellLauncher(
-                            context = context,
+                            appModel = appModel,
                             serverId = route.serverId,
                             terminalEnabled = ExperimentalFeatures.isEnabled(RemoraFeature.TERMINAL),
                             navigate = navigate,
@@ -625,7 +627,7 @@ fun RemoraApp(
 
                 is Route.Terminal -> {
                     TerminalScreen(
-                        preferredAlleycatNodeId = route.preferredAlleycatNodeId,
+                        preferredRemoraLinkHostId = route.preferredRemoraLinkHostId,
                         onBack = navigateBack,
                     )
                 }
@@ -826,21 +828,46 @@ fun RemoraApp(
     }
 }
 
+@Composable
 private fun remoteShellLauncher(
-    context: android.content.Context,
+    appModel: AppModel,
     serverId: String,
     terminalEnabled: Boolean,
     navigate: (Route) -> Unit,
 ): (() -> Unit)? {
-    if (!terminalEnabled) return null
-    val saved = SavedServerStore.remembered(context).firstOrNull { it.id == serverId } ?: return null
-    val nodeId = saved.alleycatNodeId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    val token = AlleycatCredentialStore(context.applicationContext)
-        .loadToken(nodeId)
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-        ?: return null
-    return { navigate(Route.Terminal(preferredAlleycatNodeId = nodeId)) }
+    val remoraLinkAvailable by appModel.remoraLinkAvailable.collectAsState()
+    val remoraLinkJournalRevision by appModel.remoraLinkJournalBackend.revision.collectAsState()
+    var terminalHost by remember(serverId) { mutableStateOf<RemoraLinkTerminalHost?>(null) }
+    var refreshGeneration by remember(serverId) { mutableLongStateOf(0L) }
+
+    LaunchedEffect(
+        appModel,
+        serverId,
+        terminalEnabled,
+        remoraLinkAvailable,
+        remoraLinkJournalRevision,
+    ) {
+        val generation = ++refreshGeneration
+        terminalHost = null
+        val refreshedHost = if (terminalEnabled && remoraLinkAvailable) {
+            try {
+                appModel.withRemoraLinkV2 { it.remoraLinkHosts() }
+                    .remoraLinkTerminalHost(serverId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+        if (generation == refreshGeneration) {
+            terminalHost = refreshedHost
+        }
+    }
+
+    val hostId = terminalHost?.hostId ?: return null
+    return { navigate(Route.Terminal(preferredRemoraLinkHostId = hostId)) }
 }
 
 private fun PendingUserInputRequest.isRelevantToThread(threadKey: ThreadKey): Boolean {

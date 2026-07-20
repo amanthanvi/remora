@@ -36,6 +36,9 @@ pub(crate) async fn open_backend(
             relay,
             shell,
         } => super::remote_alleycat::open(node_id, token, relay, shell, size).await,
+        TerminalBackendKind::RemoteRemoraLink { host_id, shell } => {
+            super::remote_remora_link::open(host_id, shell, size).await
+        }
         TerminalBackendKind::RemoteSsh {
             host,
             port,

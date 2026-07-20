@@ -21,7 +21,8 @@ pub struct TerminalTransportDescriptor {
 impl TerminalTransportDescriptor {
     pub(crate) fn from_backend(backend: &TerminalBackendKind) -> Self {
         match backend {
-            TerminalBackendKind::RemoteAlleycat { .. } => Self {
+            TerminalBackendKind::RemoteAlleycat { .. }
+            | TerminalBackendKind::RemoteRemoraLink { .. } => Self {
                 kind: TerminalTransportKind::RemoraLink,
                 // Deliberately omit the node id and relay. They are routing
                 // material, not presentation state, and can be correlated
@@ -154,6 +155,24 @@ mod tests {
         assert!(!debug.contains("secret-node"));
         assert!(!debug.contains("secret-token"));
         assert!(!debug.contains("secret-relay"));
+    }
+
+    #[test]
+    fn v2_paired_host_descriptor_retains_only_the_nonsecret_transport_label() {
+        let backend = TerminalBackendKind::RemoteRemoraLink {
+            host_id: "remora-link:sensitive-endpoint-id".to_string(),
+            shell: Some("/bin/zsh".to_string()),
+        };
+
+        let descriptor = TerminalTransportDescriptor::from_backend(&backend);
+        let backend_debug = format!("{backend:?}");
+        let descriptor_debug = format!("{descriptor:?}");
+
+        assert_eq!(descriptor.kind, TerminalTransportKind::RemoraLink);
+        assert_eq!(descriptor.display_label, "Remora Link");
+        assert!(backend_debug.contains("remora-link:sensitive-endpoint-id"));
+        assert!(!descriptor_debug.contains("sensitive-endpoint-id"));
+        assert!(!descriptor_debug.contains("/bin/zsh"));
     }
 
     #[test]

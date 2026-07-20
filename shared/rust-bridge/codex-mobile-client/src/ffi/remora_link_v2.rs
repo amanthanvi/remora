@@ -520,6 +520,152 @@ pub(crate) struct ConfiguredRemoraLink {
     session_connect_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
+impl ConfiguredRemoraLink {
+    pub(crate) fn close_shells_for_host(&self, host_id: &str) {
+        self.host.shell_connections.close_host(host_id);
+    }
+}
+
+#[derive(Default)]
+struct RemoraLinkShellConnectionRegistryV2 {
+    hosts: std::sync::Mutex<HashMap<String, RemoraLinkShellHostConnectionsV2>>,
+}
+
+#[derive(Default)]
+struct RemoraLinkShellHostConnectionsV2 {
+    generation: u64,
+    connections: HashMap<String, std::sync::Weak<RegisteredRemoraLinkShellConnectionV2>>,
+}
+
+impl RemoraLinkShellConnectionRegistryV2 {
+    fn claim_generation(&self, host_id: &str) -> u64 {
+        self.hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(host_id.to_string())
+            .or_default()
+            .generation
+    }
+
+    fn register(
+        self: &Arc<Self>,
+        host_id: &str,
+        generation: u64,
+        connection: Arc<dyn crate::terminal::remote_shell::RemoteShellConnection>,
+    ) -> Result<Arc<dyn crate::terminal::remote_shell::RemoteShellConnection>, ()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let registered = Arc::new(RegisteredRemoraLinkShellConnectionV2 {
+            connection,
+            registry: Arc::downgrade(self),
+            host_id: host_id.to_string(),
+            id: id.clone(),
+            closed: AtomicBool::new(false),
+        });
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let host = hosts.entry(host_id.to_string()).or_default();
+        if host.generation != generation {
+            drop(hosts);
+            registered.close_once();
+            return Err(());
+        }
+        host.connections.insert(id, Arc::downgrade(&registered));
+        drop(hosts);
+        Ok(registered)
+    }
+
+    fn remove(&self, host_id: &str, id: &str) {
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(host) = hosts.get_mut(host_id) {
+            host.connections.remove(id);
+        }
+    }
+
+    fn close_host(&self, host_id: &str) {
+        let connections = {
+            let mut hosts = self
+                .hosts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let host = hosts.entry(host_id.to_string()).or_default();
+            host.generation = host.generation.wrapping_add(1);
+            std::mem::take(&mut host.connections)
+        };
+        for connection in connections
+            .into_values()
+            .filter_map(|value| value.upgrade())
+        {
+            connection.close_once();
+        }
+    }
+
+    fn close_all(&self) {
+        let connections = {
+            let mut hosts = self
+                .hosts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hosts
+                .values_mut()
+                .flat_map(|host| {
+                    host.generation = host.generation.wrapping_add(1);
+                    std::mem::take(&mut host.connections).into_values()
+                })
+                .collect::<Vec<_>>()
+        };
+        for connection in connections.into_iter().filter_map(|value| value.upgrade()) {
+            connection.close_once();
+        }
+    }
+
+    #[cfg(test)]
+    fn connection_count(&self, host_id: &str) -> usize {
+        self.hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host_id)
+            .map_or(0, |host| host.connections.len())
+    }
+}
+
+struct RegisteredRemoraLinkShellConnectionV2 {
+    connection: Arc<dyn crate::terminal::remote_shell::RemoteShellConnection>,
+    registry: std::sync::Weak<RemoraLinkShellConnectionRegistryV2>,
+    host_id: String,
+    id: String,
+    closed: AtomicBool,
+}
+
+impl RegisteredRemoraLinkShellConnectionV2 {
+    fn close_once(&self) {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            self.connection.close();
+        }
+        if let Some(registry) = self.registry.upgrade() {
+            registry.remove(&self.host_id, &self.id);
+        }
+    }
+}
+
+impl crate::terminal::remote_shell::RemoteShellConnection
+    for RegisteredRemoraLinkShellConnectionV2
+{
+    fn close(&self) {
+        self.close_once();
+    }
+}
+
+impl Drop for RegisteredRemoraLinkShellConnectionV2 {
+    fn drop(&mut self) {
+        self.close_once();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RemoraLinkRuntimeConnectOutcome {
     pub(crate) server_id: String,
@@ -1023,7 +1169,7 @@ impl AppClient {
     ) -> Result<AppRemoraLinkReconnectBatch, RemoraLinkError> {
         let deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
         let _configuration =
-            tokio::time::timeout_at(deadline, self.inner.remora_link_configuration.read())
+            tokio::time::timeout_at(deadline, self.inner.remora_link_configuration.write())
                 .await
                 .map_err(|_| RemoraLinkError::Cancelled)?;
         let configured = self.configured_remora_link()?;
@@ -1066,12 +1212,71 @@ impl AppClient {
 }
 
 impl crate::MobileClient {
+    /// Open one authenticated v2 shell attachment without registering an
+    /// app-server session. The durable v2 journal remains the sole authority:
+    /// `reconnect` rejects unknown hosts, unselected shell runtimes, and
+    /// credentials without `ConnectRuntime` before any attachment is taken.
+    pub(crate) async fn open_remora_link_shell_transport(
+        &self,
+        host_id: &str,
+    ) -> Result<crate::terminal::remote_shell::RemoteShellTransport, crate::terminal::TerminalError>
+    {
+        let _configuration = self.remora_link_configuration.read().await;
+        let configured = remora_link_read(&self.remora_link).clone().ok_or_else(|| {
+            crate::terminal::TerminalError::Backend {
+                detail: "Remora Link v2 is not configured".to_string(),
+            }
+        })?;
+        let shell_generation = configured.host.shell_connections.claim_generation(host_id);
+        let outcome = configured
+            .lifecycle
+            .reconnect(host_id, "shell".to_string(), None)
+            .await
+            .map_err(map_shell_lifecycle_error)?;
+        if outcome.host_id != host_id || outcome.runtime_id != "shell" {
+            return Err(crate::terminal::TerminalError::Backend {
+                detail: "Remora Link shell attachment identity mismatch".to_string(),
+            });
+        }
+        let attachment = configured
+            .host
+            .take_runtime_attachment(
+                &outcome.attachment_id,
+                &outcome.host_id,
+                &outcome.runtime_id,
+            )
+            .await
+            .map_err(|error| crate::terminal::TerminalError::Backend {
+                detail: format!("claiming Remora Link shell attachment: {error}"),
+            })?;
+        let (connection, send, recv) = attachment.into_parts();
+        let connection: Arc<dyn crate::terminal::remote_shell::RemoteShellConnection> =
+            Arc::new(RemoraLinkShellConnectionV2 { connection });
+        let connection = configured
+            .host
+            .shell_connections
+            .register(host_id, shell_generation, connection)
+            .map_err(|()| crate::terminal::TerminalError::Backend {
+                detail: "Remora Link shell attachment was invalidated by host cleanup".to_string(),
+            })?;
+        Ok(crate::terminal::remote_shell::RemoteShellTransport::new(
+            tokio::io::join(recv, send),
+            connection,
+        ))
+    }
+
     async fn disconnect_remora_link_session(&self, host_id: &str) {
+        if let Some(configured) = remora_link_read(&self.remora_link).clone() {
+            configured.close_shells_for_host(host_id);
+        }
         self.replace_existing_session(host_id).await;
         project_remora_link_disconnected(&self.app_store, host_id);
     }
 
     async fn disconnect_all_remora_link_sessions(&self) {
+        if let Some(configured) = remora_link_read(&self.remora_link).clone() {
+            configured.host.shell_connections.close_all();
+        }
         let mut host_ids = self
             .sessions_read()
             .keys()
@@ -2128,6 +2333,7 @@ struct IrohRemoraLinkHost {
     endpoint: Endpoint,
     exchanges: std::sync::Mutex<HashMap<String, LiveExchange>>,
     attachments: Arc<Mutex<RetainedAttachmentRegistryV2<LiveRuntimeSession>>>,
+    shell_connections: Arc<RemoraLinkShellConnectionRegistryV2>,
 }
 
 impl IrohRemoraLinkHost {
@@ -2179,6 +2385,7 @@ impl IrohRemoraLinkHost {
                 MAX_RETAINED_ATTACHMENTS,
                 MAX_RETAINED_ATTACHMENT_AGE,
             ))),
+            shell_connections: Arc::new(RemoraLinkShellConnectionRegistryV2::default()),
         })
     }
 
@@ -2214,6 +2421,7 @@ impl IrohRemoraLinkHost {
 
     async fn close_all_runtime_sessions(&self) {
         self.attachments.lock().await.clear();
+        self.shell_connections.close_all();
     }
 
     async fn take_runtime_attachment(
@@ -2401,6 +2609,7 @@ impl HostPortV2 for IrohRemoraLinkHost {
     }
 
     async fn close_local(&self, host_id: &str) {
+        self.shell_connections.close_host(host_id);
         self.attachments.lock().await.remove_host(host_id);
         let exchange_ids: Vec<_> = self
             .exchanges()
@@ -2416,6 +2625,28 @@ impl HostPortV2 for IrohRemoraLinkHost {
 
 struct RemoraLinkSessionKeepaliveV2 {
     connection: Connection,
+}
+
+struct RemoraLinkShellConnectionV2 {
+    connection: Connection,
+}
+
+impl crate::terminal::remote_shell::RemoteShellConnection for RemoraLinkShellConnectionV2 {
+    fn close(&self) {
+        self.connection.close(
+            VarInt::from_u32(CLOSE_CODE),
+            b"Remora Link shell session closed",
+        );
+    }
+}
+
+impl Drop for RemoraLinkShellConnectionV2 {
+    fn drop(&mut self) {
+        self.connection.close(
+            VarInt::from_u32(CLOSE_CODE),
+            b"Remora Link shell attachment dropped",
+        );
+    }
 }
 
 impl RemoraLinkSessionKeepaliveV2 {
@@ -2597,6 +2828,22 @@ impl RemoteTransport for RemoraLinkRemoteTransportV2 {
 
 fn map_attachment_error(error: AttachmentCustodyErrorV2) -> TransportError {
     TransportError::ConnectionFailed(error.to_string())
+}
+
+fn map_shell_lifecycle_error(error: LifecycleErrorV2) -> crate::terminal::TerminalError {
+    use crate::terminal::TerminalError;
+
+    let detail = match error {
+        LifecycleErrorV2::NotEnrolled => "Remora Link host is not enrolled".to_string(),
+        LifecycleErrorV2::InvalidSelection => {
+            "Remora Link host is not authorized for the selected shell runtime".to_string()
+        }
+        LifecycleErrorV2::AgentUnavailable => {
+            "Remote shell is unavailable on this paired host".to_string()
+        }
+        other => format!("opening Remora Link shell attachment: {other}"),
+    };
+    TerminalError::Backend { detail }
 }
 
 fn map_control_error(
@@ -2801,8 +3048,30 @@ async fn complete_remora_link_host_mutation<T, F>(
 where
     F: Future<Output = Result<T, LifecycleErrorV2>>,
 {
+    let shell_cleanup = remora_link_read(&client.remora_link)
+        .clone()
+        .map(|configured| RemoraLinkShellCleanupGuard {
+            registry: Arc::clone(&configured.host.shell_connections),
+            host_id: host_id.to_string(),
+        });
+    if let Some(cleanup) = &shell_cleanup {
+        cleanup.registry.close_host(host_id);
+    }
     client.disconnect_remora_link_session(host_id).await;
-    operation.await.map_err(Into::into)
+    let outcome = operation.await.map_err(Into::into);
+    drop(shell_cleanup);
+    outcome
+}
+
+struct RemoraLinkShellCleanupGuard {
+    registry: Arc<RemoraLinkShellConnectionRegistryV2>,
+    host_id: String,
+}
+
+impl Drop for RemoraLinkShellCleanupGuard {
+    fn drop(&mut self) {
+        self.registry.close_host(&self.host_id);
+    }
 }
 
 fn project_pairing_cancellation(
@@ -3112,6 +3381,75 @@ mod tests {
 
     use super::*;
     use crate::remote_host_pairing::remora_link_v2::CredentialJournalV2;
+
+    struct CountingShellConnection {
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl crate::terminal::remote_shell::RemoteShellConnection for CountingShellConnection {
+        fn close(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn active_shell_cleanup_is_host_scoped_and_drop_unregisters() {
+        let registry = Arc::new(RemoraLinkShellConnectionRegistryV2::default());
+        let target_closes = Arc::new(AtomicUsize::new(0));
+        let sibling_closes = Arc::new(AtomicUsize::new(0));
+        let target = registry
+            .register(
+                "remora-link:target",
+                registry.claim_generation("remora-link:target"),
+                Arc::new(CountingShellConnection {
+                    closes: Arc::clone(&target_closes),
+                }),
+            )
+            .unwrap();
+        let sibling = registry
+            .register(
+                "remora-link:sibling",
+                registry.claim_generation("remora-link:sibling"),
+                Arc::new(CountingShellConnection {
+                    closes: Arc::clone(&sibling_closes),
+                }),
+            )
+            .unwrap();
+
+        registry.close_host("remora-link:target");
+        assert_eq!(target_closes.load(Ordering::SeqCst), 1);
+        assert_eq!(sibling_closes.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.connection_count("remora-link:target"), 0);
+        assert_eq!(registry.connection_count("remora-link:sibling"), 1);
+
+        drop(target);
+        drop(sibling);
+        assert_eq!(sibling_closes.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.connection_count("remora-link:sibling"), 0);
+    }
+
+    #[test]
+    fn cleanup_generation_rejects_an_inflight_shell_claim() {
+        let registry = Arc::new(RemoraLinkShellConnectionRegistryV2::default());
+        let host_id = "remora-link:host";
+        let generation = registry.claim_generation(host_id);
+        registry.close_host(host_id);
+        let closes = Arc::new(AtomicUsize::new(0));
+
+        assert!(
+            registry
+                .register(
+                    host_id,
+                    generation,
+                    Arc::new(CountingShellConnection {
+                        closes: Arc::clone(&closes),
+                    }),
+                )
+                .is_err()
+        );
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.connection_count(host_id), 0);
+    }
 
     struct ConflictInjectingJournal {
         snapshot: StdMutex<Option<AppRemoraLinkJournalSnapshot>>,

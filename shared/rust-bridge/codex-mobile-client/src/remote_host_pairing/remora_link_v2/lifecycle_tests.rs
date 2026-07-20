@@ -2139,6 +2139,91 @@ async fn journal_validation_rejects_widened_or_unbound_enrolled_authority() {
 }
 
 #[tokio::test]
+async fn shell_reconnect_requires_enrollment_selection_scope_and_host_availability() {
+    let not_enrolled = harness();
+    assert_eq!(
+        not_enrolled
+            .lifecycle
+            .reconnect(&not_enrolled.host_id, "shell".to_string(), None)
+            .await,
+        Err(LifecycleErrorV2::NotEnrolled)
+    );
+
+    let shell_absent = harness();
+    inspect_and_enroll(&shell_absent).await;
+    assert_eq!(
+        shell_absent
+            .lifecycle
+            .reconnect(&shell_absent.host_id, "shell".to_string(), None)
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
+    );
+
+    let mut shell_invite = invite();
+    shell_invite.max_runtime_ids = vec!["shell".to_string()];
+    let missing_scope = harness_with_invite(shell_invite.clone());
+    missing_scope
+        .lifecycle
+        .inspect(&missing_scope.invite)
+        .await
+        .unwrap();
+    missing_scope
+        .lifecycle
+        .enroll(
+            &missing_scope.invite,
+            "Remora Phone".to_string(),
+            vec!["shell".to_string()],
+            vec![DeviceScopeV2::ConnectRuntime, DeviceScopeV2::SelfRevoke],
+        )
+        .await
+        .unwrap();
+    missing_scope
+        .journal
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut(&missing_scope.host_id)
+        .unwrap()
+        .credential
+        .as_mut()
+        .unwrap()
+        .granted_scopes
+        .retain(|scope| *scope != DeviceScopeV2::ConnectRuntime);
+    assert_eq!(
+        missing_scope
+            .lifecycle
+            .reconnect(&missing_scope.host_id, "shell".to_string(), None)
+            .await,
+        Err(LifecycleErrorV2::JournalCorrupt)
+    );
+
+    let unavailable = harness_with_invite(shell_invite);
+    unavailable
+        .lifecycle
+        .inspect(&unavailable.invite)
+        .await
+        .unwrap();
+    unavailable
+        .lifecycle
+        .enroll(
+            &unavailable.invite,
+            "Remora Phone".to_string(),
+            vec!["shell".to_string()],
+            vec![DeviceScopeV2::ConnectRuntime, DeviceScopeV2::SelfRevoke],
+        )
+        .await
+        .unwrap();
+    unavailable.host.fail_connect.store(true, Ordering::SeqCst);
+    assert_eq!(
+        unavailable
+            .lifecycle
+            .reconnect(&unavailable.host_id, "shell".to_string(), None)
+            .await,
+        Err(LifecycleErrorV2::AgentUnavailable)
+    );
+}
+
+#[tokio::test]
 async fn journal_validation_rejects_corrupt_runtime_offer_presentation() {
     let harness = harness();
     harness.lifecycle.inspect(&harness.invite).await.unwrap();

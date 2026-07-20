@@ -468,6 +468,40 @@ mod tests {
     }
 
     #[test]
+    fn shell_attachment_custody_rejects_mismatch_and_is_take_once() {
+        let now = Instant::now();
+        let mut registry = RetainedAttachmentRegistryV2::new(2, Duration::from_secs(30));
+        registry
+            .insert(
+                "shell-attachment".into(),
+                "remora-link:host".into(),
+                "shell".into(),
+                7_u8,
+                now,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            registry.take("shell-attachment", "remora-link:other", "shell", now),
+            Err(AttachmentCustodyErrorV2::IdentityMismatch)
+        ));
+        assert!(matches!(
+            registry.take("shell-attachment", "remora-link:host", "codex", now),
+            Err(AttachmentCustodyErrorV2::IdentityMismatch)
+        ));
+        assert_eq!(
+            registry
+                .take("shell-attachment", "remora-link:host", "shell", now)
+                .unwrap(),
+            7
+        );
+        assert!(matches!(
+            registry.take("shell-attachment", "remora-link:host", "shell", now),
+            Err(AttachmentCustodyErrorV2::Unavailable)
+        ));
+    }
+
+    #[test]
     fn registry_expires_and_evicts_oldest_at_bound() {
         let now = Instant::now();
         let drops = Arc::new(AtomicUsize::new(0));

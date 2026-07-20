@@ -27,7 +27,7 @@ class NavigationRestorationTest {
             Route.ServerWallpaperAdjust("server:one"),
             Route.Apps,
             Route.SavedApp("app:one/two"),
-            Route.Terminal("node:one/two"),
+            Route.Terminal(preferredRemoraLinkHostId = "remora-link:host:one/two"),
             Route.Terminal(null),
         )
 
@@ -47,6 +47,15 @@ class NavigationRestorationTest {
         )
 
         assertEquals(listOf(Route.Home, Route.Conversation(key)), restored)
+    }
+
+    @Test
+    fun legacyTerminalRestorationTokensAreRejected() {
+        assertEquals(null, routeFromRestorationToken("terminal:bm9kZS1pZA"))
+        assertEquals(
+            Route.Terminal("remora-link:host-one"),
+            routeFromRestorationToken(Route.Terminal("remora-link:host-one").restorationToken()),
+        )
     }
 
     @Test

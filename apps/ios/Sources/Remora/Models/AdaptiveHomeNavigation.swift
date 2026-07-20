@@ -1,6 +1,78 @@
 import CoreGraphics
 import Foundation
 
+struct RemoraLinkTerminalHost: Identifiable, Equatable, Hashable {
+    let hostId: String
+    let displayName: String
+
+    var id: String { hostId }
+
+    var backend: TerminalBackendKind {
+        .remoteRemoraLink(hostId: hostId, shell: nil)
+    }
+}
+
+enum RemoraLinkTerminalSupport {
+    static func eligibleHosts(
+        from summaries: [AppRemoraLinkHostSummary]
+    ) -> [RemoraLinkTerminalHost] {
+        summaries.compactMap { summary in
+            guard summary.state == .paired,
+                  summary.selectedRuntimeIds.contains("shell"),
+                  summary.grantedScopes.contains(.connectRuntime) else {
+                return nil
+            }
+            let trimmedName = summary.hostDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return RemoraLinkTerminalHost(
+                hostId: summary.hostId,
+                displayName: trimmedName.isEmpty ? "Remote shell" : trimmedName
+            )
+        }
+    }
+
+    static func eligibleHostIds(
+        from summaries: [AppRemoraLinkHostSummary]
+    ) -> Set<String> {
+        Set(eligibleHosts(from: summaries).map(\.hostId))
+    }
+
+    static func initialOption<Option>(
+        preferredHostId: String?,
+        options: [Option],
+        hostId: (Option) -> String?
+    ) -> Option? {
+        guard let preferredHostId else { return options.first }
+        let normalized = preferredHostId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return options.first { hostId($0) == normalized }
+    }
+}
+
+struct RemoraLinkTerminalEligibilityState {
+    private(set) var canOpenShell = false
+    private var generation: UInt64 = 0
+
+    mutating func beginRequest() -> UInt64 {
+        generation &+= 1
+        canOpenShell = false
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+        canOpenShell = false
+    }
+
+    mutating func apply(
+        hosts: [AppRemoraLinkHostSummary],
+        serverId: String,
+        generation: UInt64
+    ) {
+        guard generation == self.generation else { return }
+        canOpenShell = RemoraLinkTerminalSupport.eligibleHostIds(from: hosts).contains(serverId)
+    }
+}
+
 enum RemoraNavigationMode: String, Equatable {
     case compact
     case split
@@ -37,7 +109,7 @@ enum HomeNavigationRoute: Hashable {
     case newThread
     case appsList
     case savedApp(appId: String)
-    case terminal(preferredAlleycatNodeId: String?)
+    case terminal(preferredRemoraLinkHostId: String?)
 
     var conversationKey: ThreadKey? {
         guard case let .conversation(key) = self else { return nil }

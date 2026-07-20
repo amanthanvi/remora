@@ -26,6 +26,10 @@ pub enum TerminalBackendKind {
         relay: Option<String>,
         shell: Option<String>,
     },
+    RemoteRemoraLink {
+        host_id: String,
+        shell: Option<String>,
+    },
     RemoteSsh {
         host: String,
         port: u16,

@@ -6,7 +6,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import uniffi.codex_mobile_client.AppStore
+import uniffi.codex_mobile_client.AppStoreInterface
 import uniffi.codex_mobile_client.TerminalBackendKind
 import uniffi.codex_mobile_client.TerminalOutputEventListener
 import uniffi.codex_mobile_client.TerminalOutputSnapshot
@@ -24,7 +24,7 @@ sealed interface TerminalRenderUpdate {
 
 class TerminalSessionController(
     private val scope: CoroutineScope,
-    private val appStore: AppStore = AppModel.shared.store,
+    private val appStore: AppStoreInterface = AppModel.shared.store,
 ) {
     enum class Phase {
         IDLE,
@@ -92,14 +92,19 @@ class TerminalSessionController(
                 } else {
                     appStore.openTerminalSession(backend, size)
                 }
-                sessionId = id
-                appStore.setActiveTerminalId(id)
+                if (generation != eventGeneration) {
+                    runCatching { appStore.closeTerminalSession(id) }
+                    return@launch
+                }
                 val opened = appStore.terminalSessionHandle(id) ?: run {
-                    sessionId = null
+                    runCatching { appStore.closeTerminalSession(id) }
+                    if (generation != eventGeneration) return@launch
                     errorMessage = "Session disappeared after open"
                     phase = Phase.FAILED
                     return@launch
                 }
+                sessionId = id
+                appStore.setActiveTerminalId(id)
                 val outputListener = object : TerminalOutputEventListener {
                     override fun onEvent(event: TerminalOutputStreamEvent) {
                         var scheduleDrain = false
@@ -123,6 +128,7 @@ class TerminalSessionController(
                 listener = outputListener
                 phase = Phase.RUNNING
             } catch (error: Exception) {
+                if (generation != eventGeneration) return@launch
                 sessionId = null
                 val challenge = sshHostTrustChallenge(error, backend)
                 if (challenge != null) {
@@ -244,9 +250,10 @@ class TerminalSessionController(
             pendingEvents.clear()
             eventDrainScheduled = false
         }
-        val id = sessionId ?: return
+        val id = sessionId
         sessionId = null
         phase = Phase.IDLE
+        if (id == null) return
         scope.launch {
             runCatching { appStore.closeTerminalSession(id) }
         }
