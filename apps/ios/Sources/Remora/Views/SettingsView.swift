@@ -13,22 +13,29 @@ struct SettingsView: View {
     @State private var activeServerSheet: SettingsServerSheet?
     @State private var serverEditError: String?
 
+    private var settingsObservation: AppModelSettingsObservation {
+        let observation = appModel.settingsObservation
+        _ = observation.revision
+        return observation
+    }
+
     private var accountServer: AppServerSnapshot? {
-        guard let snapshot = appModel.snapshot else { return nil }
-        if let activeServerId = snapshot.activeThread?.serverId,
-           let activeServer = snapshot.serverSnapshot(for: activeServerId),
+        let observation = settingsObservation
+        if let activeServerId = observation.activeServerId,
+           let activeServer = observation.servers.first(where: { $0.serverId == activeServerId }),
            activeServer.isConnected,
            !activeServer.isLocal {
             return activeServer
         }
-        return snapshot.servers.first(where: { $0.isConnected && !$0.isLocal })
+        return observation.servers.first(where: { $0.isConnected && !$0.isLocal })
     }
 
     private var connectedServers: [HomeDashboardServer] {
-        HomeDashboardSupport.sortedConnectedServers(
-            from: appModel.snapshot?.servers ?? [],
+        let observation = settingsObservation
+        return HomeDashboardSupport.sortedConnectedServers(
+            from: observation.servers,
             savedServers: SavedServerStore.rememberedServers(),
-            activeServerId: appModel.snapshot?.activeThread?.serverId
+            activeServerId: observation.activeServerId
         )
     }
 
@@ -860,7 +867,6 @@ private struct SettingsServerConnectionEditor: View {
                 wakeMAC: resolvedWakeMAC,
                 preferredConnectionMode: .ssh,
                 preferredCodexPort: nil,
-                sshPortForwardingEnabled: nil,
                 websocketURL: nil,
                 rememberedByUser: true
             )
@@ -886,7 +892,6 @@ private struct SettingsServerConnectionEditor: View {
                 wakeMAC: nil,
                 preferredConnectionMode: .directCodex,
                 preferredCodexPort: resolvedCodexPort,
-                sshPortForwardingEnabled: nil,
                 websocketURL: nil,
                 rememberedByUser: true
             )
@@ -917,7 +922,6 @@ private struct SettingsServerConnectionEditor: View {
                 wakeMAC: nil,
                 preferredConnectionMode: .directCodex,
                 preferredCodexPort: resolvedPort,
-                sshPortForwardingEnabled: nil,
                 websocketURL: rawURL,
                 rememberedByUser: true
             )

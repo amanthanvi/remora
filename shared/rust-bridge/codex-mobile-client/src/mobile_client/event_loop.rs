@@ -434,6 +434,7 @@ impl MobileClient {
     }
 }
 
+#[cfg(test)]
 fn deserialize_typed_response<R>(value: &serde_json::Value) -> Result<R, serde_json::Error>
 where
     R: serde::de::DeserializeOwned,
@@ -675,7 +676,7 @@ fn normalize_legacy_v0_128_compat(value: &mut serde_json::Value) {
 /// Wrap bare-string `status` values inside Thread-shaped objects into the
 /// canonical tagged form (`{"type": "..."}`). Upstream `ThreadStatus` is
 /// `#[serde(tag = "type")]`, but third-party bridges (older
-/// `alleycat-opencode-bridge` versions) have shipped `"status": "notLoaded"`
+/// `remora-opencode-bridge` versions) have shipped `"status": "notLoaded"`
 /// as a bare string, which made the typed deserializer reject the entire
 /// `thread/list` response and left those threads invisible in the sidebar.
 /// The detection mirrors `normalize_legacy_v0_128_compat`'s Thread shape
@@ -1133,11 +1134,12 @@ fn collect_relative_path_entries(
                 collect_relative_path_entries(child, &next_path, active_field, entries);
             }
         }
-        serde_json::Value::String(text) => {
-            if active_field.is_some() && !looks_cross_platform_absolute(text) {
-                entries.push(format!("{path}={text:?}"));
-            }
+        serde_json::Value::String(text)
+            if active_field.is_some() && !looks_cross_platform_absolute(text) =>
+        {
+            entries.push(format!("{path}={text:?}"));
         }
+        serde_json::Value::String(_) => {}
         _ => {}
     }
 }
@@ -1320,7 +1322,7 @@ mod tests {
                 "status": { "type": "notLoaded" },
                 "path": "/Users/remora/.claude/projects/-tmp/thread-1.jsonl",
                 "cwd": "",
-                "cliVersion": "alleycat-claude-bridge/0.1.0",
+                "cliVersion": "remora-claude-bridge/0.1.0",
                 "source": "appServer",
                 "turns": []
             }],
@@ -1336,7 +1338,7 @@ mod tests {
 
     #[test]
     fn deserialize_typed_response_accepts_bare_thread_status_string() {
-        // Older alleycat-opencode-bridge releases shipped `status` as a
+        // Older remora-opencode-bridge releases shipped `status` as a
         // bare string instead of the tagged form upstream `ThreadStatus`
         // expects. Without this normalization the typed deserializer
         // rejects the entire `thread/list` page and OpenCode threads
@@ -1352,7 +1354,7 @@ mod tests {
                 "status": "notLoaded",
                 "path": null,
                 "cwd": "/Users/remora/dev/health",
-                "cliVersion": "alleycat-opencode-bridge/0.1.0",
+                "cliVersion": "remora-opencode-bridge/0.1.0",
                 "source": "appServer",
                 "gitInfo": null,
                 "name": "Greeting",
@@ -1395,7 +1397,7 @@ mod tests {
                 "status": { "type": "notLoaded" },
                 "path": "/tmp/thread.jsonl",
                 "cwd": "/tmp",
-                "cliVersion": "alleycat-claude-bridge/0.1.0",
+                "cliVersion": "remora-claude-bridge/0.1.0",
                 "source": "appServer",
                 "agentNickname": null,
                 "agentRole": null,
@@ -1586,7 +1588,7 @@ mod tests {
                     "status": { "type": "notLoaded" },
                     "path": "/tmp/thread.jsonl",
                     "cwd": "/repo",
-                    "cliVersion": "alleycat-opencode-bridge/0.1.0",
+                    "cliVersion": "remora-opencode-bridge/0.1.0",
                     "source": "appServer",
                     "agentNickname": null,
                     "agentRole": null,

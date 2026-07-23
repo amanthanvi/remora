@@ -22,12 +22,14 @@ struct HeaderView: View {
         RemoraPlatform.isRegularSurface(horizontalSizeClass: horizontalSizeClass)
     }
 
-    private var server: AppServerSnapshot? {
-        appModel.snapshot?.serverSnapshot(for: thread.key.serverId)
+    private var serverObservation: AppModelServerObservation {
+        let observation = appModel.serverObservation(for: thread.key.serverId)
+        _ = observation.revision
+        return observation
     }
 
     private var availableModels: [ModelInfo] {
-        appModel.availableModels(for: thread.key.serverId)
+        serverObservation.availableModels
     }
 
     private var headerPermissionPreset: AppThreadPermissionPreset {
@@ -220,27 +222,23 @@ struct HeaderView: View {
     }
 
     private var shouldPulse: Bool {
-        guard let transportState = server?.transportState else { return false }
+        guard let transportState = serverObservation.transportState else { return false }
         return transportState == .connecting || transportState == .unresponsive
     }
 
     private var statusDotColor: Color {
-        guard let server else {
+        let observation = serverObservation
+        guard observation.exists, let transportState = observation.transportState else {
             return RemoraTheme.textMuted
         }
-        switch server.transportState {
+        switch transportState {
         case .connecting, .unresponsive:
             return .orange
         case .connected:
-            if server.isLocal {
-                switch server.account {
-                case .chatgpt?, .apiKey?:
-                    return RemoraTheme.success
-                case nil:
-                    return RemoraTheme.danger
-                }
+            if observation.isLocal {
+                return observation.hasAccount ? RemoraTheme.success : RemoraTheme.danger
             }
-            return server.account == nil ? .orange : RemoraTheme.success
+            return observation.hasAccount ? RemoraTheme.success : .orange
         case .disconnected:
             return RemoraTheme.danger
         case .unknown:
@@ -296,8 +294,7 @@ struct HeaderView: View {
     private var sessionDirectoryLabel: String {
         let currentDirectory = (thread.info.cwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !currentDirectory.isEmpty {
-            let isLocal = appModel.snapshot?.serverSnapshot(for: thread.key.serverId)?.isLocal == true
-            return PathDisplay.display(currentDirectory, isLocal: isLocal)
+            return PathDisplay.display(currentDirectory, isLocal: serverObservation.isLocal)
         }
 
         return "~"
@@ -319,8 +316,10 @@ struct HeaderView: View {
     }
 
     private var headerTransportAccessibilityLabel: String {
-        guard let server else { return "Server status unavailable" }
-        switch server.transportState {
+        guard let transportState = serverObservation.transportState else {
+            return "Server status unavailable"
+        }
+        switch transportState {
         case .connecting:
             return "Server connecting"
         case .unresponsive:
@@ -388,7 +387,9 @@ struct ConversationModelPickerPanel: View {
     let thread: AppThreadSnapshot
 
     private var availableModels: [ModelInfo] {
-        appModel.availableModels(for: thread.key.serverId)
+        let observation = appModel.serverObservation(for: thread.key.serverId)
+        _ = observation.revision
+        return observation.availableModels
     }
 
     var body: some View {
@@ -463,8 +464,10 @@ struct ConversationToolbarControls: View {
     @State private var isReloading = false
     @State private var remoteAuthSession: RemoteAuthSession?
 
-    private var server: AppServerSnapshot? {
-        appModel.snapshot?.serverSnapshot(for: thread.key.serverId)
+    private var serverObservation: AppModelServerObservation {
+        let observation = appModel.serverObservation(for: thread.key.serverId)
+        _ = observation.revision
+        return observation
     }
 
     var body: some View {
@@ -487,7 +490,7 @@ struct ConversationToolbarControls: View {
             InAppSafariView(url: session.url)
                 .ignoresSafeArea()
         }
-        .onChange(of: server?.account != nil) { _, isLoggedIn in
+        .onChange(of: serverObservation.hasAccount) { _, isLoggedIn in
             if isLoggedIn {
                 remoteAuthSession = nil
             }
@@ -502,7 +505,7 @@ struct ConversationToolbarControls: View {
                 if await handleRemoteLoginIfNeeded() {
                     return
                 }
-                if server?.account == nil {
+                if !serverObservation.hasAccount {
                     appState.showSettings = true
                 } else {
                     do {
@@ -519,7 +522,7 @@ struct ConversationToolbarControls: View {
             reloadButtonLabel
         }
         .accessibilityIdentifier("header.reloadButton")
-        .disabled(isReloading || server?.isConnected != true)
+        .disabled(isReloading || !serverObservation.isConnected)
     }
 
     @ViewBuilder
@@ -532,7 +535,7 @@ struct ConversationToolbarControls: View {
             Image(systemName: "arrow.clockwise")
                 .remoraControlIconFont(size: 16, weight: .semibold)
                 .foregroundColor(
-                    server?.isConnected == true
+                    serverObservation.isConnected
                         ? RemoraTheme.accentForegroundOnSurface
                         : RemoraTheme.textMuted
                 )
@@ -551,15 +554,16 @@ struct ConversationToolbarControls: View {
     }
 
     private func handleRemoteLoginIfNeeded() async -> Bool {
-        guard let server, !server.isLocal else {
+        let observation = serverObservation
+        guard observation.exists, !observation.isLocal else {
             return false
         }
-        guard server.account == nil else {
+        guard !observation.hasAccount else {
             return false
         }
         do {
             let authURL = try await appModel.client.startRemoteSshOauthLogin(
-                serverId: server.serverId
+                serverId: observation.serverId
             )
             if let url = URL(string: authURL) {
                 await MainActor.run {
@@ -1417,9 +1421,10 @@ private struct ModelRuntimeIcon: View {
 
 #if DEBUG
 #Preview("Header") {
-    let appModel = RemoraPreviewData.makeConversationAppModel()
+    let snapshot = RemoraPreviewData.makeConversationSnapshot()
+    let appModel = RemoraPreviewData.makeAppModel(snapshot: snapshot)
     RemoraPreviewScene(appModel: appModel) {
-        if let thread = appModel.snapshot?.threads.first {
+        if let thread = snapshot.threads.first {
             HeaderView(thread: thread)
         }
     }

@@ -1,5 +1,6 @@
 import XCTest
 import Observation
+import Foundation
 @testable import Remora
 
 final class AppModelConversationObservationTests: XCTestCase {
@@ -17,11 +18,11 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
         let initialRevision = observation.revision
 
-        var notificationCount = 0
+        let notificationCount = LockedCounter()
         withObservationTracking {
             _ = observation.revision
         } onChange: {
-            notificationCount += 1
+            notificationCount.increment()
         }
 
         other.hydratedConversationItems = [
@@ -33,7 +34,7 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
 
         XCTAssertEqual(observation.revision, initialRevision)
-        XCTAssertEqual(notificationCount, 0)
+        XCTAssertEqual(notificationCount.value, 0)
 
         let approval = makePendingApproval(id: "approval")
         observation.refresh(snapshot: makeSnapshot(
@@ -43,7 +44,7 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
 
         XCTAssertEqual(observation.revision, initialRevision + 1)
-        XCTAssertEqual(notificationCount, 1)
+        XCTAssertEqual(notificationCount.value, 1)
         XCTAssertEqual(observation.pendingApproval, approval)
     }
 
@@ -72,11 +73,11 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
         let initialRevision = observation.revision
 
-        var notificationCount = 0
+        let notificationCount = LockedCounter()
         withObservationTracking {
             _ = observation.revision
         } onChange: {
-            notificationCount += 1
+            notificationCount.increment()
         }
 
         other.hydratedConversationItems = [
@@ -94,7 +95,7 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
 
         XCTAssertEqual(observation.revision, initialRevision)
-        XCTAssertEqual(notificationCount, 0)
+        XCTAssertEqual(notificationCount.value, 0)
         XCTAssertEqual(observation.threadKey(threadId: otherKey.threadId), otherKey)
 
         otherSummary.cwd = "/moved"
@@ -105,8 +106,103 @@ final class AppModelConversationObservationTests: XCTestCase {
         ))
 
         XCTAssertEqual(observation.revision, initialRevision + 1)
-        XCTAssertEqual(notificationCount, 1)
+        XCTAssertEqual(notificationCount.value, 1)
         XCTAssertEqual(observation.sessionTarget(for: otherKey)?.cwd, "/moved")
+    }
+
+    @MainActor
+    func testHeaderServerProjectionIgnoresStreamingPayloadButPublishesServerChanges() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let observation = AppModelServerObservation(serverId: selectedKey.serverId)
+
+        observation.refresh(snapshot: makeSnapshot(threads: [selected, other]))
+        let initialRevision = observation.revision
+
+        let notificationCount = LockedCounter()
+        withObservationTracking {
+            _ = observation.revision
+        } onChange: {
+            notificationCount.increment()
+        }
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "A streamed token")
+        ]
+        observation.refresh(snapshot: makeSnapshot(threads: [selected, other]))
+
+        XCTAssertEqual(observation.revision, initialRevision)
+        XCTAssertEqual(notificationCount.value, 0)
+        XCTAssertTrue(observation.isConnected)
+
+        let renamedServer = makeServer(displayName: "Renamed Server")
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            servers: [renamedServer]
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision)
+        XCTAssertEqual(notificationCount.value, 0)
+
+        let disconnectedServer = makeServer(transportState: .disconnected)
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            servers: [disconnectedServer]
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision + 1)
+        XCTAssertEqual(notificationCount.value, 1)
+        XCTAssertFalse(observation.isConnected)
+    }
+
+    @MainActor
+    func testSettingsProjectionIgnoresThreadChangesButPublishesSettingsInputs() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let observation = AppModelSettingsObservation()
+
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+        let initialRevision = observation.revision
+
+        let notificationCount = LockedCounter()
+        withObservationTracking {
+            _ = observation.revision
+        } onChange: {
+            notificationCount.increment()
+        }
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "A streamed token")
+        ]
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision)
+        XCTAssertEqual(notificationCount.value, 0)
+        XCTAssertEqual(observation.activeServerId, selectedKey.serverId)
+
+        let secondServer = makeServer(
+            serverId: "second-server",
+            displayName: "Second Server"
+        )
+        observation.refresh(snapshot: makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey,
+            servers: [makeServer(), secondServer]
+        ))
+
+        XCTAssertEqual(observation.revision, initialRevision + 1)
+        XCTAssertEqual(notificationCount.value, 1)
+        XCTAssertEqual(observation.servers.map(\.serverId), ["server", "second-server"])
     }
 
     @MainActor
@@ -160,6 +256,57 @@ final class AppModelConversationObservationTests: XCTestCase {
     }
 
     @MainActor
+    func testAppModelRoutesSnapshotsThroughStableServerAndSettingsProjections() {
+        let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
+        let otherKey = ThreadKey(serverId: "server", threadId: "other")
+        let selected = makeThread(key: selectedKey, title: "Selected")
+        var other = makeThread(key: otherKey, title: "Other")
+        let appModel = AppModel()
+
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+        let serverObservation = appModel.serverObservation(for: selectedKey.serverId)
+        let settingsObservation = appModel.settingsObservation
+        let serverRevision = serverObservation.revision
+        let settingsRevision = settingsObservation.revision
+
+        other.hydratedConversationItems = [
+            makeObservationHydratedAssistantItem(id: "streaming", text: "Streaming")
+        ]
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey
+        ))
+
+        XCTAssertTrue(appModel.serverObservation(for: selectedKey.serverId) === serverObservation)
+        XCTAssertTrue(appModel.settingsObservation === settingsObservation)
+        XCTAssertEqual(serverObservation.revision, serverRevision)
+        XCTAssertEqual(settingsObservation.revision, settingsRevision)
+
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey,
+            servers: [makeServer(displayName: "Renamed Server")]
+        ))
+
+        XCTAssertEqual(serverObservation.revision, serverRevision)
+        XCTAssertEqual(settingsObservation.revision, settingsRevision + 1)
+        XCTAssertEqual(settingsObservation.servers.first?.displayName, "Renamed Server")
+
+        appModel.applySnapshot(makeSnapshot(
+            threads: [selected, other],
+            activeThread: selectedKey,
+            servers: [makeServer(transportState: .disconnected)]
+        ))
+
+        XCTAssertEqual(serverObservation.revision, serverRevision + 1)
+        XCTAssertEqual(settingsObservation.revision, settingsRevision + 2)
+        XCTAssertFalse(serverObservation.isConnected)
+    }
+
+    @MainActor
     func testUnrelatedThreadUpdateDoesNotAdvanceRevision() {
         let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
         let otherKey = ThreadKey(serverId: "server", threadId: "other")
@@ -198,11 +345,11 @@ final class AppModelConversationObservationTests: XCTestCase {
             composerPrefillRequest: nil
         )
 
-        var notificationCount = 0
+        let notificationCount = LockedCounter()
         withObservationTracking {
             _ = observation.revision
         } onChange: {
-            notificationCount += 1
+            notificationCount.increment()
         }
 
         other.info.title = "Changed elsewhere"
@@ -211,7 +358,7 @@ final class AppModelConversationObservationTests: XCTestCase {
             cachedThread: nil,
             composerPrefillRequest: nil
         )
-        XCTAssertEqual(notificationCount, 0)
+        XCTAssertEqual(notificationCount.value, 0)
 
         var updatedSelected = selected
         updatedSelected.info.title = "Changed here"
@@ -220,7 +367,7 @@ final class AppModelConversationObservationTests: XCTestCase {
             cachedThread: nil,
             composerPrefillRequest: nil
         )
-        XCTAssertEqual(notificationCount, 1)
+        XCTAssertEqual(notificationCount.value, 1)
     }
 
     @MainActor
@@ -385,6 +532,19 @@ final class AppModelConversationObservationTests: XCTestCase {
     }
 }
 
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
+    }
+}
+
 private func makeSnapshot(
     threads: [AppThreadSnapshot],
     agentDirectoryVersion: UInt64 = 0,
@@ -415,16 +575,20 @@ private func makeSnapshot(
     )
 }
 
-private func makeServer() -> AppServerSnapshot {
+private func makeServer(
+    serverId: String = "server",
+    displayName: String = "Server",
+    transportState: AppServerTransportState = .connected
+) -> AppServerSnapshot {
     AppServerSnapshot(
-        serverId: "server",
-        displayName: "Server",
+        serverId: serverId,
+        displayName: displayName,
         host: "server.local",
         port: 8390,
         wakeMac: nil,
         isLocal: false,
         health: .connected,
-        transportState: .connected,
+        transportState: transportState,
         capabilities: AppServerCapabilities(
             canUseTransportActions: true,
             canBrowseDirectories: true,

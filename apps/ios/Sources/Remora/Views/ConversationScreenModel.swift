@@ -184,7 +184,7 @@ final class ConversationScreenModel {
     }
 
     private func refreshState() {
-        guard let thread, let appModel else {
+        guard let thread, appModel != nil else {
             transcript = .empty
             pinnedContextItems = []
             composer = .empty

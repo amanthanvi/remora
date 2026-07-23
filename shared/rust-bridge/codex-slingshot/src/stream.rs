@@ -17,7 +17,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 use crate::api::{SlingshotApi, sanitize_json_bytes, sanitize_json_value};
-use crate::envelope::{EnvelopeType, KnownPongStatus, RemoteControlEnvelope};
 use crate::errors::{SlingshotApiError, SlingshotTransportError};
 use crate::types::DeviceKeyConnectionChallenge;
 
@@ -33,22 +32,6 @@ const REMOTE_CONTROL_SEGMENT_COUNT_MAX: usize = 1024;
 pub enum SlingshotFraming {
     Ndjson,
     Sse,
-}
-
-impl SlingshotFraming {
-    fn from_response(response: &reqwest::Response) -> Self {
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if content_type.contains("text/event-stream") {
-            Self::Sse
-        } else {
-            Self::Ndjson
-        }
-    }
 }
 
 enum OutboundCommand {
@@ -164,11 +147,8 @@ struct ControlState {
     environment_id: String,
     stream_id: String,
     next_sequence_id: u64,
-    sent_first_client_message: bool,
-    replay_queue: VecDeque<RemoteControlEnvelope>,
     wire_replay_queue: VecDeque<ClientWireEnvelope>,
     current_subscribe_cursor: Option<String>,
-    current_state: Option<String>,
     latest_inbound_sequence_id: u64,
     chunk_assemblies: HashMap<u64, ChunkAssembly>,
 }
@@ -180,11 +160,8 @@ impl ControlState {
             environment_id,
             stream_id,
             next_sequence_id: 1,
-            sent_first_client_message: false,
-            replay_queue: VecDeque::new(),
             wire_replay_queue: VecDeque::new(),
             current_subscribe_cursor: None,
-            current_state: None,
             latest_inbound_sequence_id: 0,
             chunk_assemblies: HashMap::new(),
         }
@@ -196,76 +173,13 @@ impl ControlState {
         sequence_id
     }
 
-    fn client_message(&mut self, message: serde_json::Value) -> RemoteControlEnvelope {
-        let skip_history = (!self.sent_first_client_message).then_some(true);
-        self.sent_first_client_message = true;
-        RemoteControlEnvelope {
-            kind: EnvelopeType::ClientMessage,
-            client_id: self.client_id.clone(),
-            environment_id: Some(self.environment_id.clone()),
-            sequence_id: self.allocate_sequence_id(),
-            stream_id: Some(self.stream_id.clone()),
-            skip_history,
-            cursor: None,
-            message: Some(message),
-            state: self.current_state.clone(),
-            status: None,
-        }
-    }
-
-    fn client_closed(&mut self) -> RemoteControlEnvelope {
-        RemoteControlEnvelope {
-            kind: EnvelopeType::ClientClosed,
-            client_id: self.client_id.clone(),
-            environment_id: Some(self.environment_id.clone()),
-            sequence_id: self.allocate_sequence_id(),
-            stream_id: Some(self.stream_id.clone()),
-            skip_history: None,
-            cursor: None,
-            message: None,
-            state: self.current_state.clone(),
-            status: None,
-        }
-    }
-
-    fn ack(&self, inbound: &RemoteControlEnvelope) -> RemoteControlEnvelope {
-        RemoteControlEnvelope {
-            kind: EnvelopeType::Ack,
-            client_id: self.client_id.clone(),
-            environment_id: inbound.environment_id.clone(),
-            sequence_id: inbound.sequence_id,
-            stream_id: inbound.stream_id.clone(),
-            skip_history: None,
-            cursor: inbound.cursor.clone(),
-            message: None,
-            state: self.current_state.clone(),
-            status: None,
-        }
-    }
-
-    fn pong(&mut self, inbound: &RemoteControlEnvelope) -> RemoteControlEnvelope {
-        RemoteControlEnvelope {
-            kind: EnvelopeType::Pong,
-            client_id: self.client_id.clone(),
-            environment_id: inbound.environment_id.clone(),
-            sequence_id: self.allocate_sequence_id(),
-            stream_id: inbound.stream_id.clone(),
-            skip_history: None,
-            cursor: inbound.cursor.clone(),
-            message: None,
-            state: self.current_state.clone(),
-            status: Some(KnownPongStatus::Active),
-        }
-    }
-
     fn client_message_wire_envelopes(
         &mut self,
         message: serde_json::Value,
     ) -> Result<Vec<ClientWireEnvelope>, SlingshotApiError> {
-        self.sent_first_client_message = true;
         let seq_id = self.allocate_sequence_id();
         let envelope = ClientWireEnvelope {
-            event: ClientWireEvent::ClientMessage { message },
+            event: ClientWireEvent::Message { message },
             client_id: self.client_id.clone(),
             env_id: Some(self.environment_id.clone()),
             stream_id: Some(self.stream_id.clone()),
@@ -277,7 +191,7 @@ impl ControlState {
 
     fn client_closed_wire(&mut self) -> ClientWireEnvelope {
         ClientWireEnvelope {
-            event: ClientWireEvent::ClientClosed,
+            event: ClientWireEvent::Closed,
             client_id: self.client_id.clone(),
             env_id: Some(self.environment_id.clone()),
             stream_id: Some(self.stream_id.clone()),
@@ -285,47 +199,22 @@ impl ControlState {
             cursor: self.current_subscribe_cursor.clone(),
         }
     }
-
-    fn ack_wire(
-        &self,
-        envelope: &ServerWireEnvelope,
-        segment_id: Option<usize>,
-    ) -> ClientWireEnvelope {
-        ClientWireEnvelope {
-            event: ClientWireEvent::Ack { segment_id },
-            client_id: self.client_id.clone(),
-            env_id: envelope
-                .env_id
-                .clone()
-                .or_else(|| Some(self.environment_id.clone())),
-            stream_id: envelope.stream_id.clone(),
-            seq_id: envelope.seq_id,
-            cursor: envelope
-                .cursor
-                .clone()
-                .or_else(|| self.current_subscribe_cursor.clone()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientWireEvent {
-    ClientMessage {
-        message: serde_json::Value,
-    },
-    ClientMessageChunk {
+    #[serde(rename = "client_message")]
+    Message { message: serde_json::Value },
+    #[serde(rename = "client_message_chunk")]
+    MessageChunk {
         segment_id: usize,
         segment_count: usize,
         message_size_bytes: usize,
         message_chunk_base64: String,
     },
-    Ack {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        segment_id: Option<usize>,
-    },
-    Ping,
-    ClientClosed,
+    #[serde(rename = "client_closed")]
+    Closed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -384,7 +273,7 @@ struct ChunkAssembly {
 fn split_client_wire_envelope_for_transport(
     envelope: ClientWireEnvelope,
 ) -> Result<Vec<ClientWireEnvelope>, SlingshotApiError> {
-    if !matches!(envelope.event, ClientWireEvent::ClientMessage { .. }) {
+    if !matches!(envelope.event, ClientWireEvent::Message { .. }) {
         return Ok(vec![envelope]);
     }
 
@@ -393,7 +282,7 @@ fn split_client_wire_envelope_for_transport(
         return Ok(vec![envelope]);
     }
 
-    let ClientWireEvent::ClientMessage { message } = &envelope.event else {
+    let ClientWireEvent::Message { message } = &envelope.event else {
         unreachable!("client message variant checked above");
     };
     let raw = serde_json::to_vec(message)?;
@@ -417,7 +306,7 @@ fn split_client_wire_envelope_for_transport(
     let mut segments = Vec::with_capacity(segment_count);
     for (segment_id, chunk) in raw.chunks(chunk_size).enumerate() {
         let segment = ClientWireEnvelope {
-            event: ClientWireEvent::ClientMessageChunk {
+            event: ClientWireEvent::MessageChunk {
                 segment_id,
                 segment_count,
                 message_size_bytes,
@@ -497,19 +386,19 @@ async fn control_loop(
             "slingshot websocket connected"
         );
         let (mut ws_tx, mut ws_rx) = websocket.split();
-        if api.requires_device_key_handshake() {
-            if let Err(error) = complete_device_key_handshake(&api, &mut ws_tx, &mut ws_rx).await {
-                warn!(
-                    target: "codex_slingshot",
-                    %error,
-                    client_id = %state.client_id,
-                    environment_id = %state.environment_id,
-                    stream_id = %state.stream_id,
-                    "slingshot websocket device-key handshake failed"
-                );
-                tokio::time::sleep(RECONNECT_DELAY).await;
-                continue;
-            }
+        if api.requires_device_key_handshake()
+            && let Err(error) = complete_device_key_handshake(&api, &mut ws_tx, &mut ws_rx).await
+        {
+            warn!(
+                target: "codex_slingshot",
+                %error,
+                client_id = %state.client_id,
+                environment_id = %state.environment_id,
+                stream_id = %state.stream_id,
+                "slingshot websocket device-key handshake failed"
+            );
+            tokio::time::sleep(RECONNECT_DELAY).await;
+            continue;
         }
         if let Err(error) = replay_unacked_wire(&mut ws_tx, &state).await {
             warn!(
@@ -789,30 +678,6 @@ where
     Ok(true)
 }
 
-async fn handle_outbound_bytes(
-    api: &SlingshotApi,
-    state: &mut ControlState,
-    outbound_line_buf: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<(), SlingshotApiError> {
-    outbound_line_buf.extend_from_slice(bytes);
-    while let Some(line) = drain_line(outbound_line_buf) {
-        let trimmed = trim_ascii_whitespace(&line);
-        if trimmed.is_empty() {
-            continue;
-        }
-        let message: serde_json::Value = serde_json::from_slice(trimmed)?;
-        if !message.is_object() {
-            return Err(SlingshotTransportError::InvalidClientPayload.into());
-        }
-        let envelope = state.client_message(message);
-        envelope.validate_outbound()?;
-        state.replay_queue.push_back(envelope.clone());
-        api.send_envelope(&envelope).await?;
-    }
-    Ok(())
-}
-
 async fn handle_outbound_bytes_wire<S>(
     sink: &mut S,
     state: &mut ControlState,
@@ -1018,11 +883,9 @@ async fn handle_inbound_wire_envelope(
 
 fn client_wire_event_name(envelope: &ClientWireEnvelope) -> &'static str {
     match &envelope.event {
-        ClientWireEvent::ClientMessage { .. } => "client_message",
-        ClientWireEvent::ClientMessageChunk { .. } => "client_message_chunk",
-        ClientWireEvent::Ack { .. } => "ack",
-        ClientWireEvent::Ping => "ping",
-        ClientWireEvent::ClientClosed => "client_closed",
+        ClientWireEvent::Message { .. } => "client_message",
+        ClientWireEvent::MessageChunk { .. } => "client_message_chunk",
+        ClientWireEvent::Closed => "client_closed",
     }
 }
 
@@ -1117,103 +980,6 @@ fn deliver_jsonrpc_message(
     Ok(())
 }
 
-async fn handle_inbound_envelope(
-    api: &SlingshotApi,
-    state: &mut ControlState,
-    inbound_tx: &mpsc::UnboundedSender<Vec<u8>>,
-    envelope: RemoteControlEnvelope,
-) -> Result<(), SlingshotApiError> {
-    envelope.validate_inbound()?;
-    if let Some(cursor) = envelope.cursor.clone() {
-        state.current_subscribe_cursor = Some(cursor);
-    }
-    if let Some(token) = envelope.state.clone() {
-        state.current_state = Some(token);
-    }
-    match envelope.kind {
-        EnvelopeType::ServerMessage => {
-            state.latest_inbound_sequence_id = envelope.sequence_id;
-            let message = envelope
-                .message
-                .clone()
-                .ok_or(SlingshotTransportError::MissingMessage)?;
-            let mut line = serde_json::to_vec(&message)?;
-            line.push(b'\n');
-            inbound_tx
-                .send(line)
-                .map_err(|_| IoError::new(ErrorKind::BrokenPipe, "slingshot reader closed"))?;
-            let ack = state.ack(&envelope);
-            api.send_envelope(&ack).await?;
-        }
-        EnvelopeType::Ack => {
-            let acked = envelope.sequence_id;
-            state
-                .replay_queue
-                .retain(|queued| queued.sequence_id > acked);
-        }
-        EnvelopeType::Ping => {
-            let pong = state.pong(&envelope);
-            api.send_envelope(&pong).await?;
-        }
-        EnvelopeType::Pong => {}
-        EnvelopeType::ClientMessage | EnvelopeType::ClientClosed => unreachable!(),
-    }
-    Ok(())
-}
-
-async fn replay_unacked(api: &SlingshotApi, state: &ControlState) -> Result<(), SlingshotApiError> {
-    for envelope in &state.replay_queue {
-        api.send_envelope(envelope).await?;
-    }
-    Ok(())
-}
-
-fn pull_envelopes(
-    buf: &mut Vec<u8>,
-    framing: SlingshotFraming,
-) -> Result<Vec<RemoteControlEnvelope>, SlingshotApiError> {
-    match framing {
-        SlingshotFraming::Ndjson => pull_ndjson_envelopes(buf),
-        SlingshotFraming::Sse => pull_sse_envelopes(buf),
-    }
-}
-
-fn pull_ndjson_envelopes(
-    buf: &mut Vec<u8>,
-) -> Result<Vec<RemoteControlEnvelope>, SlingshotApiError> {
-    let mut envelopes = Vec::new();
-    while let Some(line) = drain_line(buf) {
-        let trimmed = trim_ascii_whitespace(&line);
-        if trimmed.is_empty() {
-            continue;
-        }
-        envelopes.push(serde_json::from_slice(trimmed)?);
-    }
-    Ok(envelopes)
-}
-
-fn pull_sse_envelopes(buf: &mut Vec<u8>) -> Result<Vec<RemoteControlEnvelope>, SlingshotApiError> {
-    let mut envelopes = Vec::new();
-    while let Some(event) = drain_sse_event(buf) {
-        let mut data_lines = Vec::new();
-        for raw_line in event.split(|byte| *byte == b'\n') {
-            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-            let Some(rest) = line.strip_prefix(b"data:") else {
-                continue;
-            };
-            let rest = rest.strip_prefix(b" ").unwrap_or(rest);
-            data_lines.extend_from_slice(rest);
-            data_lines.push(b'\n');
-        }
-        let trimmed = trim_ascii_whitespace(&data_lines);
-        if trimmed.is_empty() || trimmed == b"[DONE]" {
-            continue;
-        }
-        envelopes.push(serde_json::from_slice(trimmed)?);
-    }
-    Ok(envelopes)
-}
-
 fn drain_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     let pos = buf.iter().position(|byte| *byte == b'\n')?;
     let mut line = buf.drain(..=pos).collect::<Vec<_>>();
@@ -1224,22 +990,6 @@ fn drain_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
         line.pop();
     }
     Some(line)
-}
-
-fn drain_sse_event(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if let Some(pos) = find_subslice(buf, b"\n\n") {
-        return Some(buf.drain(..pos + 2).collect());
-    }
-    if let Some(pos) = find_subslice(buf, b"\r\n\r\n") {
-        return Some(buf.drain(..pos + 4).collect());
-    }
-    None
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
@@ -1319,7 +1069,7 @@ mod tests {
             assert_eq!(envelope.seq_id, Some(1));
 
             match &envelope.event {
-                ClientWireEvent::ClientMessageChunk {
+                ClientWireEvent::MessageChunk {
                     segment_id: actual_segment_id,
                     segment_count,
                     message_size_bytes,
@@ -1336,27 +1086,24 @@ mod tests {
     }
 
     #[test]
-    fn parses_ndjson_envelopes() {
-        let mut buf = br#"{"type":"ping","clientId":"C","sequenceId":1}
-{"type":"pong","clientId":"C","sequenceId":2,"status":"active"}
-"#
-        .to_vec();
-        let envelopes = pull_envelopes(&mut buf, SlingshotFraming::Ndjson).unwrap();
-        assert_eq!(envelopes.len(), 2);
-        assert_eq!(envelopes[0].kind, EnvelopeType::Ping);
-        assert_eq!(envelopes[1].status, Some(KnownPongStatus::Active));
-        assert!(buf.is_empty());
-    }
+    fn client_wire_close_preserves_protocol_type() {
+        let mut state = ControlState::new(
+            "cli_1".to_string(),
+            "env_1".to_string(),
+            "stream_1".to_string(),
+        );
 
-    #[test]
-    fn parses_sse_data_envelopes() {
-        let mut buf = br#"event: message
-data: {"type":"ping","clientId":"C","sequenceId":1}
+        let envelope = state.client_closed_wire();
 
-"#
-        .to_vec();
-        let envelopes = pull_envelopes(&mut buf, SlingshotFraming::Sse).unwrap();
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].kind, EnvelopeType::Ping);
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            json!({
+                "type": "client_closed",
+                "client_id": "cli_1",
+                "env_id": "env_1",
+                "stream_id": "stream_1",
+                "seq_id": 1,
+            })
+        );
     }
 }

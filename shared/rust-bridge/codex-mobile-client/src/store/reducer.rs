@@ -20,14 +20,15 @@ use crate::conversation_uniffi::{
 };
 use crate::session::connection::ServerConfig;
 use crate::session::events::UiEvent;
+#[cfg(test)]
+use crate::types::PendingApprovalWithSeed;
 use crate::types::{
     AgentRuntimeInfo, AgentRuntimeKind, PendingApproval, PendingApprovalKey, PendingApprovalSeed,
-    PendingApprovalWithSeed, PendingUserInputAnswer, PendingUserInputKey, PendingUserInputRequest,
-    PendingUserInputSeed, ThreadInfo, ThreadKey, ThreadSummaryStatus,
+    PendingUserInputAnswer, PendingUserInputKey, PendingUserInputRequest, PendingUserInputSeed,
+    ThreadInfo, ThreadKey, ThreadSummaryStatus,
 };
 use crate::types::{
     AppModeKind, AppOperationStatus, AppPlanProgressSnapshot, AppPlanStep, AppThreadGoal,
-    AppVoiceSessionPhase, AppVoiceTranscriptEntry, AppVoiceTranscriptUpdate,
 };
 
 use super::actions::{
@@ -45,7 +46,7 @@ use super::snapshot::{
     ThreadSnapshot,
 };
 use super::updates::{AppStoreUpdateRecord, ThreadStreamingDeltaKind};
-use super::voice::{VoiceDerivedUpdate, VoiceRealtimeState};
+use super::voice::VoiceRealtimeState;
 
 /// Compute a 64-bit fingerprint of a projected `HydratedConversationItem`
 /// suitable for redundant-emit dedup in `emit_thread_item_changed`. Streams
@@ -1044,6 +1045,7 @@ impl AppStoreReducer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_pending_approvals_with_seeds(
         &self,
         approvals: Vec<PendingApprovalWithSeed>,
@@ -1994,169 +1996,13 @@ impl AppStoreReducer {
                     self.emit_thread_metadata_changed(key);
                 }
             }
-            UiEvent::RealtimeStarted { key, notification } => {
-                self.voice_state.reset_thread(key);
-                {
-                    let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    snapshot.voice_session.active_thread = Some(key.clone());
-                    snapshot.voice_session.session_id = notification.realtime_session_id.clone();
-                    snapshot.voice_session.phase = Some(AppVoiceSessionPhase::Listening);
-                    snapshot.voice_session.last_error = None;
-                    snapshot.voice_session.transcript_entries.clear();
-                    snapshot.voice_session.handoff_thread_key = None;
-                    if let Some(thread) = snapshot.threads.get_mut(key) {
-                        thread.realtime_session_id = notification.realtime_session_id.clone();
-                    }
-                }
-                self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                let protocol_notification = crate::types::AppRealtimeStartedNotification {
-                    thread_id: notification.thread_id.clone(),
-                    session_id: notification.realtime_session_id.clone(),
-                    version: match notification.version {
-                        codex_protocol::protocol::RealtimeConversationVersion::V1 => {
-                            "v1".to_string()
-                        }
-                        codex_protocol::protocol::RealtimeConversationVersion::V2 => {
-                            "v2".to_string()
-                        }
-                    },
-                };
-                self.emit(AppStoreUpdateRecord::RealtimeStarted {
-                    key: key.clone(),
-                    notification: protocol_notification,
-                });
-                self.emit_thread_metadata_changed(key);
-            }
-            UiEvent::RealtimeSdp { key, notification } => {
-                let protocol_notification =
-                    crate::types::AppRealtimeSdpNotification::from(notification.clone());
-                self.emit(AppStoreUpdateRecord::RealtimeSdp {
-                    key: key.clone(),
-                    notification: protocol_notification,
-                });
-            }
-            UiEvent::RealtimeTranscriptUpdated { key, role, text } => {
-                for update in self
-                    .voice_state
-                    .handle_typed_transcript_delta(key, role, text)
-                {
-                    match update {
-                        VoiceDerivedUpdate::Transcript(update) => {
-                            self.apply_voice_transcript_update(key, &update);
-                            self.emit(AppStoreUpdateRecord::RealtimeTranscriptUpdated {
-                                key: key.clone(),
-                                update,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            UiEvent::RealtimeItemAdded { key, notification } => {
-                for update in self.voice_state.handle_item(key, &notification.item) {
-                    match update {
-                        VoiceDerivedUpdate::Transcript(update) => {
-                            self.apply_voice_transcript_update(key, &update);
-                            self.emit(AppStoreUpdateRecord::RealtimeTranscriptUpdated {
-                                key: key.clone(),
-                                update,
-                            });
-                        }
-                        VoiceDerivedUpdate::HandoffRequest(request) => {
-                            {
-                                let mut snapshot =
-                                    self.snapshot.write().expect("app store lock poisoned");
-                                snapshot.voice_session.phase = Some(AppVoiceSessionPhase::Handoff);
-                            }
-                            self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                            self.emit(AppStoreUpdateRecord::RealtimeHandoffRequested {
-                                key: key.clone(),
-                                request,
-                            });
-                        }
-                        VoiceDerivedUpdate::SpeechStarted => {
-                            {
-                                let mut snapshot =
-                                    self.snapshot.write().expect("app store lock poisoned");
-                                snapshot.voice_session.phase =
-                                    Some(AppVoiceSessionPhase::Listening);
-                            }
-                            self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                            self.emit(AppStoreUpdateRecord::RealtimeSpeechStarted {
-                                key: key.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-            UiEvent::RealtimeOutputAudioDelta { key, notification } => {
-                {
-                    let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    if snapshot.voice_session.active_thread.as_ref() == Some(key) {
-                        snapshot.voice_session.phase = Some(AppVoiceSessionPhase::Speaking);
-                    }
-                }
-                self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                let protocol_notification = crate::types::AppRealtimeOutputAudioDeltaNotification {
-                    thread_id: notification.thread_id.clone(),
-                    audio: crate::types::AppRealtimeAudioChunk {
-                        item_id: notification.audio.item_id.clone(),
-                        data: notification.audio.data.clone(),
-                        sample_rate: notification.audio.sample_rate,
-                        num_channels: notification.audio.num_channels.into(),
-                        samples_per_channel: notification.audio.samples_per_channel,
-                    },
-                };
-                self.emit(AppStoreUpdateRecord::RealtimeOutputAudioDelta {
-                    key: key.clone(),
-                    notification: protocol_notification,
-                });
-            }
-            UiEvent::RealtimeError { key, notification } => {
-                {
-                    let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    snapshot.voice_session.phase = Some(AppVoiceSessionPhase::Error);
-                    snapshot.voice_session.last_error = Some(notification.message.clone());
-                }
-                self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                let protocol_notification = crate::types::AppRealtimeErrorNotification {
-                    thread_id: notification.thread_id.clone(),
-                    message: notification.message.clone(),
-                };
-                self.emit(AppStoreUpdateRecord::RealtimeError {
-                    key: key.clone(),
-                    notification: protocol_notification,
-                });
-            }
-            UiEvent::RealtimeClosed { key, notification } => {
-                self.voice_state.clear_thread(key);
-                {
-                    let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    if let Some(thread) = snapshot.threads.get_mut(key) {
-                        thread.realtime_session_id = None;
-                    }
-                    let reason = notification.reason.as_deref().unwrap_or("").trim();
-                    if reason.is_empty() || reason == "requested" {
-                        snapshot.voice_session = AppVoiceSessionSnapshot::default();
-                    } else {
-                        snapshot.voice_session.active_thread = Some(key.clone());
-                        snapshot.voice_session.session_id = None;
-                        snapshot.voice_session.phase = Some(AppVoiceSessionPhase::Error);
-                        snapshot.voice_session.last_error = Some(reason.to_string());
-                        snapshot.voice_session.handoff_thread_key = None;
-                    }
-                }
-                self.emit(AppStoreUpdateRecord::VoiceSessionChanged);
-                let protocol_notification = crate::types::AppRealtimeClosedNotification {
-                    thread_id: notification.thread_id.clone(),
-                    reason: notification.reason.clone(),
-                };
-                self.emit(AppStoreUpdateRecord::RealtimeClosed {
-                    key: key.clone(),
-                    notification: protocol_notification,
-                });
-                self.emit_thread_metadata_changed(key);
-            }
+            event @ (UiEvent::RealtimeStarted { .. }
+            | UiEvent::RealtimeSdp { .. }
+            | UiEvent::RealtimeTranscriptUpdated { .. }
+            | UiEvent::RealtimeItemAdded { .. }
+            | UiEvent::RealtimeOutputAudioDelta { .. }
+            | UiEvent::RealtimeError { .. }
+            | UiEvent::RealtimeClosed { .. }) => self.apply_realtime_event(event),
             UiEvent::Error { key, message, code } => {
                 if let Some(key) = key {
                     let item = {
@@ -2544,38 +2390,6 @@ impl AppStoreReducer {
         }
     }
 
-    fn apply_voice_transcript_update(&self, key: &ThreadKey, update: &AppVoiceTranscriptUpdate) {
-        let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-        if snapshot.voice_session.active_thread.as_ref() != Some(key) {
-            return;
-        }
-
-        let entry = AppVoiceTranscriptEntry {
-            item_id: update.item_id.clone(),
-            speaker: update.speaker,
-            text: update.text.clone(),
-        };
-        if let Some(existing) = snapshot
-            .voice_session
-            .transcript_entries
-            .iter_mut()
-            .find(|existing| existing.item_id == entry.item_id)
-        {
-            *existing = entry;
-        } else {
-            snapshot.voice_session.transcript_entries.push(entry);
-        }
-
-        snapshot.voice_session.phase = Some(match (update.speaker, update.is_final) {
-            (_, false) => match update.speaker {
-                crate::types::AppVoiceSpeaker::User => AppVoiceSessionPhase::Listening,
-                crate::types::AppVoiceSpeaker::Assistant => AppVoiceSessionPhase::Speaking,
-            },
-            (crate::types::AppVoiceSpeaker::Assistant, true) => AppVoiceSessionPhase::Thinking,
-            (crate::types::AppVoiceSpeaker::User, true) => AppVoiceSessionPhase::Listening,
-        });
-    }
-
     fn emit(&self, update: AppStoreUpdateRecord) {
         match &update {
             AppStoreUpdateRecord::FullResync => tracing::debug!(target: "store", "emit FullResync"),
@@ -2707,6 +2521,12 @@ impl AppStoreReducer {
         guard.retain(|(existing_key, _), buffer| {
             !(existing_key == thread_key && buffer.item_id == item_id)
         });
+    }
+}
+
+impl Default for AppStoreReducer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -3030,9 +2850,8 @@ fn append_mcp_progress(
     }
 }
 
+mod realtime;
 mod thread_merge;
-#[allow(unused_imports)]
-pub(crate) use thread_merge::reconcile_local_overlay_items;
 use thread_merge::{
     LOCAL_USER_MESSAGE_ITEM_PREFIX, USER_INPUT_RESPONSE_ITEM_PREFIX, answered_user_input_item,
     duplicate_local_overlay_item_ids, is_duplicate_overlay_item, is_superseded_overlay_item,
@@ -3073,9 +2892,7 @@ fn classify_item_mutation(
     item: &HydratedConversationItem,
 ) -> Option<ItemMutationUpdate> {
     let Some(existing) = existing else {
-        return Some(ItemMutationUpdate::Upsert(HydratedConversationItem::from(
-            item.clone(),
-        )));
+        return Some(ItemMutationUpdate::Upsert(item.clone()));
     };
 
     match (&existing.content, &item.content) {
@@ -3092,9 +2909,7 @@ fn classify_item_mutation(
                 || existing_data.cwd != projected_data.cwd
                 || existing_data.actions != projected_data.actions
             {
-                return Some(ItemMutationUpdate::Upsert(HydratedConversationItem::from(
-                    item.clone(),
-                )));
+                return Some(ItemMutationUpdate::Upsert(item.clone()));
             }
 
             let output_delta =
@@ -3106,15 +2921,11 @@ fn classify_item_mutation(
             if output_delta.is_empty() && !status_changed {
                 None
             } else {
-                Some(ItemMutationUpdate::Upsert(HydratedConversationItem::from(
-                    item.clone(),
-                )))
+                Some(ItemMutationUpdate::Upsert(item.clone()))
             }
         }
         _ if existing.content == item.content => None,
-        _ => Some(ItemMutationUpdate::Upsert(HydratedConversationItem::from(
-            item.clone(),
-        ))),
+        _ => Some(ItemMutationUpdate::Upsert(item.clone())),
     }
 }
 

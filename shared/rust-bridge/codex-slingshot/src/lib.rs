@@ -35,8 +35,8 @@ pub use types::{
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
-use codex_app_server_client::{AppServerClient, RemoteAppServerConnectArgs};
 use crate::json_line_wire::connect_json_line_stream;
+use codex_app_server_client::{AppServerClient, RemoteAppServerConnectArgs};
 
 /// Connect an upstream app-server client through one Slingshot environment.
 pub async fn connect_app_server_client(
