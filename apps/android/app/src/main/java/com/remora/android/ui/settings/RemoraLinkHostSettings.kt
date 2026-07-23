@@ -56,6 +56,7 @@ import uniffi.codex_mobile_client.AppRemoraLinkForgetResult
 import uniffi.codex_mobile_client.AppRemoraLinkHostState
 import uniffi.codex_mobile_client.AppRemoraLinkHostSummary
 import uniffi.codex_mobile_client.AppRemoraLinkPendingApproval
+import uniffi.codex_mobile_client.AppRemoraLinkRestartOutcome
 import uniffi.codex_mobile_client.AppRemoraLinkRevocationOutcome
 import uniffi.codex_mobile_client.AppRemoraLinkScope
 
@@ -76,6 +77,8 @@ internal data class RemoraLinkHostsUiState(
 
 internal interface RemoraLinkHostsApi {
     suspend fun hosts(): List<AppRemoraLinkHostSummary>
+    suspend fun restart(hostId: String, runtimeId: String): AppRemoraLinkRestartOutcome
+    suspend fun acknowledgeUnknownRestart(hostId: String): ULong
     suspend fun revoke(hostId: String): AppRemoraLinkRevocationOutcome
     suspend fun forget(hostId: String): AppRemoraLinkForgetResult
 }
@@ -98,6 +101,42 @@ internal class RemoraLinkHostsController(private val api: RemoraLinkHostsApi) {
 
     suspend fun refreshAfterResumedPairingDismissal() {
         refresh()
+    }
+
+    suspend fun restart(host: AppRemoraLinkHostSummary, runtimeId: String) {
+        if (!host.canRestartRuntime(runtimeId)) return
+        _state.value = _state.value.copy(busyHostId = host.hostId, message = null)
+        val outcome = try {
+            api.restart(host.hostId, runtimeId)
+        } catch (error: Exception) {
+            refreshAfterOperationFailure(error)
+            return
+        }
+        val message = when (outcome) {
+            is AppRemoraLinkRestartOutcome.Succeeded ->
+                "Restart succeeded for $runtimeId on ${host.hostDisplayName} " +
+                    "(sequence ${outcome.commandSequence})."
+            is AppRemoraLinkRestartOutcome.OutcomeUnknown ->
+                "Restart outcome is unknown for $runtimeId on ${host.hostDisplayName} " +
+                    "(sequence ${outcome.commandSequence}). Check the host before acknowledging."
+        }
+        refreshAfterOperation(message)
+    }
+
+    suspend fun acknowledgeUnknownRestart(host: AppRemoraLinkHostSummary) {
+        val pendingRestart = host.pendingRestart
+        if (pendingRestart?.outcomeUnknown != true) return
+        _state.value = _state.value.copy(busyHostId = host.hostId, message = null)
+        val acknowledgedSequence = try {
+            api.acknowledgeUnknownRestart(host.hostId)
+        } catch (error: Exception) {
+            refreshAfterOperationFailure(error)
+            return
+        }
+        refreshAfterOperation(
+            "Acknowledged the checked restart for ${pendingRestart.runtimeId} on " +
+                "${host.hostDisplayName} (sequence $acknowledgedSequence).",
+        )
     }
 
     suspend fun revoke(host: AppRemoraLinkHostSummary) {
@@ -151,6 +190,25 @@ internal class RemoraLinkHostsController(private val api: RemoraLinkHostsApi) {
     private fun visibleHosts(hosts: List<AppRemoraLinkHostSummary>) = hosts
         .filterNot { it.state == AppRemoraLinkHostState.FORGOTTEN }
         .sortedBy { it.hostDisplayName.lowercase() }
+
+    private suspend fun refreshAfterOperationFailure(error: Exception) {
+        refreshAfterOperation(remoraLinkErrorMessage(error))
+    }
+
+    private suspend fun refreshAfterOperation(message: String) {
+        var refreshed = true
+        val hosts = try {
+            visibleHosts(api.hosts())
+        } catch (_: Exception) {
+            refreshed = false
+            _state.value.hosts
+        }
+        _state.value = _state.value.copy(
+            hosts = hosts,
+            busyHostId = null,
+            message = if (refreshed) message else "$message Host status could not be refreshed.",
+        )
+    }
 }
 
 @Composable
@@ -160,6 +218,15 @@ internal fun RemoraLinkHostsScreen(onBack: () -> Unit) {
         object : RemoraLinkHostsApi {
             override suspend fun hosts(): List<AppRemoraLinkHostSummary> =
                 appModel.withRemoraLinkV2 { it.remoraLinkHosts() }
+
+            override suspend fun restart(
+                hostId: String,
+                runtimeId: String,
+            ): AppRemoraLinkRestartOutcome =
+                appModel.withRemoraLinkV2 { it.restartRemoraLinkRuntime(hostId, runtimeId) }
+
+            override suspend fun acknowledgeUnknownRestart(hostId: String): ULong =
+                appModel.withRemoraLinkV2 { it.acknowledgeRemoraLinkUnknownRestart(hostId) }
 
             override suspend fun revoke(hostId: String): AppRemoraLinkRevocationOutcome =
                 appModel.withRemoraLinkV2 { it.revokeRemoraLinkHost(hostId) }
@@ -192,6 +259,8 @@ internal fun RemoraLinkHostsContent(
     var revokeTarget by remember { mutableStateOf<AppRemoraLinkHostSummary?>(null) }
     var forgetTarget by remember { mutableStateOf<AppRemoraLinkHostSummary?>(null) }
     var resumeTarget by remember { mutableStateOf<AppRemoraLinkHostSummary?>(null) }
+    var restartTarget by remember { mutableStateOf<Pair<AppRemoraLinkHostSummary, String>?>(null) }
+    var acknowledgeRestartTarget by remember { mutableStateOf<AppRemoraLinkHostSummary?>(null) }
 
     fun dismissResumedPairingSheet() {
         resumeTarget = null
@@ -253,6 +322,8 @@ internal fun RemoraLinkHostsContent(
                     onRevoke = { revokeTarget = host },
                     onForget = { forgetTarget = host },
                     onContinueApproval = { resumeTarget = host },
+                    onRestart = { runtimeId -> restartTarget = host to runtimeId },
+                    onAcknowledgeRestart = { acknowledgeRestartTarget = host },
                 )
             }
         }
@@ -280,6 +351,60 @@ internal fun RemoraLinkHostsContent(
             },
             dismissButton = { TextButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
         )
+    }
+
+    restartTarget?.let { (host, runtimeId) ->
+        val pendingRestart = host.pendingRestart
+            ?.takeIf { it.runtimeId == runtimeId && !it.outcomeUnknown }
+        AlertDialog(
+            onDismissRequest = { restartTarget = null },
+            title = { Text(if (pendingRestart == null) "Restart $runtimeId?" else "Retry restart for $runtimeId?") },
+            text = {
+                Text(
+                    if (pendingRestart == null) {
+                        "This sends one restart command to $runtimeId on ${host.hostDisplayName}. " +
+                            "The runtime connection will be interrupted."
+                    } else {
+                        "This retries the same durable restart command for $runtimeId on " +
+                            "${host.hostDisplayName} (sequence ${pendingRestart.commandSequence}). " +
+                            "It does not issue a new sequence."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    restartTarget = null
+                    scope.launch { controller.restart(host, runtimeId) }
+                }) { Text("Restart runtime", color = RemoraTheme.danger) }
+            },
+            dismissButton = { TextButton(onClick = { restartTarget = null }) { Text("Cancel") } },
+        )
+    }
+
+    acknowledgeRestartTarget?.let { host ->
+        val pendingRestart = host.pendingRestart
+        if (pendingRestart?.outcomeUnknown == true) {
+            AlertDialog(
+                onDismissRequest = { acknowledgeRestartTarget = null },
+                title = { Text("Acknowledge checked host?") },
+                text = {
+                    Text(
+                        "Only continue after checking ${host.hostDisplayName} directly. This clears the " +
+                            "unknown outcome for ${pendingRestart.runtimeId} (sequence " +
+                            "${pendingRestart.commandSequence}) and allows a later explicit restart.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        acknowledgeRestartTarget = null
+                        scope.launch { controller.acknowledgeUnknownRestart(host) }
+                    }) { Text("I checked the host", color = RemoraTheme.danger) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { acknowledgeRestartTarget = null }) { Text("Cancel") }
+                },
+            )
+        }
     }
 
     forgetTarget?.let { host ->
@@ -352,6 +477,8 @@ internal fun RemoraLinkHostRow(
     onRevoke: () -> Unit,
     onForget: () -> Unit,
     onContinueApproval: () -> Unit,
+    onRestart: (String) -> Unit,
+    onAcknowledgeRestart: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -381,6 +508,79 @@ internal fun RemoraLinkHostRow(
                 color = RemoraTheme.textSecondary,
                 fontSize = 11.sp,
             )
+        }
+        host.pendingRestart?.takeIf { it.outcomeUnknown }?.let { pendingRestart ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(RemoraTheme.background, RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Restart outcome unknown",
+                    color = RemoraTheme.danger,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "Runtime: ${pendingRestart.runtimeId}",
+                    color = RemoraTheme.textPrimary,
+                    fontSize = 11.sp,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                Text(
+                    "Sequence: ${pendingRestart.commandSequence}",
+                    color = RemoraTheme.textSecondary,
+                    fontSize = 11.sp,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                Text(
+                    "Check the host directly before acknowledging this result.",
+                    color = RemoraTheme.textSecondary,
+                    fontSize = 11.sp,
+                )
+            }
+            OutlinedButton(
+                onClick = onAcknowledgeRestart,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+            ) {
+                Text("Acknowledge after checking host", color = RemoraTheme.textSecondary)
+            }
+        }
+        host.pendingRestart?.takeIf { !it.outcomeUnknown }?.let { pendingRestart ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(RemoraTheme.background, RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Restart pending",
+                    color = RemoraTheme.textPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "Runtime: ${pendingRestart.runtimeId}",
+                    color = RemoraTheme.textPrimary,
+                    fontSize = 11.sp,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                Text(
+                    "Sequence: ${pendingRestart.commandSequence}",
+                    color = RemoraTheme.textSecondary,
+                    fontSize = 11.sp,
+                    fontFamily = RemoraTheme.monoFont,
+                )
+                Text(
+                    "Retrying reuses this durable command sequence.",
+                    color = RemoraTheme.textSecondary,
+                    fontSize = 11.sp,
+                )
+            }
         }
         host.pendingApproval?.let { pending ->
             Column(
@@ -413,6 +613,23 @@ internal fun RemoraLinkHostRow(
         if (host.hostRevocationStillRequired) {
             Text("Host cleanup still required", color = RemoraTheme.danger, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         }
+        if (host.canOfferRestartActions()) {
+            Text("Runtime restarts", color = RemoraTheme.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            host.selectedRuntimeIds.distinct().forEach { runtimeId ->
+                val retryingPreparedRestart = host.pendingRestart
+                    ?.let { it.runtimeId == runtimeId && !it.outcomeUnknown }
+                    ?: false
+                Button(
+                    onClick = { onRestart(runtimeId) },
+                    enabled = !busy && host.canRestartRuntime(runtimeId),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = RemoraTheme.minimumTouchTarget),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = RemoraTheme.accent.copy(alpha = 0.18f),
+                        contentColor = RemoraTheme.accent,
+                    ),
+                ) { Text(if (retryingPreparedRestart) "Retry restart $runtimeId" else "Restart $runtimeId") }
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -433,6 +650,18 @@ internal fun RemoraLinkHostRow(
             ) { Text("Forget", color = RemoraTheme.textSecondary) }
         }
     }
+}
+
+internal fun AppRemoraLinkHostSummary.canOfferRestartActions(): Boolean =
+    state == AppRemoraLinkHostState.PAIRED &&
+        AppRemoraLinkScope.RESTART_RUNTIME in grantedScopes &&
+        selectedRuntimeIds.isNotEmpty()
+
+internal fun AppRemoraLinkHostSummary.canRestartRuntime(runtimeId: String): Boolean {
+    val pending = pendingRestart
+    return canOfferRestartActions() &&
+        runtimeId in selectedRuntimeIds &&
+        (pending == null || (pending.runtimeId == runtimeId && !pending.outcomeUnknown))
 }
 
 @Composable

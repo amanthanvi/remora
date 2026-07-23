@@ -47,7 +47,7 @@ final class MessageRecorder {
             do {
                 try await store.startReplay(data: data, targetKey: targetKey)
             } catch {
-                NSLog("[MessageRecorder] replay error: \(error)")
+                LLog.error("message-recorder", "replay failed", error: error)
             }
             await MainActor.run { self?.isReplaying = false }
         }

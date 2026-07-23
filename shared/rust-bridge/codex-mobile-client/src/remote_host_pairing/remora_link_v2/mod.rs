@@ -15,8 +15,7 @@ mod wire;
 
 #[allow(unused_imports)]
 pub(crate) use client::{
-    ControlExchangeError, read_proof_frame, read_request_frame, read_response_frame,
-    write_proof_frame, write_request_frame,
+    ControlExchangeError, read_response_frame, write_proof_frame, write_request_frame,
 };
 #[allow(unused_imports)]
 pub(crate) use wire::{
@@ -28,9 +27,7 @@ pub(crate) use wire::{
     derive_sas, encode_enrollment_transcript, encode_host_policy_transcript,
     encode_proof_transcript, encode_prospective_credential_material, enrollment_transcript_hash,
     host_policy_digest, operation_payload_hash, prospective_credential_id, validate_policy,
-    verify_proof_signature,
 };
-
 #[allow(unused_imports)]
 pub(crate) use lifecycle::{
     EnrollmentOutcomeV2, ForgetOutcomeV2, LifecycleErrorV2, MutationOutcomeV2, PairingLifecycleV2,

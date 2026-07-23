@@ -3,8 +3,7 @@ package com.remora.android.state
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import com.google.gson.Strictness
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
 import com.remora.android.util.LLog
@@ -430,7 +429,7 @@ object ChatGPTOAuth {
     private fun strictJsonStructure(text: String): OAuthJsonStructure {
         validateStrictJsonLexemes(text)
         return JsonReader(StringReader(text)).use { reader ->
-            reader.isLenient = false
+            reader.strictness = Strictness.STRICT
             val structure = when (reader.peek()) {
                 JsonToken.BEGIN_OBJECT -> {
                     val keys = linkedSetOf<String>()

@@ -53,6 +53,10 @@ impl SshClient {
     ///
     /// `host_key_callback` is invoked with the SHA-256 fingerprint of the
     /// server's public key. Return `true` to accept, `false` to reject.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the boxed async host-key callback is part of the public SSH connection boundary"
+    )]
     pub async fn connect(
         credentials: SshCredentials,
         host_key_callback: Box<dyn Fn(&str) -> BoxFuture<'static, bool> + Send + Sync>,

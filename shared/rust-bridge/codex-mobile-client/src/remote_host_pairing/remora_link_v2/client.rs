@@ -22,6 +22,7 @@ pub(crate) enum ControlExchangeError {
 
 /// Read a request frame and reject both malformed JSON and semantically
 /// invalid v2 values before returning it to lifecycle code.
+#[cfg(test)]
 pub(crate) async fn read_request_frame<R>(reader: &mut R) -> Result<RequestV2, ControlExchangeError>
 where
     R: AsyncRead + Unpin,
@@ -31,6 +32,7 @@ where
 }
 
 /// Read the proof frame with strict unknown-field, encoding, and DER checks.
+#[cfg(test)]
 pub(crate) async fn read_proof_frame<R>(reader: &mut R) -> Result<ProofV2, ControlExchangeError>
 where
     R: AsyncRead + Unpin,

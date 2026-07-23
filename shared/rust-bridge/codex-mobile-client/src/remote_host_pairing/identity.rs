@@ -8,8 +8,6 @@ use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::remora_link_v2::{ConfirmationModeV2, DeviceScopeV2, validate_policy};
-pub(crate) const REMORA_LINK_V2_ALPN: &[u8] = b"remora-link/2";
-const LEGACY_V1_PROTOCOL_VERSION: u32 = 1;
 const REMORA_LINK_V2_ENVELOPE_PREFIX: &str = "remora-link:v2:";
 const MAX_ENCODED_SEGMENT_BYTES: usize = 4096;
 const MAX_DECODED_JSON_BYTES: usize = 4096;
@@ -17,37 +15,6 @@ const V2_INVITATION_ID_BYTES: usize = 16;
 const V2_SECRET_BYTES: usize = 32;
 const MAX_HOST_NAME_BYTES: usize = 255;
 const MAX_ENDPOINT_ID_BYTES: usize = 256;
-
-/// Private, credential-bearing result of decoding a code. Its custom Debug
-/// implementation is intentionally redacted.
-#[derive(Clone)]
-pub(crate) enum DecodedPairingCode {
-    LegacyV1 { params: LegacyV1Invitation },
-    DeviceGrantV2(V2Invite),
-}
-
-impl DecodedPairingCode {
-    pub(crate) fn suggested_display_name(&self) -> String {
-        match self {
-            Self::LegacyV1 { params } => params
-                .host_name
-                .as_deref()
-                .map(sanitize_host_name)
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "Remote Host".to_string()),
-            Self::DeviceGrantV2(invite) => invite
-                .host_name
-                .clone()
-                .unwrap_or_else(|| "Remora Link".to_string()),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct LegacyV1Invitation {
-    pub(crate) node_id: String,
-    host_name: Option<String>,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PairingCodeError {
@@ -58,27 +25,7 @@ pub(crate) enum PairingCodeError {
     InvalidEnrollmentMaterial,
     MissingHostIdentity,
     InvalidHostIdentity,
-    MissingEnrollmentMaterial,
     InvalidRelayHint,
-}
-
-impl fmt::Debug for DecodedPairingCode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LegacyV1 { params } => formatter
-                .debug_struct("LegacyV1")
-                .field("host_id", &format_args!("alleycat:{}", params.node_id))
-                .field("credential", &"<redacted>")
-                .finish(),
-            Self::DeviceGrantV2(invite) => formatter
-                .debug_struct("DeviceGrantV2")
-                .field("host_id", &format_args!("remora-link:{}", invite.node_id))
-                .field("invitation_id", &"<redacted>")
-                .field("secret", &"<redacted>")
-                .field("expires_at", &invite.expires_at)
-                .finish(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -121,22 +68,6 @@ struct VersionProbe {
 }
 
 #[derive(Deserialize)]
-struct LegacyV1InvitationWire {
-    v: u32,
-    node_id: String,
-    token: String,
-    relay: Option<String>,
-    #[serde(default, alias = "hostname", alias = "display_name", alias = "name")]
-    host_name: Option<String>,
-}
-
-impl Drop for LegacyV1InvitationWire {
-    fn drop(&mut self) {
-        self.token.zeroize();
-    }
-}
-
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V2InviteWire {
     v: u32,
@@ -163,7 +94,7 @@ impl Drop for V2InviteWire {
 pub(crate) fn decode_pairing_code(
     encoded: String,
     now_unix_seconds: u64,
-) -> Result<DecodedPairingCode, PairingCodeError> {
+) -> Result<V2Invite, PairingCodeError> {
     let encoded = Zeroizing::new(encoded);
     let trimmed = encoded.trim();
     if trimmed.is_empty() {
@@ -201,8 +132,7 @@ pub(crate) fn decode_pairing_code(
             }
             (Zeroizing::new(trimmed.to_string()), false)
         } else if trimmed.starts_with("remora-link:") {
-            // Fail closed for unknown envelope versions. In particular, never
-            // reinterpret a broken v2 envelope as a legacy bearer payload.
+            // Fail closed for unknown envelope versions.
             return Err(PairingCodeError::IncompatibleProtocol);
         } else {
             // A human-entered short locator is not an authenticator. It stays
@@ -213,20 +143,10 @@ pub(crate) fn decode_pairing_code(
 
     let version: VersionProbe =
         serde_json::from_str(&json).map_err(|_| PairingCodeError::MalformedCode)?;
-    if v2_envelope && version.v != 2 {
+    if !v2_envelope || version.v != 2 {
         return Err(PairingCodeError::IncompatibleProtocol);
     }
-    match version.v {
-        LEGACY_V1_PROTOCOL_VERSION => {
-            let params = decode_legacy_v1(&json)?;
-            Ok(DecodedPairingCode::LegacyV1 { params })
-        }
-        2 if v2_envelope => {
-            decode_v2(&json, now_unix_seconds).map(DecodedPairingCode::DeviceGrantV2)
-        }
-        2 => Err(PairingCodeError::IncompatibleProtocol),
-        _ => Err(PairingCodeError::IncompatibleProtocol),
-    }
+    decode_v2(&json, now_unix_seconds)
 }
 
 fn decode_v2(json: &str, _now_unix_seconds: u64) -> Result<V2Invite, PairingCodeError> {
@@ -322,47 +242,8 @@ fn normalize_host_name(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn sanitize_host_name(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .take(MAX_HOST_NAME_BYTES)
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
 fn valid_label(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
-}
-
-fn decode_legacy_v1(json: &str) -> Result<LegacyV1Invitation, PairingCodeError> {
-    let wire: LegacyV1InvitationWire =
-        serde_json::from_str(json).map_err(|_| PairingCodeError::MalformedCode)?;
-    if wire.v != LEGACY_V1_PROTOCOL_VERSION {
-        return Err(PairingCodeError::IncompatibleProtocol);
-    }
-    if wire.node_id.trim().is_empty() {
-        return Err(PairingCodeError::MissingHostIdentity);
-    }
-    EndpointId::from_str(&wire.node_id).map_err(|_| PairingCodeError::InvalidHostIdentity)?;
-    if wire.token.trim().is_empty() {
-        return Err(PairingCodeError::MissingEnrollmentMaterial);
-    }
-    if let Some(relay) = wire.relay.as_deref() {
-        RelayUrl::from_str(relay).map_err(|_| PairingCodeError::InvalidRelayHint)?;
-    }
-    Ok(LegacyV1Invitation {
-        node_id: wire.node_id.clone(),
-        host_name: normalize_host_name(wire.host_name.clone()),
-    })
 }
 
 #[cfg(test)]
@@ -395,27 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn characterizes_existing_v1_wire_and_stable_id() {
-        let json = serde_json::json!({
-            "v": 1,
-            "node_id": NODE_ID,
-            "token": "legacy-bearer",
-            "host_name": "Old Host",
-            "relay": "https://relay.example"
-        })
-        .to_string();
-
-        let decoded = decode_pairing_code(json, 1_000).expect("legacy code");
-        match decoded {
-            DecodedPairingCode::LegacyV1 { params } => {
-                assert_eq!(params.node_id, NODE_ID);
-                assert_eq!(params.host_name.as_deref(), Some("Old Host"));
-            }
-            DecodedPairingCode::DeviceGrantV2(_) => panic!("expected legacy classification"),
-        }
-    }
-
-    #[test]
     fn accepts_copy_paste_envelope_and_rejects_raw_v2_json() {
         let now = 5_000;
         let json = v2_json(now);
@@ -426,39 +286,34 @@ mod tests {
             decode_pairing_code(json, now),
             Err(PairingCodeError::IncompatibleProtocol)
         ));
-        match copied {
-            DecodedPairingCode::DeviceGrantV2(invite) => {
-                assert_eq!(invite.node_id, NODE_ID);
-                assert_eq!(invite.host_name.as_deref(), Some("Studio Mac"));
-            }
-            DecodedPairingCode::LegacyV1 { .. } => panic!("expected v2 invitation"),
-        }
+        assert_eq!(copied.node_id, NODE_ID);
+        assert_eq!(copied.host_name.as_deref(), Some("Studio Mac"));
     }
 
     #[test]
-    fn v2_never_falls_back_to_v1() {
+    fn current_envelope_rejects_incomplete_and_wrong_version_payloads() {
         let now = 5_000;
         let mut value: serde_json::Value = serde_json::from_str(&v2_json(now)).unwrap();
         value.as_object_mut().unwrap().remove("secret");
-        value["token"] = serde_json::Value::String("legacy-bearer".into());
+        value["deprecated_secret"] = serde_json::Value::String("must-not-be-accepted".into());
 
         assert!(matches!(
             decode_pairing_code(v2_envelope(value.to_string()), now),
             Err(PairingCodeError::MalformedCode)
         ));
 
-        let v1 = serde_json::json!({
-            "v": 1,
+        let wrong_version = serde_json::json!({
+            "v": 7,
             "node_id": NODE_ID,
-            "token": "legacy-bearer"
+            "deprecated_secret": "must-not-be-accepted"
         })
         .to_string();
-        let wrapped_v1 = format!(
+        let wrapped_wrong_version = format!(
             "{REMORA_LINK_V2_ENVELOPE_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode(v1)
+            URL_SAFE_NO_PAD.encode(wrong_version)
         );
         assert!(matches!(
-            decode_pairing_code(wrapped_v1, now),
+            decode_pairing_code(wrapped_wrong_version, now),
             Err(PairingCodeError::IncompatibleProtocol)
         ));
     }
@@ -467,7 +322,7 @@ mod tests {
     fn rejects_unknown_fields_and_noncanonical_secret_length() {
         let now = 5_000;
         let mut unknown: serde_json::Value = serde_json::from_str(&v2_json(now)).unwrap();
-        unknown["token"] = serde_json::Value::String("must-not-be-accepted".into());
+        unknown["deprecated_secret"] = serde_json::Value::String("must-not-be-accepted".into());
         assert!(matches!(
             decode_pairing_code(v2_envelope(unknown.to_string()), now),
             Err(PairingCodeError::MalformedCode)

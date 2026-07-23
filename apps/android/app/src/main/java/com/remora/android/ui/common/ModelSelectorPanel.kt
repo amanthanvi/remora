@@ -82,10 +82,10 @@ import java.util.Locale
 fun ModelSelectorPanel(
     thread: AppThreadSnapshot?,
     availableModels: List<ModelInfo>,
-    onToggleMode: ((AppModeKind) -> Unit)? = null,
     fastMode: Boolean,
     onFastModeChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    onToggleMode: ((AppModeKind) -> Unit)? = null,
     showBackground: Boolean = true,
 ) {
     val appModel = LocalAppModel.current

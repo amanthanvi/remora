@@ -30,16 +30,16 @@ import uniffi.codex_mobile_client.ThreadKey
 
 @Composable
 fun ChatWallpaperBackground(
-    threadKey: ThreadKey? = null,
     modifier: Modifier = Modifier,
+    threadKey: ThreadKey? = null,
 ) {
     WallpaperBackdrop(threadKey = threadKey, modifier = modifier.fillMaxSize())
 }
 
 @Composable
 fun WallpaperBackdrop(
-    threadKey: ThreadKey? = null,
     modifier: Modifier = Modifier,
+    threadKey: ThreadKey? = null,
 ) {
     // Read version to recompose when wallpaper prefs change
     @Suppress("UNUSED_VARIABLE")

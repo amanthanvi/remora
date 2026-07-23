@@ -50,19 +50,6 @@ class RemoraLinkPairingControllerTest {
     }
 
     @Test
-    fun `legacy code requires v2 re-pair without becoming an offer`() = runBlocking {
-        val api = FakePairingApi(
-            inspection = AppRemoraLinkInspection.LegacyRePairRequired("old-host", "Office Mac"),
-        )
-        val controller = RemoraLinkPairingController(api, "Pixel")
-
-        controller.submitCode("legacy-code")
-
-        val state = controller.state.value as RemoraLinkPairingState.LegacyRePair
-        assertEquals("Office Mac", state.hostDisplayName)
-    }
-
-    @Test
     fun `interactive acceptance exposes SAS then completes after approval`() = runBlocking {
         val api = FakePairingApi(
             inspection = AppRemoraLinkInspection.Ready(offer()),

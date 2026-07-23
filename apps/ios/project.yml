@@ -17,8 +17,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
-    MARKETING_VERSION: "1.5.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.6.0"
+    CURRENT_PROJECT_VERSION: "2"
     SWIFT_OBJC_BRIDGING_HEADER: Sources/Remora/Bridge/RemoraBridgingHeader.h
     OTHER_LDFLAGS: "$(inherited) -lc++ -lz -lresolv -lcodex_mobile_client"
     HEADER_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/GeneratedRust/Headers"

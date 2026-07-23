@@ -4,11 +4,11 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
-use alleycat_bridge_core::{
+use futures::future::BoxFuture;
+use remora_bridge_core::{
     ChildProcess, ChildStderr, ChildStdin, ChildStdout, ProcessLauncher, ProcessRole, ProcessSpec,
     StdioMode,
 };
-use futures::future::BoxFuture;
 
 use crate::ssh::{
     PROFILE_INIT, RemoteShell, SshClient, SshExecChild, build_posix_exec_command, shell_quote,

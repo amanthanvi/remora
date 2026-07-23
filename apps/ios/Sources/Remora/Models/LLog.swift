@@ -2,7 +2,15 @@ import Foundation
 import OSLog
 
 enum LLog {
+    enum RenderingPolicy {
+        case diagnostic
+        case release
+    }
+
     private static let subsystemRoot = Bundle.main.bundleIdentifier ?? "com.remora.app"
+    private static let safeIdentifierCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
     private nonisolated(unsafe) static var bootstrapped = false
 
     static func bootstrap() {
@@ -32,7 +40,12 @@ enum LLog {
     static func error(_ subsystem: String, _ message: String, error: Error? = nil, fields: [String: Any] = [:], payloadJson: String? = nil) {
         var allFields = fields
         if let error {
-            allFields["error"] = error.localizedDescription
+            let nsError = error as NSError
+            allFields["error_domain"] = nsError.domain
+            allFields["error_code"] = nsError.code
+            #if DEBUG
+            allFields["error_description"] = error.localizedDescription
+            #endif
         }
         emit(level: .error, subsystem: subsystem, message: message, fields: allFields, payloadJson: payloadJson)
     }
@@ -41,22 +54,34 @@ enum LLog {
     /// localized descriptions out of public OSLog output.
     static func operationalFailureFields(operation: String, error: Error) -> [String: Any] {
         let nsError = error as NSError
-        return [
+        var fields: [String: Any] = [
             "operation": operation,
             "error_domain": nsError.domain,
             "error_code": nsError.code,
         ]
+        #if DEBUG
+        fields["error_description"] = error.localizedDescription
+        #endif
+        return fields
     }
 
     private static func emit(level: OSLogType, subsystem: String, message: String, fields: [String: Any], payloadJson: String?) {
         let logger = Logger(subsystem: subsystemRoot, category: subsystem)
         #if DEBUG
-        let rendered = render(message: message, fields: fields, payloadJson: payloadJson)
+        let rendered = render(
+            message: message,
+            fields: fields,
+            payloadJson: payloadJson,
+            policy: .diagnostic
+        )
         mirrorToStderr(level: level, subsystem: subsystem, rendered: rendered)
         #else
-        let rendered: String = level == .debug
-            ? message
-            : render(message: message, fields: fields, payloadJson: payloadJson)
+        let rendered = render(
+            message: message,
+            fields: fields,
+            payloadJson: payloadJson,
+            policy: .release
+        )
         #endif
 
         switch level {
@@ -89,15 +114,57 @@ enum LLog {
     }
     #endif
 
-    private static func render(message: String, fields: [String: Any], payloadJson: String?) -> String {
+    static func render(
+        message: String,
+        fields: [String: Any],
+        payloadJson: String?,
+        policy: RenderingPolicy
+    ) -> String {
         var parts = [message]
-        if let fieldsJson = jsonString(from: fields) {
+        let renderedFields = switch policy {
+        case .diagnostic:
+            fields
+        case .release:
+            releaseSafeFields(from: fields)
+        }
+        if let fieldsJson = jsonString(from: renderedFields) {
             parts.append("fields=\(fieldsJson)")
         }
-        if let payloadJson, !payloadJson.isEmpty {
+        if policy == .diagnostic, let payloadJson, !payloadJson.isEmpty {
             parts.append("payload=\(payloadJson)")
         }
         return parts.joined(separator: " ")
+    }
+
+    private static func releaseSafeFields(from fields: [String: Any]) -> [String: Any] {
+        // Release fields are rendered public. Keep this allowlist limited to
+        // bounded, hard-coded operational metadata.
+        var safeFields: [String: Any] = [:]
+
+        if let operation = safeIdentifier(fields["operation"]) {
+            safeFields["operation"] = operation
+        }
+        if let errorDomain = safeIdentifier(fields["error_domain"]) {
+            safeFields["error_domain"] = errorDomain
+        }
+        if let errorCode = fields["error_code"] as? Int {
+            safeFields["error_code"] = errorCode
+        }
+        if let status = fields["status"] as? Int {
+            safeFields["status"] = status
+        }
+
+        return safeFields
+    }
+
+    private static func safeIdentifier(_ value: Any?) -> String? {
+        guard let value = value as? String,
+              !value.isEmpty,
+              value.count <= 80,
+              value.unicodeScalars.allSatisfy({ safeIdentifierCharacters.contains($0) }) else {
+            return nil
+        }
+        return value
     }
 
     private static func resolveCodexHome() -> URL {

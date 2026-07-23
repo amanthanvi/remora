@@ -35,12 +35,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.outlined.ViewList
+import androidx.compose.material.icons.automirrored.outlined.ViewQuilt
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.ViewAgenda
-import androidx.compose.material.icons.outlined.ViewList
-import androidx.compose.material.icons.outlined.ViewQuilt
 import androidx.compose.material.icons.outlined.ViewStream
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -287,8 +287,8 @@ fun HomeDashboardScreen(
 
     fun zoomIconFor(level: Int): ImageVector = when (level) {
         // Matches iOS semantics: 1 = most compact (scan), 4 = most detail (deep).
-        1 -> Icons.Outlined.ViewQuilt
-        2 -> Icons.Outlined.ViewList
+        1 -> Icons.AutoMirrored.Outlined.ViewQuilt
+        2 -> Icons.AutoMirrored.Outlined.ViewList
         3 -> Icons.Outlined.ViewAgenda
         else -> Icons.Outlined.ViewStream
     }

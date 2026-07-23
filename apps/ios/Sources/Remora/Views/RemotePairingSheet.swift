@@ -9,13 +9,7 @@ enum RemoraLinkVisualTokens {
 }
 
 struct RemotePairingSheet: View {
-    static let pairCommand = "npx --yes remora-link@latest pair"
-    static let legacyRePairTitle = "Pair again with Remora Link"
-
-    static func legacyRePairMessage(hostDisplayName: String) -> String {
-        "\(hostDisplayName) uses a legacy invitation that Remora no longer accepts. "
-            + "Create a new Remora Link pairing code on the host, then scan or paste it here."
-    }
+    static let pairCommand = "remora-link pair --qr --runtime codex"
 
     static func supportsQRScanning(rendersAsMacApp: Bool) -> Bool {
         !rendersAsMacApp
@@ -157,6 +151,9 @@ struct RemotePairingSheet: View {
                 .foregroundStyle(linkCyan)
                 .accessibilityLabel(copiedCommand ? "Pairing command copied" : "Copy pairing command")
             }
+            Text("Replace codex with an ID from remora-link agents, or repeat --runtime to authorize more than one harness.")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.68))
         }
         .padding(16)
         .background(cardBackground)
@@ -171,8 +168,6 @@ struct RemotePairingSheet: View {
             ingressView
         case .inspecting:
             progressCard(title: "Checking code", detail: "Authenticating the host invitation…")
-        case let .legacyRePair(_, hostDisplayName):
-            legacyRePairView(hostDisplayName: hostDisplayName)
         case .offer(let offer):
             offerView(offer)
         case .accepting:
@@ -231,24 +226,6 @@ struct RemotePairingSheet: View {
         .padding(18)
         .background(cardBackground)
         .accessibilityElement(children: .combine)
-    }
-
-    private func legacyRePairView(hostDisplayName: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(Self.legacyRePairTitle, systemImage: "arrow.triangle.2.circlepath")
-                .font(.system(.headline, design: .monospaced))
-                .foregroundStyle(linkText)
-            Text(Self.legacyRePairMessage(hostDisplayName: hostDisplayName))
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(linkText.opacity(0.72))
-            ingressButtons(
-                scanTitle: "Scan New Code",
-                pasteTitle: "Paste New Code",
-                pasteAction: inspectClipboardCode
-            )
-        }
-        .padding(18)
-        .background(cardBackground)
     }
 
     private func offerView(_ offer: AppRemoraLinkOffer) -> some View {
@@ -691,6 +668,9 @@ private struct QRScannerScreen: View {
                 }
                 .accessibilityLabel(copied ? "Pairing command copied" : "Copy pairing command")
             }
+            Text("Replace codex with an ID from remora-link agents, or repeat --runtime for multiple harnesses.")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.78))
         }
         .foregroundStyle(.white)
         .padding(16)

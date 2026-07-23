@@ -90,6 +90,7 @@ fun ConversationScreen(
 ) {
     val appModel = LocalAppModel.current
     val snapshot by appModel.snapshot.collectAsState()
+    val launchSnapshot by appModel.launchState.snapshot.collectAsState()
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -630,7 +631,7 @@ fun ConversationScreen(
                                                                     additionalInputs = emptyList(),
                                                                     approvalPolicy = appModel.launchState.approvalPolicyValue(threadKey),
                                                                     sandboxPolicy = appModel.launchState.turnSandboxPolicy(threadKey),
-                                                                    model = appModel.launchState.snapshot.value.selectedModel.trim().ifEmpty { null },
+                                                                    model = launchSnapshot.selectedModel.trim().ifEmpty { null },
                                                                     reasoningEffort = null,
                                                                     serviceTier = null,
                                                                 )
@@ -966,7 +967,7 @@ fun ConversationScreen(
             ) {
                 ComposerSkillsSheet(
                     serverId = threadKey.serverId,
-                    cwd = thread?.info?.cwd ?: appModel.launchState.snapshot.value.currentCwd.ifBlank { "/" },
+                    cwd = thread?.info?.cwd ?: launchSnapshot.currentCwd.ifBlank { "/" },
                     onDismiss = { showSkillsSheet = false },
                     onError = { slashErrorMessage = it },
                 )

@@ -90,10 +90,6 @@ pub(crate) struct FinishedExchangeV2 {
 pub(crate) enum HostPortErrorV2 {
     #[error("Remora Link host is temporarily unavailable")]
     Unavailable,
-    #[error("Remora Link v2 negotiation is unavailable")]
-    V2Unavailable,
-    #[error("Remora Link operation was cancelled")]
-    Cancelled,
     #[error("Remora Link transport violated the control contract")]
     ProtocolViolation,
 }

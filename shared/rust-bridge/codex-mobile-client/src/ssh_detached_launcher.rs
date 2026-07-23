@@ -3,10 +3,10 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use alleycat_bridge_core::{
+use futures::future::BoxFuture;
+use remora_bridge_core::{
     ChildProcess, ChildStderr, ChildStdin, ChildStdout, ProcessLauncher, ProcessRole, ProcessSpec,
 };
-use futures::future::BoxFuture;
 
 use crate::ssh::{RemoteShell, SshClient, SshExecChild, build_posix_exec_command, shell_quote};
 use crate::ssh_launcher::{SshLauncher, build_remote_command};

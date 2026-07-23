@@ -1,14 +1,15 @@
 package com.remora.android.state
 
 import android.content.Context
-import android.util.Log
 import androidx.compose.runtime.mutableStateOf
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.PendingPurchasesParams
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryPurchasesParams
+import com.remora.android.util.LLog
 
 /**
  * Shared, lightweight view of the user's tip-jar purchases so surfaces like
@@ -67,12 +68,17 @@ object TipJarSupporterState {
         selectedHeaderKeys.value = loadSelectedHeaderKeys(app)
         val client = BillingClient.newBuilder(app)
             .setListener(PurchasesUpdatedListener { _, _ -> })
-            .enablePendingPurchases()
+            .enablePendingPurchases(
+                PendingPurchasesParams.newBuilder()
+                    .enableOneTimeProducts()
+                    .build(),
+            )
             .build()
         client.startConnection(object : BillingClientStateListener {
             override fun onBillingSetupFinished(result: BillingResult) {
                 if (result.responseCode != BillingClient.BillingResponseCode.OK) {
-                    Log.w(TAG, "billing setup failed: ${result.debugMessage}")
+                    LLog.w(TAG, "Billing setup failed")
+                    LLog.debug(TAG) { "Billing setup failure details: ${result.debugMessage}" }
                     client.endConnection()
                     return
                 }

@@ -2,14 +2,14 @@
 
 Status: implemented mobile contract and release guardrails.
 
-Host source pin: `amanthanvi/alleycat@0e625bece349a2ce53b7926cac7fc6a81121ca37`
+Host source: the Remora-owned Git source recorded in the shared Rust manifest,
+pinned by the shared Rust lockfile.
 
 ## Decision
 
 Remora Link v2 is the only active paired-host authorization path. It uses the
 `remora-link/2` ALPN and the pinned host's byte-level wire contract and golden
-vectors. The retired v1 bearer path is not a fallback. A v1 invitation is
-recognized only so the app can require explicit re-pairing.
+vectors. Unsupported invitation formats fail closed and require fresh pairing.
 
 Enrollment and routine access are deliberately different:
 
@@ -26,8 +26,8 @@ Enrollment and routine access are deliberately different:
 5. QR and paste are only encodings of the same invitation. Neither path changes
    the authorization policy.
 
-The host adapter accepts only the pinned v2 contract. It never silently retries
-`alleycat/1` after a v2 error and never imports a legacy bearer or endpoint key.
+The host adapter accepts only the pinned v2 contract. It never retries another
+protocol after a v2 error and never imports unsupported credentials.
 
 ## Implemented ownership boundary
 
@@ -77,36 +77,16 @@ Recovery is conservative:
 - an ambiguous enrollment cannot be treated as a fresh invitation;
 - a revoked or forgotten host cannot be resurrected by a stale async result;
 - long background gaps trigger authoritative reconnect/reload;
-- missing local key material requires re-pairing and never downgrades to v1.
+- missing local key material requires fresh pairing.
 
-## Legacy migration boundary
+## Supported upgrade boundary
 
-The following historical identifiers remain only where removal would weaken a
-direct-upgrade migration or break a pinned compatibility contract:
-
-- `ALLEYCAT_*` constants and `alleycat/1` in the isolated host compatibility
-  implementation;
-- a private, token-zeroizing v1 invitation classifier that returns
-  `LegacyRePairRequired`;
-- the explicit `npx kittylitter` string used to explain an existing legacy
-  installation;
-- `_alleycat_seq` as a time-bounded read fallback for the exact pinned host,
-  while `_remora_link_seq` is canonical;
-- historical SSH-bridge crate/package identity;
-- exact legacy secret namespaces used by idempotent deletion and Android backup
-  exclusions.
-
-The apps never write v1 pairing credentials. At startup they repeatedly delete
-the historical stores:
-
-- iOS generic-password service `com.alleycat.token`, all accounts;
-- iOS service `com.alleycat.device_key`, account
-  `__device_secret_key__`;
-- Android shared preferences `alleycat_credentials`.
-
-There is intentionally no completion marker. The purge retries when protected
-data is unavailable and remains in place until direct upgrades from every
-v1-writing build are outside the supported upgrade window.
+Remora 1.6.0 is the security and direct-upgrade floor on iOS and Android. When
+its versioned cutover marker is absent, startup removes unsupported credentials,
+signing authority, saved hosts, and protocol journals before configuring the
+shared runtime. Every host must then be paired again. No migration or
+compatibility guarantee applies to older state; direct upgrades are supported
+from 1.6.0 onward.
 
 ## Verification gates
 
@@ -116,11 +96,11 @@ Every host pin or protocol change requires:
 - deterministic binding generation;
 - Rust lifecycle, replay, reconnect, revocation, attachment, and shell-cleanup
   tests;
-- platform journal/key-provider and legacy-purge tests;
+- platform journal and key-provider tests;
 - iOS simulator and Android unit/debug builds;
 - pairing, reconnect, terminal, revoke/forget, and stale-resume smoke tests on
   both platforms;
-- a residual-identifier audit against the documented interop allowlist.
+- a residual product-identity audit.
 
 The normal local gate is:
 
@@ -131,7 +111,6 @@ make ios-sim-fast
 cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The pinned host contract is documented in the fork's
-[v2 wire specification](https://github.com/amanthanvi/alleycat/blob/0e625bece349a2ce53b7926cac7fc6a81121ca37/docs/remora-link-v2-wire.md)
-and
-[golden vectors](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37/tests/fixtures/remora-link-v2).
+The Remora-owned host source carries the v2 wire specification and golden
+vectors. The shared Rust manifest and lockfile record the exact reviewed source
+and revision.

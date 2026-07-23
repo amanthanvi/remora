@@ -48,6 +48,16 @@ struct RemoraLinkHostsSettingsView: View {
         ) {
             if let confirmation {
                 switch confirmation.action {
+                case .restart(let runtimeId):
+                    Button("Restart \(runtimeId)", role: .destructive) {
+                        self.confirmation = nil
+                        Task { await restart(runtimeId, on: confirmation.host) }
+                    }
+                case .acknowledgeRestart:
+                    Button("Acknowledge Checked Restart", role: .destructive) {
+                        self.confirmation = nil
+                        Task { await acknowledgeUnknownRestart(on: confirmation.host) }
+                    }
                 case .revoke:
                     Button("Revoke on Host", role: .destructive) {
                         self.confirmation = nil
@@ -64,6 +74,10 @@ struct RemoraLinkHostsSettingsView: View {
         } message: {
             if let confirmation {
                 switch confirmation.action {
+                case .restart(let runtimeId):
+                    Text("Restarting \(runtimeId) can interrupt active work. Remora will send one durable restart request to this paired host.")
+                case .acknowledgeRestart(let runtimeId, let commandSequence):
+                    Text("Only acknowledge after checking \(runtimeId) on the host. This clears the unknown result for sequence \(commandSequence) and allows a later restart; it does not send a new restart.")
                 case .revoke:
                     Text("Revoke asks the host to invalidate this device. The local record remains until cleanup finishes.")
                 case .forget:
@@ -179,6 +193,16 @@ struct RemoraLinkHostsSettingsView: View {
                     .accessibilityLabel("Host cleanup is still required")
             }
 
+            if let pendingRestart = host.pendingRestart {
+                pendingRestartStatus(pendingRestart, host: host)
+            }
+
+            if host.state == .paired,
+               host.grantedScopes.contains(.restartRuntime),
+               !host.selectedRuntimeIds.isEmpty {
+                runtimeRestartControls(host)
+            }
+
             HStack(spacing: 18) {
                 Button("Revoke") {
                     confirmation = HostConfirmation(action: .revoke, host: host)
@@ -200,6 +224,117 @@ struct RemoraLinkHostsSettingsView: View {
         .accessibilityElement(children: .contain)
     }
 
+    private func pendingRestartStatus(
+        _ pendingRestart: AppRemoraLinkPendingRestart,
+        host: AppRemoraLinkHostSummary
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                pendingRestart.outcomeUnknown ? "Restart outcome unknown" : "Restart request pending",
+                systemImage: pendingRestart.outcomeUnknown
+                    ? "exclamationmark.triangle.fill"
+                    : "arrow.triangle.2.circlepath"
+            )
+            .font(.system(.caption, design: .monospaced, weight: .semibold))
+            .foregroundStyle(linkWarning)
+
+            Text("Runtime \(pendingRestart.runtimeId) · sequence \(pendingRestart.commandSequence)")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(linkText.opacity(0.72))
+
+            if pendingRestart.outcomeUnknown {
+                Text("Check this runtime on the host before acknowledging. Do not retry while its result is unknown.")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.72))
+
+                Button("Acknowledge After Checking Host") {
+                    confirmation = HostConfirmation(
+                        action: .acknowledgeRestart(
+                            runtimeId: pendingRestart.runtimeId,
+                            commandSequence: pendingRestart.commandSequence
+                        ),
+                        host: host
+                    )
+                }
+                .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                .foregroundStyle(linkCyan)
+                .frame(minHeight: 44)
+                .disabled(actionHostId != nil)
+                .accessibilityHint("Clears the unknown restart result without sending another restart")
+            } else {
+                Text("Retry this runtime to resume the same durable request. Other runtimes remain blocked.")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(linkText.opacity(0.72))
+            }
+        }
+    }
+
+    private func runtimeRestartControls(_ host: AppRemoraLinkHostSummary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Runtime controls")
+                .font(.system(.caption, design: .monospaced, weight: .semibold))
+                .foregroundStyle(linkText.opacity(0.62))
+
+            ForEach(Array(host.selectedRuntimeIds.enumerated()), id: \.offset) { _, runtimeId in
+                Button {
+                    confirmation = HostConfirmation(action: .restart(runtimeId: runtimeId), host: host)
+                } label: {
+                    HStack(spacing: 10) {
+                        Label(runtimeId, systemImage: "arrow.triangle.2.circlepath")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(restartButtonTitle(runtimeId, on: host))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                .foregroundStyle(linkCyan)
+                .frame(minHeight: 44)
+                .disabled(restartIsDisabled(runtimeId, on: host))
+                .accessibilityHint(restartAccessibilityHint(runtimeId, on: host))
+            }
+        }
+    }
+
+    private func restartButtonTitle(
+        _ runtimeId: String,
+        on host: AppRemoraLinkHostSummary
+    ) -> String {
+        guard let pendingRestart = host.pendingRestart,
+              pendingRestart.runtimeId == runtimeId,
+              !pendingRestart.outcomeUnknown else {
+            return "Restart"
+        }
+        return "Retry"
+    }
+
+    private func restartIsDisabled(
+        _ runtimeId: String,
+        on host: AppRemoraLinkHostSummary
+    ) -> Bool {
+        guard actionHostId == nil else { return true }
+        guard let pendingRestart = host.pendingRestart else { return false }
+        return pendingRestart.outcomeUnknown || pendingRestart.runtimeId != runtimeId
+    }
+
+    private func restartAccessibilityHint(
+        _ runtimeId: String,
+        on host: AppRemoraLinkHostSummary
+    ) -> String {
+        guard let pendingRestart = host.pendingRestart else {
+            return "Requires confirmation and may interrupt active work"
+        }
+        if pendingRestart.outcomeUnknown {
+            return "Unavailable until the unknown restart result is checked and acknowledged"
+        }
+        if pendingRestart.runtimeId != runtimeId {
+            return "Unavailable while another runtime has a pending restart"
+        }
+        return "Requires confirmation and retries the same durable restart request"
+    }
+
     private func loadHosts() async {
         isLoading = true
         do {
@@ -213,6 +348,44 @@ struct RemoraLinkHostsSettingsView: View {
             errorMessage = hostActionMessage(error)
         }
         isLoading = false
+    }
+
+    private func restart(
+        _ runtimeId: String,
+        on host: AppRemoraLinkHostSummary
+    ) async {
+        actionHostId = host.hostId
+        defer { actionHostId = nil }
+        do {
+            switch try await appModel.client.restartRemoraLinkRuntime(
+                hostId: host.hostId,
+                runtimeId: runtimeId
+            ) {
+            case .succeeded(let commandSequence):
+                noticeMessage = "Restarted \(runtimeId) on \(host.hostDisplayName) · sequence \(commandSequence)."
+            case .outcomeUnknown(let commandSequence):
+                noticeMessage = "Restart outcome unknown for \(runtimeId) · sequence \(commandSequence). Check the host before acknowledging it."
+            }
+            await loadHosts()
+        } catch {
+            await loadHosts()
+            errorMessage = hostActionMessage(error)
+        }
+    }
+
+    private func acknowledgeUnknownRestart(on host: AppRemoraLinkHostSummary) async {
+        actionHostId = host.hostId
+        defer { actionHostId = nil }
+        do {
+            let commandSequence = try await appModel.client.acknowledgeRemoraLinkUnknownRestart(
+                hostId: host.hostId
+            )
+            noticeMessage = "Acknowledged checked restart sequence \(commandSequence) on \(host.hostDisplayName). No new restart was sent."
+            await loadHosts()
+        } catch {
+            await loadHosts()
+            errorMessage = hostActionMessage(error)
+        }
     }
 
     private func revoke(_ host: AppRemoraLinkHostSummary) async {
@@ -265,16 +438,24 @@ struct RemoraLinkHostsSettingsView: View {
 
     private var linkCyan: Color { Color(red: 13 / 255, green: 213 / 255, blue: 240 / 255) }
     private var linkText: Color { Color(red: 234 / 255, green: 251 / 255, blue: 255 / 255) }
+    private var linkWarning: Color { Color(red: 226 / 255, green: 166 / 255, blue: 68 / 255) }
 }
 
 private struct HostConfirmation {
-    enum Action { case revoke, forget }
+    enum Action {
+        case restart(runtimeId: String)
+        case acknowledgeRestart(runtimeId: String, commandSequence: UInt64)
+        case revoke
+        case forget
+    }
 
     let action: Action
     let host: AppRemoraLinkHostSummary
 
     var title: String {
         switch action {
+        case .restart(let runtimeId): return "Restart \(runtimeId) on \(host.hostDisplayName)?"
+        case .acknowledgeRestart: return "Acknowledge unknown restart?"
         case .revoke: return "Revoke \(host.hostDisplayName)?"
         case .forget: return "Forget \(host.hostDisplayName)?"
         }

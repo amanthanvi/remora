@@ -77,6 +77,7 @@ fun SessionCanvasRow(
     isLocal: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
     onFork: (() -> Unit)? = null,
     onReply: (() -> Unit)? = null,
     onCancelTurn: (() -> Unit)? = null,
@@ -84,7 +85,6 @@ fun SessionCanvasRow(
     onUnpin: (() -> Unit)? = null,
     isPinned: Boolean = false,
     lineage: ThreadLineage? = null,
-    modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     // Rust's reducer already derives every field this card displays — last

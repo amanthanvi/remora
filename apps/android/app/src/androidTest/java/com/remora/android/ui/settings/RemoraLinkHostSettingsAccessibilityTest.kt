@@ -26,6 +26,8 @@ import uniffi.codex_mobile_client.AppRemoraLinkForgetResult
 import uniffi.codex_mobile_client.AppRemoraLinkHostState
 import uniffi.codex_mobile_client.AppRemoraLinkHostSummary
 import uniffi.codex_mobile_client.AppRemoraLinkPendingApproval
+import uniffi.codex_mobile_client.AppRemoraLinkPendingRestart
+import uniffi.codex_mobile_client.AppRemoraLinkRestartOutcome
 import uniffi.codex_mobile_client.AppRemoraLinkRevocationOutcome
 import uniffi.codex_mobile_client.AppRemoraLinkScope
 
@@ -78,12 +80,15 @@ class RemoraLinkHostSettingsAccessibilityTest {
                             requestedScopes = listOf(AppRemoraLinkScope.CONNECT_RUNTIME),
                             deviceDisplayName = "Pixel",
                         ),
+                        pendingRestart = null,
                         hostRevocationStillRequired = false,
                     ),
                     busy = false,
                     onRevoke = {},
                     onForget = {},
                     onContinueApproval = { continued = true },
+                    onRestart = {},
+                    onAcknowledgeRestart = {},
                 )
             }
         }
@@ -91,6 +96,42 @@ class RemoraLinkHostSettingsAccessibilityTest {
         composeRule.onNodeWithText("Continue approval").assertIsDisplayed().performClick()
 
         composeRule.runOnIdle { assertTrue(continued) }
+    }
+
+    @Test
+    fun restartRequiresConfirmationAndUnknownOutcomeRequiresCheckedHostConfirmation() {
+        val host = pendingHost().copy(
+            state = AppRemoraLinkHostState.PAIRED,
+            grantedScopes = listOf(AppRemoraLinkScope.RESTART_RUNTIME),
+            pendingApproval = null,
+        )
+        val api = FakeRemoraLinkHostsApi(
+            initialHost = host,
+            restartOutcome = AppRemoraLinkRestartOutcome.OutcomeUnknown(41uL),
+        )
+        composeRule.setContent {
+            RemoraAppTheme {
+                RemoraLinkHostsContent(onBack = {}, api = api)
+            }
+        }
+
+        composeRule.waitUntil(5_000) { api.hostReadCount >= 1 }
+        composeRule.onNodeWithText("Restart codex").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Restart runtime").assertIsDisplayed()
+        composeRule.runOnIdle { assertTrue(api.restartRequestCount == 0) }
+        composeRule.onNodeWithText("Restart runtime").performClick()
+        composeRule.waitUntil(5_000) { api.restartRequestCount == 1 && api.hostReadCount >= 2 }
+
+        composeRule.onNodeWithText("Restart outcome unknown").assertIsDisplayed()
+        composeRule.onNodeWithText("Runtime: codex").assertIsDisplayed()
+        composeRule.onNodeWithText("Sequence: 41").assertIsDisplayed()
+        composeRule.onNodeWithText("Acknowledge after checking host").performClick()
+        composeRule.onNodeWithText("I checked the host").assertIsDisplayed()
+        composeRule.runOnIdle { assertTrue(api.acknowledgementCount == 0) }
+        composeRule.onNodeWithText("I checked the host").performClick()
+        composeRule.waitUntil(5_000) { api.acknowledgementCount == 1 && api.hostReadCount >= 3 }
+
+        composeRule.onNodeWithText("Restart outcome unknown").assertDoesNotExist()
     }
 
     @Test
@@ -169,11 +210,15 @@ class RemoraLinkHostSettingsAccessibilityTest {
             requestedScopes = listOf(AppRemoraLinkScope.CONNECT_RUNTIME),
             deviceDisplayName = "Pixel",
         ),
+        pendingRestart = null,
         hostRevocationStillRequired = false,
     )
 }
 
-private class FakeRemoraLinkHostsApi(initialHost: AppRemoraLinkHostSummary) : RemoraLinkHostsApi {
+private class FakeRemoraLinkHostsApi(
+    initialHost: AppRemoraLinkHostSummary,
+    private val restartOutcome: AppRemoraLinkRestartOutcome = AppRemoraLinkRestartOutcome.Succeeded(7uL),
+) : RemoraLinkHostsApi {
     private val lock = Any()
     private var storedHosts = listOf(initialHost)
 
@@ -181,9 +226,47 @@ private class FakeRemoraLinkHostsApi(initialHost: AppRemoraLinkHostSummary) : Re
     var hostReadCount: Int = 0
         private set
 
+    @Volatile
+    var restartRequestCount: Int = 0
+        private set
+
+    @Volatile
+    var acknowledgementCount: Int = 0
+        private set
+
     override suspend fun hosts(): List<AppRemoraLinkHostSummary> = synchronized(lock) {
         hostReadCount += 1
         storedHosts
+    }
+
+    override suspend fun restart(hostId: String, runtimeId: String): AppRemoraLinkRestartOutcome =
+        synchronized(lock) {
+            restartRequestCount += 1
+            if (restartOutcome is AppRemoraLinkRestartOutcome.OutcomeUnknown) {
+                storedHosts = storedHosts.map { host ->
+                    if (host.hostId == hostId) {
+                        host.copy(
+                            pendingRestart = AppRemoraLinkPendingRestart(
+                                runtimeId = runtimeId,
+                                commandSequence = restartOutcome.commandSequence,
+                                outcomeUnknown = true,
+                            ),
+                        )
+                    } else {
+                        host
+                    }
+                }
+            }
+            restartOutcome
+        }
+
+    override suspend fun acknowledgeUnknownRestart(hostId: String): ULong = synchronized(lock) {
+        acknowledgementCount += 1
+        val sequence = storedHosts.first { it.hostId == hostId }.pendingRestart?.commandSequence ?: 0uL
+        storedHosts = storedHosts.map { host ->
+            if (host.hostId == hostId) host.copy(pendingRestart = null) else host
+        }
+        sequence
     }
 
     override suspend fun revoke(hostId: String): AppRemoraLinkRevocationOutcome =

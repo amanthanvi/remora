@@ -46,7 +46,11 @@ pub struct TerminalCellMetrics {
 
 /// Compute the cell at `(x, y)` pixels given the surface's cell metrics.
 /// Returns `None` if metrics describe a zero-sized cell.
-pub fn hit_test_cell(metrics: TerminalCellMetrics, x_px: f32, y_px: f32) -> Option<TerminalCellPosition> {
+pub fn hit_test_cell(
+    metrics: TerminalCellMetrics,
+    x_px: f32,
+    y_px: f32,
+) -> Option<TerminalCellPosition> {
     if metrics.cell_width_px <= 0.0 || metrics.cell_height_px <= 0.0 {
         return None;
     }

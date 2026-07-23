@@ -1055,7 +1055,6 @@ fn malformed_duplicate_unknown_and_v1_json_never_enters_the_v2_codec() {
         );
     }
     assert_eq!(ALPN, b"remora-link/2");
-    assert_ne!(ALPN, b"alleycat/1");
 
     let response_duplicate =
         br#"{"v":2,"v":2,"ok":false,"error_code":"invalid_request","error":"invalid request"}"#;

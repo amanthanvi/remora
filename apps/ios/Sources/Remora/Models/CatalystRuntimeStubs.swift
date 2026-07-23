@@ -52,6 +52,10 @@ final class AppRuntimeController {
 
     func configureRemoraLinkIfNeeded(client: AppClient) {
         remoraLinkClient = client
+        guard CurrentKeychainNamespaceCleanup.shared.isComplete else {
+            remoraLinkStatus = .unavailable
+            return
+        }
         if remoraLinkStatus == .configuring {
             remoraLinkRetryRequested = true
             return
@@ -74,7 +78,7 @@ final class AppRuntimeController {
                 self?.finishRemoraLinkConfiguration(succeeded: true, client: client)
             } catch {
                 self?.finishRemoraLinkConfiguration(succeeded: false, client: client)
-                NSLog("[REMORA_LINK_V2] native custody unavailable: %@", error.localizedDescription)
+                LLog.error("remora-link", "v2 native custody unavailable", error: error)
             }
         }
     }

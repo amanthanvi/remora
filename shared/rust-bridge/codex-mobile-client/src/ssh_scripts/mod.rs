@@ -25,7 +25,7 @@ pub(crate) mod posix {
     /// Find the first allowed `codex` binary using deterministic PATH and
     /// configured-location precedence. Placeholder: `{{SHARED_LINES}}`.
     pub(crate) const RESOLVE_CODEX_BINARY: &str =
-        alleycat_bridge_core::codex_resolver::POSIX_RESOLVE_CODEX_BINARY;
+        remora_bridge_core::codex_resolver::POSIX_RESOLVE_CODEX_BINARY;
 
     /// Detect whether anything is listening on TCP `{{PORT}}` using lsof,
     /// then ss, then netstat (whichever is present).
@@ -80,7 +80,7 @@ pub(crate) mod powershell {
     /// Find the first allowed `codex` executable using deterministic command
     /// and configured-location precedence.
     pub(crate) const RESOLVE_CODEX_BINARY: &str =
-        alleycat_bridge_core::codex_resolver::POWERSHELL_RESOLVE_CODEX_BINARY;
+        remora_bridge_core::codex_resolver::POWERSHELL_RESOLVE_CODEX_BINARY;
 
     /// Detect whether anything is listening on TCP `{{PORT}}`.
     pub(crate) const PORT_LISTENING: &str = include_str!("powershell/port_listening.ps1");

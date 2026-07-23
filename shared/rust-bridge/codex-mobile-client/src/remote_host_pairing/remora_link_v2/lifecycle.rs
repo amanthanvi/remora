@@ -103,10 +103,6 @@ pub(crate) enum LifecycleErrorV2 {
     InvalidSignature,
     #[error("Remora Link host is unavailable")]
     HostUnavailable,
-    #[error("Remora Link v2 negotiation is unavailable")]
-    V2Unavailable,
-    #[error("Remora Link operation was cancelled")]
-    Cancelled,
     #[error("Remora Link host identity changed")]
     HostIdentityDrift,
     #[error("Remora Link client transport identity changed")]
@@ -1452,8 +1448,6 @@ impl From<HostPortErrorV2> for LifecycleErrorV2 {
     fn from(value: HostPortErrorV2) -> Self {
         match value {
             HostPortErrorV2::Unavailable => Self::HostUnavailable,
-            HostPortErrorV2::V2Unavailable => Self::V2Unavailable,
-            HostPortErrorV2::Cancelled => Self::Cancelled,
             HostPortErrorV2::ProtocolViolation => Self::ProtocolViolation,
         }
     }

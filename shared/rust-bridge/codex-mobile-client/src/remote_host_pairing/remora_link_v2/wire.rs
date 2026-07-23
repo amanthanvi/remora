@@ -4,6 +4,7 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+#[cfg(test)]
 use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,7 @@ pub(crate) enum RequestCorrelationV2 {
 }
 
 impl RequestV2 {
+    #[cfg(test)]
     pub(crate) fn decode_json(bytes: &[u8]) -> Result<Self, WireError> {
         let request: Self = serde_json::from_slice(bytes).map_err(|_| WireError::InvalidRequest)?;
         request.validate()?;
@@ -537,6 +539,7 @@ pub(crate) struct ProofV2 {
 }
 
 impl ProofV2 {
+    #[cfg(test)]
     pub(crate) fn decode_json(bytes: &[u8]) -> Result<Self, WireError> {
         let proof: Self = serde_json::from_slice(bytes).map_err(|_| WireError::InvalidProof)?;
         proof.validate()?;
@@ -564,6 +567,7 @@ impl ProofV2 {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_for_challenge(
         &self,
         challenge: &ProofChallengeV2,
@@ -1424,6 +1428,7 @@ pub(crate) fn derive_sas(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn verify_proof_signature(
     request: &RequestV2,
     challenge: &ProofChallengeV2,
@@ -1649,6 +1654,7 @@ fn validate_endpoint_id(value: &str) -> Result<(), WireError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_challenge_for_request(
     challenge: &ProofChallengeV2,
     request: &RequestV2,

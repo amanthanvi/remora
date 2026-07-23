@@ -20,9 +20,6 @@ use crate::transport::TransportError;
 
 const MAX_OBSERVED_FRAME_BYTES: usize = 1024 * 1024;
 const REMORA_LINK_SEQUENCE_FIELD: &str = "_remora_link_seq";
-// Temporary compatibility with the pinned host fork at 0e625be. Remove this
-// alias after that fork emits the v2-neutral field above.
-const PINNED_HOST_SEQUENCE_FIELD: &str = "_alleycat_seq";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeFramingV2 {
@@ -329,11 +326,6 @@ fn observe_remora_link_sequence(payload: &[u8], tracker: &AtomicU64) {
     let Some(sequence) = value
         .get(REMORA_LINK_SEQUENCE_FIELD)
         .and_then(|value| value.as_u64())
-        .or_else(|| {
-            value
-                .get(PINNED_HOST_SEQUENCE_FIELD)
-                .and_then(|value| value.as_u64())
-        })
     else {
         return;
     };
@@ -618,12 +610,9 @@ mod tests {
     }
 
     #[test]
-    fn observer_prefers_v2_sequence_and_tolerates_the_pinned_host_alias() {
+    fn observer_tracks_only_the_current_sequence_field() {
         let tracker = AtomicU64::new(0);
-        observe_remora_link_sequence(br#"{"_alleycat_seq":41}"#, &tracker);
-        assert_eq!(tracker.load(Ordering::Relaxed), 41);
-
-        observe_remora_link_sequence(br#"{"_remora_link_seq":52,"_alleycat_seq":99}"#, &tracker);
+        observe_remora_link_sequence(br#"{"_remora_link_seq":52,"other_seq":99}"#, &tracker);
         assert_eq!(tracker.load(Ordering::Relaxed), 52);
     }
 

@@ -7,7 +7,7 @@ and pinned host contract.
 
 Only an explicitly enrolled mobile installation may exercise the exact runtime
 and terminal capabilities granted by a Remora Link host. Delivery routes,
-relays, notifications, harnesses, saved UI state, and legacy v1 artifacts must
+relays, notifications, harnesses, and saved UI state must
 not create or widen authority.
 
 ## Trust boundaries
@@ -69,8 +69,7 @@ Explicit limits:
 | Wrong-machine terminal | Opaque host-ID backend, exact preferred-host fail-closed behavior, versioned restoration token, and stale-open fencing. | iOS/Android controller and route tests plus smoke tests. |
 | Notification approval replay | Push is an opaque wake hint; lock-screen payloads cannot approve, launch, grant, or revoke. | Payload-shape tests and interactive inspection. |
 | Arbitrary harness execution | Host advertises and launches only configured installed runtimes; mobile cannot provide a path or arguments. | Host compatibility matrix and negative launch tests. |
-| Legacy credential persistence | Idempotent exact-namespace purge on every launch; no v1 writes or active v1 connection path. | Injected purge tests and residual identifier audit. |
-| Legacy invitation downgrade | Private classifier returns explicit re-pair guidance; v2 never retries `alleycat/1`. | v1 fixture inspection and downgrade-negative tests. |
+| Unsupported invitation downgrade | Unsupported formats fail closed; v2 never retries a different protocol. | Malformed-invitation and downgrade-negative tests. |
 
 ## Terminal-specific controls
 
@@ -93,22 +92,17 @@ SSH bridge persistence uses a neutral typed field:
 - `Some([])`: bridge and probe all supported runtimes;
 - `Some(kinds)`: bridge restricted to the selected runtimes.
 
-Historical bridge markers are migrated once. A mixed saved record retains a
-viable direct/SSH route; a v1-only paired record is removed. Historical
-bridge-dependency names may remain internally because the retained crates are
-still active SSH infrastructure, not product identity.
+Saved records use the current Remora-owned schema. Records from unsupported
+versions are not migrated into active host authority.
 
-## Legacy tombstones
+## Upgrade floor
 
-Exact v1 Keychain and preference identifiers remain visible in source and
-Android backup exclusions only to delete and prevent restoration of historical
-secrets. They are a time-bounded migration/security exception, not an active
-credential namespace. Removal criteria:
-
-1. the minimum supported app version cannot directly upgrade from a v1-writing
-   build;
-2. release telemetry/support policy confirms the migration window is closed;
-3. a reviewed release removes both purge code and backup exclusions together.
+Remora 1.6.0 is the security and direct-upgrade floor on iOS and Android.
+Before Remora Link can initialize, a missing 1.6 cutover marker triggers a
+fail-closed reset of pairing credentials, signing authority, journals, and
+saved records. Fresh host pairing is required. Security review and testing do
+not assume compatibility with older state, and direct upgrades are supported
+from 1.6.0 onward.
 
 ## Release gates
 
@@ -117,8 +111,8 @@ credential namespace. Removal criteria:
   assemble;
 - interactive pairing/reconnect/terminal/revoke smoke tests on both platforms;
 - no secrets, prompts, paths, commands, or approval data in push payloads;
-- residual naming matches the documented compatibility/tombstone allowlist;
+- residual product naming is Remora-owned;
 - branch CI green before merge.
 
-The reviewed host source is pinned at
-[`0e625bece349a2ce53b7926cac7fc6a81121ca37`](https://github.com/amanthanvi/alleycat/tree/0e625bece349a2ce53b7926cac7fc6a81121ca37).
+The reviewed host source is the Remora-owned Git source recorded in the shared
+Rust manifest and pinned to an exact revision by the lockfile.

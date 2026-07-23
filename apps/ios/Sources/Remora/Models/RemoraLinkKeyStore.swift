@@ -169,6 +169,7 @@ final class RemoraLinkKeyStore: @unchecked Sendable {
     static let shared = RemoraLinkKeyStore()
 
     private static let namespace = "com.remora.app.remora-link.v2.signing"
+    static let securityCutoverApplicationTagPrefix = Data("\(namespace).".utf8)
     private static let maximumSlotBytes = 512
 
     private let security: any RemoraLinkKeySecurity

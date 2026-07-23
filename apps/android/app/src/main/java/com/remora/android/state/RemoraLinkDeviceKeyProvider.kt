@@ -303,7 +303,7 @@ class RemoraLinkDeviceKeyProvider(
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val CURVE_NAME = "secp256r1"
         private const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
-        private const val KEY_ALIAS_PREFIX = "com.remora.android.remora_link.v2.signing."
+        internal const val KEY_ALIAS_PREFIX = "com.remora.android.remora_link.v2.signing."
     }
 }
 

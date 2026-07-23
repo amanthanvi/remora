@@ -6,7 +6,38 @@ extension Notification.Name {
 
 @MainActor
 enum SavedServerStore {
-    static let savedServersKey = "codex_saved_servers"
+    /// The versioned namespace is itself part of the 1.6 hard cut: a stale
+    /// pre-cutover record can never be loaded even if physical deletion of the
+    /// retired defaults key is interrupted.
+    static let savedServersKey = "remora.savedServers.v2"
+    static var retiredSavedServersKey: String {
+        // One-release deletion tombstone for the unsupported pre-1.6 key.
+        // Reconstruct it only to destroy old state; never load or migrate it.
+        String(
+            bytes: [
+                99, 111, 100, 101, 120, 95, 115, 97,
+                118, 101, 100, 95, 115, 101, 114, 118,
+                101, 114, 115,
+            ],
+            encoding: .utf8
+        )!
+    }
+    private static let currentFields: Set<String> = [
+        "id",
+        "name",
+        "hostname",
+        "port",
+        "codexPorts",
+        "sshPort",
+        "source",
+        "hasCodexServer",
+        "wakeMAC",
+        "preferredConnectionMode",
+        "preferredCodexPort",
+        "websocketURL",
+        "rememberedByUser",
+        "sshBridgeRuntimeKinds",
+    ]
 
     static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
         guard let data = try? JSONEncoder().encode(servers) else { return }
@@ -16,24 +47,30 @@ enum SavedServerStore {
 
     static func load(from defaults: UserDefaults = .standard) -> [SavedServer] {
         guard let data = defaults.data(forKey: savedServersKey) else { return [] }
-        let decoded = (try? JSONDecoder().decode([SavedServer].self, from: data)) ?? []
-        let migrated = decoded.compactMap { saved -> SavedServer? in
-            guard saved.id != "local", saved.source != .local else { return nil }
-            guard !saved.containsLegacyV1Metadata
-                || saved.sshBridgeRuntimeKinds != nil
-                || saved.hasViableDirectOrSSHPath else {
+        guard let objects = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            defaults.removeObject(forKey: savedServersKey)
+            return []
+        }
+        let decoded = objects.compactMap { object -> SavedServer? in
+            guard let fields = object as? [String: Any],
+                  Set(fields.keys).isSubset(of: currentFields),
+                  let recordData = try? JSONSerialization.data(withJSONObject: fields) else {
                 return nil
             }
+            return try? JSONDecoder().decode(SavedServer.self, from: recordData)
+        }
+        let normalized = decoded.compactMap { saved -> SavedServer? in
+            guard saved.id != "local", saved.source != .local else { return nil }
             let server = saved.toDiscoveredServer()
             let restored = SavedServer
                 .from(server, rememberedByUser: saved.rememberedByUser)
                 .withSSHBridge(runtimeKinds: saved.sshBridgeRuntimeKinds)
             return restored
         }
-        if migrated != decoded {
-            save(migrated, to: defaults)
+        if decoded.count != objects.count || normalized != decoded {
+            save(normalized, to: defaults)
         }
-        return migrated
+        return normalized
     }
 
     static func upsert(_ server: DiscoveredServer) {
@@ -83,6 +120,18 @@ enum SavedServerStore {
         save(saved)
     }
 
+    @discardableResult
+    static func removeAllForSecurityCutover(from defaults: UserDefaults = .standard) -> Bool {
+        defaults.removeObject(forKey: savedServersKey)
+        defaults.removeObject(forKey: retiredSavedServersKey)
+        let synchronized = defaults.synchronize()
+        let removed =
+            defaults.object(forKey: savedServersKey) == nil
+            && defaults.object(forKey: retiredSavedServersKey) == nil
+        NotificationCenter.default.post(name: .remoraSavedServersDidChange, object: nil)
+        return synchronized && removed
+    }
+
     static func rename(serverId: String, newName: String) {
         var saved = load()
         guard let index = saved.firstIndex(where: { $0.id == serverId }) else { return }
@@ -99,7 +148,6 @@ enum SavedServerStore {
             wakeMAC: old.wakeMAC,
             preferredConnectionMode: old.preferredConnectionMode,
             preferredCodexPort: old.preferredCodexPort,
-            sshPortForwardingEnabled: old.sshPortForwardingEnabled,
             websocketURL: old.websocketURL,
             rememberedByUser: old.rememberedByUser,
             sshBridgeRuntimeKinds: old.sshBridgeRuntimeKinds
@@ -132,7 +180,6 @@ enum SavedServerStore {
             wakeMAC: normalizedWakeMAC,
             preferredConnectionMode: existing.preferredConnectionMode,
             preferredCodexPort: existing.preferredCodexPort,
-            sshPortForwardingEnabled: existing.sshPortForwardingEnabled,
             websocketURL: existing.websocketURL,
             rememberedByUser: existing.rememberedByUser,
             sshBridgeRuntimeKinds: existing.sshBridgeRuntimeKinds

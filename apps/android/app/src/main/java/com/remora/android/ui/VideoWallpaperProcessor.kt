@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.util.Log
+import com.remora.android.util.LLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -39,7 +39,8 @@ object VideoWallpaperProcessor {
         // Validate duration
         val durationMs = getVideoDurationMs(context, uri)
         if (durationMs == null || durationMs > MAX_DURATION_MS) {
-            Log.e(TAG, "Video too long or unreadable: ${durationMs}ms (max ${MAX_DURATION_MS}ms)")
+            LLog.e(TAG, "Local wallpaper video duration invalid")
+            LLog.debug(TAG) { "Video too long or unreadable: ${durationMs}ms (max ${MAX_DURATION_MS}ms)" }
             return@withContext null
         }
 
@@ -49,7 +50,8 @@ object VideoWallpaperProcessor {
 
         // Check file size
         if (outputFile.length() > MAX_FILE_SIZE_BYTES) {
-            Log.e(TAG, "Video file too large: ${outputFile.length()} bytes")
+            LLog.e(TAG, "Local wallpaper video file too large")
+            LLog.debug(TAG) { "Video file too large: ${outputFile.length()} bytes" }
             outputFile.delete()
             return@withContext null
         }
@@ -86,14 +88,16 @@ object VideoWallpaperProcessor {
         // Validate duration
         val durationMs = getVideoDurationMs(tempFile.absolutePath)
         if (durationMs == null || durationMs > MAX_DURATION_MS) {
-            Log.e(TAG, "Remote video too long or unreadable: ${durationMs}ms")
+            LLog.e(TAG, "Remote wallpaper video duration invalid")
+            LLog.debug(TAG) { "Remote video too long or unreadable: ${durationMs}ms" }
             tempFile.delete()
             return@withContext null
         }
 
         // Check file size
         if (tempFile.length() > MAX_FILE_SIZE_BYTES) {
-            Log.e(TAG, "Remote video too large: ${tempFile.length()} bytes")
+            LLog.e(TAG, "Remote wallpaper video file too large")
+            LLog.debug(TAG) { "Remote video too large: ${tempFile.length()} bytes" }
             tempFile.delete()
             return@withContext null
         }
@@ -119,8 +123,9 @@ object VideoWallpaperProcessor {
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
             retriever.release()
             duration
-        }.onFailure {
-            Log.e(TAG, "Failed to get video duration", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Local wallpaper video duration read failed")
+            LLog.debug(TAG, error) { "Failed to get video duration" }
         }.getOrNull()
     }
 
@@ -131,8 +136,9 @@ object VideoWallpaperProcessor {
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
             retriever.release()
             duration
-        }.onFailure {
-            Log.e(TAG, "Failed to get video duration from file", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper video file duration read failed")
+            LLog.debug(TAG, error) { "Failed to get video duration from file: $filePath" }
         }.getOrNull()
     }
 
@@ -149,8 +155,9 @@ object VideoWallpaperProcessor {
                     stream.fd.sync()
                 }
             }
-        }.onFailure {
-            Log.e(TAG, "Failed to generate thumbnail", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper video thumbnail generation failed")
+            LLog.debug(TAG, error) { "Failed to generate thumbnail for video=$videoPath thumbnail=$thumbnailFile" }
         }
     }
 
@@ -163,8 +170,9 @@ object VideoWallpaperProcessor {
                     output.fd.sync()
                 }
             } ?: throw IllegalStateException("Could not open input stream for $uri")
-        }.onFailure {
-            Log.e(TAG, "Failed to copy URI to file", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper video copy failed")
+            LLog.debug(TAG, error) { "Failed to copy URI=$uri to file=${destFile.absolutePath}" }
         }.isSuccess
     }
 
@@ -186,8 +194,9 @@ object VideoWallpaperProcessor {
                 }
             }
             connection.disconnect()
-        }.onFailure {
-            Log.e(TAG, "Failed to download video from $urlString", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper video download failed")
+            LLog.debug(TAG, error) { "Failed to download video from $urlString to ${destFile.absolutePath}" }
         }.isSuccess
     }
 

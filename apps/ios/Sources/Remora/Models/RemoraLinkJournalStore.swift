@@ -145,6 +145,29 @@ final class RemoraLinkJournalStore: @unchecked Sendable {
         } ?? .unavailable
     }
 
+    /// Removes all durable Remora Link lifecycle state before the 1.6 runtime
+    /// can observe it. This is called only during process-start cutover.
+    func discardForSecurityCutover() -> Bool {
+        guard Self.processLock.lock(
+            before: Date(timeIntervalSinceNow: Self.lockWaitInterval)
+        ) else {
+            return false
+        }
+        defer { Self.processLock.unlock() }
+        guard let directoryURL = journalFileURL?.deletingLastPathComponent() else {
+            return false
+        }
+        guard fileManager.fileExists(atPath: directoryURL.path) else {
+            return true
+        }
+        do {
+            try fileManager.removeItem(at: directoryURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private static func validReplacement(
         expectedRevision: UInt64?,
         replacement: RemoraLinkJournalSnapshot

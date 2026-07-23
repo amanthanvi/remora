@@ -91,11 +91,7 @@ impl TerminalSshTrustStore {
 /// Lowercase + strip bracket / scope-id noise so equality matches the way
 /// `russh` normalizes the connect address.
 pub(crate) fn normalize_host(host: &str) -> String {
-    let mut value = host
-        .trim()
-        .trim_matches('[')
-        .trim_matches(']')
-        .to_string();
+    let mut value = host.trim().trim_matches('[').trim_matches(']').to_string();
     value = value.replace("%25", "%");
     if !value.contains(':') {
         if let Some(idx) = value.find('%') {
@@ -121,10 +117,7 @@ mod tests {
             self.store.lock().unwrap().get(&(host, port)).cloned()
         }
         fn write(&self, host: String, port: u16, fingerprint: String) {
-            self.store
-                .lock()
-                .unwrap()
-                .insert((host, port), fingerprint);
+            self.store.lock().unwrap().insert((host, port), fingerprint);
         }
         fn remove(&self, host: String, port: u16) {
             self.store.lock().unwrap().remove(&(host, port));

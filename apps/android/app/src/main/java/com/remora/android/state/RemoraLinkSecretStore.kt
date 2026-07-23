@@ -311,7 +311,7 @@ internal class AndroidAtomicRemoraLinkSecretBackend(
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        private const val KEY_ALIAS = "com.remora.android.remora_link.v2.secrets.aes"
+        internal const val KEY_ALIAS = "com.remora.android.remora_link.v2.secrets.aes"
         private const val FILE_EXTENSION = "rls2"
         private const val PENDING_EXTENSION = "rls2.new"
         private const val MAX_ENVELOPE_BYTES = 1_048_576L

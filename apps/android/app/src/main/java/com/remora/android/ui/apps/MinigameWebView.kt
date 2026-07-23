@@ -53,7 +53,7 @@ window.structuredResponse = function(){ return Promise.reject(new Error('disable
  * Pass [widgetHtml] as the HTML fragment to render. The shell wraps it via
  * [wrapWidgetHtml] exactly as [AppModeWebView] does.
  */
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
 fun MinigameWebView(
     widgetHtml: String,

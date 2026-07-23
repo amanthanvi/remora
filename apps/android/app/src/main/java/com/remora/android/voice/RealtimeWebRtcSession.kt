@@ -1,7 +1,9 @@
 package com.remora.android.voice
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
@@ -41,7 +43,8 @@ class RealtimeWebRtcSession(private val context: Context) {
     private val isClosed = AtomicBoolean(false)
 
     private var previousAudioMode: Int = audioManager.mode
-    private var previousSpeakerphoneOn: Boolean = audioManager.isSpeakerphoneOn
+    private var previousCommunicationDevice: AudioDeviceInfo? = null
+    private var previousSpeakerphoneOn: Boolean = false
     private var audioFocusRequest: AudioFocusRequest? = null
     private val didConfigureAudio = AtomicBoolean(false)
 
@@ -166,47 +169,64 @@ class RealtimeWebRtcSession(private val context: Context) {
         releaseAudio()
     }
 
+    @SuppressLint("SetAndClearCommunicationDevice") // releaseAudio restores or clears every successful selection.
     private fun configureAudio() {
         if (!didConfigureAudio.compareAndSet(false, true)) return
         previousAudioMode = audioManager.mode
-        previousSpeakerphoneOn = audioManager.isSpeakerphoneOn
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            previousCommunicationDevice = audioManager.communicationDevice
+        } else {
+            previousSpeakerphoneOn = legacySpeakerphoneState()
+        }
 
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                .setAudioAttributes(attrs)
-                .setOnAudioFocusChangeListener { }
-                .build()
-            audioFocusRequest = request
-            audioManager.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                null,
-                AudioManager.STREAM_VOICE_CALL,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-            )
-        }
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(attrs)
+            .setOnAudioFocusChangeListener { }
+            .build()
+        audioFocusRequest = request
+        audioManager.requestAudioFocus(request)
 
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        audioManager.isSpeakerphoneOn = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val speaker = audioManager.availableCommunicationDevices.firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            }
+            if (speaker == null || !audioManager.setCommunicationDevice(speaker)) {
+                LLog.w(TAG, "Unable to select the built-in speaker for voice communication")
+            }
+        } else {
+            setLegacySpeakerphoneState(true)
+        }
     }
 
     private fun releaseAudio() {
         if (!didConfigureAudio.compareAndSet(true, false)) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-            audioFocusRequest = null
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        audioFocusRequest = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            restoreSelectedCommunicationDevice(
+                previousDevice = previousCommunicationDevice,
+                selectDevice = audioManager::setCommunicationDevice,
+                clearDevice = audioManager::clearCommunicationDevice,
+            )
+            previousCommunicationDevice = null
         } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
+            setLegacySpeakerphoneState(previousSpeakerphoneOn)
         }
         audioManager.mode = previousAudioMode
-        audioManager.isSpeakerphoneOn = previousSpeakerphoneOn
+    }
+
+    @Suppress("DEPRECATION")
+    private fun legacySpeakerphoneState(): Boolean = audioManager.isSpeakerphoneOn
+
+    @Suppress("DEPRECATION")
+    private fun setLegacySpeakerphoneState(enabled: Boolean) {
+        audioManager.isSpeakerphoneOn = enabled
     }
 
     private suspend fun createOffer(
@@ -346,5 +366,15 @@ class RealtimeWebRtcSession(private val context: Context) {
                 factory
             }
         }
+    }
+}
+
+internal fun <T> restoreSelectedCommunicationDevice(
+    previousDevice: T?,
+    selectDevice: (T) -> Boolean,
+    clearDevice: () -> Unit,
+) {
+    if (previousDevice == null || !selectDevice(previousDevice)) {
+        clearDevice()
     }
 }

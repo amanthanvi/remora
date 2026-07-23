@@ -14,8 +14,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -119,7 +119,7 @@ fun VoiceCallView(
                 onClick = { /* TODO: toggle speaker route */ },
                 modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
             ) {
-                Icon(Icons.Default.VolumeUp, "Speaker", tint = RemoraTheme.textSecondary)
+                Icon(Icons.AutoMirrored.Filled.VolumeUp, "Speaker", tint = RemoraTheme.textSecondary)
             }
         }
 

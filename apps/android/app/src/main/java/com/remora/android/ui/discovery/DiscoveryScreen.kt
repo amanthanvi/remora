@@ -511,7 +511,7 @@ fun DiscoveryScreen(
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ChooserCard(
                 title = "Remora Link",
-                subtitle = "Run $REMORA_LINK_PAIR_COMMAND on the host, then scan or paste its one-time code.",
+                subtitle = "Choose one or more host runtimes, then scan or paste a scoped Remora Link code.",
                 badge = "RECOMMENDED",
                 icon = Icons.Default.QrCodeScanner,
                 supportedAgents = RemotePairingAgents,

@@ -56,7 +56,6 @@ enum RemoraLinkPairingState: Equatable {
     case availability(RemoraLinkPairingAvailability)
     case ingress
     case inspecting
-    case legacyRePair(hostId: String, hostDisplayName: String)
     case offer(AppRemoraLinkOffer)
     case accepting
     case awaiting(RemoraLinkPendingPairing)
@@ -307,10 +306,10 @@ final class RemoraLinkPairingModel {
             selectedScopes = Set(offer.defaultScopes).union(offer.requiredScopes)
             selectedScopes.formIntersection(offer.maximumScopes)
             state = .offer(offer)
-        case .legacyRePairRequired(let hostId, let hostDisplayName):
+        @unknown default:
             selectedRuntimeIds = []
             selectedScopes = []
-            state = .legacyRePair(hostId: hostId, hostDisplayName: hostDisplayName)
+            state = .failure("That Remora Link pairing code is invalid or expired.")
         }
     }
 

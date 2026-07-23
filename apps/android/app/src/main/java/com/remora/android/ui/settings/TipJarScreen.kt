@@ -1,7 +1,6 @@
 package com.remora.android.ui.settings
 
 import android.app.Activity
-import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.Image
@@ -53,6 +52,7 @@ import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingFlowParams
 import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.PendingPurchasesParams
 import com.android.billingclient.api.ProductDetails
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
@@ -60,6 +60,7 @@ import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
 import com.remora.android.state.TipJarSupporterState
 import com.remora.android.ui.RemoraTheme
+import com.remora.android.util.LLog
 
 private data class TipProduct(
     val productIds: List<String>,
@@ -138,7 +139,11 @@ fun TipJarScreen(onBack: () -> Unit) {
     val billingClient = remember {
         BillingClient.newBuilder(context)
             .setListener(purchasesUpdatedListener)
-            .enablePendingPurchases()
+            .enablePendingPurchases(
+                PendingPurchasesParams.newBuilder()
+                    .enableOneTimeProducts()
+                    .build(),
+            )
             .build()
     }
 
@@ -150,10 +155,10 @@ fun TipJarScreen(onBack: () -> Unit) {
         billingClient.startConnection(object : BillingClientStateListener {
             override fun onBillingSetupFinished(billingResult: BillingResult) {
                 if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
-                    Log.w(
-                        TIP_JAR_TAG,
-                        "Billing setup failed code=${billingResult.responseCode} message=${billingResult.debugMessage}",
-                    )
+                    LLog.w(TIP_JAR_TAG, "Billing setup failed")
+                    LLog.debug(TIP_JAR_TAG) {
+                        "Billing setup failure details: code=${billingResult.responseCode} message=${billingResult.debugMessage}"
+                    }
                     state = TipJarState.Ready(
                         products = TIP_PRODUCTS,
                         message = "Google Play Billing is unavailable for this install.",
@@ -178,10 +183,10 @@ fun TipJarScreen(onBack: () -> Unit) {
 
                 billingClient.queryProductDetailsAsync(params) { result, detailsList ->
                     if (result.responseCode != BillingClient.BillingResponseCode.OK) {
-                        Log.w(
-                            TIP_JAR_TAG,
-                            "Product detail query failed code=${result.responseCode} message=${result.debugMessage}",
-                        )
+                        LLog.w(TIP_JAR_TAG, "Product detail query failed")
+                        LLog.debug(TIP_JAR_TAG) {
+                            "Product detail query failure details: code=${result.responseCode} message=${result.debugMessage}"
+                        }
                         state = TipJarState.Ready(
                             products = TIP_PRODUCTS,
                             message = "Google Play did not return tip products for this install.",
@@ -190,10 +195,10 @@ fun TipJarScreen(onBack: () -> Unit) {
                     }
 
                     val detailsMap = detailsList.associateBy { it.productId }
-                    Log.i(
-                        TIP_JAR_TAG,
-                        "Resolved tip products=${detailsMap.keys.sorted()} requested=$requestedProductIds",
-                    )
+                    LLog.i(TIP_JAR_TAG, "Tip products resolved")
+                    LLog.debug(TIP_JAR_TAG) {
+                        "Resolved tip products=${detailsMap.keys.sorted()} requested=$requestedProductIds"
+                    }
 
                     // Query owned purchases (non-consumables persist here)
                     billingClient.queryPurchasesAsync(
@@ -241,7 +246,7 @@ fun TipJarScreen(onBack: () -> Unit) {
             }
 
             override fun onBillingServiceDisconnected() {
-                Log.w(TIP_JAR_TAG, "Billing service disconnected")
+                LLog.w(TIP_JAR_TAG, "Billing service disconnected")
             }
         })
     }

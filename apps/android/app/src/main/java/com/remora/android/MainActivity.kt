@@ -23,6 +23,7 @@ import androidx.lifecycle.lifecycleScope
 import com.remora.android.background.BackgroundAwareness
 import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.AppModel
+import com.remora.android.state.CurrentSecurityCutover
 import com.remora.android.state.OpenAIApiKeyStore
 import com.remora.android.ui.AnimatedSplashScreen
 import com.remora.android.ui.ExperimentalFeatures
@@ -55,6 +56,9 @@ class MainActivity : ComponentActivity() {
         ExperimentalFeatures.initialize(applicationContext)
 
         try {
+            check(CurrentSecurityCutover.apply(applicationContext)) {
+                "Remora 1.6 security cutover did not complete"
+            }
             appModel = AppModel.init(this)
             WallpaperManager.initialize(this)
             appModel?.start()

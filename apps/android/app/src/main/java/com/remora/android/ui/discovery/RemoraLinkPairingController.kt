@@ -20,8 +20,7 @@ import uniffi.codex_mobile_client.AppRemoraLinkPendingApproval
 import uniffi.codex_mobile_client.AppRemoraLinkScope
 import uniffi.codex_mobile_client.RemoraLinkException
 
-internal const val REMORA_LINK_PAIR_COMMAND = "npx --yes remora-link@latest pair"
-internal const val REMORA_LINK_LEGACY_PAIR_COMMAND = "npx kittylitter"
+internal const val REMORA_LINK_PAIR_COMMAND = "remora-link pair --qr --runtime codex"
 internal const val REMORA_LINK_DEVICE_NAME_MAX_BYTES = 80
 
 internal sealed interface RemoraLinkPairingState {
@@ -32,11 +31,6 @@ internal sealed interface RemoraLinkPairingState {
 
     data object Ingress : RemoraLinkPairingState
     data object Inspecting : RemoraLinkPairingState
-
-    data class LegacyRePair(
-        val hostId: String,
-        val hostDisplayName: String,
-    ) : RemoraLinkPairingState
 
     data class Offer(
         val offer: AppRemoraLinkOffer,
@@ -157,12 +151,8 @@ internal class RemoraLinkPairingController(
                     )
                 }
 
-                is AppRemoraLinkInspection.LegacyRePairRequired -> {
-                    _state.value = RemoraLinkPairingState.LegacyRePair(
-                        hostId = inspection.hostId,
-                        hostDisplayName = inspection.hostDisplayName,
-                    )
-                }
+                else -> _state.value =
+                    RemoraLinkPairingState.Failure("That pairing code is invalid or expired.")
             }
         } catch (error: Exception) {
             _state.value = error.toPairingFailure()

@@ -189,7 +189,7 @@ final class RealtimeWebRtcSession: NSObject {
             try session.setCategory(
                 .playAndRecord,
                 mode: .voiceChat,
-                options: [.allowBluetooth, .defaultToSpeaker]
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
             )
             try session.setActive(true)
             didConfigureAudioSession = true
@@ -327,13 +327,11 @@ final class RealtimeWebRtcSession: NSObject {
                 }
                 return false
             }
-            group.addTask { [weak self] in
+            group.addTask { @MainActor [weak self] in
                 try? await Task.sleep(for: Self.iceGatheringTimeout)
-                await MainActor.run {
-                    if let continuation = self?.iceGatheringContinuation {
-                        self?.iceGatheringContinuation = nil
-                        continuation.resume()
-                    }
+                if let continuation = self?.iceGatheringContinuation {
+                    self?.iceGatheringContinuation = nil
+                    continuation.resume()
                 }
                 return true
             }

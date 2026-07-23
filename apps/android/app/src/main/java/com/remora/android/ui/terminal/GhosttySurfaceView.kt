@@ -1,5 +1,6 @@
 package com.remora.android.ui.terminal
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -52,13 +53,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.remora.android.core.bridge.GhosttyInputCallback
 import com.remora.android.core.bridge.GhosttyRendererBridge
 import com.remora.android.core.bridge.GhosttyRendererStatus
@@ -84,9 +85,9 @@ internal fun GhosttyTerminalSurface(
     controller: TerminalSessionController,
     rendererStatus: GhosttyRendererStatus,
     onRendererUnavailable: () -> Unit,
+    modifier: Modifier = Modifier,
     config: TerminalConfig? = null,
     onFontSizeChanged: ((Float) -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
@@ -351,6 +352,10 @@ internal class GhosttySnapshotRefreshGate {
     }
 }
 
+@SuppressLint(
+    "ViewConstructor", // Programmatic-only SurfaceView requires renderer dependencies at construction.
+    "ClickableViewAccessibility", // GestureDetector dispatches confirmed taps through performClick().
+)
 private class GhosttyAndroidSurfaceView(
     context: Context,
     private val rendererStatus: GhosttyRendererStatus,
@@ -487,6 +492,7 @@ private class GhosttyAndroidSurfaceView(
             }
 
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                performClick()
                 val renderer = terminalRenderer ?: return false
                 if (currentSelectionRange() != null) {
                     clearSelection()
@@ -617,6 +623,11 @@ private class GhosttyAndroidSurfaceView(
             }
         }
         return pinchHandled || super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {

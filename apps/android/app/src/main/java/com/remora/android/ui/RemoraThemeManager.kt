@@ -2,12 +2,12 @@ package com.remora.android.ui
 
 import android.content.Context
 import android.content.res.Configuration
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import com.remora.android.util.LLog
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -411,7 +411,8 @@ object RemoraThemeManager {
                 }
             }
         }.onFailure { error ->
-            Log.w(THEME_LOG_TAG, "Failed to load theme manifest", error)
+            LLog.w(THEME_LOG_TAG, "Theme manifest load failed")
+            LLog.debug(THEME_LOG_TAG, error) { "Theme manifest load failure details" }
         }.getOrDefault(emptyList())
     }
 
@@ -430,7 +431,8 @@ object RemoraThemeManager {
                 }
             }
         }.onFailure { error ->
-            Log.w(THEME_LOG_TAG, "Failed to load theme $slug", error)
+            LLog.w(THEME_LOG_TAG, "Theme load failed")
+            LLog.debug(THEME_LOG_TAG, error) { "Theme load failure details for slug=$slug" }
         }.getOrNull()
     }
 

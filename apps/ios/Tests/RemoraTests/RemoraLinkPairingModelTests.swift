@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class RemoraLinkPairingModelTests: XCTestCase {
     func testPairingUIUsesV2Command() {
-        XCTAssertEqual(RemotePairingSheet.pairCommand, "npx --yes remora-link@latest pair")
+        XCTAssertEqual(RemotePairingSheet.pairCommand, "remora-link pair --qr --runtime codex")
     }
 
     func testPairingIngressMatchesPlatformCapabilities() {
@@ -59,23 +59,6 @@ final class RemoraLinkPairingModelTests: XCTestCase {
         XCTAssertEqual(inspectedText, "secret-pairing-code")
         let remainingBytes = retainedCarrier?.withUnsafeBytes { Array($0) }
         XCTAssertEqual(remainingBytes, Array(repeating: 0, count: "secret-pairing-code".utf8.count))
-    }
-
-    func testLegacyInspectionMapsToExplicitRemoraLinkRepairState() async {
-        let model = makeModel(inspect: { _ in
-            .legacyRePairRequired(hostId: "host-v1", hostDisplayName: "Studio Mac")
-        })
-
-        model.inspect(codeText: "legacy-code")
-        await waitUntil {
-            model.state == .legacyRePair(hostId: "host-v1", hostDisplayName: "Studio Mac")
-        }
-
-        XCTAssertEqual(RemotePairingSheet.legacyRePairTitle, "Pair again with Remora Link")
-        let message = RemotePairingSheet.legacyRePairMessage(hostDisplayName: "Studio Mac")
-        XCTAssertTrue(message.contains("legacy invitation"))
-        XCTAssertTrue(message.contains("new Remora Link pairing code"))
-        XCTAssertFalse(message.contains("npx kittylitter"))
     }
 
     func testOfferUsesRustDefaultsAndKeepsRequiredScopesSelected() async {

@@ -3,6 +3,9 @@ package com.remora.android.state
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
+import androidx.annotation.ChecksSdkIntAtLeast
+import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +25,7 @@ import uniffi.codex_mobile_client.AppMdnsSeed
 import uniffi.codex_mobile_client.ProgressiveDiscoveryUpdateKind
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 
 /**
@@ -43,6 +47,7 @@ class NetworkDiscovery(private val discovery: DiscoveryBridge) {
     val scanProgressLabel: StateFlow<String?> = _scanProgressLabel.asStateFlow()
 
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val callbackExecutor = Executor { command -> command.run() }
     private var scanJob: Job? = null
 
     fun startScanning(context: Context) {
@@ -107,7 +112,7 @@ class NetworkDiscovery(private val discovery: DiscoveryBridge) {
                             withTimeoutOrNull(2000L) {
                                 resolveService(nsdManager, service)
                             }?.let { resolved ->
-                                val host = resolved.host?.hostAddress ?: return@let null
+                                val host = resolvedHostAddress(resolved) ?: return@let null
                                 AppMdnsSeed(
                                     name = resolved.serviceName,
                                     host = host,
@@ -162,18 +167,90 @@ class NetworkDiscovery(private val discovery: DiscoveryBridge) {
     private suspend fun resolveService(
         nsdManager: NsdManager,
         service: NsdServiceInfo,
+    ): NsdServiceInfo? =
+        if (usesModernNsdApis(Build.VERSION.SDK_INT)) {
+            resolveServiceWithCallback(nsdManager, service)
+        } else {
+            resolveServiceLegacy(nsdManager, service)
+        }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private suspend fun resolveServiceWithCallback(
+        nsdManager: NsdManager,
+        service: NsdServiceInfo,
     ): NsdServiceInfo? = suspendCancellableCoroutine { cont ->
-        nsdManager.resolveService(service, object : NsdManager.ResolveListener {
+        val callback = object : NsdManager.ServiceInfoCallback {
+            override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                if (cont.isActive) cont.resume(null)
+            }
+
+            override fun onServiceUpdated(resolved: NsdServiceInfo) {
+                if (cont.isActive) cont.resume(resolved)
+                try {
+                    nsdManager.unregisterServiceInfoCallback(this)
+                } catch (_: Exception) {}
+            }
+
+            override fun onServiceLost() {
+                if (cont.isActive) cont.resume(null)
+                try {
+                    nsdManager.unregisterServiceInfoCallback(this)
+                } catch (_: Exception) {}
+            }
+
+            override fun onServiceInfoCallbackUnregistered() {}
+        }
+
+        try {
+            nsdManager.registerServiceInfoCallback(service, callbackExecutor, callback)
+        } catch (_: Exception) {
+            if (cont.isActive) cont.resume(null)
+        }
+
+        cont.invokeOnCancellation {
+            try {
+                nsdManager.unregisterServiceInfoCallback(callback)
+            } catch (_: Exception) {}
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun resolveServiceLegacy(
+        nsdManager: NsdManager,
+        service: NsdServiceInfo,
+    ): NsdServiceInfo? = suspendCancellableCoroutine { cont ->
+        val listener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(service: NsdServiceInfo, errorCode: Int) {
                 if (cont.isActive) cont.resume(null)
             }
+
             override fun onServiceResolved(resolved: NsdServiceInfo) {
                 if (cont.isActive) cont.resume(resolved)
             }
-        })
+        }
+        try {
+            nsdManager.resolveService(service, listener)
+        } catch (_: Exception) {
+            if (cont.isActive) cont.resume(null)
+        }
     }
 
     companion object {
+        private fun resolvedHostAddress(service: NsdServiceInfo): String? =
+            if (usesModernNsdApis(Build.VERSION.SDK_INT)) {
+                service.hostAddresses.firstOrNull()?.hostAddress
+            } else {
+                legacyHostAddress(service)
+            }
+
+        @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.UPSIDE_DOWN_CAKE, parameter = 0)
+        internal fun usesModernNsdApis(sdkInt: Int): Boolean =
+            sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+
+        @Suppress("DEPRECATION")
+        private fun legacyHostAddress(service: NsdServiceInfo): String? =
+            service.host?.hostAddress
+
         fun localIpv4Address(): String? {
             try {
                 for (iface in NetworkInterface.getNetworkInterfaces()) {

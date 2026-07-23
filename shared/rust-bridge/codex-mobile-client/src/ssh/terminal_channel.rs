@@ -31,15 +31,7 @@ impl SshClient {
         drop(handle);
 
         channel
-            .request_pty(
-                true,
-                "xterm-256color",
-                cols as u32,
-                rows as u32,
-                0,
-                0,
-                &[],
-            )
+            .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
             .await
             .map_err(|error| SshError::ConnectionFailed(format!("request pty: {error}")))?;
 

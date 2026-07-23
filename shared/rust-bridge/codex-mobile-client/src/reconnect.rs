@@ -201,6 +201,10 @@ impl ReconnectPlan {
 }
 
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the decision carries an owned reconnect plan directly to avoid heap allocation in the synchronous planning path"
+)]
 pub(crate) enum ReconnectPlanDecision {
     Plan(ReconnectPlan),
     NoAction(ReconnectOutcome),
@@ -296,10 +300,10 @@ fn resolved_preferred_codex_port(server: &SavedServerRecord) -> Option<u16> {
         return None;
     }
     let ports = available_direct_codex_ports(server);
-    if let Some(pref) = server.preferred_codex_port {
-        if ports.contains(&pref) {
-            return Some(pref);
-        }
+    if let Some(pref) = server.preferred_codex_port
+        && ports.contains(&pref)
+    {
+        return Some(pref);
     }
     None
 }
@@ -342,6 +346,7 @@ fn compute_reconnect_plan(
     compute_reconnect_plan_with_slingshot(server, credential, None, is_connected)
 }
 
+#[cfg(test)]
 pub(crate) fn compute_reconnect_plan_with_slingshot(
     server: &SavedServerRecord,
     credential: Option<&SshCredentialRecord>,
@@ -444,16 +449,16 @@ pub(crate) fn decide_reconnect_plan_with_slingshot(
     }
 
     // 6. No explicit mode, but credential available → SSH (legacy fallback)
-    if mode.is_none() {
-        if let Some(cred) = credential {
-            return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
-                server_id: server.id.clone(),
-                display_name: server.name.clone(),
-                host: server.hostname.clone(),
-                ssh_port: resolved_ssh_port(server),
-                credential: cred.clone(),
-            });
-        }
+    if mode.is_none()
+        && let Some(cred) = credential
+    {
+        return ReconnectPlanDecision::Plan(ReconnectPlan::Ssh {
+            server_id: server.id.clone(),
+            display_name: server.name.clone(),
+            host: server.hostname.clone(),
+            ssh_port: resolved_ssh_port(server),
+            credential: cred.clone(),
+        });
     }
 
     // 7. Local source → Local

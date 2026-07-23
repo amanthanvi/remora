@@ -183,9 +183,7 @@ fn osc_set_changed(cached: &[TerminalLink], hyperlinks: &[TerminalHyperlink]) ->
 fn contains(link: &TerminalLink, pos: TerminalCellPosition) -> bool {
     // Single-row link: [start.col, end.col).
     if link.start.row == link.end.row {
-        return pos.row == link.start.row
-            && pos.col >= link.start.col
-            && pos.col < link.end.col;
+        return pos.row == link.start.row && pos.col >= link.start.col && pos.col < link.end.col;
     }
     // Multi-row link: full rows in between, plus tails.
     if pos.row < link.start.row || pos.row > link.end.row {
@@ -243,7 +241,10 @@ mod tests {
         assert_eq!(links[0].url, "https://example.com");
         assert!(matches!(links[0].source, TerminalLinkSource::Linkifier));
         assert_eq!(links[0].start, cell(0, 4));
-        assert_eq!(links[0].end, cell(0, 4 + "https://example.com".len() as u32));
+        assert_eq!(
+            links[0].end,
+            cell(0, 4 + "https://example.com".len() as u32)
+        );
     }
 
     #[test]

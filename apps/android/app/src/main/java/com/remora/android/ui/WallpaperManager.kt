@@ -8,12 +8,12 @@ import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.net.Uri
 import android.os.Build
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.remora.android.util.LLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -223,7 +223,10 @@ object WallpaperManager {
                     check(bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream))
                     stream.fd.sync()
                 }
-            }.onFailure { Log.e(TAG, "Failed to write pending wallpaper image", it) }.isSuccess
+            }.onFailure { error ->
+                LLog.e(TAG, "Pending wallpaper image write failed")
+                LLog.debug(TAG, error) { "Pending wallpaper image write failure details" }
+            }.isSuccess
         }
         if (!wrote) return false
         pendingConfig = WallpaperConfig(type = WallpaperType.CUSTOM_IMAGE)
@@ -339,7 +342,10 @@ object WallpaperManager {
                     check(bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream))
                     stream.fd.sync()
                 }
-            }.onFailure { Log.e(TAG, "Failed to write wallpaper image", it) }.isSuccess
+            }.onFailure { error ->
+                LLog.e(TAG, "Wallpaper image write failed")
+                LLog.debug(TAG, error) { "Wallpaper image write failure details" }
+            }.isSuccess
         }
         if (!wrote) return false
 
@@ -577,8 +583,9 @@ object WallpaperManager {
         if (file.exists()) {
             prefsData = runCatching {
                 JSONObject(file.readText())
-            }.getOrElse {
-                Log.w(TAG, "Failed to parse wallpaper prefs", it)
+            }.getOrElse { error ->
+                LLog.w(TAG, "Wallpaper preferences parse failed")
+                LLog.debug(TAG, error) { "Wallpaper preferences parse failure details" }
                 JSONObject()
             }
         }
@@ -589,8 +596,9 @@ object WallpaperManager {
         val file = File(context.filesDir, PREFS_FILENAME)
         runCatching {
             file.writeText(prefsData.toString(2))
-        }.onFailure {
-            Log.e(TAG, "Failed to save wallpaper prefs", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper preferences save failed")
+            LLog.debug(TAG, error) { "Wallpaper preferences save failure details" }
         }
     }
 
@@ -626,8 +634,11 @@ object WallpaperManager {
                 }
             }
             dest
-        }.onFailure {
-            Log.e(TAG, "Failed to copy wallpaper asset from ${source.absolutePath} to ${dest.absolutePath}", it)
+        }.onFailure { error ->
+            LLog.e(TAG, "Wallpaper asset copy failed")
+            LLog.debug(TAG, error) {
+                "Failed to copy wallpaper asset from ${source.absolutePath} to ${dest.absolutePath}"
+            }
         }.getOrNull()
 
     private fun drawHexagon(canvas: Canvas, cx: Float, cy: Float, size: Float, paint: Paint) {
@@ -659,8 +670,9 @@ object WallpaperManager {
                             )
                         }
                     }
-                }.onFailure {
-                    Log.w(TAG, "ImageDecoder failed for uri=$uri", it)
+                }.onFailure { error ->
+                    LLog.w(TAG, "Wallpaper image decode failed")
+                    LLog.debug(TAG, error) { "ImageDecoder failed for uri=$uri" }
                 }.getOrNull()?.let { return@withContext it }
             }
 

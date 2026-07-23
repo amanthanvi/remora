@@ -209,7 +209,7 @@ internal fun SessionDiffSheet(
     onDismiss: () -> Unit,
 ) {
     var collapsedSectionIds by remember(sections) {
-        mutableStateOf(sections.mapTo(linkedSetOf()) { it.id })
+        mutableStateOf<Set<String>>(sections.mapTo(linkedSetOf()) { it.id })
     }
     val totalSummary = remember(sections) {
         sections.fold(DiffSummary(additions = 0, deletions = 0)) { acc, section ->

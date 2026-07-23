@@ -195,6 +195,7 @@ final class AdaptiveNavigationAndActionsTests: XCTestCase {
             selectedRuntimeIds: runtimeIds,
             grantedScopes: scopes,
             pendingApproval: nil,
+            pendingRestart: nil,
             hostRevocationStillRequired: false
         )
     }

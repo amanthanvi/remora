@@ -28,6 +28,7 @@ import java.io.File
 @Composable
 fun VideoWallpaperPlayer(
     filePath: String,
+    modifier: Modifier = Modifier,
     blurAmount: Float = 0f,
     brightnessAlpha: Float = 1f,
     motionTransform: WallpaperMotionTransform = WallpaperMotionTransform(
@@ -35,7 +36,6 @@ fun VideoWallpaperPlayer(
         translationX = 0f,
         translationY = 0f,
     ),
-    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current

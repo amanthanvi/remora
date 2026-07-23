@@ -716,15 +716,13 @@ impl AppStoreSubscription {
                     "no app-store subscriber".to_string(),
                 ))?
         };
-        let result = loop {
-            match receive_next_update(&mut state).await {
-                Ok(update) => break Ok(update.into()),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    break Ok(AppStoreUpdateRecord::FullResync);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break Err(ClientError::EventClosed("closed".to_string()));
-                }
+        let result = match receive_next_update(&mut state).await {
+            Ok(update) => Ok(update.into()),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Ok(AppStoreUpdateRecord::FullResync)
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                Err(ClientError::EventClosed("closed".to_string()))
             }
         };
         *self.state.lock().unwrap() = Some(state);

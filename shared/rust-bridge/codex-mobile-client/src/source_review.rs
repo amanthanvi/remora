@@ -13,9 +13,9 @@
 //! enforces this contract on the host, source preview fails closed with
 //! [`SourcePreviewUnsupportedReason::CapabilityUnavailable`].
 
+use crate::MobileClient;
 use crate::conversation_uniffi::HydratedConversationItemContent;
 use crate::types::ThreadKey;
-use crate::MobileClient;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 
@@ -2448,10 +2448,12 @@ Binary files a/picture.png and b/picture.png differ
                 && file.change_kind == DiffFileChangeKind::Unsupported
                 && file.raw_patch.is_empty()
         }));
-        assert!(review
-            .files
-            .iter()
-            .any(|file| file.relative_path.as_deref() == Some("safe.txt")));
+        assert!(
+            review
+                .files
+                .iter()
+                .any(|file| file.relative_path.as_deref() == Some("safe.txt"))
+        );
         assert!(!format!("{review:?}").contains("/secret"));
     }
 
@@ -2508,10 +2510,12 @@ Binary files a/picture.png and b/picture.png differ
             panic!("expected ready review");
         };
         assert!(!review.truncated);
-        assert!(review
-            .files
-            .iter()
-            .any(|file| file.relative_path.as_deref() == Some("safe.txt")));
+        assert!(
+            review
+                .files
+                .iter()
+                .any(|file| file.relative_path.as_deref() == Some("safe.txt"))
+        );
         assert!(review.files.iter().any(|file| {
             file.display_path == "Outside workspace"
                 && file.change_kind == DiffFileChangeKind::Unsupported
