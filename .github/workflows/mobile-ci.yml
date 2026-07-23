@@ -91,7 +91,7 @@ jobs:
 
       - name: Restore generated mobile bindings cache
         id: mobile-bindings-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             shared/rust-bridge/generated
@@ -127,7 +127,7 @@ jobs:
             apps/ios/GeneratedRust/Headers
 
       - name: Upload shared prep artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: shared-prep
           path: .ci-prep/shared
@@ -256,7 +256,11 @@ jobs:
           xcode-version: "26.3"
 
       - name: Install build dependencies
-        run: brew install xcodegen meson ninja llvm lld
+        run: |
+          if brew tap | grep -qx "aws/tap"; then
+            brew untap aws/tap
+          fi
+          brew install xcodegen meson ninja llvm lld
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
