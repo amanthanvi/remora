@@ -70,29 +70,6 @@ final class HomeDashboardSupportTests: XCTestCase {
         )
     }
 
-    func testSavedServerMigratesLegacySshPortIntoDedicatedField() throws {
-        let data = """
-        {
-          "id": "legacy-ssh",
-          "name": "Legacy SSH",
-          "hostname": "mac-mini.local",
-          "port": 8390,
-          "source": "manual",
-          "hasCodexServer": false,
-          "wakeMAC": null,
-          "sshPortForwardingEnabled": true
-        }
-        """.data(using: .utf8)!
-
-        let saved = try JSONDecoder().decode(SavedServer.self, from: data)
-        let discovered = saved.toDiscoveredServer()
-
-        XCTAssertNil(discovered.port)
-        XCTAssertEqual(discovered.sshPort, 8390)
-        XCTAssertEqual(discovered.resolvedSSHPort, 8390)
-        XCTAssertFalse(discovered.hasCodexServer)
-    }
-
     func testHomeDashboardModelRefreshesWhenObservedSnapshotChanges() async {
         let appModel = AppModel()
         let model = HomeDashboardModel()
@@ -246,7 +223,6 @@ final class HomeDashboardSupportTests: XCTestCase {
             wakeMAC: nil,
             preferredConnectionMode: .ssh,
             preferredCodexPort: nil,
-            sshPortForwardingEnabled: nil,
             websocketURL: nil,
             rememberedByUser: true,
             sshBridgeRuntimeKinds: [.codex, .droid]

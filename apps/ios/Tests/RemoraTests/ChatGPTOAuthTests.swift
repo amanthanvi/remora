@@ -22,6 +22,31 @@ final class ChatGPTOAuthTests: XCTestCase {
         XCTAssertEqual(query["codex_cli_simplified_flow"], "true")
     }
 
+    func testAuthorizeURLLoggingRedactsStateAndCodeChallenge() throws {
+        let state = "oauth-state-secret"
+        let codeChallenge = "pkce-challenge-secret"
+        let url = try ChatGPTOAuth.buildAuthorizeURL(
+            state: state,
+            codeChallenge: codeChallenge,
+            redirectURI: "http://localhost:1455/auth/callback"
+        )
+
+        let sanitizedURL = try XCTUnwrap(
+            URL(string: ChatGPTOAuth.sanitizedAuthorizeURLForLogging(url))
+        )
+        let components = try XCTUnwrap(
+            URLComponents(url: sanitizedURL, resolvingAgainstBaseURL: false)
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") }
+        )
+
+        XCTAssertEqual(query["state"], "<redacted>")
+        XCTAssertEqual(query["code_challenge"], "<redacted>")
+        XCTAssertFalse(sanitizedURL.absoluteString.contains(state))
+        XCTAssertFalse(sanitizedURL.absoluteString.contains(codeChallenge))
+    }
+
     func testValidateCallbackURLAcceptsLoopbackCallback() throws {
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1:1455/auth/callback?code=abc&state=xyz"))
 
@@ -190,6 +215,69 @@ final class ChatGPTOAuthTests: XCTestCase {
             payloadData.base64URLEncodedString(),
             ""
         ].joined(separator: ".")
+    }
+}
+
+final class LLogTests: XCTestCase {
+    func testReleaseRenderingOnlyIncludesAllowlistedOperationalMetadata() {
+        let rendered = LLog.render(
+            message: "request failed",
+            fields: [
+                "operation": "send_message",
+                "error_domain": "NSURLErrorDomain",
+                "error_code": -1009,
+                "status": 503,
+                "server_id": "server-secret",
+                "thread_id": "thread-secret",
+                "cursor": "cursor-secret",
+                "state": "oauth-state-secret",
+                "error_description": "raw error secret"
+            ],
+            payloadJson: #"{"token":"payload-secret"}"#,
+            policy: .release
+        )
+
+        XCTAssertEqual(
+            rendered,
+            #"request failed fields={"error_code":-1009,"error_domain":"NSURLErrorDomain","operation":"send_message","status":503}"#
+        )
+        XCTAssertFalse(rendered.contains("server-secret"))
+        XCTAssertFalse(rendered.contains("thread-secret"))
+        XCTAssertFalse(rendered.contains("cursor-secret"))
+        XCTAssertFalse(rendered.contains("oauth-state-secret"))
+        XCTAssertFalse(rendered.contains("raw error secret"))
+        XCTAssertFalse(rendered.contains("payload-secret"))
+    }
+
+    func testReleaseRenderingRejectsUnstructuredValuesForStringMetadata() {
+        let rendered = LLog.render(
+            message: "request failed",
+            fields: [
+                "operation": "send message for account@example.com",
+                "error_domain": "secret\nvalue",
+                "error_code": 7
+            ],
+            payloadJson: nil,
+            policy: .release
+        )
+
+        XCTAssertEqual(rendered, #"request failed fields={"error_code":7}"#)
+    }
+
+    func testDiagnosticRenderingPreservesFieldsAndPayload() {
+        let rendered = LLog.render(
+            message: "request failed",
+            fields: [
+                "thread_id": "thread-debug",
+                "error_description": "debug description"
+            ],
+            payloadJson: #"{"detail":"debug payload"}"#,
+            policy: .diagnostic
+        )
+
+        XCTAssertTrue(rendered.contains("thread-debug"))
+        XCTAssertTrue(rendered.contains("debug description"))
+        XCTAssertTrue(rendered.contains("debug payload"))
     }
 }
 

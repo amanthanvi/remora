@@ -11,7 +11,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 uniffi = { version = "0.31.0", features = ["tokio"] }
-iroh = "0.98.1"
+iroh = "1.0.3"
 codex-app-server = { workspace = true }
 codex-app-server-client = { workspace = true }
 codex-app-server-protocol = { workspace = true }
@@ -27,10 +27,10 @@ codex-utils-absolute-path = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-feedback = { workspace = true }
 codex-arg0 = { workspace = true }
-alleycat-bridge-core = { workspace = true }
-alleycat-pi-bridge = { workspace = true }
-alleycat-claude-bridge = { workspace = true }
-alleycat-opencode-bridge = { workspace = true }
+remora-bridge-core = { workspace = true }
+remora-pi-bridge = { workspace = true }
+remora-claude-bridge = { workspace = true }
+remora-opencode-bridge = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

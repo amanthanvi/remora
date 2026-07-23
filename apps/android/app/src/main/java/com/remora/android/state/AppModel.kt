@@ -94,6 +94,9 @@ class AppModel private constructor(context: android.content.Context) {
         fun init(context: android.content.Context): AppModel {
             if (_instance == null) {
                 val appContext = context.applicationContext
+                check(CurrentSecurityCutover.apply(appContext)) {
+                    "Remora 1.6 security cutover did not complete"
+                }
                 _instance = AppModel(appContext)
             }
             return _instance!!
@@ -181,7 +184,14 @@ class AppModel private constructor(context: android.content.Context) {
         remoraLinkConfigurationGate.configureInSeparateJob().also { job ->
             job.invokeOnCompletion {
                 remoraLinkConfigurationGate.lastFailure?.let { failure ->
-                    LLog.w("AppModel", "Remora Link v2 configuration unavailable: ${failure.message}")
+                    LLog.w(
+                        "AppModel",
+                        "Remora Link v2 configuration unavailable",
+                        fields = mapOf(
+                            "errorType" to failure.javaClass.simpleName,
+                            "error" to failure.message,
+                        ),
+                    )
                 }
             }
         }
@@ -1632,11 +1642,24 @@ private fun registerBundledCliTools() {
     val tools = emptyMap<String, String>()
     try {
         registerAndroidTools(tools)
-        android.util.Log.i(
+        LLog.i(
             "AppModel",
-            "Registered ${tools.size} bundled CLI tools: ${tools.keys}",
+            "Registered bundled CLI tools",
+            fields = mapOf("count" to tools.size),
+        )
+        LLog.d(
+            "AppModel",
+            "Registered bundled CLI tool details",
+            fields = mapOf("tools" to tools.keys.joinToString(",")),
         )
     } catch (e: Throwable) {
-        android.util.Log.w("AppModel", "registerAndroidTools failed: ${e.message}")
+        LLog.w(
+            "AppModel",
+            "registerAndroidTools failed",
+            fields = mapOf(
+                "errorType" to e.javaClass.simpleName,
+                "error" to e.message,
+            ),
+        )
     }
 }

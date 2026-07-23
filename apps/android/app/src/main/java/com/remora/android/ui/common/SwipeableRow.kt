@@ -59,9 +59,9 @@ data class SwipeAction(
  */
 @Composable
 fun SwipeableRow(
+    modifier: Modifier = Modifier,
     leadingAction: SwipeAction? = null,
     trailingAction: SwipeAction? = null,
-    modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current

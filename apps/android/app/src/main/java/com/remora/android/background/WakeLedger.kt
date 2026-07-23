@@ -3,8 +3,7 @@ package com.remora.android.background
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import com.remora.android.state.openEncryptedPrefsOrReset
 import java.security.SecureRandom
 
 internal data class SeenWake(
@@ -257,12 +256,4 @@ internal class WakeLedger(context: Context) {
 }
 
 internal fun openPushAwarenessPreferences(context: Context): SharedPreferences =
-    EncryptedSharedPreferences.create(
-        context,
-        "remora_push_awareness_v1",
-        MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    openEncryptedPrefsOrReset(context, "remora_push_awareness_v1")

@@ -30,7 +30,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::ffi::AppClient;
 use crate::ffi::background_relay::AppRelaySecretValue;
-use crate::remote_host_pairing::identity::{DecodedPairingCode, V2Invite, decode_pairing_code};
+use crate::remote_host_pairing::identity::{V2Invite, decode_pairing_code};
 use crate::remote_host_pairing::remora_link_v2::{
     ALPN, AgentInfoV2, AgentWireV2, AttachKindV2, AttachmentCustodyErrorV2, ConfirmationModeV2,
     CredentialCustodyPortV2, CredentialPortError, DeviceScopeV2, EnrollmentOutcomeV2,
@@ -38,8 +38,8 @@ use crate::remote_host_pairing::remora_link_v2::{
     HostRouteV2, InvitationInspectionV2, JOURNAL_SCHEMA_VERSION, JournalPhaseV2,
     JournalPortErrorV2, JournalPortV2, LifecycleErrorV2, MutationOutcomeV2, PairingJournalEntryV2,
     PairingLifecycleV2, ReconnectOutcomeV2, RequestCorrelationV2, RequestV2, ResponseV2,
-    RetainedAttachmentRegistryV2, StartedExchangeV2, connect_runtime_client_v2,
-    read_response_frame, write_proof_frame, write_request_frame,
+    RestartDispositionV2, RestartOutcomeV2, RetainedAttachmentRegistryV2, StartedExchangeV2,
+    connect_runtime_client_v2, read_response_frame, write_proof_frame, write_request_frame,
 };
 use crate::session::connection::{
     RemoteSessionExtras, RuntimeRemoteSessionResource, ServerConfig, ServerSession,
@@ -296,13 +296,7 @@ pub struct AppRemoraLinkOffer {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum AppRemoraLinkInspection {
-    Ready {
-        offer: AppRemoraLinkOffer,
-    },
-    LegacyRePairRequired {
-        host_id: String,
-        host_display_name: String,
-    },
+    Ready { offer: AppRemoraLinkOffer },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -359,6 +353,13 @@ pub struct AppRemoraLinkPendingApproval {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AppRemoraLinkPendingRestart {
+    pub runtime_id: String,
+    pub command_sequence: u64,
+    pub outcome_unknown: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct AppRemoraLinkHostSummary {
     pub host_id: String,
     pub host_display_name: String,
@@ -366,6 +367,7 @@ pub struct AppRemoraLinkHostSummary {
     pub selected_runtime_ids: Vec<String>,
     pub granted_scopes: Vec<AppRemoraLinkScope>,
     pub pending_approval: Option<AppRemoraLinkPendingApproval>,
+    pub pending_restart: Option<AppRemoraLinkPendingRestart>,
     pub host_revocation_still_required: bool,
 }
 
@@ -442,6 +444,12 @@ pub enum AppRemoraLinkRevocationOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppRemoraLinkRestartOutcome {
+    Succeeded { command_sequence: u64 },
+    OutcomeUnknown { command_sequence: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum AppRemoraLinkPairingCancellationOutcome {
     Cancelled,
     OutcomeUnknown,
@@ -454,7 +462,7 @@ pub struct AppRemoraLinkForgetResult {
     pub host_revocation_still_required: bool,
 }
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum RemoraLinkError {
     #[error("Remora Link is not configured")]
     NotConfigured,
@@ -865,17 +873,7 @@ impl AppClient {
         code: AppRemoraLinkPairingCode,
     ) -> Result<AppRemoraLinkInspection, RemoraLinkError> {
         let _configuration = self.inner.remora_link_configuration.read().await;
-        let decoded = decode_code(code)?;
-        let host_display_name = decoded.suggested_display_name();
-        let invite = match decoded {
-            DecodedPairingCode::LegacyV1 { params } => {
-                return Ok(AppRemoraLinkInspection::LegacyRePairRequired {
-                    host_id: format!("alleycat:{}", params.node_id),
-                    host_display_name,
-                });
-            }
-            DecodedPairingCode::DeviceGrantV2(invite) => invite,
-        };
+        let invite = decode_code(code)?;
         let configured = self.configured_remora_link()?;
         let inspection = configured.lifecycle.inspect(&invite).await?;
         let offer = offer_from_inspection(&invite, inspection)?;
@@ -956,12 +954,11 @@ impl AppClient {
         }
         let supplied_code = code.is_some();
         let invite = if let Some(code) = code {
-            match decode_code(code)? {
-                DecodedPairingCode::DeviceGrantV2(invite) if v2_host_id(&invite) == host_id => {
-                    invite
-                }
-                _ => return Err(RemoraLinkError::InvitationMismatch),
+            let invite = decode_code(code)?;
+            if v2_host_id(&invite) != host_id {
+                return Err(RemoraLinkError::InvitationMismatch);
             }
+            invite
         } else {
             configured
                 .invitations
@@ -1099,6 +1096,43 @@ impl AppClient {
             configured: Arc::clone(&configured),
         });
         reconnect_all(configured, attacher, Vec::new(), deadline, None).await
+    }
+
+    /// Restart one explicitly granted runtime using the durable, at-most-once
+    /// command sequence. An ambiguous result stays blocked until the operator
+    /// acknowledges it through `acknowledge_remora_link_unknown_restart`.
+    pub async fn restart_remora_link_runtime(
+        &self,
+        host_id: String,
+        runtime_id: String,
+    ) -> Result<AppRemoraLinkRestartOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        let outcome = configured.lifecycle.restart(&host_id, runtime_id).await?;
+        self.inner.disconnect_remora_link_session(&host_id).await;
+        Ok(match outcome {
+            RestartOutcomeV2::Succeeded { command_sequence } => {
+                AppRemoraLinkRestartOutcome::Succeeded { command_sequence }
+            }
+            RestartOutcomeV2::OutcomeUnknown { command_sequence } => {
+                AppRemoraLinkRestartOutcome::OutcomeUnknown { command_sequence }
+            }
+        })
+    }
+
+    /// Confirm that the operator inspected an ambiguous restart externally and
+    /// accepts issuing a new sequence on a later explicit restart request.
+    pub async fn acknowledge_remora_link_unknown_restart(
+        &self,
+        host_id: String,
+    ) -> Result<u64, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        configured
+            .lifecycle
+            .acknowledge_unknown_restart(&host_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Cancel a staged or pending enrollment without treating it as an
@@ -2373,7 +2407,7 @@ impl IrohRemoraLinkHost {
             .dns_resolver(iroh::dns::DnsResolver::with_nameserver(
                 std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
             ))
-            .ca_roots_config(iroh::tls::CaRootsConfig::embedded());
+            .ca_tls_config(iroh::tls::CaTlsConfig::embedded());
         let endpoint = endpoint_builder
             .bind()
             .await
@@ -2853,7 +2887,7 @@ fn map_control_error(
 
 // MARK: - Projection and validation helpers
 
-fn decode_code(code: AppRemoraLinkPairingCode) -> Result<DecodedPairingCode, RemoraLinkError> {
+fn decode_code(code: AppRemoraLinkPairingCode) -> Result<V2Invite, RemoraLinkError> {
     if code.0.len() > MAX_PAIRING_CODE_BYTES {
         return Err(RemoraLinkError::InvalidPairingCode);
     }
@@ -3138,6 +3172,14 @@ fn project_host_summary(entry: PairingJournalEntryV2) -> AppRemoraLinkHostSummar
                 .collect(),
             device_display_name: value.display_name.clone(),
         });
+    let pending_restart = entry
+        .pending_restart
+        .as_ref()
+        .map(|value| AppRemoraLinkPendingRestart {
+            runtime_id: value.runtime_id.clone(),
+            command_sequence: value.command_sequence,
+            outcome_unknown: value.disposition == RestartDispositionV2::OutcomeUnknown,
+        });
     let (state, host_revocation_still_required) = match entry.phase {
         JournalPhaseV2::Inspecting => (AppRemoraLinkHostState::Inspecting, false),
         JournalPhaseV2::Ready => (AppRemoraLinkHostState::Ready, false),
@@ -3172,6 +3214,7 @@ fn project_host_summary(entry: PairingJournalEntryV2) -> AppRemoraLinkHostSummar
         selected_runtime_ids,
         granted_scopes,
         pending_approval,
+        pending_restart,
         host_revocation_still_required,
     }
 }
@@ -3304,8 +3347,6 @@ impl From<LifecycleErrorV2> for AppRemoraLinkFailure {
             LifecycleErrorV2::MissingCredential => Self::MissingCredential,
             LifecycleErrorV2::InvalidSignature => Self::InvalidSignature,
             LifecycleErrorV2::HostUnavailable => Self::HostUnavailable,
-            LifecycleErrorV2::V2Unavailable => Self::V2Unavailable,
-            LifecycleErrorV2::Cancelled => Self::Cancelled,
             LifecycleErrorV2::HostIdentityDrift
             | LifecycleErrorV2::ClientIdentityDrift
             | LifecycleErrorV2::HardwareKeyDrift => Self::IdentityDrift,
@@ -3965,6 +4006,30 @@ mod tests {
     }
 
     #[test]
+    fn host_summary_projects_ambiguous_restart_until_operator_acknowledges_it() {
+        use crate::remote_host_pairing::remora_link_v2::RestartCommandJournalV2;
+
+        let mut entry = enrolled_entry("restart", 8, vec!["codex".to_string()]);
+        entry.pending_restart = Some(RestartCommandJournalV2 {
+            runtime_id: "codex".to_string(),
+            idempotency_key: "restart-key".to_string(),
+            command_sequence: 19,
+            disposition: RestartDispositionV2::OutcomeUnknown,
+        });
+
+        let summary = project_host_summary(entry);
+
+        assert_eq!(
+            summary.pending_restart,
+            Some(AppRemoraLinkPendingRestart {
+                runtime_id: "codex".to_string(),
+                command_sequence: 19,
+                outcome_unknown: true,
+            })
+        );
+    }
+
+    #[test]
     fn staged_and_pending_enrollment_summaries_preserve_possible_host_authority() {
         for phase in [
             JournalPhaseV2::EnrollmentStaged,
@@ -3977,29 +4042,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_code_is_classified_with_directional_host_name_without_v2_configuration() {
+    async fn unsupported_code_fails_closed_without_v2_configuration() {
         let client = AppClient {
             inner: Arc::new(crate::MobileClient::new()),
             rt: crate::ffi::shared::shared_runtime(),
         };
         let payload = serde_json::json!({
-            "v": 1,
+            "v": 7,
             "node_id": "a".repeat(64),
-            "token": "legacy-bearer",
-            "host_name": "Legacy Studio"
+            "deprecated_secret": "must-not-be-accepted"
         })
         .to_string()
         .into_bytes()
         .into();
 
-        let inspection = client.inspect_remora_link_code(payload).await.unwrap();
-
         assert_eq!(
-            inspection,
-            AppRemoraLinkInspection::LegacyRePairRequired {
-                host_id: format!("alleycat:{}", "a".repeat(64)),
-                host_display_name: "Legacy Studio".to_string(),
-            }
+            client.inspect_remora_link_code(payload).await,
+            Err(RemoraLinkError::InvalidPairingCode)
         );
     }
 

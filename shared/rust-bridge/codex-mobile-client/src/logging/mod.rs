@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use tracing::Level;
 
 static TRACING_SUBSCRIBER_INSTALLED: OnceLock<()> = OnceLock::new();
+#[cfg(test)]
 const JSON_LOG_PREVIEW_LIMIT: usize = 512;
 
 #[cfg(target_os = "android")]
@@ -272,6 +273,7 @@ pub(crate) fn log_rust(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn summarize_json_for_log(payload: &str) -> String {
     let compact = serde_json::from_str::<serde_json::Value>(payload)
         .ok()
@@ -281,6 +283,7 @@ pub(crate) fn summarize_json_for_log(payload: &str) -> String {
     truncate_log_preview(&compact, JSON_LOG_PREVIEW_LIMIT)
 }
 
+#[cfg(test)]
 fn truncate_log_preview(value: &str, limit: usize) -> String {
     let total_chars = value.chars().count();
     let total_bytes = value.len();
@@ -295,6 +298,7 @@ fn truncate_log_preview(value: &str, limit: usize) -> String {
     )
 }
 
+#[cfg(test)]
 fn format_bytes(bytes: usize) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
 

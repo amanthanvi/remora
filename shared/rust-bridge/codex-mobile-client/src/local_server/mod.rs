@@ -37,21 +37,16 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 
-/// POSIX candidate lines shared with Alleycat's Codex resolver.
-///
-/// Alleycat is an upstream dependency and still names its shell helpers with
-/// the original fork prefix. Project them into Remora-owned helper names at
-/// this boundary so generated remote scripts do not ship stale branding.
+/// POSIX candidate lines shared with Remora Link's Codex resolver.
 pub(crate) fn shell_candidate_lines() -> Vec<String> {
-    alleycat_bridge_core::codex_resolver::POSIX_SHELL_CANDIDATE_LINES
+    remora_bridge_core::codex_resolver::POSIX_SHELL_CANDIDATE_LINES
         .iter()
         .map(|line| remora_codex_resolver_snippet(line))
         .collect()
 }
 
 pub(crate) fn remora_codex_resolver_snippet(script: &str) -> String {
-    const UPSTREAM_HELPER_PREFIX: &str = concat!("_", "lit", "ter");
-    script.replace(UPSTREAM_HELPER_PREFIX, "_remora")
+    script.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +72,7 @@ pub async fn probe_local_server(port: u16) -> bool {
 /// deterministic candidate precedence, also used by SSH bootstrap and the
 /// host daemon.
 pub fn resolve_codex_binary_local() -> Option<PathBuf> {
-    alleycat_bridge_core::codex_resolver::resolve_latest_codex_binary(Path::new("codex"))
+    remora_bridge_core::codex_resolver::resolve_latest_codex_binary(Path::new("codex"))
 }
 
 // ---------------------------------------------------------------------------

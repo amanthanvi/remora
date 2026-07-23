@@ -57,9 +57,9 @@ fun ThreadSearchBar(
     isExpanded: Boolean,
     onQueryChange: (String) -> Unit,
     onExpandChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
     focusRequest: Int = 0,
     onFocusChanged: (Boolean) -> Unit = {},
-    modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
 

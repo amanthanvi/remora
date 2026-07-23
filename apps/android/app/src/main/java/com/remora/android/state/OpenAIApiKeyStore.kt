@@ -1,5 +1,6 @@
 package com.remora.android.state
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.system.Os
 
@@ -19,28 +20,40 @@ class OpenAIApiKeyStore(context: Context) {
         return raw?.takeIf { it.isNotEmpty() }
     }
 
+    @SuppressLint("ApplySharedPref", "UseKtx") // Credential/environment state must change only after durable storage.
     fun save(apiKey: String) {
         val trimmed = apiKey.trim()
-        prefs.edit().putString(KEY_API_KEY, trimmed).commit()
+        check(prefs.edit().putString(KEY_API_KEY, trimmed).commit()) {
+            "Could not persist the OpenAI API key"
+        }
         applyToEnvironment()
     }
 
+    @SuppressLint("ApplySharedPref", "UseKtx") // See save(): the environment must not outrun durable state.
     fun saveBaseUrl(baseUrl: String) {
         val trimmed = baseUrl.trim()
-        prefs.edit().putString(KEY_BASE_URL, trimmed).commit()
+        check(prefs.edit().putString(KEY_BASE_URL, trimmed).commit()) {
+            "Could not persist the OpenAI base URL"
+        }
         applyToEnvironment()
     }
 
+    @SuppressLint("ApplySharedPref", "UseKtx") // Do not revoke the process key unless durable revocation succeeds.
     fun clear() {
-        prefs.edit().remove(KEY_API_KEY).commit()
+        check(prefs.edit().remove(KEY_API_KEY).commit()) {
+            "Could not remove the OpenAI API key"
+        }
         try {
             Os.unsetenv(API_KEY_ENV_KEY)
         } catch (_: Exception) {
         }
     }
 
+    @SuppressLint("ApplySharedPref", "UseKtx") // Do not revoke the process URL unless durable revocation succeeds.
     fun clearBaseUrl() {
-        prefs.edit().remove(KEY_BASE_URL).commit()
+        check(prefs.edit().remove(KEY_BASE_URL).commit()) {
+            "Could not remove the OpenAI base URL"
+        }
         try {
             Os.unsetenv(BASE_URL_ENV_KEY)
         } catch (_: Exception) {

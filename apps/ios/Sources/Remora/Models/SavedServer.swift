@@ -12,17 +12,11 @@ struct SavedServer: Codable, Identifiable, Equatable {
     let wakeMAC: String?
     let preferredConnectionMode: PreferredConnectionMode?
     let preferredCodexPort: UInt16?
-    let sshPortForwardingEnabled: Bool?
     let websocketURL: String?
     let rememberedByUser: Bool
     /// `nil` is an ordinary direct/SSH server, `[]` probes all bridge runtimes,
     /// and a non-empty list reconnects only the selected bridge runtimes.
     let sshBridgeRuntimeKinds: [AgentRuntimeKind]?
-
-    /// Decode-only marker used by `SavedServerStore` to discard v1-only rows.
-    /// It is deliberately not encoded, so every successful load strips v1 data.
-    private(set) var containsLegacyV1Metadata = false
-    private var requiresPersistenceRewrite = false
 
     init(
         id: String,
@@ -36,7 +30,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
         wakeMAC: String?,
         preferredConnectionMode: PreferredConnectionMode?,
         preferredCodexPort: UInt16?,
-        sshPortForwardingEnabled: Bool?,
         websocketURL: String?,
         rememberedByUser: Bool = false,
         sshBridgeRuntimeKinds: [AgentRuntimeKind]? = nil
@@ -52,7 +45,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
         self.wakeMAC = wakeMAC
         self.preferredConnectionMode = preferredConnectionMode
         self.preferredCodexPort = preferredCodexPort
-        self.sshPortForwardingEnabled = sshPortForwardingEnabled
         self.websocketURL = websocketURL
         self.rememberedByUser = rememberedByUser
         self.sshBridgeRuntimeKinds = sshBridgeRuntimeKinds
@@ -70,16 +62,9 @@ struct SavedServer: Codable, Identifiable, Equatable {
         case wakeMAC
         case preferredConnectionMode
         case preferredCodexPort
-        case sshPortForwardingEnabled
         case websocketURL
         case rememberedByUser
         case sshBridgeRuntimeKinds
-        // Decode-only v1 keys. Never write these again.
-        case alleycatHost
-        case alleycatNodeId
-        case alleycatRelay
-        case alleycatAgentName
-        case alleycatAgentWire
     }
 
     init(from decoder: Decoder) throws {
@@ -102,38 +87,11 @@ struct SavedServer: Codable, Identifiable, Equatable {
             forKey: .preferredConnectionMode
         )
         self.preferredCodexPort = try container.decodeIfPresent(UInt16.self, forKey: .preferredCodexPort)
-        self.sshPortForwardingEnabled = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .sshPortForwardingEnabled
-        )
         self.websocketURL = try container.decodeIfPresent(String.self, forKey: .websocketURL)
         self.rememberedByUser = try container.decodeIfPresent(Bool.self, forKey: .rememberedByUser) ?? true
-        let legacyHost = try container.decodeIfPresent(String.self, forKey: .alleycatHost)
-        let legacyNodeId = try container.decodeIfPresent(String.self, forKey: .alleycatNodeId)
-        let legacyRelay = try container.decodeIfPresent(String.self, forKey: .alleycatRelay)
-        let legacyAgentName = try container.decodeIfPresent(String.self, forKey: .alleycatAgentName)
-        let legacyAgentWire = try container.decodeIfPresent(String.self, forKey: .alleycatAgentWire)
-        let historicalSSHBridge = legacyAgentWire == "ssh-bridge" || id.hasPrefix("ssh-bridge:")
-        self.containsLegacyV1Metadata = id.hasPrefix("alleycat:")
-            || historicalSSHBridge
-            || [legacyHost, legacyNodeId, legacyRelay, legacyAgentName, legacyAgentWire]
-                .contains { $0 != nil }
-
-        if container.contains(.sshBridgeRuntimeKinds) {
-            let decodedKinds = try container.decodeIfPresent(
-                [AgentRuntimeKind].self,
-                forKey: .sshBridgeRuntimeKinds
-            )
-            self.sshBridgeRuntimeKinds = decodedKinds.map(Self.normalizedSSHBridgeRuntimeKinds)
-            self.requiresPersistenceRewrite = decodedKinds == nil
-                || self.sshBridgeRuntimeKinds != decodedKinds
-        } else if historicalSSHBridge {
-            self.sshBridgeRuntimeKinds = Self.normalizedSSHBridgeRuntimeKinds(legacyAgentName)
-            self.requiresPersistenceRewrite = true
-        } else {
-            self.sshBridgeRuntimeKinds = nil
-        }
-        self.requiresPersistenceRewrite = requiresPersistenceRewrite || containsLegacyV1Metadata
+        self.sshBridgeRuntimeKinds = try container
+            .decodeIfPresent([AgentRuntimeKind].self, forKey: .sshBridgeRuntimeKinds)
+            .map(Self.normalizedSSHBridgeRuntimeKinds)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -149,7 +107,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
         try container.encodeIfPresent(wakeMAC, forKey: .wakeMAC)
         try container.encodeIfPresent(preferredConnectionMode, forKey: .preferredConnectionMode)
         try container.encodeIfPresent(preferredCodexPort, forKey: .preferredCodexPort)
-        try container.encodeIfPresent(sshPortForwardingEnabled, forKey: .sshPortForwardingEnabled)
         try container.encodeIfPresent(websocketURL, forKey: .websocketURL)
         try container.encode(rememberedByUser, forKey: .rememberedByUser)
         try container.encodeIfPresent(sshBridgeRuntimeKinds, forKey: .sshBridgeRuntimeKinds)
@@ -170,7 +127,7 @@ struct SavedServer: Codable, Identifiable, Equatable {
             wakeMAC: wakeMAC,
             sshPortForwardingEnabled: false,
             websocketURL: websocketURL,
-            preferredConnectionMode: migratedPreferredConnectionMode,
+            preferredConnectionMode: preferredConnectionMode,
             preferredCodexPort: preferredCodexPort
         )
     }
@@ -188,7 +145,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
             wakeMAC: server.wakeMAC,
             preferredConnectionMode: server.preferredConnectionMode,
             preferredCodexPort: server.preferredCodexPort,
-            sshPortForwardingEnabled: nil,
             websocketURL: server.websocketURL,
             rememberedByUser: rememberedByUser,
             sshBridgeRuntimeKinds: nil
@@ -208,7 +164,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
             wakeMAC: wakeMAC,
             preferredConnectionMode: preferredConnectionMode,
             preferredCodexPort: preferredCodexPort,
-            sshPortForwardingEnabled: sshPortForwardingEnabled,
             websocketURL: websocketURL,
             rememberedByUser: rememberedByUser,
             sshBridgeRuntimeKinds: runtimeKinds
@@ -228,7 +183,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
             wakeMAC: wakeMAC,
             preferredConnectionMode: preferredConnectionMode,
             preferredCodexPort: preferredCodexPort,
-            sshPortForwardingEnabled: sshPortForwardingEnabled,
             websocketURL: websocketURL,
             rememberedByUser: rememberedByUser,
             sshBridgeRuntimeKinds: sshBridgeRuntimeKinds
@@ -245,10 +199,6 @@ struct SavedServer: Codable, Identifiable, Equatable {
         return []
     }
 
-    private var migratedPreferredConnectionMode: PreferredConnectionMode? {
-        preferredConnectionMode ?? (sshPortForwardingEnabled == true ? .ssh : nil)
-    }
-
     func toRecord() -> SavedServerRecord {
         SavedServerRecord(
             id: id,
@@ -262,29 +212,10 @@ struct SavedServer: Codable, Identifiable, Equatable {
             wakeMac: wakeMAC,
             preferredConnectionMode: preferredConnectionMode?.rawValue,
             preferredCodexPort: preferredCodexPort,
-            sshPortForwardingEnabled: sshPortForwardingEnabled,
+            sshPortForwardingEnabled: nil,
             websocketUrl: websocketURL,
             rememberedByUser: rememberedByUser,
             sshBridgeRuntimeKinds: sshBridgeRuntimeKinds
-        )
-    }
-
-    var hasViableDirectOrSSHPath: Bool {
-        if websocketURL != nil { return true }
-        if let sshPort, sshPort > 0 { return true }
-        if source == .ssh || preferredConnectionMode == .ssh || sshPortForwardingEnabled == true {
-            return true
-        }
-        if let preferredCodexPort, preferredCodexPort > 0 { return true }
-        // Older SSH-only rows stored their SSH port in `port` before `sshPort`
-        // existed, so any non-zero legacy port is still a viable native path.
-        if let port, port > 0 { return true }
-        return codexPorts.contains { $0 > 0 }
-    }
-
-    private static func normalizedSSHBridgeRuntimeKinds(_ csv: String?) -> [AgentRuntimeKind] {
-        normalizedSSHBridgeRuntimeKinds(
-            (csv ?? "").split(separator: ",").map(String.init)
         )
     }
 

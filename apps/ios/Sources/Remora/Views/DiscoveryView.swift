@@ -249,7 +249,7 @@ struct DiscoveryView: View {
 
                 chooserCard(
                     title: "Remora Link",
-                    subtitle: "Run npx --yes remora-link@latest pair on the host, then scan or paste its code.",
+                    subtitle: "Choose one or more host runtimes, then scan or paste a scoped Remora Link code.",
                     badge: "RECOMMENDED",
                     icon: "qrcode.viewfinder",
                     supportedAgents: Self.remoraAgents,
@@ -1404,7 +1404,15 @@ struct DiscoveryView: View {
         autoSSHStarted = true
 
         Task {
-            NSLog("[AUTO_SSH] connecting to %@ as %@ (method=%@)", host, user, keyPem == nil ? "password" : "key")
+            LLog.debug(
+                "discovery",
+                "simulator auto-SSH connecting",
+                fields: [
+                    "host": host,
+                    "user": user,
+                    "auth_method": keyPem == nil ? "password" : "key"
+                ]
+            )
             let server = DiscoveredServer(
                 id: "auto-ssh-\(host)",
                 name: host,

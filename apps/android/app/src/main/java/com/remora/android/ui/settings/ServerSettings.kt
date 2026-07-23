@@ -218,7 +218,6 @@ internal fun ServerEditSheet(
                     wakeMAC = null,
                     preferredConnectionMode = null,
                     preferredCodexPort = null,
-                    sshPortForwardingEnabled = null,
                     websocketURL = null,
                     rememberedByUser = true,
                 )
@@ -252,7 +251,6 @@ internal fun ServerEditSheet(
                     wakeMAC = resolvedWakeMAC,
                     preferredConnectionMode = "ssh",
                     preferredCodexPort = null,
-                    sshPortForwardingEnabled = null,
                     websocketURL = null,
                     rememberedByUser = true,
                 )
@@ -280,7 +278,6 @@ internal fun ServerEditSheet(
                     wakeMAC = null,
                     preferredConnectionMode = "directCodex",
                     preferredCodexPort = resolvedCodexPort,
-                    sshPortForwardingEnabled = null,
                     websocketURL = null,
                     rememberedByUser = true,
                 )
@@ -309,7 +306,6 @@ internal fun ServerEditSheet(
                     wakeMAC = null,
                     preferredConnectionMode = "directCodex",
                     preferredCodexPort = resolvedPort,
-                    sshPortForwardingEnabled = null,
                     websocketURL = rawURL,
                     rememberedByUser = true,
                 )

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Adaptive-icon XML is rejected by AAPT outside the v26-qualified folder. -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+
+    <!-- Firebase reads this injected resource reflectively at runtime. -->
+    <issue id="UnusedResources">
+        <ignore regexp="project_id" />
+    </issue>
+
+    <!-- Explicit framework calls are the project convention; KTX rewrites are stylistic. -->
+    <issue id="UseKtx" severity="ignore" />
+</lint>

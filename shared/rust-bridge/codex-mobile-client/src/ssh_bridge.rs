@@ -7,17 +7,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use alleycat_bridge_core::{Bridge, ProcessLauncher, serve_stream};
-use alleycat_claude_bridge::index::{ClaudeSessionInfo, entry_from_claude};
-use alleycat_claude_bridge::{ClaudeBridge, ClaudeSessionRef};
-use alleycat_opencode_bridge::{OpencodeBridge, OpencodeRuntime};
-use alleycat_pi_bridge::PiBridge;
-use alleycat_pi_bridge::index::{PiHydrator, PiSessionInfo};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use codex_app_server_client::{
     AppServerClient, RemoteAppServerConnectArgs, RemoteAppServerEndpoint,
 };
+use remora_bridge_core::{Bridge, ProcessLauncher, serve_stream};
+use remora_claude_bridge::index::{ClaudeSessionInfo, entry_from_claude};
+use remora_claude_bridge::{ClaudeBridge, ClaudeSessionRef};
+use remora_opencode_bridge::{OpencodeBridge, OpencodeRuntime};
+use remora_pi_bridge::PiBridge;
+use remora_pi_bridge::index::{PiHydrator, PiSessionInfo};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, duplex};
 use tracing::{debug, info, warn};
@@ -789,7 +789,7 @@ async fn hydrate_remote_claude_index(ssh: &SshClient, shell: RemoteShell, state_
     match scan_remote_claude_sessions(ssh, shell).await {
         Ok(sessions) => {
             let index_path = state_dir.join("threads.json");
-            let index = match alleycat_bridge_core::ThreadIndex::<ClaudeSessionRef>::open_at(
+            let index = match remora_bridge_core::ThreadIndex::<ClaudeSessionRef>::open_at(
                 index_path,
             )
             .await
@@ -1221,9 +1221,8 @@ fn pairing_only_agent_error(kind: &str) -> String {
 }
 
 pub fn runtime_label(kind: &str) -> &str {
-    // The stable name *is* the wire label now — alleycat advertises
-    // each agent by its id (`"codex"`, `"claude"`, …) and remora just
-    // passes the same string through to logging / SSH state paths.
+    // The stable name is the wire label: Remora Link advertises each runtime
+    // by its id and the mobile client preserves it in logs and SSH state paths.
     kind
 }
 
@@ -1245,6 +1244,6 @@ mod tests {
             message,
             "agent `amp` is only available through remote pairing"
         );
-        assert!(!message.contains("Alleycat"));
+        assert!(!message.contains("install"));
     }
 }

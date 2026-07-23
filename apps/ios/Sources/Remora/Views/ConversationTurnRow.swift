@@ -64,7 +64,7 @@ struct ConversationTurnRow: View, Equatable {
 
             TypingIndicator()
                 .opacity(showTypingIndicator ? 1 : 0)
-                .animation(nil)
+                .transaction { $0.animation = nil }
 
             if canCollapse {
                 Button("Show Less", systemImage: "chevron.up", action: onToggleExpansion)

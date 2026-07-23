@@ -11,7 +11,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         LLog.bootstrap()
 
         LLog.info("lifecycle", "application did finish launching")
-        LegacyV1SecretPurge.shared.start()
+        CurrentKeychainNamespaceCleanup.shared.start {
+            NotificationCenter.default.post(name: .remoraSecurityCutoverDidComplete, object: nil)
+            // Pre-initialize Rust bridges (tokio runtime) on a background
+            // thread only after the 1.6 authority cutover is durable.
+            DispatchQueue.global(qos: .userInitiated).async {
+                AppModel.prewarmRustBridges()
+            }
+        }
         #if !targetEnvironment(macCatalyst)
         // Register on every launch so APNs can report token rotation. This does
         // not request alert permission; visible notification permission remains
@@ -20,12 +27,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             application.registerForRemoteNotifications()
         }
         #endif
-        // Pre-initialize Rust bridges (tokio runtime) on a background thread
-        // before SwiftUI accesses AppModel.shared, avoiding a priority inversion
-        // where the main thread blocks on lower-QoS tokio worker init.
-        DispatchQueue.global(qos: .userInitiated).async {
-            AppModel.prewarmRustBridges()
-        }
         DispatchQueue.main.async {
             CloudKVSBridge.shared.start()
         }

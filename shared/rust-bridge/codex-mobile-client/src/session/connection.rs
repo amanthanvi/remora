@@ -612,6 +612,7 @@ impl ConnectionTimeline {
         );
     }
 
+    #[cfg(test)]
     fn snapshot(&self) -> Vec<ConnectionTimelineEntry> {
         match self.state.lock() {
             Ok(state) => state.entries.iter().cloned().collect(),
@@ -721,13 +722,13 @@ fn available_runtime_kinds_from_health(
 ) -> Vec<AgentRuntimeKind> {
     let mut kinds = health
         .iter()
-        .filter_map(|(runtime_kind, health)| {
+        .filter(|(_, health)| {
             matches!(
                 health,
                 ConnectionHealth::Connected | ConnectionHealth::Connecting { .. }
             )
-            .then(|| runtime_kind.clone())
         })
+        .map(|(runtime_kind, _)| runtime_kind.clone())
         .collect::<Vec<_>>();
     kinds.sort();
     kinds
@@ -798,6 +799,10 @@ impl ReconnectBackoff {
 // Internal command type for the worker task
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "commands own protocol payloads while queued; boxing individual variants would complicate every request dispatch path"
+)]
 enum SessionCommand {
     Request {
         request: ClientRequest,
@@ -867,7 +872,6 @@ pub struct ServerSession {
     ssh_client: Option<Arc<SshClient>>,
     ssh_pid: Option<Arc<StdMutex<Option<u32>>>>,
     runtime_health_state: Option<Arc<StdMutex<RuntimeHealthState>>>,
-    connection_timeline: ConnectionTimeline,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -970,12 +974,12 @@ impl ServerSession {
         }
 
         if let Some(ref working_dir) = in_process.working_directory {
-            if let Err(e) = std::env::set_current_dir(working_dir) {
-                return Err(TransportError::ConnectionFailed(format!(
+            std::env::set_current_dir(working_dir).map_err(|e| {
+                TransportError::ConnectionFailed(format!(
                     "failed to set working directory {:?}: {e}",
                     working_dir
-                )));
-            }
+                ))
+            })?;
         }
 
         let mut cli_overrides = vec![
@@ -1161,7 +1165,6 @@ impl ServerSession {
             ssh_client: None,
             ssh_pid: None,
             runtime_health_state: None,
-            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         })
     }
@@ -1295,7 +1298,6 @@ impl ServerSession {
             ssh_client: extras.ssh_client,
             ssh_pid: extras.ssh_pid,
             runtime_health_state: Some(runtime_health_state),
-            connection_timeline,
             worker_handle,
         })
     }
@@ -1391,12 +1393,6 @@ impl ServerSession {
                 }
             }
         }
-    }
-
-    /// Snapshot the bounded local reconnect timeline. This stays inside the
-    /// process and contains only low-cardinality, redacted fields.
-    pub(crate) fn connection_timeline(&self) -> Vec<ConnectionTimelineEntry> {
-        self.connection_timeline.snapshot()
     }
 
     pub fn runtime_kinds(&self) -> Vec<AgentRuntimeKind> {
@@ -1715,6 +1711,10 @@ pub(crate) async fn connect_remote_client_over_slingshot(
         .map_err(|e| TransportError::ConnectionFailed(e.to_string()))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "reconnect state is passed explicitly so transport, health, and timeline ownership remain visible at the retry boundary"
+)]
 async fn reconnect_remote_client(
     client: &mut AppServerClient,
     keepalive: &mut Option<Arc<dyn SessionKeepalive>>,
@@ -2187,6 +2187,10 @@ impl RemoteTransport for SlingshotReconnectTransport {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the worker owns independent runtime channels and reconnect resources that must move into one spawned task"
+)]
 fn spawn_remote_runtime_worker(
     runtime_kind: AgentRuntimeKind,
     mut client: AppServerClient,
@@ -2506,7 +2510,6 @@ impl ServerSession {
             ssh_client: None,
             ssh_pid: None,
             runtime_health_state: None,
-            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
     }
@@ -2544,7 +2547,6 @@ impl ServerSession {
             ssh_client: None,
             ssh_pid: None,
             runtime_health_state: None,
-            connection_timeline: ConnectionTimeline::default(),
             worker_handle,
         }
     }

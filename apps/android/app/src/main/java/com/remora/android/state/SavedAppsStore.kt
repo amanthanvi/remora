@@ -1,7 +1,7 @@
 package com.remora.android.state
 
 import android.content.Context
-import android.util.Log
+import com.remora.android.util.LLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -163,11 +163,14 @@ object SavedAppsStore {
                             schema,
                         )
                     } catch (e: SavedAppException.StateTooLarge) {
-                        Log.w(TAG, "saveState rejected (too large) appId=$appId", e)
+                        LLog.w(TAG, "Saved app state rejected as too large")
+                        LLog.debug(TAG, e) { "saveState rejected (too large) appId=$appId" }
                     } catch (e: SavedAppException) {
-                        Log.w(TAG, "saveState failed appId=$appId", e)
+                        LLog.w(TAG, "Saved app state save failed")
+                        LLog.debug(TAG, e) { "saveState failed appId=$appId" }
                     } catch (e: Exception) {
-                        Log.e(TAG, "saveState unexpected failure appId=$appId", e)
+                        LLog.e(TAG, "Saved app state save failed unexpectedly")
+                        LLog.debug(TAG, e) { "saveState unexpected failure appId=$appId" }
                     }
                 }
                 debouncers[appId] = DebouncedSave(job, stateJson, schemaVersion)
@@ -197,7 +200,8 @@ object SavedAppsStore {
                 )
             }
         } catch (e: Exception) {
-            Log.w(TAG, "flushPendingSave failed appId=$appId", e)
+            LLog.w(TAG, "Pending saved app state flush failed")
+            LLog.debug(TAG, e) { "flushPendingSave failed appId=$appId" }
         }
     }
 

@@ -75,7 +75,6 @@ import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.SavedApp
 import uniffi.codex_mobile_client.SavedAppWithPayload
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun SavedAppScreen(
     appId: String,
@@ -433,8 +432,8 @@ private fun TopBar(
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 private fun AppModeWebView(
     payload: SavedAppWithPayload,
     dimmed: Boolean,

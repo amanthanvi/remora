@@ -255,7 +255,14 @@ struct SSHLoginSheet: View {
                         hasSavedCredentials = false
                     }
                 } catch {
-                    NSLog("[SSH_CREDENTIALS] keychain update failed: %@", error.localizedDescription)
+                    LLog.error(
+                        "ssh-credentials",
+                        "keychain update failed",
+                        error: error,
+                        fields: [
+                            "operation": rememberCredentials ? "save" : "delete"
+                        ]
+                    )
                 }
 
                 clearSensitiveInput()
@@ -293,7 +300,12 @@ struct SSHLoginSheet: View {
                 unlockMacosKeychain = saved.unlockMacosKeychain ?? false
             }
         } catch {
-            NSLog("[SSH_CREDENTIALS] failed to load: %@", error.localizedDescription)
+            LLog.error(
+                "ssh-credentials",
+                "keychain load failed",
+                error: error,
+                fields: ["operation": "load"]
+            )
         }
     }
 
@@ -304,7 +316,12 @@ struct SSHLoginSheet: View {
             rememberCredentials = false
             clearSensitiveInput()
         } catch {
-            NSLog("[SSH_CREDENTIALS] failed to delete: %@", error.localizedDescription)
+            LLog.error(
+                "ssh-credentials",
+                "keychain delete failed",
+                error: error,
+                fields: ["operation": "delete"]
+            )
         }
     }
 

@@ -32,8 +32,8 @@ internal fun isDiffLanguage(language: String?): Boolean {
 @Composable
 internal fun SyntaxHighlightedDiffBlock(
     diff: String,
-    titleHint: String? = null,
     modifier: Modifier = Modifier,
+    titleHint: String? = null,
     fontSize: TextUnit = TextUnit.Unspecified,
 ) {
     val textScale = LocalTextScale.current

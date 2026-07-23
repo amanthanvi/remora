@@ -1,5 +1,6 @@
 package com.remora.android.ui.common
 
+import android.annotation.SuppressLint
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,9 +35,8 @@ import uniffi.codex_mobile_client.AppAgentMetadata
 typealias AgentRuntimeKind = String
 
 /**
- * Lookup hook into the Rust-owned `AgentMetadataStore`. Wired up at
- * app launch in `RemoraApplication`. Returns `null` before the first
- * probe response has populated the cache.
+ * Lookup hook into the Rust-owned `AgentMetadataStore`. Returns `null`
+ * before the first probe response has populated the cache.
  */
 object AgentRuntimeMetadataProvider {
     var lookup: ((String) -> AppAgentMetadata?)? = null
@@ -106,10 +106,11 @@ private fun AgentRuntimeKind.titlecased(): String {
  * agents stay renderable without needing a remora release first.
  */
 @Composable
+@SuppressLint("DiscouragedApi") // Runtime-advertised harness ids deliberately resolve optional bundled icons by convention.
 fun AgentIconView(
     kind: AgentRuntimeKind,
-    sizeDp: Int = 24,
     modifier: Modifier = Modifier,
+    sizeDp: Int = 24,
 ) {
     val context = LocalContext.current
     val resName = "agent_${kind.lowercase()}"
@@ -128,8 +129,8 @@ fun AgentIconView(
 @Composable
 fun AgentMonogram(
     kind: AgentRuntimeKind,
-    sizeDp: Int = 24,
     modifier: Modifier = Modifier,
+    sizeDp: Int = 24,
 ) {
     Box(
         modifier = modifier

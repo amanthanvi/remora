@@ -184,12 +184,11 @@ struct ConversationView: View {
         localSendScrollToken &+= 1
         Task {
             do {
-                NSLog(
-                    "[ConversationView] sendMessage start server=%@ thread=%@ textLength=%ld",
-                    activeThreadKey.serverId,
-                    activeThreadKey.threadId,
-                    text.count
-                )
+                LLog.debug("conversation", "send message started", fields: [
+                    "server_id": activeThreadKey.serverId,
+                    "thread_id": activeThreadKey.threadId,
+                    "text_length": text.count
+                ])
                 let payload = try makeComposerPayload(
                     text: text,
                     attachmentImage: attachmentImage,
@@ -198,18 +197,15 @@ struct ConversationView: View {
                     pluginMentions: pluginMentions
                 )
                 try await appModel.startTurn(key: activeThreadKey, payload: payload)
-                NSLog(
-                    "[ConversationView] sendMessage turnStart returned server=%@ thread=%@",
-                    activeThreadKey.serverId,
-                    activeThreadKey.threadId
-                )
+                LLog.debug("conversation", "send message turn start returned", fields: [
+                    "server_id": activeThreadKey.serverId,
+                    "thread_id": activeThreadKey.threadId
+                ])
             } catch {
-                NSLog(
-                    "[ConversationView] sendMessage error server=%@ thread=%@ error=%@",
-                    activeThreadKey.serverId,
-                    activeThreadKey.threadId,
-                    error.localizedDescription
-                )
+                LLog.error("conversation", "send message failed", error: error, fields: [
+                    "server_id": activeThreadKey.serverId,
+                    "thread_id": activeThreadKey.threadId
+                ])
                 messageActionError = error.localizedDescription
             }
         }

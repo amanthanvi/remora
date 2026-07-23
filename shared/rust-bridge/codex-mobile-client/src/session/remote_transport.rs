@@ -141,6 +141,7 @@ mod tests {
 
         // Drop the local strong reference; only `keepalive` keeps it alive now.
         drop(initial);
+        assert!(keepalive.is_some());
         assert_eq!(drop_count.load(Ordering::SeqCst), 0);
 
         // SSH-style reconnect: keepalive is None, slot must NOT be cleared.
@@ -148,6 +149,7 @@ mod tests {
         if next_ssh.is_some() {
             keepalive = next_ssh;
         }
+        assert!(keepalive.is_some());
         assert_eq!(
             drop_count.load(Ordering::SeqCst),
             0,
@@ -160,6 +162,7 @@ mod tests {
             counter: Arc::clone(&next_managed_drop_count),
         });
         keepalive = Some(next_managed);
+        assert!(keepalive.is_some());
         assert_eq!(
             drop_count.load(Ordering::SeqCst),
             1,

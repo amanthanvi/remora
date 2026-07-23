@@ -88,7 +88,7 @@ pub struct SshClient {
     /// The underlying russh handle, behind `Arc<Mutex>` so port-forwarding
     /// background tasks can open channels concurrently with foreground
     /// exec calls.
-    pub(super) handle: Arc<Mutex<Handle<ClientHandler>>>,
+    pub(in crate::ssh) handle: Arc<Mutex<Handle<ClientHandler>>>,
     /// Tracks forwarding background tasks so we can abort them on disconnect.
     pub(super) forward_tasks: Mutex<HashMap<u16, ForwardTask>>,
     /// Optional login password to reuse for unlocking the remote macOS
@@ -123,10 +123,10 @@ pub(super) fn remote_shell_name(shell: RemoteShell) -> &'static str {
 pub(super) fn normalize_host(host: &str) -> String {
     let mut h = host.trim().trim_matches('[').trim_matches(']').to_string();
     h = h.replace("%25", "%");
-    if !h.contains(':') {
-        if let Some(idx) = h.find('%') {
-            h.truncate(idx);
-        }
+    if !h.contains(':')
+        && let Some(idx) = h.find('%')
+    {
+        h.truncate(idx);
     }
     h
 }

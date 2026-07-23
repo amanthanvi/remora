@@ -6,7 +6,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -84,6 +83,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
+import com.remora.android.util.LLog
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
@@ -226,17 +226,6 @@ fun RemotePairingSheet(
                 onInspect = { inspectCode(pastedCode) },
             )
             RemoraLinkPairingState.Inspecting -> ProgressContent("Checking pairing code…")
-            is RemoraLinkPairingState.LegacyRePair -> LegacyRePairContent(
-                state = current,
-                onScan = {
-                    controller.returnToIngress()
-                    requestCameraAndScan()
-                },
-                onEnterCode = {
-                    controller.returnToIngress()
-                    showPaste = true
-                },
-            )
             is RemoraLinkPairingState.Offer -> OfferContent(
                 state = current,
                 onDeviceNameChange = controller::updateDeviceDisplayName,
@@ -492,44 +481,6 @@ private fun AwaitingContent(
 }
 
 @Composable
-private fun LegacyRePairContent(
-    state: RemoraLinkPairingState.LegacyRePair,
-    onScan: () -> Unit,
-    onEnterCode: () -> Unit,
-) {
-    Text(
-        "Pair ${state.hostDisplayName} again",
-        color = RemoraTheme.textPrimary,
-        fontSize = 17.sp,
-        fontWeight = FontWeight.SemiBold,
-    )
-    Text(
-        "This is a legacy v1 code created by `$REMORA_LINK_LEGACY_PAIR_COMMAND`. " +
-            "Update the host and run this command to create a secure Remora Link v2 code.",
-        color = RemoraTheme.textSecondary,
-        fontSize = 13.sp,
-    )
-    PairCommandRow()
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        PrimaryIngressButton(
-            label = "Scan QR",
-            icon = Icons.Default.QrCodeScanner,
-            onClick = onScan,
-            modifier = Modifier.weight(1f),
-        )
-        PrimaryIngressButton(
-            label = "Enter code",
-            icon = Icons.Default.ContentCopy,
-            onClick = onEnterCode,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
-@Composable
 private fun SuccessContent(state: RemoraLinkPairingState.Success, onDone: () -> Unit) {
     Text(
         if (state.alreadyPaired) "Already paired" else "Pairing complete",
@@ -642,41 +593,52 @@ private fun PairCommandRow() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
-            .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
-            REMORA_LINK_PAIR_COMMAND,
-            color = RemoraTheme.textPrimary,
-            fontFamily = RemoraTheme.monoFont,
-            fontSize = 12.sp,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(
-            onClick = {
-                val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                manager?.setPrimaryClip(ClipData.newPlainText("Remora Link pairing command", REMORA_LINK_PAIR_COMMAND))
-                copied = true
-                scope.launch {
-                    delay(1_400)
-                    copied = false
-                }
-            },
-            modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
-            contentPadding = PaddingValues(0.dp),
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(RemoraTheme.surface, RoundedCornerShape(10.dp))
+                .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         ) {
-            Icon(
-                if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                contentDescription = if (copied) "Pairing command copied" else "Copy pairing command",
-                tint = RemoraTheme.accent,
-                modifier = Modifier.size(18.dp),
+            Text(
+                REMORA_LINK_PAIR_COMMAND,
+                color = RemoraTheme.textPrimary,
+                fontFamily = RemoraTheme.monoFont,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
             )
+            TextButton(
+                onClick = {
+                    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    manager?.setPrimaryClip(ClipData.newPlainText("Remora Link pairing command", REMORA_LINK_PAIR_COMMAND))
+                    copied = true
+                    scope.launch {
+                        delay(1_400)
+                        copied = false
+                    }
+                },
+                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                Icon(
+                    if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    contentDescription = if (copied) "Pairing command copied" else "Copy pairing command",
+                    tint = RemoraTheme.accent,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
+        Text(
+            "Replace codex with an ID from remora-link agents, or repeat --runtime to authorize more than one harness.",
+            color = RemoraTheme.textSecondary,
+            fontFamily = RemoraTheme.monoFont,
+            fontSize = 11.sp,
+        )
     }
 }
 
@@ -783,6 +745,11 @@ private fun QrScannerScreen(onScanned: (String) -> Unit, onCancel: () -> Unit) {
                     fontSize = 13.sp,
                     modifier = Modifier.fillMaxWidth().background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp)).padding(10.dp),
                 )
+                Text(
+                    "Replace codex with an ID from remora-link agents, or repeat --runtime for multiple harnesses.",
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 12.sp,
+                )
                 Text("Point the camera at the QR code it prints.", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
             }
             Spacer(Modifier.weight(1f))
@@ -797,6 +764,7 @@ private fun QrScannerScreen(onScanned: (String) -> Unit, onCancel: () -> Unit) {
     }
 }
 
+@androidx.annotation.OptIn(markerClass = [androidx.camera.core.ExperimentalGetImage::class])
 private fun bindCameraUseCases(
     context: Context,
     lifecycleOwner: LifecycleOwner,
@@ -823,12 +791,18 @@ private fun bindCameraUseCases(
                 .addOnSuccessListener { barcodes ->
                     barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE }?.rawValue?.let(onResult)
                 }
-                .addOnFailureListener { Log.w(LOG_TAG, "barcode analyze failed", it) }
+                .addOnFailureListener { error ->
+                    LLog.w(LOG_TAG, "Barcode analysis failed")
+                    LLog.debug(LOG_TAG, error) { "Barcode analysis failure details" }
+                }
                 .addOnCompleteListener { proxy.close() }
         }
         runCatching {
             provider.unbindAll()
             provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-        }.onFailure { Log.w(LOG_TAG, "bindToLifecycle failed", it) }
+        }.onFailure { error ->
+            LLog.w(LOG_TAG, "Camera lifecycle binding failed")
+            LLog.debug(LOG_TAG, error) { "Camera lifecycle binding failure details" }
+        }
     }, ContextCompat.getMainExecutor(context))
 }

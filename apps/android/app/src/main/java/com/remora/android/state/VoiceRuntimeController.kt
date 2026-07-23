@@ -4,6 +4,7 @@ import android.content.Context
 import com.remora.android.util.LLog
 import com.remora.android.voice.RealtimeWebRtcSession
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +17,7 @@ import uniffi.codex_mobile_client.AppDynamicToolSpec
 import uniffi.codex_mobile_client.AppRealtimeStartTransport
 import uniffi.codex_mobile_client.AppSandboxMode
 import uniffi.codex_mobile_client.AppSandboxPolicy
+import uniffi.codex_mobile_client.AppStoreSubscriptionInterface
 import uniffi.codex_mobile_client.AppStoreUpdateRecord
 import uniffi.codex_mobile_client.HandoffManager
 import uniffi.codex_mobile_client.PinnedThreadKey
@@ -182,24 +184,21 @@ class VoiceRuntimeController {
             LLog.debug(TAG) { "Subscribing to realtime updates first" }
             val subscription = appModel.store.subscribeUpdates()
 
-            // Start the event loop in background — it will block on nextUpdate()
-            sessionJob = scope.launch(Dispatchers.Default) {
-                LLog.debug(TAG) { "Realtime event loop started" }
-                while (true) {
-                    try {
-                        val update = subscription.nextUpdate()
-                        LLog.debug(TAG) { "Received realtime update: ${update::class.simpleName}" }
-                        handleRealtimeUpdate(appModel, update)
-                    } catch (error: Exception) {
-                        LLog.e(TAG, "Realtime event loop failed")
-                        LLog.debug(TAG, error) { "Realtime event loop failure details" }
-                        throw error
-                    }
-                }
-            }
-
-            // Give the event loop a moment to start consuming
-            kotlinx.coroutines.delay(50)
+            // Enter the event loop immediately so startup does not depend on scheduler timing.
+            sessionJob = scope.launchRealtimeUpdateLoop(
+                subscription = subscription,
+                onStarted = {
+                    LLog.debug(TAG) { "Realtime event loop started" }
+                },
+                onUpdate = { update ->
+                    LLog.debug(TAG) { "Received realtime update: ${update::class.simpleName}" }
+                    handleRealtimeUpdate(appModel, update)
+                },
+                onFailure = { error ->
+                    LLog.e(TAG, "Realtime event loop failed")
+                    LLog.debug(TAG, error) { "Realtime event loop failure details" }
+                },
+            )
 
             LLog.debug(TAG) { "Creating WebRTC peer connection and offer" }
             val session = RealtimeWebRtcSession(appModel.appContext)
@@ -630,5 +629,22 @@ class VoiceRuntimeController {
             }
         }
         _activeSession.value = null
+    }
+}
+
+internal fun CoroutineScope.launchRealtimeUpdateLoop(
+    subscription: AppStoreSubscriptionInterface,
+    onStarted: () -> Unit = {},
+    onUpdate: suspend (AppStoreUpdateRecord) -> Unit,
+    onFailure: (Exception) -> Unit,
+): Job = launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+    onStarted()
+    while (true) {
+        try {
+            onUpdate(subscription.nextUpdate())
+        } catch (error: Exception) {
+            onFailure(error)
+            throw error
+        }
     }
 }

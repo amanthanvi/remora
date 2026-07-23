@@ -220,18 +220,6 @@ pub(crate) fn remove_duplicate_local_overlay_items(thread: &mut ThreadSnapshot) 
     });
 }
 
-pub(crate) fn reconcile_local_overlay_items(thread: &mut ThreadSnapshot) {
-    if let Some(turn_id) = thread.active_turn_id.clone() {
-        for item in &mut thread.local_overlay_items {
-            if item.id.starts_with(LOCAL_USER_MESSAGE_ITEM_PREFIX) && item.source_turn_id.is_none()
-            {
-                item.source_turn_id = Some(turn_id.clone());
-            }
-        }
-    }
-    remove_duplicate_local_overlay_items(thread);
-}
-
 fn bind_pending_local_user_overlay_to_target_turn(
     item: &HydratedConversationItem,
     target: &ThreadSnapshot,

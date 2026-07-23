@@ -57,6 +57,10 @@ final class AppRuntimeController {
 
     func configureRemoraLinkIfNeeded(client: AppClient) {
         remoraLinkClient = client
+        guard CurrentKeychainNamespaceCleanup.shared.isComplete else {
+            remoraLinkStatus = .unavailable
+            return
+        }
         if remoraLinkStatus == .configuring {
             remoraLinkRetryRequested = true
             return

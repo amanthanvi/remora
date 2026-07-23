@@ -70,6 +70,7 @@ final class AppModel {
     let reconnectController: ReconnectController
     let chromeObservation = AppModelChromeObservation()
     let navigationObservation = AppModelNavigationObservation()
+    let settingsObservation = AppModelSettingsObservation()
 
     private(set) var snapshot: AppSnapshotRecord? {
         didSet {
@@ -77,6 +78,8 @@ final class AppModel {
             snapshotRevision &+= 1
             chromeObservation.refresh(snapshot: snapshot)
             navigationObservation.refresh(snapshot: snapshot)
+            settingsObservation.refresh(snapshot: snapshot)
+            refreshServerObservations()
             refreshConversationObservations()
         }
     }
@@ -109,6 +112,7 @@ final class AppModel {
     @ObservationIgnored private var pendingCommandRowMutations: [String: PendingCommandRowMutation] = [:]
     @ObservationIgnored private var pendingCommandRowMutationTask: Task<Void, Never>?
     @ObservationIgnored private var cachedThreadSnapshots: [ThreadKey: AppThreadSnapshot] = [:]
+    @ObservationIgnored private var serverObservations: [String: AppModelServerObservation] = [:]
     @ObservationIgnored private var conversationObservations: [ThreadKey: WeakAppModelConversationObservation] = [:]
     @ObservationIgnored private var loadingTurnPageThreadKeys: Set<ThreadKey> = []
 
@@ -1563,7 +1567,7 @@ final class AppModel {
             return key
         }
 
-        var currentKey = key
+        let currentKey = key
         for attempt in 0..<maxAttempts {
             var readSucceeded = false
             do {
@@ -1680,6 +1684,22 @@ final class AppModel {
 
     func threadSnapshot(for key: ThreadKey) -> AppThreadSnapshot? {
         snapshot?.threadSnapshot(for: key) ?? cachedThreadSnapshots[key]
+    }
+
+    func serverObservation(for serverId: String) -> AppModelServerObservation {
+        if let observation = serverObservations[serverId] {
+            return observation
+        }
+        let observation = AppModelServerObservation(serverId: serverId)
+        serverObservations[serverId] = observation
+        observation.refresh(snapshot: snapshot)
+        return observation
+    }
+
+    private func refreshServerObservations() {
+        for observation in serverObservations.values {
+            observation.refresh(snapshot: snapshot)
+        }
     }
 
     func conversationObservation(for key: ThreadKey) -> AppModelConversationObservation {

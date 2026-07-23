@@ -1,6 +1,7 @@
 package com.remora.android.state
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -66,16 +67,35 @@ class VoiceTranscriptionManager {
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
+        if (bufferSize <= 0) {
+            _error.value = "Microphone configuration is unavailable"
+            return
+        }
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            deviceSampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize * 2,
-        )
-
-        audioRecord?.startRecording()
+        val recorder = try {
+            createAudioRecord(bufferSize)
+        } catch (_: SecurityException) {
+            _error.value = "Microphone permission required"
+            return
+        } catch (_: IllegalArgumentException) {
+            _error.value = "Microphone configuration is unavailable"
+            return
+        } catch (_: IllegalStateException) {
+            _error.value = "Microphone is unavailable"
+            return
+        }
+        try {
+            recorder.startRecording()
+        } catch (_: SecurityException) {
+            recorder.release()
+            _error.value = "Microphone permission required"
+            return
+        } catch (_: IllegalStateException) {
+            recorder.release()
+            _error.value = "Microphone is unavailable"
+            return
+        }
+        audioRecord = recorder
         _isRecording.value = true
 
         recordingThread = Thread {
@@ -90,6 +110,19 @@ class VoiceTranscriptionManager {
                 }
             }
         }.also { it.start() }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createAudioRecord(bufferSize: Int): AudioRecord {
+        // The caller checks RECORD_AUDIO immediately before entering this helper
+        // and handles revocation races through SecurityException.
+        return AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            deviceSampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize * 2,
+        )
     }
 
     suspend fun stopAndTranscribe(authMethod: AuthMode?, authToken: String?): String? {

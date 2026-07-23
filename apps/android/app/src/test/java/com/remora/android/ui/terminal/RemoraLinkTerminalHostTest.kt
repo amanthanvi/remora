@@ -98,6 +98,7 @@ class RemoraLinkTerminalHostTest {
         selectedRuntimeIds = selectedRuntimeIds,
         grantedScopes = grantedScopes,
         pendingApproval = null,
+        pendingRestart = null,
         hostRevocationStillRequired = false,
     )
 }

@@ -6,6 +6,7 @@ struct VoiceCallView: View {
     @Environment(VoiceRuntimeController.self) private var voiceRuntime
     @AppStorage("conversationTextSizeStep") private var conversationTextSizeStep = VoiceConversationTextSize.medium.rawValue
     @State private var screenModel = ConversationScreenModel()
+    @State private var conversationObservation: AppModelConversationObservation?
 #if DEBUG
     @State private var showDebugSheet = false
 #endif
@@ -15,11 +16,15 @@ struct VoiceCallView: View {
     }
 
     private var voiceContext: VoiceCallContext? {
-        guard let session = voiceRuntime.activeVoiceSession,
-              let thread = appModel.snapshot?.threadSnapshot(for: session.threadKey) else {
+        guard let session = voiceRuntime.activeVoiceSession else {
             return nil
         }
-        return VoiceCallContext(session: session, thread: thread)
+        guard let observation = conversationObservation?.matching(threadKey: session.threadKey) else {
+            return nil
+        }
+        _ = observation.revision
+        guard observation.thread != nil else { return nil }
+        return VoiceCallContext(session: session)
     }
 
     var body: some View {
@@ -46,7 +51,10 @@ struct VoiceCallView: View {
             }
         }
         .interactiveDismissDisabled(true)
-        .task(id: voiceContext?.session.id) {
+        .task(id: voiceRuntime.activeVoiceSession?.id) {
+            bindModel()
+        }
+        .onChange(of: conversationObservation?.revision) { _, _ in
             bindModel()
         }
 #if DEBUG
@@ -59,11 +67,22 @@ struct VoiceCallView: View {
     }
 
     private func bindModel() {
-        guard let context = voiceContext else { return }
+        guard let session = voiceRuntime.activeVoiceSession else {
+            conversationObservation = nil
+            return
+        }
+        let observation: AppModelConversationObservation
+        if let current = conversationObservation?.matching(threadKey: session.threadKey) {
+            observation = current
+        } else {
+            observation = appModel.conversationObservation(for: session.threadKey)
+            conversationObservation = observation
+        }
+        guard let thread = observation.thread else { return }
         screenModel.bind(
-            thread: context.thread,
+            thread: thread,
             appModel: appModel,
-            agentDirectoryVersion: appModel.snapshot?.agentDirectoryVersion ?? 0
+            conversationObservation: observation
         )
     }
 
@@ -225,7 +244,6 @@ struct VoiceCallView: View {
 
 private struct VoiceCallContext {
     let session: VoiceSessionState
-    let thread: AppThreadSnapshot
 }
 
 private enum VoiceConversationTextSize: Int {

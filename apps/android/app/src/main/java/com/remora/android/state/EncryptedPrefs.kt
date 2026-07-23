@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION") // AndroidX provides no replacement; keep its audited AES-SIV/GCM format behind one migration seam.
+
 package com.remora.android.state
 
 import android.content.Context

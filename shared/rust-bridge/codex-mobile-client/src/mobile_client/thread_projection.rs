@@ -115,60 +115,7 @@ pub(super) fn queued_follow_up_text_from_inputs(inputs: &[upstream::UserInput]) 
     }
 }
 
-pub(super) fn queued_follow_up_kind_from_json_value(
-    value: &serde_json::Value,
-) -> Option<AppQueuedFollowUpKind> {
-    let object = value.as_object()?;
-    let raw_kind = object
-        .get("kind")
-        .or_else(|| object.get("category"))
-        .or_else(|| object.get("queueKind"))
-        .or_else(|| object.get("queue_kind"))
-        .and_then(serde_json::Value::as_str)?
-        .trim()
-        .to_ascii_lowercase();
-
-    match raw_kind.as_str() {
-        "pending_steer" | "pending-steer" | "pendingsteer" | "steer" => {
-            Some(AppQueuedFollowUpKind::PendingSteer)
-        }
-        "rejected_steer" | "rejected-steer" | "rejectedsteer" | "retrying_steer"
-        | "retrying-steer" | "retryingsteer" => Some(AppQueuedFollowUpKind::RetryingSteer),
-        "queued" | "queued_follow_up" | "queued-follow-up" | "queuedfollowup" => {
-            Some(AppQueuedFollowUpKind::Message)
-        }
-        _ => None,
-    }
-}
-
-pub(super) fn queued_follow_up_text_from_json_value(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => {
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        }
-        serde_json::Value::Object(object) => {
-            if let Some(nested) = object
-                .get("userMessage")
-                .or_else(|| object.get("user_message"))
-            {
-                return queued_follow_up_text_from_json_value(nested);
-            }
-
-            if let Some(text) = string_field(object, &["text", "message", "summary"]) {
-                return Some(text);
-            }
-
-            let attachment_count = array_field_len(object, &["localImages", "local_images"])
-                + array_field_len(object, &["remoteImageUrls", "remote_image_urls"])
-                + array_field_len(object, &["images", "imageUrls", "image_urls"]);
-
-            attachment_summary(attachment_count)
-        }
-        _ => None,
-    }
-}
-
+#[cfg(test)]
 pub(super) fn queued_follow_up_inputs_from_json_value(
     value: &serde_json::Value,
 ) -> Vec<upstream::UserInput> {
@@ -340,6 +287,7 @@ pub(super) fn queued_follow_up_message_json_from_inputs(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn string_field(
     object: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
@@ -365,30 +313,12 @@ pub(super) fn string_field(
         })
 }
 
-pub(super) fn array_field_len(
-    object: &serde_json::Map<String, serde_json::Value>,
-    keys: &[&str],
-) -> usize {
-    keys.iter()
-        .filter_map(|key| object.get(*key))
-        .find_map(|value| value.as_array().map(Vec::len))
-        .unwrap_or(0)
-}
-
 pub(super) fn attachment_summary(attachment_count: usize) -> Option<String> {
     match attachment_count {
         0 => None,
         1 => Some("1 image attachment".to_string()),
         count => Some(format!("{count} image attachments")),
     }
-}
-
-pub(super) fn stable_follow_up_preview_id(scope: &str, index: usize, text: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    scope.hash(&mut hasher);
-    index.hash(&mut hasher);
-    text.hash(&mut hasher);
-    format!("{scope}-{index}-{:016x}", hasher.finish())
 }
 
 pub(super) fn remote_oauth_callback_port(auth_url: &str) -> Result<u16, RpcError> {
@@ -867,25 +797,6 @@ pub(super) fn upsert_thread_snapshot_from_app_server_read_response(
     reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
     app_store.upsert_thread_snapshot(snapshot);
     Ok(())
-}
-
-pub(super) fn upstream_thread_status_from_summary_status(
-    status: ThreadSummaryStatus,
-) -> upstream::ThreadStatus {
-    match status {
-        ThreadSummaryStatus::NotLoaded | ThreadSummaryStatus::Idle => upstream::ThreadStatus::Idle,
-        ThreadSummaryStatus::Active => upstream::ThreadStatus::Active {
-            active_flags: Vec::new(),
-        },
-        ThreadSummaryStatus::SystemError => upstream::ThreadStatus::SystemError,
-    }
-}
-
-pub(super) fn thread_snapshot_from_upstream_thread(
-    server_id: &str,
-    thread: upstream::Thread,
-) -> ThreadSnapshot {
-    thread_snapshot_from_upstream_thread_state(server_id, thread, None, None, None, None, None)
 }
 
 pub(super) fn thread_snapshot_from_upstream_thread_state(

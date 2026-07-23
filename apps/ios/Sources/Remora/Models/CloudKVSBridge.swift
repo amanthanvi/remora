@@ -24,7 +24,23 @@ final class CloudKVSBridge {
     /// rapid local changes.
     private static let debounceInterval: TimeInterval = 0.5
 
-    private let store = NSUbiquitousKeyValueStore.default
+    /// Keep KVS completely dormant unless this target is built with the
+    /// matching signed entitlement. iOS has no public API for inspecting the
+    /// running process's arbitrary entitlements, so the compilation condition
+    /// is the fail-closed build-time assertion. Enable it only alongside
+    /// `com.apple.developer.ubiquity-kvstore-identifier` in `project.yml`.
+    private static var isEntitledBuild: Bool {
+        #if REMORA_ICLOUD_KVS_ENTITLED
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// Constructing the default store without its entitlement makes
+    /// `ubiquity-kvstore` fault inside Foundation, so initialize it only after
+    /// the entitlement gate succeeds.
+    private var store: NSUbiquitousKeyValueStore?
     private let defaults = UserDefaults.standard
     private let preferencesDirectory: String
     private let deviceId: String
@@ -47,7 +63,13 @@ final class CloudKVSBridge {
     func start() {
         guard !started else { return }
         started = true
+        guard Self.isEntitledBuild else {
+            LLog.info("cloud_sync", "kvs disabled; target is not entitled")
+            return
+        }
 
+        let store = NSUbiquitousKeyValueStore.default
+        self.store = store
         // Inbound: another device pushed an envelope.
         let externalChange = NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
@@ -107,6 +129,7 @@ final class CloudKVSBridge {
     }
 
     private func applyEnvelopeFromStore() {
+        guard let store else { return }
         guard let bytes = store.data(forKey: Self.envelopeKey) else {
             return
         }
@@ -201,6 +224,7 @@ final class CloudKVSBridge {
     }
 
     private func scheduleExport() {
+        guard store != nil else { return }
         pendingExportTask?.cancel()
         pendingExportTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.debounceInterval * 1_000_000_000))
@@ -210,6 +234,7 @@ final class CloudKVSBridge {
     }
 
     private func exportNow() {
+        guard let store else { return }
         do {
             let bytes = try cloudSyncExportSnapshot(
                 directory: preferencesDirectory,

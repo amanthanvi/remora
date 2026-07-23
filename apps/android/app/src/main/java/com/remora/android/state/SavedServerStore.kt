@@ -1,8 +1,10 @@
 package com.remora.android.state
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import com.remora.android.ui.common.AgentRuntimeKind
+import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.codex_mobile_client.AppDiscoveredServer
@@ -25,7 +27,6 @@ data class SavedServer(
     val wakeMAC: String? = null,
     val preferredConnectionMode: String? = null, // directCodex or ssh
     val preferredCodexPort: Int? = null,
-    val sshPortForwardingEnabled: Boolean? = null, // legacy migration only
     val websocketURL: String? = null,
     val os: String? = null,
     val sshBanner: String? = null,
@@ -62,7 +63,6 @@ data class SavedServer(
         wakeMAC?.let { put("wakeMAC", it) }
         preferredConnectionMode?.let { put("preferredConnectionMode", it) }
         preferredCodexPort?.let { put("preferredCodexPort", it) }
-        sshPortForwardingEnabled?.let { put("sshPortForwardingEnabled", it) }
         websocketURL?.let { put("websocketURL", it) }
         os?.let { put("os", it) }
         sshBanner?.let { put("sshBanner", it) }
@@ -83,7 +83,7 @@ data class SavedServer(
         get() = when (preferredConnectionMode) {
             "directCodex" -> if (availableDirectCodexPorts.isNotEmpty() || websocketURL != null) "directCodex" else null
             "ssh" -> if (canConnectViaSsh) "ssh" else null
-            else -> if (sshPortForwardingEnabled == true) "ssh" else null
+            else -> null
         }
 
     val prefersSshConnection: Boolean
@@ -93,9 +93,8 @@ data class SavedServer(
         get() = websocketURL == null && (
             sshPort != null ||
                 source == "ssh" ||
-                (!hasCodexServer && resolvedSshPort > 0) ||
-                preferredConnectionMode == "ssh" ||
-                sshPortForwardingEnabled == true
+                (!hasCodexServer && port > 0) ||
+                preferredConnectionMode == "ssh"
         )
 
     val resolvedSshPort: Int
@@ -141,7 +140,6 @@ data class SavedServer(
             } else {
                 null
             },
-            sshPortForwardingEnabled = null,
         )
 
     fun normalizedForPersistence(): SavedServer =
@@ -200,23 +198,17 @@ data class SavedServer(
         }
 
         fun fromJson(obj: JSONObject): SavedServer {
-            val id = obj.getString("id")
-            val legacyAgentWire = obj.optString("alleycatAgentWire").trim()
-            val isHistoricalSshBridge = id.startsWith("ssh-bridge:") || legacyAgentWire == "ssh-bridge"
             val sshBridgeRuntimeKinds = when {
                 obj.has("sshBridgeRuntimeKinds") && !obj.isNull("sshBridgeRuntimeKinds") ->
                     obj.optJSONArray("sshBridgeRuntimeKinds")
                         ?.toNormalizedRuntimeKinds()
                         ?: emptyList()
                 obj.has("sshBridgeRuntimeKinds") -> null
-                isHistoricalSshBridge -> obj.optString("alleycatAgentName")
-                    .split(',')
-                    .toNormalizedRuntimeKinds()
                 else -> null
             }
 
             return SavedServer(
-                id = id,
+                id = obj.getString("id"),
                 name = obj.optString("name", ""),
                 hostname = obj.optString("hostname", ""),
                 port = obj.optInt("port", 0),
@@ -234,11 +226,6 @@ data class SavedServer(
                 wakeMAC = if (obj.has("wakeMAC")) obj.getString("wakeMAC") else null,
                 preferredConnectionMode = obj.optString("preferredConnectionMode").ifBlank { null },
                 preferredCodexPort = if (obj.has("preferredCodexPort")) obj.getInt("preferredCodexPort") else null,
-                sshPortForwardingEnabled = if (obj.has("sshPortForwardingEnabled")) {
-                    obj.optBoolean("sshPortForwardingEnabled")
-                } else {
-                    null
-                },
                 websocketURL = if (obj.has("websocketURL")) obj.getString("websocketURL") else null,
                 os = if (obj.has("os")) obj.getString("os") else null,
                 sshBanner = if (obj.has("sshBanner")) obj.getString("sshBanner") else null,
@@ -291,37 +278,56 @@ fun SavedServer.toRecord() = SavedServerRecord(
     wakeMac = wakeMAC,
     preferredConnectionMode = preferredConnectionMode,
     preferredCodexPort = preferredCodexPort?.toUShort(),
-    sshPortForwardingEnabled = sshPortForwardingEnabled,
+    sshPortForwardingEnabled = null,
     websocketUrl = websocketURL,
     rememberedByUser = rememberedByUser,
     sshBridgeRuntimeKinds = sshBridgeRuntimeKinds,
 )
 
 object SavedServerStore {
-    private const val PREFS_NAME = "codex_saved_servers_prefs"
-    private const val KEY = "codex_saved_servers"
+    internal const val PREFERENCES_NAME = "remora_saved_servers_v2"
+    internal const val VALUE_KEY = "saved_servers"
+    private val currentFields = setOf(
+        "id",
+        "name",
+        "hostname",
+        "port",
+        "codexPorts",
+        "sshPort",
+        "source",
+        "hasCodexServer",
+        "wakeMAC",
+        "preferredConnectionMode",
+        "preferredCodexPort",
+        "websocketURL",
+        "os",
+        "sshBanner",
+        "rememberedByUser",
+        "sshBridgeRuntimeKinds",
+    )
 
     private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
     fun load(context: Context): List<SavedServer> {
-        val json = prefs(context).getString(KEY, null) ?: return emptyList()
+        val json = prefs(context).getString(VALUE_KEY, null) ?: return emptyList()
         return try {
             val array = JSONArray(json)
-            val decoded = (0 until array.length()).map { index ->
-                val objectValue = array.getJSONObject(index)
-                objectValue to SavedServer.fromJson(objectValue)
+            val decoded = (0 until array.length()).mapNotNull { index ->
+                val objectValue = array.optJSONObject(index) ?: return@mapNotNull null
+                if (!hasOnlyCurrentFields(objectValue)) return@mapNotNull null
+                runCatching { objectValue to SavedServer.fromJson(objectValue) }.getOrNull()
             }
-            val retained = decoded.filterNot { (objectValue, _) -> isLegacyV1Only(objectValue) }
-            val migrated = retained.map { (_, server) -> server.normalizedForPersistence() }
-            val needsRewrite = retained.size != decoded.size ||
-                retained.any { (objectValue, _) -> LEGACY_V1_JSON_KEYS.any(objectValue::has) } ||
+            val retained = decoded.filter { (_, server) -> server.hasSupportedConnectionPath }
+            val normalized = retained.map { (_, server) -> server.normalizedForPersistence() }
+            val needsRewrite = decoded.size != array.length() ||
+                retained.size != decoded.size ||
                 retained.any { (objectValue, server) -> runtimeKindsNeedRewrite(objectValue, server) } ||
-                retained.map { it.second } != migrated
+                retained.map { it.second } != normalized
             if (needsRewrite) {
-                save(context, migrated)
+                save(context, normalized)
             }
-            migrated
+            normalized
         } catch (_: Exception) {
             emptyList()
         }
@@ -330,7 +336,7 @@ object SavedServerStore {
     fun save(context: Context, servers: List<SavedServer>) {
         val array = JSONArray()
         servers.forEach { array.put(it.toJson()) }
-        prefs(context).edit().putString(KEY, array.toString()).apply()
+        prefs(context).edit().putString(VALUE_KEY, array.toString()).apply()
     }
 
     fun upsert(context: Context, server: SavedServer) {
@@ -355,6 +361,24 @@ object SavedServerStore {
         val existing = load(context).toMutableList()
         existing.removeAll { it.id == serverId }
         save(context, existing)
+    }
+
+    @SuppressLint("ApplySharedPref", "UseKtx") // Callers require a synchronous durability result before marking cutover complete.
+    fun removeAllForSecurityCutover(context: Context): Boolean {
+        val currentRemoved = prefs(context).edit().clear().commit() &&
+            prefs(context).all.isEmpty()
+        val retiredName = retiredSavedServerPreferencesName()
+        val sharedPreferencesDirectory = File(context.dataDir, "shared_prefs")
+        val retiredFiles = listOf(
+            File(sharedPreferencesDirectory, "$retiredName.xml"),
+            File(sharedPreferencesDirectory, "$retiredName.xml.bak"),
+        )
+        val retiredRemoved = retiredFiles.none(File::exists) ||
+            (
+                context.deleteSharedPreferences(retiredName) &&
+                    retiredFiles.none(File::exists)
+            )
+        return currentRemoved && retiredRemoved
     }
 
     fun rename(context: Context, serverId: String, newName: String) {
@@ -395,29 +419,6 @@ object SavedServerStore {
         return withoutScope.lowercase()
     }
 
-    internal fun isLegacyV1Only(obj: JSONObject): Boolean {
-        val id = obj.optString("id")
-        val agentWire = obj.optString("alleycatAgentWire")
-        if (id.startsWith("ssh-bridge:") || agentWire == "ssh-bridge") return false
-
-        val hasLegacyPairingMarker = id.startsWith("alleycat:") ||
-            obj.has("alleycatHost") ||
-            obj.has("alleycatNodeId") ||
-            obj.has("alleycatRelay")
-        if (!hasLegacyPairingMarker) return false
-
-        val directPorts = obj.optJSONArray("codexPorts")
-        val hasDirectPort = (obj.optBoolean("hasCodexServer") && obj.optInt("port") > 0) ||
-            (directPorts != null && (0 until directPorts.length()).any { directPorts.optInt(it) > 0 }) ||
-            obj.optString("websocketURL").isNotBlank()
-        val hasSshPath = obj.optInt("sshPort") > 0 ||
-            obj.optString("source").equals("ssh", ignoreCase = true) ||
-            obj.optString("preferredConnectionMode") == "ssh" ||
-            obj.optBoolean("sshPortForwardingEnabled") ||
-            (!obj.optBoolean("hasCodexServer") && obj.optInt("port") > 0)
-        return !hasDirectPort && !hasSshPath
-    }
-
     internal fun runtimeKindsNeedRewrite(obj: JSONObject, server: SavedServer): Boolean {
         val normalized = server.sshBridgeRuntimeKinds
         if (!obj.has("sshBridgeRuntimeKinds")) return normalized != null
@@ -427,14 +428,29 @@ object SavedServerStore {
         return values != normalized
     }
 
-    private val LEGACY_V1_JSON_KEYS = listOf(
-        "alleycatHost",
-        "alleycatNodeId",
-        "alleycatRelay",
-        "alleycatAgentName",
-        "alleycatAgentWire",
-    )
+    internal fun hasOnlyCurrentFields(obj: JSONObject): Boolean =
+        obj.keys().asSequence().all(currentFields::contains)
+
 }
+
+/**
+ * One-release deletion tombstone for the unsupported pre-1.6 saved-host file.
+ *
+ * The historical identifier is reconstructed only to destroy the retired
+ * namespace; SavedServerStore never reads or migrates from it. Remove this
+ * tombstone when the direct-upgrade floor advances beyond 1.6.
+ */
+internal fun retiredSavedServerPreferencesName(): String =
+    byteArrayOf(
+        99, 111, 100, 101, 120, 95, 115, 97, 118, 101, 100,
+        95, 115, 101, 114, 118, 101, 114, 115, 95, 112, 114,
+        101, 102, 115,
+    ).toString(Charsets.UTF_8)
+
+internal val SavedServer.hasSupportedConnectionPath: Boolean
+    get() = websocketURL?.isNotBlank() == true ||
+        availableDirectCodexPorts.isNotEmpty() ||
+        canConnectViaSsh
 
 private fun List<String>.normalizeRuntimeKinds(): List<AgentRuntimeKind> =
     map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()

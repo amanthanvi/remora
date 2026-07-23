@@ -1,9 +1,14 @@
 import SwiftUI
 
+extension Notification.Name {
+    static let remoraSecurityCutoverDidComplete =
+        Notification.Name("com.remora.security-cutover.did-complete")
+}
+
 @main
 struct RemoraApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var appModel = AppModel.shared
+    @State private var appModel: AppModel?
     @State private var voiceRuntime = VoiceRuntimeController.shared
     @State private var appRuntime = AppRuntimeController.shared
     @State private var actionCenter = RemoraActionCenter.shared
@@ -21,30 +26,48 @@ struct RemoraApp: App {
             // `MacWindowTitleBarStyler` via
             // `UIWindowScene.sizeRestrictions`.
             .commands {
-                RemoraCommands(actionCenter: actionCenter, appModel: appModel)
+                if let appModel {
+                    RemoraCommands(actionCenter: actionCenter, appModel: appModel)
+                }
             }
         #else
         mainWindowGroup
             .commands {
-                RemoraCommands(actionCenter: actionCenter, appModel: appModel)
+                if let appModel {
+                    RemoraCommands(actionCenter: actionCenter, appModel: appModel)
+                }
             }
         #endif
     }
 
     private var mainWindowGroup: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(appModel)
-                .environment(appRuntime)
-                .environment(voiceRuntime)
-                .environment(themeManager)
-                .environment(wallpaperManager)
-                .task {
-                    appModel.start()
-                    voiceRuntime.bind(appModel: appModel)
-                    appRuntime.bind(appModel: appModel, voiceRuntime: voiceRuntime)
-                    appRuntime.appDidBecomeActive()
+            Group {
+                if let appModel {
+                    ContentView()
+                        .environment(appModel)
+                        .environment(appRuntime)
+                        .environment(voiceRuntime)
+                        .environment(themeManager)
+                        .environment(wallpaperManager)
+                        .task {
+                            appModel.start()
+                            voiceRuntime.bind(appModel: appModel)
+                            appRuntime.bind(appModel: appModel, voiceRuntime: voiceRuntime)
+                            appRuntime.appDidBecomeActive()
+                        }
+                } else {
+                    SecurityCutoverGateView()
                 }
+            }
+            .task {
+                activateRuntimeIfSecurityCutoverCompleted()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoraSecurityCutoverDidComplete)
+            ) { _ in
+                activateRuntimeIfSecurityCutoverCompleted()
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             LLog.info("lifecycle", "scenePhase changed", fields: ["phase": newPhase.debugName])
@@ -58,6 +81,35 @@ struct RemoraApp: App {
             default:
                 break
             }
+        }
+    }
+
+    private func activateRuntimeIfSecurityCutoverCompleted() {
+        guard appModel == nil,
+              CurrentKeychainNamespaceCleanup.shared.isComplete else {
+            return
+        }
+        appModel = AppModel.shared
+    }
+}
+
+private struct SecurityCutoverGateView: View {
+    var body: some View {
+        ZStack {
+            Color(red: 2 / 255, green: 8 / 255, blue: 44 / 255)
+                .ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView()
+                    .tint(Color(red: 13 / 255, green: 213 / 255, blue: 240 / 255))
+                Text("Securing Remora")
+                    .font(.system(.headline, design: .monospaced, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("Protected credentials must be available before Remora can start.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(28)
         }
     }
 }
