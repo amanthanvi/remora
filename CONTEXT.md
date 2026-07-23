@@ -34,28 +34,21 @@ automation, Fastlane, and store-feedback triage remain excluded.
 - Shared behavior should cross one handwritten UniFFI boundary rather than be
   reimplemented independently on each platform.
 
-## Interop Identity Boundary
+## Identity and Upgrade Boundary
 
-Remora is the only product identity. Upstream protocol identifiers remain only
-where changing them would break host compatibility:
+Remora is the only product and protocol identity in supported builds. New
+pairing uses Remora Link and the `remora-link/2` contract. The minimum supported
+direct-upgrade version is Remora 1.6.0 on both platforms. Its first launch
+performs a fail-closed reset of pairing authority, journals, and saved servers
+before Remora Link starts. Fresh host pairing is required, and the codebase
+does not migrate older pairing state, secrets, saved servers, or protocol
+records. Direct upgrades are supported from 1.6.0 onward.
 
-- `ALLEYCAT_*` constants and the legacy `alleycat/1` ALPN;
-- the historical SSH-bridge dependency identity required by retained bridge
-  crates;
-- the time-bounded `_alleycat_seq` replay fallback accepted from the pinned
-  host while `_remora_link_seq` is the canonical v2 field;
-- the old `npx kittylitter` bootstrap string only where needed to detect or
-  explain an existing installation during the re-pair transition;
-- precise terminal Kitty protocol terminology in implementation comments;
-- exact legacy secret identifiers and Android backup exclusions retained as an
-  idempotent purge tombstone until direct upgrades from v1-writing builds are
-  no longer supported;
-- exact retired saved-server keys and host-ID prefix used only to migrate or
-  discard v1 records, after which surviving records are rewritten without
-  those keys.
-
-These are transport details, not UI branding. New product copy, persistence
-keys, package names, and symbols use Remora naming.
+Retired product identifiers are not present as plaintext in supported app or
+host code. The 1.6 cutover retains only deletion-only byte tombstones needed
+to remove unsupported persisted namespaces; those bytes are never loaded,
+migrated, displayed, logged, or sent over the network. Remove the tombstones
+when the direct-upgrade floor advances beyond 1.6.
 
 ## Glossary
 
@@ -69,7 +62,6 @@ keys, package names, and symbols use Remora naming.
 | `ThreadKey` | Stable `(serverId, threadId)` identity for a conversation. |
 | `DiscoveryBridge` | Rust utility surface for discovery merge, ranking, dedupe, and probing policy. |
 | `SshBridge` | Rust utility surface for SSH connection, trust, forwarding, and remote bootstrap. |
-| Legacy pairing v1 | The retired bearer-token host pairing protocol. It is retained only for detection and explicit re-pair guidance. |
 | Remora Link | Remora-owned host daemon and v2 pairing/transport boundary. It detects and launches installed harnesses but never installs them. |
 | Remora relay | Durable sequenced event/outbox service for hosted or self-hosted deployments; APNs/FCM remain non-authoritative wake hints. |
 | Remote terminal | A shell on a paired or SSH-connected host; there is no on-device terminal backend. |
@@ -83,10 +75,19 @@ keys, package names, and symbols use Remora naming.
 The minimum cross-platform gate is:
 
 ```bash
+make bootstrap-remora-link-test bindings-hardener-test
 make rebuild-bindings
 make rust-test
 make ios-sim-fast
-cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
+make test-ios
+cd apps/android && ./gradlew \
+  :app:testDebugUnitTest \
+  :app:testReleaseUnitTest \
+  :app:lintDebug \
+  :app:assembleDebug
 ```
 
-Branch CI is defined in [`.github/workflows/mobile-ci.yml`](.github/workflows/mobile-ci.yml).
+Complete release verification also installs these exact build outputs on a
+simulator and emulator, exercises the 1.6 security cutover, captures both home
+screens, and checks runtime logs for crashes and cutover failures. Branch CI is
+defined in [`.github/workflows/mobile-ci.yml`](.github/workflows/mobile-ci.yml).

@@ -141,6 +141,7 @@ PACKAGE_CARGO_ENV := CARGO_INCREMENTAL=0
 # incremental compilation. CI calls build-rust.sh directly with its own env.
 DEV_CARGO_ENV := env -u CARGO_INCREMENTAL
 UPDATE_REMORA_LINK := $(ROOT)/tools/scripts/update-remora-link.sh
+BOOTSTRAP_REMORA_LINK := $(ROOT)/tools/scripts/bootstrap-remora-link.sh
 
 PATCH_FILES := \
 	$(PATCHES_DIR)/ios-exec-hook.patch \
@@ -158,7 +159,9 @@ PATCH_FILES := \
 	$(PATCHES_DIR)/realtime-client-controlled-handoff.patch
 
 BOUNDARY_SOURCES := \
+	$(RUST_DIR)/generate-bindings.sh \
 	$(RUST_DIR)/codex-mobile-client/Cargo.toml \
+	$(RUST_DIR)/codex-mobile-client/uniffi.toml \
 	$(RUST_DIR)/codex-mobile-client/src/lib.rs \
 	$(RUST_DIR)/codex-mobile-client/src/conversation_uniffi.rs \
 	$(RUST_DIR)/codex-mobile-client/src/discovery_uniffi.rs
@@ -195,7 +198,7 @@ $(shell mkdir -p $(STAMPS))
 	android android-fast android-emulator-fast android-emulator-run android-device-run android-debug android-install android-emulator-install \
 	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-test rust-host-dev rust-shellcheck \
 	ghostty-ios ghostty-android \
-	update-remora-link \
+	update-remora-link bootstrap-remora-link bootstrap-remora-link-test \
 	bindings bindings-swift bindings-kotlin bindings-hardener-test \
 	sync patch unpatch sync-ghostty unpatch-ghostty xcgen \
 	ios-build ios-build-sim ios-build-sim-fast ios-build-device ios-build-device-fast \
@@ -353,6 +356,13 @@ update-remora-link:
 	@test -n "$(REV)" || { echo "usage: make update-remora-link REV=<40-character commit>" >&2; exit 1; }
 	@$(UPDATE_REMORA_LINK) "$(REV)"
 
+bootstrap-remora-link:
+	@test -n "$(REV)" || { echo "usage: make bootstrap-remora-link REV=<40-character commit>" >&2; exit 1; }
+	@$(BOOTSTRAP_REMORA_LINK) "$(REV)"
+
+bootstrap-remora-link-test:
+	@./tools/scripts/test-bootstrap-remora-link.sh
+
 rust-ios-package: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Packaging Rust for iOS (device + simulator + xcframework)..."
 	@cd $(ROOT) && $(PACKAGE_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current $(CARGO_FEATURES)
@@ -415,13 +425,13 @@ $(STAMP_SYNC_GHOSTTY): $(GHOSTTY_PATCH_FILES) apps/ios/scripts/sync-ghostty.sh M
 	@touch $@
 
 ghostty-ios: $(STAMP_GHOSTTY_IOS)
-$(STAMP_GHOSTTY_IOS): $(STAMP_SYNC_GHOSTTY) shared/third_party/ghostty/build.zig apps/ios/scripts/build-ghostty.sh Makefile
+$(STAMP_GHOSTTY_IOS): $(STAMP_SYNC_GHOSTTY) shared/third_party/ghostty/build.zig apps/ios/scripts/build-ghostty.sh tools/scripts/resolve-zig.sh Makefile
 	@echo "==> Building Ghostty renderer for iOS..."
 	@cd $(ROOT) && $(IOS_SCRIPTS)/build-ghostty.sh
 	@touch $@
 
 ghostty-android: $(STAMP_GHOSTTY_ANDROID)
-$(STAMP_GHOSTTY_ANDROID): $(STAMP_SYNC_GHOSTTY) shared/third_party/ghostty/build.zig tools/scripts/build-ghostty-android.sh Makefile
+$(STAMP_GHOSTTY_ANDROID): $(STAMP_SYNC_GHOSTTY) shared/third_party/ghostty/build.zig tools/scripts/build-ghostty-android.sh tools/scripts/resolve-zig.sh Makefile
 	@echo "==> Building Ghostty renderer for Android..."
 	@cd $(ROOT) && ANDROID_ABIS="$(ANDROID_ABIS)" ./tools/scripts/build-ghostty-android.sh
 	@touch $@
@@ -440,7 +450,8 @@ help:
 		'make rust-ios-macabi-fast fast Rust Mac Catalyst lane (host-arch macabi staticlib only)' \
 		'make ghostty-ios        build pinned Ghostty iOS renderer artifacts' \
 		'make ghostty-android    build pinned Ghostty Android renderer artifacts (requires Android platform patch)' \
-		'make update-remora-link REV=<sha>  pin the reviewed Remora Alleycat fork revision' \
+		'make update-remora-link REV=<sha>  pin a reviewed Remora Link source revision' \
+		'make bootstrap-remora-link REV=<sha>  install Remora Link from reviewed source' \
 		'make catalyst           full Mac Catalyst build (release+LTO macabi staticlib + xcodebuild)' \
 		'make catalyst-run       full Mac Catalyst build + launch' \
 		'make catalyst-fast      fast Mac Catalyst dev build (ios-dev profile, host arch)' \
@@ -596,7 +607,7 @@ android-emulator-install: android-emulator-fast
 	if [ -z "$$EMU" ]; then echo "ERROR: no emulator found"; exit 1; fi && \
 	adb -s "$$EMU" install -r $(ANDROID_APK)
 
-test: bindings-hardener-test test-rust test-ios test-android
+test: bindings-hardener-test bootstrap-remora-link-test test-rust test-ios test-android
 
 test-rust: patch rust-shellcheck
 	@echo "==> Running Rust tests..."

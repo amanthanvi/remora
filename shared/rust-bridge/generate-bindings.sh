@@ -22,7 +22,7 @@ if [[ -z "${RUSTC_WRAPPER:-}" ]] && [[ "${CARGO_INCREMENTAL:-}" != "1" ]] && com
     export RUSTC_WRAPPER="$(command -v sccache)"
 fi
 
-PROFILE="debug"
+PROFILE="bindings"
 GENERATE_SWIFT=1
 GENERATE_KOTLIN=1
 
@@ -57,7 +57,7 @@ echo "==> Building codex-mobile-client cdylib ($PROFILE)..."
 if [[ "$PROFILE" == "release" ]]; then
     cargo build -p codex-mobile-client --release
 else
-    cargo build -p codex-mobile-client
+    cargo build -p codex-mobile-client --profile bindings
 fi
 
 DYLIB_PATH="${CARGO_TARGET_DIR:-$WORKSPACE_DIR/target}/$PROFILE"
@@ -100,6 +100,7 @@ if [[ "$GENERATE_KOTLIN" -eq 1 ]]; then
     cargo run -p uniffi-bindgen -- generate \
         --library "$DYLIB_FILE" \
         --language kotlin \
+        --no-format \
         --out-dir "$OUT_KOTLIN"
 fi
 

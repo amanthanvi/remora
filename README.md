@@ -63,9 +63,24 @@ surface. Watch, CarPlay, the full Live Activity
 extension, and store-release automation remain out of scope.
 
 New remote pairing uses Remora Link. During development, build the native host
-from the reviewed source revision recorded in the Rust lockfile. The
-`npx remora-link` launcher will become the default bootstrap after its first
-trusted npm publication.
+from the reviewed source revision recorded in the Rust lockfile:
+
+```bash
+make bootstrap-remora-link REV=<40-character-commit>
+```
+
+The bootstrap prefers an in-repository `remora-link-host` checkout and
+otherwise fetches the Remora-owned host source recorded in the Rust manifest.
+Package-registry launchers are not part of the supported bootstrap path.
+
+## Upgrade Support
+
+Remora 1.6.0 is the security and direct-upgrade floor on both iOS and Android.
+Its first launch atomically discards unsupported saved hosts, pairing journals,
+transport identities, and signing authority before Remora Link starts. Remote
+hosts must then be paired again. No compatibility or migration guarantee
+applies to state created by an older build; direct upgrades are supported from
+1.6.0 onward.
 
 ## License
 
