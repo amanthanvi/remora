@@ -58,7 +58,6 @@ enum RemoraTheme {
     static var warning: Color        { adaptive(light: light.warning, dark: dark.warning) }
     static var textOnAccent: Color   { adaptive(light: light.textOnAccent, dark: dark.textOnAccent) }
     static var codeBackground: Color { adaptive(light: light.codeBackground, dark: dark.codeBackground) }
-    static let textOnDarkOverlay = Color(hex: "#EAFBFF")
 
     /// The app-chrome base is intentionally a single restrained ocean tone.
     /// Depth comes from `surface` and `surfaceLight`, not decoration behind

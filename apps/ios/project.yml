@@ -155,7 +155,6 @@ targets:
           - Views/InlineVoiceButton.swift
           - Views/InlineVoiceStatusStrip.swift
           - Views/RealtimeVoiceScreen.swift
-          - Views/VoiceCallView.swift
           - "**/*.h"
       - path: Sources/Remora/Bridge/UniFFICodexClient.generated.swift
     resources:
