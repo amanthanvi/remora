@@ -305,7 +305,7 @@ impl AppStoreReducer {
             server_id: server_id.to_string(),
         });
         for key in removed_thread_keys {
-            self.clear_thread_update_caches(&key);
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -447,7 +447,7 @@ impl AppStoreReducer {
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
         for key in removed_thread_keys {
-            self.clear_thread_update_caches(&key);
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -887,10 +887,6 @@ impl AppStoreReducer {
         }
     }
 
-    pub fn remove_thread_follow_up_preview(&self, key: &ThreadKey, preview_id: &str) {
-        self.remove_thread_follow_up_draft(key, preview_id);
-    }
-
     pub(crate) fn remove_thread_follow_up_draft(&self, key: &ThreadKey, preview_id: &str) {
         if self
             .mutate_thread_with_result(key, |thread| {
@@ -937,22 +933,6 @@ impl AppStoreReducer {
             self.emit_thread_metadata_changed(key);
         }
         result
-    }
-
-    pub fn set_thread_follow_up_previews(
-        &self,
-        key: &ThreadKey,
-        previews: Vec<AppQueuedFollowUpPreview>,
-    ) {
-        let drafts = previews
-            .into_iter()
-            .map(|preview| QueuedFollowUpDraft {
-                preview,
-                inputs: Vec::new(),
-                source_message_json: None,
-            })
-            .collect();
-        self.set_thread_follow_up_drafts(key, drafts);
     }
 
     pub(crate) fn set_thread_follow_up_drafts(
@@ -1005,7 +985,7 @@ impl AppStoreReducer {
                 .retain(|key, _| remaining_user_input_keys.contains(key));
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
-        self.clear_thread_update_caches(key);
+        self.clear_removed_thread_caches(key);
         self.emit(AppStoreUpdateRecord::ThreadRemoved {
             key: key.clone(),
             agent_directory_version,
@@ -1359,19 +1339,6 @@ impl AppStoreReducer {
         }
     }
 
-    pub fn server_has_active_turns(&self, server_id: &str) -> bool {
-        self.snapshot
-            .read()
-            .expect("app store lock poisoned")
-            .threads
-            .iter()
-            .any(|(key, thread)| {
-                key.server_id == server_id
-                    && (thread.active_turn_id.is_some()
-                        || thread.info.status == ThreadSummaryStatus::Active)
-            })
-    }
-
     pub fn server_pending_mutation_kind(
         &self,
         server_id: &str,
@@ -1575,6 +1542,7 @@ impl AppStoreReducer {
                 }
             }
             UiEvent::TurnCompleted { key, turn_id, .. } => {
+                self.clear_dynamic_tool_arg_buffers_for_thread(key);
                 if self
                     .mutate_thread_with_result(key, |thread| {
                         thread.active_turn_id = None;
@@ -2170,6 +2138,11 @@ impl AppStoreReducer {
             .retain(|(thread_key, _), _| thread_key != key);
     }
 
+    fn clear_removed_thread_caches(&self, key: &ThreadKey) {
+        self.clear_thread_update_caches(key);
+        self.clear_dynamic_tool_arg_buffers_for_thread(key);
+    }
+
     pub(crate) fn emit_thread_upsert(&self, key: &ThreadKey) {
         self.clear_thread_update_caches(key);
         let update = {
@@ -2293,49 +2266,6 @@ impl AppStoreReducer {
                 .filter(|existing| is_superseded_overlay_item(existing, &item, active_turn_id))
                 .map(|existing| existing.id.clone())
                 .collect::<Vec<_>>();
-            // Diagnostic for the duplicate-user-message bug (task #11):
-            // when an upstream UserMessage arrives, log the surrounding
-            // store state so we can see whether the local overlay was
-            // present-and-deduped, present-and-NOT-deduped, or absent —
-            // and whether `thread.items` already contains a sibling User
-            // item with matching content.
-            if is_user_message {
-                let other_user_items: Vec<_> = thread
-                    .items
-                    .iter()
-                    .filter(|existing| {
-                        existing.id != item.id
-                            && matches!(&existing.content, HydratedConversationItemContent::User(_))
-                    })
-                    .map(|existing| existing.id.clone())
-                    .collect();
-                let overlay_count = thread.local_overlay_items.len();
-                let user_overlay_ids: Vec<_> = thread
-                    .local_overlay_items
-                    .iter()
-                    .filter_map(|existing| {
-                        if matches!(&existing.content, HydratedConversationItemContent::User(_)) {
-                            Some(existing.id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                tracing::warn!(
-                    target: "store",
-                    server_id = key.server_id,
-                    thread_id = key.thread_id,
-                    item_id = item.id,
-                    item_turn_id = item.source_turn_id.as_deref().unwrap_or(""),
-                    item_boundary = item.is_from_user_turn_boundary,
-                    existing_user_items = ?other_user_items,
-                    user_overlays = ?user_overlay_ids,
-                    overlay_count = overlay_count,
-                    will_remove_overlays = ?removed_overlay_ids,
-                    has_existing_with_id = existing.is_some(),
-                    "apply_item_update UserMessage diagnostic"
-                );
-            }
             thread
                 .local_overlay_items
                 .retain(|existing| !is_superseded_overlay_item(existing, &item, active_turn_id));
@@ -2521,6 +2451,13 @@ impl AppStoreReducer {
         guard.retain(|(existing_key, _), buffer| {
             !(existing_key == thread_key && buffer.item_id == item_id)
         });
+    }
+
+    fn clear_dynamic_tool_arg_buffers_for_thread(&self, thread_key: &ThreadKey) {
+        self.dynamic_tool_arg_buffers
+            .write()
+            .expect("app store dynamic_tool_arg_buffers poisoned")
+            .retain(|(existing_key, _), _| existing_key != thread_key);
     }
 }
 

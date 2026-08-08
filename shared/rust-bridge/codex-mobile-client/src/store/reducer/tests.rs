@@ -2122,6 +2122,94 @@ fn dynamic_tool_arg_delta_buffer_clears_on_item_completed() {
 }
 
 #[test]
+fn remove_server_clears_all_thread_update_caches() {
+    let reducer = AppStoreReducer::new();
+    let config = make_server_config("srv");
+    let key = key_thread("thread-cache-cleanup");
+    reducer.upsert_server(&config, ServerHealthSnapshot::Connected);
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-cache-cleanup"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"app_id":"fit","title":"Fit","widget_code":"<div>hi"#.to_string(),
+    });
+    reducer.emit_thread_metadata_changed(&key);
+    reducer.emit_thread_item_changed(
+        &key,
+        HydratedConversationItem {
+            id: "cached-item".to_string(),
+            content: HydratedConversationItemContent::User(HydratedUserMessageData {
+                text: "cached".to_string(),
+                image_data_uris: Vec::new(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: None,
+            timestamp: None,
+            is_from_user_turn_boundary: true,
+        },
+    );
+
+    assert!(
+        reducer
+            .last_thread_state_updates
+            .read()
+            .unwrap()
+            .contains_key(&key)
+    );
+    assert!(
+        reducer
+            .last_thread_item_upserts
+            .read()
+            .unwrap()
+            .keys()
+            .any(|(thread_key, _)| thread_key == &key)
+    );
+    assert!(
+        reducer
+            .dynamic_tool_arg_buffers
+            .read()
+            .unwrap()
+            .keys()
+            .any(|(thread_key, _)| thread_key == &key)
+    );
+
+    reducer.remove_server("srv");
+
+    assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
+    assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
+}
+
+#[test]
+fn dynamic_tool_arg_delta_buffers_clear_on_turn_completed() {
+    let reducer = AppStoreReducer::new();
+    let key = key_thread("thread-turn-completed");
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-turn-completed"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"widget_code":"<svg"#.to_string(),
+    });
+    assert_eq!(reducer.dynamic_tool_arg_buffers.read().unwrap().len(), 1);
+
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key,
+        turn_id: "turn-1".to_string(),
+        error: Some("interrupted".to_string()),
+    });
+
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
+}
+
+#[test]
 fn dynamic_tool_arg_delta_buffers_are_scoped_per_call() {
     let reducer = AppStoreReducer::new();
     let key = key_thread("thread-3");

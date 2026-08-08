@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use crate::types::ThreadKey;
 use crate::types::{AppVoiceHandoffRequest, AppVoiceSpeaker, AppVoiceTranscriptUpdate};
@@ -24,13 +23,6 @@ struct VoiceRealtimeThreadState {
     pending_assistant_item_id: Option<String>,
     live_user_text: String,
     live_assistant_text: String,
-    last_delta: Option<LastDelta>,
-}
-
-struct LastDelta {
-    speaker: AppVoiceSpeaker,
-    delta: String,
-    timestamp: Instant,
 }
 
 impl VoiceRealtimeState {
@@ -150,7 +142,7 @@ impl VoiceRealtimeThreadState {
             return updates;
         }
 
-        let merged = merge_text(self.live_text(speaker), &text);
+        let merged = merge_final_text(self.live_text(speaker), &text);
         self.set_live_text(speaker, String::new());
         self.set_pending_item_id(speaker, None);
 
@@ -180,7 +172,7 @@ impl VoiceRealtimeThreadState {
         delta: &str,
         speaker: AppVoiceSpeaker,
     ) -> Vec<VoiceDerivedUpdate> {
-        if delta.is_empty() || self.should_skip_delta(delta, speaker) {
+        if delta.is_empty() {
             return Vec::new();
         }
 
@@ -195,24 +187,6 @@ impl VoiceRealtimeThreadState {
             text: merged,
             is_final: false,
         })]
-    }
-
-    fn should_skip_delta(&mut self, delta: &str, speaker: AppVoiceSpeaker) -> bool {
-        let now = Instant::now();
-        if let Some(previous) = &self.last_delta {
-            if previous.speaker == speaker
-                && previous.delta == delta
-                && now.duration_since(previous.timestamp) < Duration::from_millis(500)
-            {
-                return true;
-            }
-        }
-        self.last_delta = Some(LastDelta {
-            speaker,
-            delta: delta.to_string(),
-            timestamp: now,
-        });
-        false
     }
 
     fn flush_live_transcript(&mut self, speaker: AppVoiceSpeaker) -> Option<VoiceDerivedUpdate> {
@@ -294,6 +268,16 @@ fn merge_text(existing: &str, incoming: &str) -> String {
     if existing.is_empty() {
         return incoming.to_string();
     }
+    if incoming.len() > existing.len() && incoming.starts_with(existing) {
+        return incoming.to_string();
+    }
+    format!("{existing}{incoming}")
+}
+
+fn merge_final_text(existing: &str, incoming: &str) -> String {
+    if existing.is_empty() {
+        return incoming.to_string();
+    }
     if existing == incoming || existing.ends_with(incoming) {
         return existing.to_string();
     }
@@ -372,7 +356,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn transcript_deltas_are_merged_and_deduped() {
+    fn cumulative_transcript_deltas_replace_their_prefix() {
         let state = VoiceRealtimeState::default();
         let key = ThreadKey {
             server_id: "local".into(),
@@ -381,28 +365,46 @@ mod tests {
 
         let updates = state.handle_item(
             &key,
-            &json!({"type": "input_transcript_delta", "delta": "Hel"}),
+            &json!({"type": "input_transcript_delta", "delta": "hel"}),
         );
         let [VoiceDerivedUpdate::Transcript(first)] = updates.as_slice() else {
             panic!("expected transcript update");
         };
-        assert_eq!(first.text, "Hel");
+        assert_eq!(first.text, "hel");
         assert!(!first.is_final);
 
         let updates = state.handle_item(
             &key,
-            &json!({"type": "input_transcript_delta", "delta": "Hello"}),
+            &json!({"type": "input_transcript_delta", "delta": "hello"}),
         );
         let [VoiceDerivedUpdate::Transcript(second)] = updates.as_slice() else {
             panic!("expected merged transcript update");
         };
-        assert_eq!(second.text, "Hello");
+        assert_eq!(second.text, "hello");
+    }
 
-        let updates = state.handle_item(
-            &key,
-            &json!({"type": "input_transcript_delta", "delta": "Hello"}),
-        );
-        assert!(updates.is_empty());
+    #[test]
+    fn genuine_repeated_transcript_deltas_are_preserved() {
+        let key = ThreadKey {
+            server_id: "local".into(),
+            thread_id: "voice-thread".into(),
+        };
+
+        let repeated_word_state = VoiceRealtimeState::default();
+        repeated_word_state.handle_typed_transcript_delta(&key, "user", "ha");
+        let updates = repeated_word_state.handle_typed_transcript_delta(&key, "user", "ha");
+        let [VoiceDerivedUpdate::Transcript(repeated_word)] = updates.as_slice() else {
+            panic!("expected repeated transcript update");
+        };
+        assert_eq!(repeated_word.text, "haha");
+
+        let repeated_phrase_state = VoiceRealtimeState::default();
+        repeated_phrase_state.handle_typed_transcript_delta(&key, "user", "very");
+        let updates = repeated_phrase_state.handle_typed_transcript_delta(&key, "user", " very");
+        let [VoiceDerivedUpdate::Transcript(repeated_phrase)] = updates.as_slice() else {
+            panic!("expected repeated phrase update");
+        };
+        assert_eq!(repeated_phrase.text, "very very");
     }
 
     #[test]
