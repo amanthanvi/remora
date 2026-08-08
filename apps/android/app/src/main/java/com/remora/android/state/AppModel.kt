@@ -38,6 +38,7 @@ import uniffi.codex_mobile_client.MessageParser
 import uniffi.codex_mobile_client.ReconnectController
 import uniffi.codex_mobile_client.ServerBridge
 import uniffi.codex_mobile_client.SshBridge
+import uniffi.codex_mobile_client.TerminalSshTrustStore
 import uniffi.codex_mobile_client.ThreadKey
 import uniffi.codex_mobile_client.AppListThreadsRequest
 import uniffi.codex_mobile_client.AppLoginAccountRequest
@@ -45,6 +46,7 @@ import uniffi.codex_mobile_client.AppRefreshModelsRequest
 import uniffi.codex_mobile_client.AppReadThreadRequest
 import uniffi.codex_mobile_client.AppStartThreadRequest
 import uniffi.codex_mobile_client.registerAndroidTools
+import uniffi.codex_mobile_client.registerSshHostTrustStore
 import uniffi.codex_mobile_client.threadPermissionsAreAuthoritative
 
 class LocalAccountLoginRequiredException(val serverId: String) :
@@ -135,6 +137,11 @@ class AppModel private constructor(context: android.content.Context) {
     val appContext: android.content.Context = context
     init {
         UniffiInit.ensure(context)
+        // Every Rust SSH path (app-server connect, SSH bridge, background
+        // reconnect) verifies host keys against this store. The terminal
+        // hands its own store in per session; these paths have no such seam,
+        // so register the same encrypted backend once per process.
+        registerSshHostTrustStore(TerminalSshTrustStore(SshTrustStore(context)))
         registerBundledCliTools()
         LLog.bootstrap(context)
         store = AppStore()

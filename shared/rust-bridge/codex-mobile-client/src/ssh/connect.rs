@@ -118,6 +118,30 @@ impl SshClient {
             client::connect(Arc::new(config), &*addr, handler),
         )
         .await;
+        // A rejected host key aborts the handshake, so `client::connect`
+        // resolves to `Err(russh::Error::UnknownKey)` rather than handing back
+        // a handle. Check the rejection flag *before* mapping the connect
+        // error, otherwise the typed host-key failure is unreachable and the
+        // caller only ever sees a generic "Unknown server key" connect error.
+        //
+        // `pinned` is unknown at this layer; the trust-aware connect wrapper
+        // enriches it with the stored fingerprint so callers can distinguish
+        // "changed key" from "unknown key".
+        let rejected_fingerprint = rejected_fp.lock().await.take();
+        if let Some(fp) = rejected_fingerprint {
+            warn!("SSH host key rejected addr={} fingerprint={}", addr, fp);
+            append_bridge_info_log(&format!(
+                "ssh_host_key_rejected addr={} fingerprint={}",
+                addr, fp
+            ));
+            return Err(SshError::HostKeyVerification {
+                host: normalize_host(&credentials.host),
+                port: credentials.port,
+                fingerprint: fp,
+                pinned: None,
+            });
+        }
+
         let mut handle = match connect_result {
             Ok(Ok(handle)) => handle,
             Ok(Err(error)) => {
@@ -134,16 +158,6 @@ impl SshClient {
                 return Err(SshError::Timeout);
             }
         };
-
-        // If the handler rejected the key, surface a specific error.
-        if let Some(fp) = rejected_fp.lock().await.take() {
-            warn!("SSH host key rejected addr={} fingerprint={}", addr, fp);
-            append_bridge_info_log(&format!(
-                "ssh_host_key_rejected addr={} fingerprint={}",
-                addr, fp
-            ));
-            return Err(SshError::HostKeyVerification { fingerprint: fp });
-        }
 
         let auth_result = match &credentials.auth {
             SshAuth::Password(pw) => handle

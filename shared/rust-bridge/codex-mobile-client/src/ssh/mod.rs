@@ -18,6 +18,7 @@
 //! - [`keychain`] — macOS unlock-keychain via stdin
 //! - [`codex_binary`] — `RemoteCodexBinary` + per-shell launch builders
 //! - [`clixml`] — strip PowerShell CLIXML envelopes
+//! - [`host_trust`] — shared host-key pinning policy for every SSH path
 //! - [`types`] — public records (`SshCredentials`, `SshError`, …)
 
 mod bootstrap;
@@ -27,11 +28,14 @@ mod connect;
 mod detect;
 mod exec;
 mod forwarding;
+mod host_trust;
 mod keychain;
 mod port_forward;
 mod probes;
 mod resolve_binary;
 mod terminal_channel;
+#[cfg(test)]
+pub(crate) mod test_server;
 mod types;
 
 use std::collections::HashMap;
@@ -54,6 +58,13 @@ pub(crate) use crate::shell_quoting::posix_quote as shell_quote;
 pub(crate) use crate::ssh_scripts::posix::{PACKAGE_MANAGER_PROBE, PROFILE_INIT};
 pub(crate) use codex_binary::RemoteCodexBinary;
 pub(crate) use exec::build_posix_exec_command;
+pub use host_trust::register_host_trust_store;
+#[cfg(test)]
+pub(crate) use host_trust::{HOST_TRUST_TEST_LOCK, clear_host_trust_store};
+pub(crate) use host_trust::{
+    connect_with_host_trust, connect_with_trust_store, global_host_trust_store,
+    host_key_error_message,
+};
 pub use types::{
     ExecResult, SshAuth, SshBootstrapResult, SshCredentials, SshError, SshExecChild, SshExecIo,
     SshExecStderr, SshExecStdin, SshExecStdout,

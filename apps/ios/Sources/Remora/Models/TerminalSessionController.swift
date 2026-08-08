@@ -107,7 +107,13 @@ final class TerminalSessionController {
 
     func trustUnknownSshHostAndRetry() async {
         guard let challenge = sshTrustChallenge else { return }
-        SwiftSshTrustBackend.shared.write(
+        // Record through the Rust store, not the backend directly: `pin`
+        // applies the same host normalization (case, brackets, IPv6 zone id)
+        // that the connect-time lookup uses. Writing the raw challenge host
+        // straight to the backend would file the approval under a
+        // noncanonical key, leaving the canonical spelling unpinned and still
+        // eligible for trust-on-first-use.
+        TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).pin(
             host: challenge.host,
             port: challenge.port,
             fingerprint: challenge.fingerprint

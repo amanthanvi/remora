@@ -3,6 +3,7 @@ use crate::ffi::shared::{shared_mobile_client, shared_runtime};
 use crate::session::connection::ServerConfig;
 use crate::ssh::{
     RemoteShell, SshAuth, SshBootstrapTransport, SshClient, SshCredentials, SshError,
+    connect_with_host_trust,
 };
 use crate::store::{
     AppConnectionProgressSnapshot, AppConnectionStepKind, AppConnectionStepState,
@@ -109,12 +110,9 @@ impl SshBridge {
         let rt = Arc::clone(&self.rt);
         let session = tokio::task::spawn_blocking(move || {
             rt.block_on(async move {
-                SshClient::connect(
-                    credentials,
-                    Box::new(move |_fingerprint| Box::pin(async move { accept_unknown_host })),
-                )
-                .await
-                .map_err(map_ssh_error)
+                connect_with_host_trust(credentials, accept_unknown_host)
+                    .await
+                    .map_err(map_ssh_error)
             })
         })
         .await
@@ -229,12 +227,9 @@ impl SshBridge {
             unlock_macos_keychain,
         };
         let session = Arc::new(
-            SshClient::connect(
-                credentials,
-                Box::new(move |_fingerprint| Box::pin(async move { accept_unknown_host })),
-            )
-            .await
-            .map_err(map_ssh_error)?,
+            connect_with_host_trust(credentials, accept_unknown_host)
+                .await
+                .map_err(map_ssh_error)?,
         );
         let shell = session.detect_remote_shell().await;
         let wake_mac = self.ssh_read_wake_mac(Arc::clone(&session)).await;
@@ -366,6 +361,19 @@ impl SshBridge {
     }
 }
 
+/// Install the process-wide SSH host-key trust store.
+///
+/// The terminal path receives a store per session-open; the app-server SSH
+/// paths (connect, SSH bridge, automatic reconnect) have no user-facing call
+/// that could carry one, so each platform registers its keychain-backed
+/// backend once at startup and every SSH path shares the same pins.
+///
+/// Safe to call more than once; the last registration wins.
+#[uniffi::export]
+pub fn register_ssh_host_trust_store(store: Arc<crate::terminal::TerminalSshTrustStore>) {
+    crate::ssh::register_host_trust_store(store);
+}
+
 pub(crate) fn ssh_auth_kind(auth: &SshAuth) -> &'static str {
     match auth {
         SshAuth::Password(_) => "password",
@@ -426,12 +434,9 @@ pub(crate) async fn run_guided_ssh_connect(
         working_dir.as_deref().unwrap_or("<none>")
     );
     let ssh_client = Arc::new(
-        SshClient::connect(
-            credentials.clone(),
-            Box::new(move |_fingerprint| Box::pin(async move { accept_unknown_host })),
-        )
-        .await
-        .map_err(map_ssh_error)?,
+        connect_with_host_trust(credentials.clone(), accept_unknown_host)
+            .await
+            .map_err(map_ssh_error)?,
     );
     info!(
         "guided ssh connect connected to ssh server_id={} host={} ssh_port={}",
@@ -634,8 +639,11 @@ pub(crate) fn map_ssh_error(error: SshError) -> ClientError {
         | SshError::ExecFailed {
             stderr: message, ..
         } => ClientError::Transport(message),
-        SshError::HostKeyVerification { fingerprint } => {
-            ClientError::Transport(format!("host key verification failed: {fingerprint}"))
+        // Display is already the stable `host-key-changed:` / `unknown-host:` /
+        // `host-key-store-unavailable:` message platforms can parse; see
+        // `ssh::host_trust`.
+        error @ (SshError::HostKeyVerification { .. } | SshError::HostKeyStoreUnavailable { .. }) => {
+            ClientError::Transport(error.to_string())
         }
         SshError::Timeout => ClientError::Transport("SSH operation timed out".into()),
         SshError::Disconnected => ClientError::Transport("SSH session disconnected".into()),

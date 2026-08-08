@@ -122,9 +122,21 @@ fn test_ssh_error_display() {
     assert_eq!(e.to_string(), "connection failed: refused");
 
     let e = SshError::HostKeyVerification {
+        host: "host.example".into(),
+        port: 22,
         fingerprint: "SHA256:abc".into(),
+        pinned: None,
     };
     assert!(e.to_string().contains("SHA256:abc"));
+    assert!(e.to_string().starts_with("unknown-host:host.example:22"));
+
+    let e = SshError::HostKeyVerification {
+        host: "host.example".into(),
+        port: 22,
+        fingerprint: "SHA256:new".into(),
+        pinned: Some("SHA256:old".into()),
+    };
+    assert!(e.to_string().starts_with("host-key-changed:host.example:22"));
 
     let e = SshError::ExecFailed {
         exit_code: 127,

@@ -144,7 +144,13 @@ class TerminalSessionController(
 
     fun trustUnknownSshHostAndRetry() {
         val challenge = sshTrustChallenge ?: return
-        SshTrustStore(AppModel.shared.appContext).write(
+        // Record through the Rust store, not the backend directly: `pin`
+        // applies the same host normalization (case, brackets, IPv6 zone id)
+        // that the connect-time lookup uses. Writing the raw challenge host
+        // straight to the backend would file the approval under a
+        // noncanonical key, leaving the canonical spelling unpinned and still
+        // eligible for trust-on-first-use.
+        TerminalSshTrustStore(SshTrustStore(AppModel.shared.appContext)).pin(
             host = challenge.host,
             port = challenge.port,
             fingerprint = challenge.fingerprint,
