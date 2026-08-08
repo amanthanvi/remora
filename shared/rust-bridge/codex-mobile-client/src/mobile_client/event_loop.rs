@@ -51,12 +51,6 @@ impl MobileClient {
                         runtime_kind,
                         notification,
                     }) => {
-                        note_notification_runtime(
-                            &app_store,
-                            &server_id,
-                            runtime_kind.clone(),
-                            &notification,
-                        );
                         if let upstream::ServerNotification::AccountLoginCompleted(payload) =
                             &notification
                         {
@@ -262,14 +256,6 @@ impl MobileClient {
             self.reconcile_transport_error(server_id, &error);
             error.to_string()
         })
-    }
-
-    /// Return the configs of all currently connected servers (public for tooling).
-    pub fn connected_server_configs(&self) -> Vec<ServerConfig> {
-        self.sessions_read()
-            .values()
-            .map(|s| s.config().clone())
-            .collect()
     }
 
     pub(crate) fn snapshot_thread(&self, key: &ThreadKey) -> Result<ThreadSnapshot, RpcError> {
