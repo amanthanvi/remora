@@ -396,8 +396,7 @@ struct SettingsView: View {
         do {
             try SavedServerStore.remove(serverId: server.id)
         } catch {
-            serverEditError = error.localizedDescription
-            return
+            guard savedServerMutationCommitted(despite: error) else { return }
         }
         Task { await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh) }
         appModel.serverBridge.disconnectServer(serverId: server.id)
@@ -410,8 +409,7 @@ struct SettingsView: View {
         do {
             try SavedServerStore.replace(configuration.savedServer)
         } catch {
-            serverEditError = error.localizedDescription
-            return
+            guard savedServerMutationCommitted(despite: error) else { return }
         }
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
@@ -423,6 +421,15 @@ struct SettingsView: View {
 
         guard reconnect else { return }
         reconnectServer(using: configuration)
+    }
+
+    private func savedServerMutationCommitted(despite error: Error) -> Bool {
+        serverEditError = error.localizedDescription
+        guard let storeError = error as? SavedServerStoreError else { return false }
+        if case .trustCleanupPending = storeError {
+            return true
+        }
+        return false
     }
 
     private func reconnectServer(using configuration: SettingsServerConnectionConfiguration) {

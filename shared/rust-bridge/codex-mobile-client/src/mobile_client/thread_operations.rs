@@ -1254,18 +1254,29 @@ impl MobileClient {
                 "MobileClient: blocked turn start while ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
             );
+            self.release_undispatched_autosend_claim(&thread_key, autosend_claim_id.as_deref());
             return Err(RpcError::Timeout);
         }
         let turn_start_lock = self.turn_start_lock(&thread_key);
         let mut turn_start_guard =
-            tokio::time::timeout(self.turn_request_timeout, turn_start_lock.lock_owned())
+            match tokio::time::timeout(self.turn_request_timeout, turn_start_lock.lock_owned())
                 .await
-                .map_err(|_| RpcError::Timeout)?;
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.release_undispatched_autosend_claim(
+                        &thread_key,
+                        autosend_claim_id.as_deref(),
+                    );
+                    return Err(RpcError::Timeout);
+                }
+            };
         if self.pending_turn_reconciliation().contains_key(&thread_key) {
             warn!(
                 "MobileClient: blocked turn start after lock acquisition because ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
             );
+            self.release_undispatched_autosend_claim(&thread_key, autosend_claim_id.as_deref());
             return Err(RpcError::Timeout);
         }
         self.app_store
@@ -1504,6 +1515,17 @@ impl MobileClient {
             // The detached task owns finalization and the per-thread lock, so
             // neither timeout nor caller cancellation can reopen this input.
             Err(_) => Err(RpcError::Timeout),
+        }
+    }
+
+    fn release_undispatched_autosend_claim(
+        &self,
+        thread_key: &ThreadKey,
+        autosend_claim_id: Option<&str>,
+    ) {
+        if let Some(claim_id) = autosend_claim_id {
+            self.app_store
+                .release_thread_follow_up_claim(thread_key, claim_id);
         }
     }
 

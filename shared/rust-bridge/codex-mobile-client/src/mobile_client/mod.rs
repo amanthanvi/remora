@@ -1191,6 +1191,7 @@ pub(super) fn run_post_reconnect_resubscribe(
         );
 
         for key in keys_to_resume {
+            let expected_generation = app_store.server_event_generation(&server_id);
             // Force-authoritative so the response carries the embedded
             // turn list. Without it `thread/resume` short-circuits via the
             // direct-resume marker (or returns an empty turn list under
@@ -1198,11 +1199,19 @@ pub(super) fn run_post_reconnect_resubscribe(
             // any stale `active_turn_id` whose turn has already completed
             // server-side.
             match client
-                .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
+                .force_refresh_thread_authoritative_if_ui_generation(
+                    &key.server_id,
+                    &key.thread_id,
+                    expected_generation,
+                )
                 .await
             {
-                Ok(()) => debug!(
+                Ok(true) => debug!(
                     "MobileClient: post-reconnect resubscribe ok server_id={} thread_id={}",
+                    key.server_id, key.thread_id
+                ),
+                Ok(false) => debug!(
+                    "MobileClient: post-reconnect resubscribe discarded stale response server_id={} thread_id={}",
                     key.server_id, key.thread_id
                 ),
                 Err(error) => warn!(

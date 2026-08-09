@@ -2793,6 +2793,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn autosend_lock_timeout_releases_undispatched_claim() {
+        let client =
+            MobileClient::new_with_turn_request_timeout(tokio::time::Duration::from_millis(20));
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config, None, None, None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let lock_guard = client.turn_start_lock(&key).lock_owned().await;
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        drop(lock_guard);
+
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn autosend_blocked_by_pending_reconciliation_releases_undispatched_claim() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config, None, None, None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
+    }
+
+    #[tokio::test]
     async fn concurrent_manual_turn_starts_serialize_and_queue_second_message() {
         let client = MobileClient::new();
         let server_id = "srv";

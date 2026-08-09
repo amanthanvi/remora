@@ -183,6 +183,54 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertEqual(unpinned.first?.1, 22)
     }
 
+    func testRemovingDuplicateIdsDurablyCleansEveryUniqueSSHTrustTarget() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let first = makeServer(
+            id: "duplicate",
+            hostname: "first.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let second = makeServer(
+            id: "duplicate",
+            hostname: "second.example",
+            port: nil,
+            sshPort: 2_222,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([first, second], to: defaults)
+        var initialAttempts: [(String, UInt16)] = []
+
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(
+                serverId: first.id,
+                from: defaults,
+                pinned: { host, _ in "SHA256:\(host)" }
+            ) { host, port in
+                initialAttempts.append((host, port))
+                if host == second.hostname {
+                    throw NSError(domain: "SavedServerStoreTests", code: 8)
+                }
+            }
+        )
+
+        XCTAssertTrue(SavedServerStore.load(from: defaults).isEmpty)
+        XCTAssertEqual(initialAttempts.map(\.0), [first.hostname, second.hostname])
+        XCTAssertNotNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+
+        var replayed: [(String, UInt16)] = []
+        XCTAssertTrue(
+            try SavedServerStore.resumePendingTrustCleanup(from: defaults) { host, port in
+                replayed.append((host, port))
+            }
+        )
+        XCTAssertEqual(replayed.map(\.0), [first.hostname, second.hostname])
+        XCTAssertEqual(replayed.map(\.1), [first.sshPort, second.sshPort])
+        XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+    }
+
     func testFailedPinRemovalRetainsDurableJournalAndReplaysExactlyOnce() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
