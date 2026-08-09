@@ -67,10 +67,21 @@ enum SavedServerStore {
     }
 
     static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
-        guard defaults.object(forKey: sshTrustCleanupJournalKey) == nil else { return }
-        guard let data = try? JSONEncoder().encode(servers) else { return }
-        defaults.set(data, forKey: savedServersKey)
-        NotificationCenter.default.post(name: .remoraSavedServersDidChange, object: nil)
+        do {
+            if let pending = try pendingTrustCleanup(from: defaults) {
+                let refreshed = SSHTrustCleanupJournal(
+                    servers: servers,
+                    host: pending.host,
+                    port: pending.port
+                )
+                let journalData = try JSONEncoder().encode(refreshed)
+                try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
+            }
+            try persistServers(servers, to: defaults)
+        } catch {
+            return
+        }
+        postSavedServersDidChange()
     }
 
     static func load() -> [SavedServer] {

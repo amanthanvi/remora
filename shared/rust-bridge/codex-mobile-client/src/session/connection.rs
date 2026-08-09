@@ -2267,6 +2267,19 @@ async fn request_remote_client(
     }
 }
 
+fn request_is_safe_to_replay_after_transport_error(request: &ClientRequest) -> bool {
+    matches!(
+        request,
+        ClientRequest::GetAccount { .. }
+            | ClientRequest::GetAccountRateLimits { .. }
+            | ClientRequest::ModelList { .. }
+            | ClientRequest::ThreadList { .. }
+            | ClientRequest::ThreadRead { .. }
+            | ClientRequest::ThreadTurnsList { .. }
+            | ClientRequest::CollaborationModeList { .. }
+    )
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the worker owns independent runtime channels and reconnect resources that must move into one spawned task"
@@ -2298,10 +2311,8 @@ fn spawn_remote_runtime_worker(
                             response_tx,
                         } => {
                             let request_retry = request.clone();
-                            let ambiguous_turn_mutation = matches!(
-                                &request,
-                                ClientRequest::TurnStart { .. } | ClientRequest::TurnSteer { .. }
-                            );
+                            let safe_to_replay =
+                                request_is_safe_to_replay_after_transport_error(&request);
                             if turn_deadline
                                 .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
                             {
@@ -2343,7 +2354,7 @@ fn spawn_remote_runtime_worker(
                                         reconnect_generation,
                                         replay_outcome,
                                     );
-                                    if !ambiguous_turn_mutation {
+                                    if safe_to_replay {
                                         result = request_remote_client(
                                             &client,
                                             request_retry,
@@ -3007,6 +3018,74 @@ mod tests {
             Some(ConnectionAttemptOutcome::Succeeded)
         );
         assert!(entries.iter().all(|entry| entry.route == "managed"));
+
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("worker should accept shutdown");
+        worker.await.expect("worker should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_does_not_replay_command_exec_after_stream_drop() {
+        let initial_client = app_server_client_for_json_line_server(
+            TestJsonLineServer::DropOnFirstRequest,
+            "drop-command-test-bridge",
+        )
+        .await;
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let reconnect_transport: Arc<dyn RemoteTransport> = Arc::new(TestReconnectTransport {
+            reconnects: Arc::clone(&reconnects),
+        });
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            initial_client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: health_state,
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("drop-command-test-bridge"),
+            "drop-command-test-bridge".to_string(),
+            REMOTE_TURN_REQUEST_DEADLINE,
+            Some(reconnect_transport),
+        );
+
+        let request: ClientRequest = serde_json::from_value(json!({
+            "id": 1,
+            "method": "command/exec",
+            "params": {"command": ["touch", "must-run-once"]}
+        }))
+        .expect("valid command/exec request");
+        let (response_tx, response_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request,
+                turn_deadline: None,
+                response_tx,
+            })
+            .await
+            .expect("worker should accept command/exec");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), response_rx)
+            .await
+            .expect("dropped command/exec should reconnect instead of hanging")
+            .expect("worker should resolve the response waiter")
+            .expect_err("ambiguous command/exec must not be replayed");
+        assert!(matches!(error, RpcError::Transport(_)));
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
 
         command_tx
             .send(SessionCommand::Shutdown)
