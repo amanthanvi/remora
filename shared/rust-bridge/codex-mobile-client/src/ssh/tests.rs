@@ -28,6 +28,11 @@ fn test_normalize_host_zone_id_removal() {
 }
 
 #[test]
+fn test_normalize_host_key_is_case_insensitive() {
+    assert_eq!(normalize_host_key("  EXAMPLE.COM  "), "example.com");
+}
+
+#[test]
 fn test_shell_quote_simple() {
     // Detailed contract lives in shell_quoting; this guards the re-export wiring.
     assert_eq!(shell_quote("hello"), "'hello'");

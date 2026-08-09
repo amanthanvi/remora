@@ -572,6 +572,7 @@ impl AppStoreReducer {
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
         for key in removed_thread_keys {
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -616,6 +617,12 @@ impl AppStoreReducer {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
             let existing = snapshot.threads.get(&key).cloned();
             if let Some(existing) = existing.as_ref() {
+                let consume_claimed_follow_up = existing.active_turn_id.is_none()
+                    && thread.active_turn_id.is_some()
+                    && existing
+                        .queued_follow_up_drafts
+                        .first()
+                        .is_some_and(|draft| draft.autosend_claimed);
                 // Diagnostic for the duplicate-user-message bug (task #11):
                 // catch transient overlap where the incoming snapshot's
                 // hydrated User items match an overlay that's already in
@@ -666,6 +673,9 @@ impl AppStoreReducer {
                 thread.is_resumed = thread.is_resumed || existing.is_resumed;
                 preserve_local_overlay_items(existing, &mut thread);
                 preserve_queued_follow_ups(existing, &mut thread);
+                if consume_claimed_follow_up {
+                    remove_first_queued_follow_up(&mut thread);
+                }
                 // Preserve existing items when the incoming snapshot has none
                 // (e.g. thread/read with include_turns=false).
                 if thread.items.is_empty() && !existing.items.is_empty() {
@@ -709,6 +719,7 @@ impl AppStoreReducer {
                 preview,
                 inputs: Vec::new(),
                 source_message_json: None,
+                autosend_claimed: false,
             },
         );
     }
@@ -727,6 +738,23 @@ impl AppStoreReducer {
         {
             self.emit_thread_metadata_changed(key);
         }
+    }
+
+    pub(crate) fn try_claim_first_queued_follow_up(
+        &self,
+        key: &ThreadKey,
+    ) -> Option<QueuedFollowUpDraft> {
+        let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+        let thread = snapshot.threads.get_mut(key)?;
+        if thread.active_turn_id.is_some() {
+            return None;
+        }
+        let draft = thread.queued_follow_up_drafts.first_mut()?;
+        if draft.autosend_claimed {
+            return None;
+        }
+        draft.autosend_claimed = true;
+        Some(draft.clone())
     }
 
     pub(crate) fn stage_local_user_message_overlay(

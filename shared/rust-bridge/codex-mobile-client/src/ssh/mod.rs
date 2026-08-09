@@ -142,5 +142,9 @@ pub(super) fn normalize_host(host: &str) -> String {
     h
 }
 
+pub(super) fn normalize_host_key(host: &str) -> String {
+    normalize_host(host).to_lowercase()
+}
+
 #[cfg(test)]
 mod tests;

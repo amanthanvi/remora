@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::backend::{OpenBackendResult, TerminalBackend, TerminalBackendEvent};
 use super::session::{TerminalError, TerminalSize};
-use super::ssh_known_hosts::{TerminalSshTrustStore, normalize_host};
+use super::ssh_known_hosts::TerminalSshTrustStore;
 use crate::ssh::{
     SshAuth, SshClient, SshCredentials, SshError, connect_with_trust_store, global_host_trust_store,
 };
@@ -72,7 +72,6 @@ pub(crate) async fn open(
     size: TerminalSize,
     trust_store: Option<Arc<TerminalSshTrustStore>>,
 ) -> Result<OpenBackendResult, TerminalError> {
-    let normalized = normalize_host(&host);
     let credentials = SshCredentials {
         host: host.clone(),
         port,
@@ -91,7 +90,7 @@ pub(crate) async fn open(
         accept_unknown_host,
     )
     .await
-    .map_err(|error| map_ssh_error(error, &normalized))?;
+    .map_err(map_ssh_error)?;
     let client = Arc::new(client);
 
     let shell_override = shell.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -99,7 +98,7 @@ pub(crate) async fn open(
     let channel = client
         .open_terminal_channel(size.cols, size.rows, shell_override, cwd_arg)
         .await
-        .map_err(|error| map_ssh_error(error, &normalized))?;
+        .map_err(map_ssh_error)?;
 
     let (control_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
     let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
@@ -229,26 +228,19 @@ async fn drive_channel(
         .await;
 }
 
-fn map_ssh_error(error: SshError, host: &str) -> TerminalError {
+fn map_ssh_error(error: SshError) -> TerminalError {
     match error {
         SshError::HostKeyVerification {
+            host,
+            port,
             fingerprint,
             pinned,
-            ..
-        } => {
-            // The russh callback rejected the key. If we had a pin, the
-            // remote fingerprint differed from it; if not, the user did
-            // not auto-accept unknown hosts.
-            //
-            // These two detail strings are a platform-parsed contract
-            // (`TerminalSessionController` on both platforms keys off them).
-            // Keep them byte-for-byte stable.
-            let detail = match pinned {
-                Some(_) => format!("host-key-changed:{host}:{fingerprint}"),
-                None => format!("unknown-host:{fingerprint}"),
-            };
-            TerminalError::Backend { detail }
-        }
+        } => TerminalError::SshHostKeyVerification {
+            host,
+            port,
+            fingerprint,
+            pinned,
+        },
         SshError::HostKeyStoreUnavailable { message, .. } => TerminalError::Backend {
             detail: format!("trust-store-unavailable:{message}"),
         },
@@ -279,44 +271,48 @@ mod tests {
     use crate::terminal::session::{TerminalBackendKind, TerminalOutputListener, TerminalSession};
     use std::sync::Mutex as StdMutex;
 
-    /// The two detail strings below are a contract with
-    /// `TerminalSessionController` on both platforms, which string-matches
-    /// them to decide between "refused, key changed" and the
-    /// "trust this fingerprint?" prompt. Generalizing the trust policy into
-    /// `ssh::host_trust` must not perturb a single byte, so assert exact
-    /// equality rather than a prefix.
     #[test]
-    fn terminal_host_key_details_keep_their_exact_legacy_wire_format() {
-        let changed = map_ssh_error(
-            SshError::HostKeyVerification {
-                host: "host.example".into(),
-                port: 22,
-                fingerprint: "SHA256:new".into(),
-                pinned: Some("SHA256:old".into()),
-            },
-            "host.example",
-        );
+    fn terminal_host_key_errors_are_typed() {
+        let changed = map_ssh_error(SshError::HostKeyVerification {
+            host: "host.example".into(),
+            port: 22,
+            fingerprint: "SHA256:new".into(),
+            pinned: Some("SHA256:old".into()),
+        });
         match changed {
-            TerminalError::Backend { detail } => {
-                assert_eq!(detail, "host-key-changed:host.example:SHA256:new");
+            TerminalError::SshHostKeyVerification {
+                host,
+                port,
+                fingerprint,
+                pinned,
+            } => {
+                assert_eq!(host, "host.example");
+                assert_eq!(port, 22);
+                assert_eq!(fingerprint, "SHA256:new");
+                assert_eq!(pinned.as_deref(), Some("SHA256:old"));
             }
-            other => panic!("expected Backend, got {other:?}"),
+            other => panic!("expected SshHostKeyVerification, got {other:?}"),
         }
 
-        let unknown = map_ssh_error(
-            SshError::HostKeyVerification {
-                host: "host.example".into(),
-                port: 22,
-                fingerprint: "SHA256:new".into(),
-                pinned: None,
-            },
-            "host.example",
-        );
+        let unknown = map_ssh_error(SshError::HostKeyVerification {
+            host: "host.example".into(),
+            port: 2222,
+            fingerprint: "SHA256:new".into(),
+            pinned: None,
+        });
         match unknown {
-            TerminalError::Backend { detail } => {
-                assert_eq!(detail, "unknown-host:SHA256:new");
+            TerminalError::SshHostKeyVerification {
+                host,
+                port,
+                fingerprint,
+                pinned,
+            } => {
+                assert_eq!(host, "host.example");
+                assert_eq!(port, 2222);
+                assert_eq!(fingerprint, "SHA256:new");
+                assert_eq!(pinned, None);
             }
-            other => panic!("expected Backend, got {other:?}"),
+            other => panic!("expected SshHostKeyVerification, got {other:?}"),
         }
     }
 

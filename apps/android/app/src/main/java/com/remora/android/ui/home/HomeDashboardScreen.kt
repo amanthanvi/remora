@@ -208,10 +208,10 @@ fun HomeDashboardScreen(
         }
     }
 
-    // Saved apps by origin thread id. The store's `.apps` StateFlow is kept
-    // fresh by AppModel's handleUpdate on SavedAppsChanged (R3), plus a
-    // best-effort reload on home re-entry to catch any changes that arrived
-    // while we were off-screen.
+    // All saved apps shown by the header Apps action. The store's `.apps`
+    // StateFlow is kept fresh by AppModel's handleUpdate on SavedAppsChanged
+    // (R3), plus a best-effort reload on home re-entry to catch any changes
+    // that arrived while we were off-screen.
     LaunchedEffect(Unit) {
         try { com.remora.android.state.SavedAppsStore.reload(context) } catch (_: Exception) {}
     }
@@ -1296,4 +1296,3 @@ private fun Rect.relativeTo(root: Rect): Rect {
         bottom = bottom - root.top,
     )
 }
-

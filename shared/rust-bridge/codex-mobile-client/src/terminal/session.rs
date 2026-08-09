@@ -43,6 +43,13 @@ pub enum TerminalError {
     InvalidSize { detail: String },
     #[error("Backend: {detail}")]
     Backend { detail: String },
+    #[error("SSH host key verification failed for {host}:{port}: {fingerprint}")]
+    SshHostKeyVerification {
+        host: String,
+        port: u16,
+        fingerprint: String,
+        pinned: Option<String>,
+    },
     #[error("Terminal session is closed")]
     Closed,
 }

@@ -245,16 +245,7 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
     client: Arc<MobileClient>,
     key: ThreadKey,
 ) {
-    let snapshot = client.app_store.snapshot();
-    let Some(thread) = snapshot.threads.get(&key).cloned() else {
-        return;
-    };
-    if thread.active_turn_id.is_some() || thread.queued_follow_up_drafts.is_empty() {
-        return;
-    }
-
-    let next = thread.queued_follow_up_drafts.first().cloned();
-    let Some(draft) = next else {
+    let Some(draft) = client.app_store.try_claim_first_queued_follow_up(&key) else {
         return;
     };
     let result = client
@@ -487,6 +478,64 @@ mod tests {
             requests.lock().expect("request log lock").as_slice(),
             ["claude:turn/start"]
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_queued_follow_up_autosend_claims_the_draft_once() {
+        let client = Arc::new(MobileClient::new());
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "continue");
+
+        let requests = Arc::new(StdMutex::new(0usize));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                *requests.lock().expect("request count lock") += 1;
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let first = maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone());
+        let second = maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone());
+        tokio::join!(first, second);
+
+        assert_eq!(*requests.lock().expect("request count lock"), 1);
+        let snapshot = client.app_store.snapshot();
+        let thread = snapshot.threads.get(&key).expect("thread snapshot");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+
+        client.app_store.apply_ui_event(&UiEvent::TurnStarted {
+            key: key.clone(),
+            turn_id: "turn-follow-up".to_string(),
+        });
+        let snapshot = client.app_store.snapshot();
+        let thread = snapshot.threads.get(&key).expect("thread snapshot");
+        assert!(thread.queued_follow_up_drafts.is_empty());
     }
 
     #[tokio::test]

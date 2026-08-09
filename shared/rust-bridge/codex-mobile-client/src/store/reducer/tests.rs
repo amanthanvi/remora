@@ -1603,6 +1603,35 @@ fn turn_started_consumes_first_queued_follow_up_preview() {
 }
 
 #[test]
+fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-1".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "first".to_string(),
+        },
+    );
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
+
+    let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    authoritative.active_turn_id = Some("turn-follow-up".to_string());
+    authoritative.info.status = ThreadSummaryStatus::Active;
+    reducer.upsert_thread_snapshot(authoritative);
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+    assert!(thread.queued_follow_up_drafts.is_empty());
+}
+
+#[test]
 fn turn_started_binds_first_pending_local_user_message_overlay() {
     let reducer = AppStoreReducer::new();
     let key = ThreadKey {
@@ -2179,6 +2208,46 @@ fn remove_server_clears_all_thread_update_caches() {
 
     reducer.remove_server("srv");
 
+    assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
+    assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
+}
+
+#[test]
+fn authoritative_thread_removal_clears_all_thread_update_caches() {
+    let reducer = AppStoreReducer::new();
+    let config = make_server_config("srv");
+    let key = key_thread("thread-list-cleanup");
+    reducer.upsert_server(&config, ServerHealthSnapshot::Connected);
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-list-cleanup"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"widget_code":"<div>hi"#.to_string(),
+    });
+    reducer.emit_thread_metadata_changed(&key);
+    reducer.emit_thread_item_changed(
+        &key,
+        HydratedConversationItem {
+            id: "cached-item".to_string(),
+            content: HydratedConversationItemContent::User(HydratedUserMessageData {
+                text: "cached".to_string(),
+                image_data_uris: Vec::new(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: None,
+            timestamp: None,
+            is_from_user_turn_boundary: true,
+        },
+    );
+
+    reducer.finalize_thread_list_sync("srv", &HashSet::new());
+
+    assert!(!reducer.snapshot().threads.contains_key(&key));
     assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
     assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
     assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());

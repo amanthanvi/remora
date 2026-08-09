@@ -265,12 +265,6 @@ impl VoiceRealtimeThreadState {
 }
 
 fn merge_text(existing: &str, incoming: &str) -> String {
-    if existing.is_empty() {
-        return incoming.to_string();
-    }
-    if incoming.len() > existing.len() && incoming.starts_with(existing) {
-        return incoming.to_string();
-    }
     format!("{existing}{incoming}")
 }
 
@@ -356,7 +350,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn cumulative_transcript_deltas_replace_their_prefix() {
+    fn incremental_transcript_deltas_append_even_when_the_new_chunk_has_the_old_prefix() {
         let state = VoiceRealtimeState::default();
         let key = ThreadKey {
             server_id: "local".into(),
@@ -380,7 +374,7 @@ mod tests {
         let [VoiceDerivedUpdate::Transcript(second)] = updates.as_slice() else {
             panic!("expected merged transcript update");
         };
-        assert_eq!(second.text, "hello");
+        assert_eq!(second.text, "helhello");
     }
 
     #[test]

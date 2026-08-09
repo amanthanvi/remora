@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use super::{
     CONNECT_TIMEOUT, KEEPALIVE_INTERVAL, SSH_CHANNEL_BUFFER_SIZE, SSH_CHANNEL_WINDOW_SIZE,
     SSH_MAX_PACKET_SIZE, SshAuth, SshClient, SshCredentials, SshError, append_bridge_info_log,
-    normalize_host,
+    normalize_host, normalize_host_key,
 };
 
 pub(super) type HostKeyCallback = Arc<dyn Fn(&str) -> BoxFuture<'static, bool> + Send + Sync>;
@@ -135,7 +135,7 @@ impl SshClient {
                 addr, fp
             ));
             return Err(SshError::HostKeyVerification {
-                host: normalize_host(&credentials.host),
+                host: normalize_host_key(&credentials.host),
                 port: credentials.port,
                 fingerprint: fp,
                 pinned: None,

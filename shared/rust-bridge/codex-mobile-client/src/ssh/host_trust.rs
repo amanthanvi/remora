@@ -35,12 +35,13 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
+use std::sync::Weak;
 
 use futures::future::BoxFuture;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use super::{SshClient, SshCredentials, SshError, normalize_host};
+use super::{SshClient, SshCredentials, SshError, normalize_host_key};
 use crate::terminal::TerminalSshTrustStore;
 
 /// Process-wide trust store used by SSH paths that cannot thread a store
@@ -146,7 +147,7 @@ fn lookup_pin(
 /// same address both observe "no pin" and both record, so the loser can
 /// overwrite the winner's pin with a different key. Connections that already
 /// have a pin never take this lock — they only compare, never write.
-static TOFU_LOCKS: LazyLock<StdMutex<HashMap<(String, u16), Arc<Mutex<()>>>>> =
+static TOFU_LOCKS: LazyLock<StdMutex<HashMap<(String, u16), Weak<Mutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 fn tofu_lock(host: &str, port: u16) -> Arc<Mutex<()>> {
@@ -154,11 +155,14 @@ fn tofu_lock(host: &str, port: u16) -> Arc<Mutex<()>> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    Arc::clone(
-        guard
-            .entry((host.to_string(), port))
-            .or_insert_with(|| Arc::new(Mutex::new(()))),
-    )
+    guard.retain(|_, lock| lock.strong_count() > 0);
+    let key = (host.to_string(), port);
+    if let Some(lock) = guard.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    guard.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 /// Evaluates presented host keys for one `host:port` against the trust store.
@@ -184,7 +188,7 @@ impl HostKeyVerifier {
         port: u16,
         allow_first_use: bool,
     ) -> Result<Self, SshError> {
-        let host = normalize_host(host);
+        let host = normalize_host_key(host);
         let pinned = lookup_pin(store.as_deref(), &host, port)?;
         Ok(Self {
             host,
@@ -352,7 +356,7 @@ pub(crate) async fn connect_with_trust_store(
     credentials: SshCredentials,
     allow_first_use: bool,
 ) -> Result<SshClient, SshError> {
-    let host = normalize_host(&credentials.host);
+    let host = normalize_host_key(&credentials.host);
     let port = credentials.port;
     let may_record = allow_first_use
         && store.is_some()
@@ -459,6 +463,21 @@ mod tests {
             unknown_strict.decide("SHA256:whatever"),
             HostKeyDecision::Untrusted
         );
+    }
+
+    #[test]
+    fn tofu_locks_do_not_retain_inactive_host_entries() {
+        let first = tofu_lock("weak-lock-test.example", 2222);
+        let weak = Arc::downgrade(&first);
+        let same = tofu_lock("weak-lock-test.example", 2222);
+        assert!(Arc::ptr_eq(&first, &same));
+
+        drop(first);
+        drop(same);
+        assert!(weak.upgrade().is_none());
+
+        let replacement = tofu_lock("weak-lock-test.example", 2222);
+        assert_eq!(Arc::strong_count(&replacement), 1);
     }
 
     #[tokio::test]
