@@ -143,6 +143,17 @@ fn test_ssh_error_display() {
     };
     assert!(e.to_string().starts_with("host-key-changed:host.example:22"));
 
+    let e = SshError::HostKeyStoreUnavailable {
+        host: "host.example".into(),
+        port: 22,
+        message: "keychain locked".into(),
+    };
+    assert!(
+        e.to_string()
+            .starts_with("host-key-store-unavailable:host.example:22")
+    );
+    assert!(e.to_string().contains("keychain locked"));
+
     let e = SshError::ExecFailed {
         exit_code: 127,
         stderr: "not found".into(),

@@ -63,7 +63,8 @@ pub fn register_host_trust_store(store: Arc<TerminalSshTrustStore>) {
 
 /// Serializes tests that mutate the process-wide store.
 #[cfg(test)]
-pub(crate) static HOST_TRUST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static HOST_TRUST_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Drop the process-wide store so one test's registration cannot leak into
 /// another. Hold [`HOST_TRUST_TEST_LOCK`] across register/clear.

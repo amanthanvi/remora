@@ -1047,9 +1047,7 @@ mod tests {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        let _guard = crate::ssh::HOST_TRUST_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ssh::HOST_TRUST_TEST_LOCK.lock().await;
         let store = crate::ssh::test_server::in_memory_trust_store();
         let pinned_key = crate::ssh::test_server::test_host_key();
         let pinned = crate::ssh::test_server::host_key_fingerprint(&pinned_key);
