@@ -835,6 +835,40 @@ impl AppStoreReducer {
         }
     }
 
+    pub(crate) fn consume_thread_follow_up_claim_if_replayed(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+    ) -> bool {
+        let consumed = self
+            .mutate_thread_with_result(key, |thread| {
+                let Some(draft) = thread
+                    .queued_follow_up_drafts
+                    .first()
+                    .filter(|draft| draft.autosend_claimed)
+                else {
+                    return false;
+                };
+                let Some(local_item) = local_user_message_overlay_item(&draft.inputs) else {
+                    return false;
+                };
+                let replayed = authoritative_items.iter().any(|item| {
+                    item.is_from_user_turn_boundary
+                        && matches!(&item.content, HydratedConversationItemContent::User(_))
+                        && item.content.eq(&local_item.content)
+                });
+                if replayed {
+                    remove_first_queued_follow_up(thread);
+                }
+                replayed
+            })
+            .unwrap_or(false);
+        if consumed {
+            self.emit_thread_metadata_changed(key);
+        }
+        consumed
+    }
+
     pub(crate) fn stage_local_user_message_overlay(
         &self,
         key: &ThreadKey,

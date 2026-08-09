@@ -11,7 +11,7 @@ fn reconcile_completed_turn_probe(
 ) -> (ThreadSnapshot, bool) {
     let was_active = existing.active_turn_id.is_some();
     let mut target = existing.clone();
-    target.active_turn_id = None;
+    target.active_turn_id = active_turn_id_from_turns(turns);
     target.info.status = ThreadSummaryStatus::Idle;
     reconcile_active_turn(Some(existing), &mut target, turns);
     let active_turn_cleared = was_active && target.active_turn_id.is_none();
@@ -321,7 +321,11 @@ impl MobileClient {
                     if !applied {
                         return Ok(false);
                     }
-                    if force_authoritative && supports_pagination {
+                    let ambiguous_reconciliation_pending =
+                        self.pending_turn_reconciliation().contains(&key);
+                    if supports_pagination
+                        && (force_authoritative || ambiguous_reconciliation_pending)
+                    {
                         if !self
                             .reconcile_active_turn_via_turn_list_probe(
                                 server_id,
@@ -501,7 +505,9 @@ impl MobileClient {
             self.thread_runtime_routes()
                 .insert(key.clone(), runtime_kind.clone());
             self.mark_direct_resumed_thread(key.clone());
-            self.reconcile_ambiguous_turn_claim(key);
+            if !server_honored_exclude_turns {
+                self.reconcile_ambiguous_turn_claim(key);
+            }
         };
         let applied = self
             .apply_if_refresh_current(server_id, &request_session, lag_fence, apply_response)
@@ -526,6 +532,10 @@ impl MobileClient {
         lag_fence: Option<&LagRefreshFence<'_>>,
     ) -> bool {
         const PROBE_LIMIT: u32 = 5;
+        // Only reconcile the ambiguity that existed before this probe. A new
+        // turn failure that races the request must retain its fresh token for
+        // a later authoritative response.
+        let ambiguous_reconciliation_pending = self.pending_turn_reconciliation().contains(key);
         let request = upstream::ClientRequest::ThreadTurnsList {
             request_id: upstream::RequestId::Integer(crate::next_request_id()),
             params: upstream::ThreadTurnsListParams {
@@ -602,10 +612,16 @@ impl MobileClient {
                     .is_some();
             }
         };
-        let needs_repair_page = self
-            .app_store
-            .thread_snapshot(key)
-            .is_some_and(|existing| reconcile_completed_turn_probe(&existing, &response.data).1);
+        let terminal_turn_observed = response
+            .data
+            .iter()
+            .any(|turn| !matches!(turn.status, upstream::TurnStatus::InProgress));
+        let repair_required_for_ambiguity =
+            ambiguous_reconciliation_pending && terminal_turn_observed;
+        let needs_repair_page =
+            self.app_store.thread_snapshot(key).is_some_and(|existing| {
+                reconcile_completed_turn_probe(&existing, &response.data).1
+            }) || repair_required_for_ambiguity;
         let repair_page = if needs_repair_page {
             let request = upstream::ClientRequest::ThreadTurnsList {
                 request_id: upstream::RequestId::Integer(crate::next_request_id()),
@@ -638,9 +654,12 @@ impl MobileClient {
         } else {
             None
         };
-        let apply_response = |app_store: &AppStoreReducer| {
+        if repair_required_for_ambiguity && repair_page.is_none() {
+            return false;
+        }
+        let apply_response = |app_store: &AppStoreReducer| -> bool {
             let Some(existing) = app_store.thread_snapshot(key) else {
-                return;
+                return false;
             };
             let (target, active_turn_cleared) =
                 reconcile_completed_turn_probe(&existing, &response.data);
@@ -650,29 +669,32 @@ impl MobileClient {
             {
                 app_store.upsert_thread_snapshot(target);
             }
-            if active_turn_cleared
+            if (active_turn_cleared || repair_required_for_ambiguity)
                 && let Some(page) = repair_page.as_ref()
-                && let Err(error) = self.apply_thread_turns_page(
+            {
+                if let Err(error) = self.apply_thread_turns_page(
                     server_id,
                     thread_id,
                     page,
                     crate::types::AppTurnsSortDirection::Descending,
-                )
-            {
-                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                    "force_authoritative: completed-turn repair merge failed server={} thread={}: {}",
-                    server_id, thread_id, error
-                );
+                ) {
+                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "force_authoritative: completed-turn repair merge failed server={} thread={}: {}",
+                        server_id, thread_id, error
+                    );
+                    return false;
+                }
+                if repair_required_for_ambiguity {
+                    app_store.consume_thread_follow_up_claim_if_replayed(key, &page.turns);
+                }
             }
-            self.reconcile_ambiguous_turn_claim(key);
+            if ambiguous_reconciliation_pending {
+                self.reconcile_ambiguous_turn_claim(key);
+            }
+            true
         };
-        if self
-            .apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
-            .is_none()
-        {
-            return false;
-        }
-        true
+        self.apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
+            .unwrap_or(false)
     }
 
     /// Composite action: page a thread's older turns via `thread/turns/list`

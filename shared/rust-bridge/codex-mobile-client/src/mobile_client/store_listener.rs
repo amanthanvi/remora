@@ -148,6 +148,7 @@ pub(super) fn spawn_store_listener(
 }
 
 async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
+    let mut needs_retry = false;
     let sessions = client
         .sessions_read()
         .iter()
@@ -182,6 +183,7 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
                     "MobileClient: lag reconcile thread-list refresh failed for {}: {}",
                     server_id, error
                 );
+                needs_retry = true;
             }
         }
     }
@@ -218,12 +220,13 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
                     "MobileClient: lag reconcile failed for {} thread {}: {}",
                     key.server_id, key.thread_id, error
                 );
+                needs_retry = true;
                 continue;
             }
         }
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key).await;
     }
-    false
+    needs_retry
 }
 
 fn maybe_hydrate_collab_agent_metadata(
@@ -723,6 +726,23 @@ mod tests {
         })
     }
 
+    fn successful_active_thread_turns_list_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": [{
+                "id": "turn-authoritative",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": 1,
+                "completedAt": null,
+                "durationMs": null
+            }],
+            "nextCursor": null,
+            "backwardsCursor": null
+        })
+    }
+
     #[test]
     fn collab_receiver_thread_ids_extracts_spawn_agent_targets() {
         let event = UiEvent::ItemCompleted {
@@ -1021,6 +1041,9 @@ mod tests {
                 upstream::ClientRequest::ThreadResume { .. } => {
                     Ok(successful_thread_resume_response("thread-1"))
                 }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
                 upstream::ClientRequest::TurnStart { .. } => {
                     retry_turn_start_requests.fetch_add(1, Ordering::SeqCst);
                     Ok(successful_turn_start_response())
@@ -1066,6 +1089,218 @@ mod tests {
             .expect("retried thread");
         assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
         assert!(thread.queued_follow_up_drafts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn paginated_ambiguous_claim_is_consumed_only_after_active_probe() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination(server_id, true);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+        client.pending_turn_reconciliation().insert(key.clone());
+
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                requests
+                    .lock()
+                    .expect("request log lock")
+                    .push(request.method().to_string());
+                match request {
+                    upstream::ClientRequest::ThreadResume { params, .. } => {
+                        assert!(params.exclude_turns);
+                        Ok(successful_thread_resume_response(thread_id))
+                    }
+                    upstream::ClientRequest::ThreadTurnsList { .. } => {
+                        Ok(successful_active_thread_turns_list_response())
+                    }
+                    other => Err(RpcError::Deserialization(format!(
+                        "unexpected paginated ambiguity request: {}",
+                        other.method()
+                    ))),
+                }
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .force_refresh_thread_authoritative(server_id, thread_id)
+            .await
+            .expect("paginated authoritative refresh succeeds");
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume", "thread/turns/list"]
+        );
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("authoritative active thread");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-authoritative"));
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_ambiguous_claim_uses_full_repair_page_after_fast_completion() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination(server_id, true);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+        client.pending_turn_reconciliation().insert(key.clone());
+
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { params, .. } => {
+                    assert!(params.exclude_turns);
+                    requests
+                        .lock()
+                        .expect("request log lock")
+                        .push("thread/resume".to_string());
+                    Ok(successful_thread_resume_response(thread_id))
+                }
+                upstream::ClientRequest::ThreadTurnsList { params, .. } => {
+                    let skeleton =
+                        matches!(params.items_view, Some(upstream::TurnItemsView::NotLoaded));
+                    requests.lock().expect("request log lock").push(
+                        if skeleton {
+                            "thread/turns/list:skeleton"
+                        } else {
+                            "thread/turns/list:full"
+                        }
+                        .to_string(),
+                    );
+                    Ok(serde_json::json!({
+                        "data": [{
+                            "id": "turn-authoritative",
+                            "items": if skeleton {
+                                serde_json::json!([])
+                            } else {
+                                serde_json::json!([{
+                                    "id": "item-user",
+                                    "type": "userMessage",
+                                    "content": [{
+                                        "type": "text",
+                                        "text": "retained",
+                                        "textElements": []
+                                    }]
+                                }])
+                            },
+                            "itemsView": if skeleton { "notLoaded" } else { "full" },
+                            "status": "completed",
+                            "error": null,
+                            "startedAt": 1,
+                            "completedAt": 2,
+                            "durationMs": 1
+                        }],
+                        "nextCursor": null,
+                        "backwardsCursor": null
+                    }))
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected paginated completion request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .force_refresh_thread_authoritative(server_id, thread_id)
+            .await
+            .expect("paginated authoritative repair succeeds");
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            [
+                "thread/resume",
+                "thread/turns/list:skeleton",
+                "thread/turns/list:full"
+            ]
+        );
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("authoritatively repaired thread");
+        assert_eq!(thread.active_turn_id, None);
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.items.len(), 1);
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1749,12 +1984,82 @@ mod tests {
             .expect("sessions lock")
             .insert(server_id.to_string(), session);
 
-        reconcile_after_store_listener_lag(Arc::clone(&client)).await;
+        assert!(
+            reconcile_after_store_listener_lag(Arc::clone(&client)).await,
+            "RPC failures must request another lag-reconciliation pass"
+        );
 
         assert_eq!(
             requests.lock().expect("request log lock").as_slice(),
             ["thread/list", "thread/resume"]
         );
+    }
+
+    #[tokio::test]
+    async fn lag_reconcile_transient_rpc_failures_retry_until_clean() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let list_attempts = Arc::new(AtomicUsize::new(0));
+        let resume_attempts = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let list_attempts = Arc::clone(&list_attempts);
+            let resume_attempts = Arc::clone(&resume_attempts);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadList { .. } => {
+                    if list_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(RpcError::Deserialization(
+                            "intentional transient thread-list failure".to_string(),
+                        ))
+                    } else {
+                        Ok(successful_thread_list_response(&[thread_id]))
+                    }
+                }
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    if resume_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(RpcError::Deserialization(
+                            "intentional transient thread-resume failure".to_string(),
+                        ))
+                    } else {
+                        Ok(successful_thread_resume_response(thread_id))
+                    }
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                other => panic!("unexpected request: {other:?}"),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        assert!(
+            reconcile_after_store_listener_lag(Arc::clone(&client)).await,
+            "the transient failures should keep reconciliation scheduled"
+        );
+        assert!(
+            !reconcile_after_store_listener_lag(Arc::clone(&client)).await,
+            "the successful retry should finish cleanly"
+        );
+        assert_eq!(list_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(resume_attempts.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
