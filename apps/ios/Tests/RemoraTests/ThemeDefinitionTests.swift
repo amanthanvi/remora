@@ -192,13 +192,6 @@ final class ThemeDefinitionTests: XCTestCase {
             )
         }
 
-        let voiceCall = try source("VoiceCallView.swift")
-        XCTAssertTrue(voiceCall.contains(".foregroundColor(RemoraTheme.textOnDarkOverlay)"))
-        XCTAssertTrue(voiceCall.contains(".background(Capsule().fill(Color(hex: \"#02082C\")))"))
-        XCTAssertFalse(voiceCall.contains("phaseForegroundColor"))
-        XCTAssertTrue(voiceCall.contains(".foregroundColor(titleForegroundColor)"))
-        XCTAssertTrue(voiceCall.contains("return RemoraTheme.accentForeground\n"))
-
         let toolCall = try source("ToolCallCardView.swift")
         XCTAssertTrue(toolCall.contains(".foregroundColor(kindForeground)"))
         XCTAssertFalse(toolCall.contains(".foregroundColor(kindAccent)"))

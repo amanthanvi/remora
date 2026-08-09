@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import uniffi.codex_mobile_client.AppStoreInterface
 import uniffi.codex_mobile_client.TerminalBackendKind
+import uniffi.codex_mobile_client.TerminalException
 import uniffi.codex_mobile_client.TerminalOutputEventListener
 import uniffi.codex_mobile_client.TerminalOutputSnapshot
 import uniffi.codex_mobile_client.TerminalOutputStreamEvent
@@ -144,11 +145,23 @@ class TerminalSessionController(
 
     fun trustUnknownSshHostAndRetry() {
         val challenge = sshTrustChallenge ?: return
-        SshTrustStore(AppModel.shared.appContext).write(
-            host = challenge.host,
-            port = challenge.port,
-            fingerprint = challenge.fingerprint,
-        )
+        // Record through the Rust store, not the backend directly: `pin`
+        // applies the same host normalization (case, brackets, IPv6 zone id)
+        // that the connect-time lookup uses. Writing the raw challenge host
+        // straight to the backend would file the approval under a
+        // noncanonical key, leaving the canonical spelling unpinned and still
+        // eligible for trust-on-first-use.
+        try {
+            TerminalSshTrustStore(SshTrustStore(AppModel.shared.appContext)).pin(
+                host = challenge.host,
+                port = challenge.port,
+                fingerprint = challenge.fingerprint,
+            )
+        } catch (error: Exception) {
+            errorMessage = error.message ?: "Unable to save SSH host key"
+            phase = Phase.FAILED
+            return
+        }
         sshTrustChallenge = null
         errorMessage = null
         phase = Phase.IDLE
@@ -203,25 +216,15 @@ class TerminalSessionController(
         error: Exception,
         backend: TerminalBackendKind,
     ): SshHostTrustChallenge? {
-        val sshBackend = backend as? TerminalBackendKind.RemoteSsh ?: return null
-        val fingerprint = unknownHostFingerprint(error.message.orEmpty()) ?: return null
+        if (backend !is TerminalBackendKind.RemoteSsh) return null
+        val trustError = error as? TerminalException.SshHostKeyVerification ?: return null
+        if (trustError.pinned != null) return null
         return SshHostTrustChallenge(
-            host = sshBackend.host,
-            port = sshBackend.port,
-            fingerprint = fingerprint,
+            host = trustError.host,
+            port = trustError.port,
+            fingerprint = trustError.fingerprint,
             backend = backend,
         )
-    }
-
-    private fun unknownHostFingerprint(message: String): String? {
-        val marker = "unknown-host:"
-        val start = message.indexOf(marker)
-        if (start < 0) return null
-        return message
-            .substring(start + marker.length)
-            .trim()
-            .trim('"', '\'', '(', ')', '[', ']')
-            .takeIf { it.isNotEmpty() }
     }
 
     fun resize(cols: Int, rows: Int, notifyBackend: Boolean = true) {

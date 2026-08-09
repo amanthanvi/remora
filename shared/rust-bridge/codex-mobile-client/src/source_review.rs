@@ -1700,7 +1700,7 @@ mod tests {
         }
     }
 
-    fn client_with_thread(cwd: &str) -> MobileClient {
+    fn client_with_thread(cwd: &str) -> std::sync::Arc<MobileClient> {
         let client = MobileClient::new();
         client
             .app_store

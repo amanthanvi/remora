@@ -72,6 +72,43 @@ fn sync_thread_list_for_runtime_tags_threads() {
 }
 
 #[test]
+fn authoritative_refresh_fence_rejects_state_older_than_streamed_event() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "archived".to_string(),
+    };
+    let stale = ThreadSnapshot::from_info("srv", make_thread_info(&key.thread_id));
+    reducer.upsert_thread_snapshot(stale.clone());
+    let request_generation = reducer.server_event_generation("srv");
+
+    reducer.apply_ui_event(&UiEvent::ThreadArchived { key: key.clone() });
+    let applied = reducer.apply_if_server_event_generation("srv", request_generation, |store| {
+        store.upsert_thread_snapshot(stale);
+    });
+
+    assert!(applied.is_none());
+    assert!(!reducer.snapshot().threads.contains_key(&key));
+}
+
+#[test]
+fn authoritative_refresh_fence_ignores_unrelated_server_events() {
+    let reducer = AppStoreReducer::new();
+    let request_generation = reducer.server_event_generation("srv-a");
+
+    reducer.apply_ui_event(&UiEvent::ThreadArchived {
+        key: ThreadKey {
+            server_id: "srv-b".to_string(),
+            thread_id: "other".to_string(),
+        },
+    });
+    let applied =
+        reducer.apply_if_server_event_generation("srv-a", request_generation, |_| "applied");
+
+    assert_eq!(applied, Some("applied"));
+}
+
+#[test]
 fn authoritative_runtime_refresh_prunes_only_that_runtime() {
     let reducer = AppStoreReducer::new();
     for (runtime, thread_id) in [("codex", "stale-codex"), ("pi", "keep-pi")] {
@@ -1566,19 +1603,97 @@ fn upsert_thread_snapshot_dedupes_matching_unbound_local_overlay() {
 }
 
 #[test]
-fn turn_started_consumes_first_queued_follow_up_preview() {
+fn turn_started_consumes_and_selectively_reanchors_queued_follow_up_preview() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    let mut initial = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    initial.active_turn_id = Some("turn-a".to_string());
+    reducer.upsert_thread_snapshot(initial);
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-1".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "repeated".to_string(),
+        },
+    );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-2".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "repeated".to_string(),
+        },
+    );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-3".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "newer".to_string(),
+        },
+    );
+    reducer.mutate_thread_with_result(&key, |thread| {
+        thread.queued_follow_up_drafts[2].causal_anchor_turn_id = Some("turn-c".to_string());
+    });
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key: key.clone(),
+        turn_id: "turn-a".to_string(),
+        error: None,
+    });
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
+
+    reducer.apply_ui_event(&UiEvent::TurnStarted {
+        key: key.clone(),
+        turn_id: "turn-b".to_string(),
+    });
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-b"));
+    assert_eq!(thread.queued_follow_ups.len(), 2);
+    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
+    assert_eq!(thread.queued_follow_ups[1].id, "queued-3");
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-b")
+    );
+    assert_eq!(
+        thread.queued_follow_up_drafts[1]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-c")
+    );
+}
+
+#[test]
+fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
     let reducer = AppStoreReducer::new();
     let key = ThreadKey {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
     reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
-    reducer.enqueue_thread_follow_up_preview(
+    reducer.enqueue_thread_follow_up_draft(
         &key,
-        AppQueuedFollowUpPreview {
-            id: "queued-1".to_string(),
-            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
-            text: "first".to_string(),
+        QueuedFollowUpDraft {
+            preview: AppQueuedFollowUpPreview {
+                id: "queued-1".to_string(),
+                kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+                text: "first".to_string(),
+            },
+            inputs: vec![upstream::UserInput::Text {
+                text: "first".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source_message_json: None,
+            causal_anchor_turn_id: None,
+            autosend_claimed: false,
         },
     );
     reducer.enqueue_thread_follow_up_preview(
@@ -1589,17 +1704,85 @@ fn turn_started_consumes_first_queued_follow_up_preview() {
             text: "second".to_string(),
         },
     );
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
 
-    reducer.apply_ui_event(&UiEvent::TurnStarted {
-        key: key.clone(),
-        turn_id: "turn-2".to_string(),
+    let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    authoritative.active_turn_id = Some("turn-follow-up".to_string());
+    authoritative.info.status = ThreadSummaryStatus::Active;
+    authoritative.items.push(HydratedConversationItem {
+        id: "user-follow-up".to_string(),
+        content: HydratedConversationItemContent::User(HydratedUserMessageData {
+            text: "first".to_string(),
+            image_data_uris: Vec::new(),
+        }),
+        source_turn_id: Some("turn-follow-up".to_string()),
+        source_turn_index: Some(0),
+        timestamp: None,
+        is_from_user_turn_boundary: true,
     });
+    reducer.upsert_thread_snapshot(authoritative);
 
     let snapshot = reducer.snapshot();
     let thread = snapshot.threads.get(&key).expect("thread exists");
-    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-2"));
-    assert_eq!(thread.queued_follow_ups.len(), 1);
-    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+    assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-follow-up")
+    );
+}
+
+#[test]
+fn authoritative_unrelated_active_turn_preserves_claimed_queued_follow_up() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.enqueue_thread_follow_up_draft(
+        &key,
+        QueuedFollowUpDraft {
+            preview: AppQueuedFollowUpPreview {
+                id: "queued-1".to_string(),
+                kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+                text: "claimed follow-up".to_string(),
+            },
+            inputs: vec![upstream::UserInput::Text {
+                text: "claimed follow-up".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source_message_json: None,
+            causal_anchor_turn_id: None,
+            autosend_claimed: false,
+        },
+    );
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
+
+    let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    authoritative.active_turn_id = Some("turn-other-client".to_string());
+    authoritative.info.status = ThreadSummaryStatus::Active;
+    authoritative.items.push(HydratedConversationItem {
+        id: "other-user-message".to_string(),
+        content: HydratedConversationItemContent::User(HydratedUserMessageData {
+            text: "unrelated request".to_string(),
+            image_data_uris: Vec::new(),
+        }),
+        source_turn_id: Some("turn-other-client".to_string()),
+        source_turn_index: Some(0),
+        timestamp: None,
+        is_from_user_turn_boundary: true,
+    });
+    reducer.upsert_thread_snapshot(authoritative);
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-other-client"));
+    assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+    assert_eq!(thread.queued_follow_up_drafts[0].preview.id, "queued-1");
+    assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
 }
 
 #[test]
@@ -1943,7 +2126,9 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    let mut initial = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    initial.active_turn_id = Some("turn-1".to_string());
+    reducer.upsert_thread_snapshot(initial);
     reducer.enqueue_thread_follow_up_preview(
         &key,
         AppQueuedFollowUpPreview {
@@ -1952,6 +2137,20 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
             text: "queued follow-up".to_string(),
         },
     );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-2".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "next follow-up".to_string(),
+        },
+    );
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key: key.clone(),
+        turn_id: "turn-1".to_string(),
+        error: None,
+    });
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
 
     reducer.apply_item_update(
         &key,
@@ -1972,7 +2171,14 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
 
     let snapshot = reducer.snapshot();
     let thread = snapshot.threads.get(&key).expect("thread exists");
-    assert!(thread.queued_follow_ups.is_empty());
+    assert_eq!(thread.queued_follow_ups.len(), 1);
+    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-2")
+    );
 }
 
 // ── SW-R3: streaming dynamic tool call argument deltas ───────────
@@ -2119,6 +2325,134 @@ fn dynamic_tool_arg_delta_buffer_clears_on_item_completed() {
         reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty(),
         "buffer should be cleared after item completion"
     );
+}
+
+#[test]
+fn remove_server_clears_all_thread_update_caches() {
+    let reducer = AppStoreReducer::new();
+    let config = make_server_config("srv");
+    let key = key_thread("thread-cache-cleanup");
+    reducer.upsert_server(&config, ServerHealthSnapshot::Connected);
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-cache-cleanup"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"app_id":"fit","title":"Fit","widget_code":"<div>hi"#.to_string(),
+    });
+    reducer.emit_thread_metadata_changed(&key);
+    reducer.emit_thread_item_changed(
+        &key,
+        HydratedConversationItem {
+            id: "cached-item".to_string(),
+            content: HydratedConversationItemContent::User(HydratedUserMessageData {
+                text: "cached".to_string(),
+                image_data_uris: Vec::new(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: None,
+            timestamp: None,
+            is_from_user_turn_boundary: true,
+        },
+    );
+
+    assert!(
+        reducer
+            .last_thread_state_updates
+            .read()
+            .unwrap()
+            .contains_key(&key)
+    );
+    assert!(
+        reducer
+            .last_thread_item_upserts
+            .read()
+            .unwrap()
+            .keys()
+            .any(|(thread_key, _)| thread_key == &key)
+    );
+    assert!(
+        reducer
+            .dynamic_tool_arg_buffers
+            .read()
+            .unwrap()
+            .keys()
+            .any(|(thread_key, _)| thread_key == &key)
+    );
+
+    reducer.remove_server("srv");
+
+    assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
+    assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
+}
+
+#[test]
+fn authoritative_thread_removal_clears_all_thread_update_caches() {
+    let reducer = AppStoreReducer::new();
+    let config = make_server_config("srv");
+    let key = key_thread("thread-list-cleanup");
+    reducer.upsert_server(&config, ServerHealthSnapshot::Connected);
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-list-cleanup"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"widget_code":"<div>hi"#.to_string(),
+    });
+    reducer.emit_thread_metadata_changed(&key);
+    reducer.emit_thread_item_changed(
+        &key,
+        HydratedConversationItem {
+            id: "cached-item".to_string(),
+            content: HydratedConversationItemContent::User(HydratedUserMessageData {
+                text: "cached".to_string(),
+                image_data_uris: Vec::new(),
+            }),
+            source_turn_id: Some("turn-1".to_string()),
+            source_turn_index: None,
+            timestamp: None,
+            is_from_user_turn_boundary: true,
+        },
+    );
+
+    reducer.finalize_thread_list_sync("srv", &HashSet::new());
+
+    assert!(!reducer.snapshot().threads.contains_key(&key));
+    assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
+    assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
+}
+
+#[test]
+fn dynamic_tool_arg_delta_buffers_clear_on_turn_completed() {
+    let reducer = AppStoreReducer::new();
+    let key = key_thread("thread-turn-completed");
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+        "srv",
+        make_thread_info("thread-turn-completed"),
+    ));
+    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
+        key: key.clone(),
+        item_id: "item-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        delta: r#"{"widget_code":"<svg"#.to_string(),
+    });
+    assert_eq!(reducer.dynamic_tool_arg_buffers.read().unwrap().len(), 1);
+
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key,
+        turn_id: "turn-1".to_string(),
+        error: Some("interrupted".to_string()),
+    });
+
+    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
 }
 
 #[test]

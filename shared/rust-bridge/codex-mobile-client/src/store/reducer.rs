@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use codex_app_server_protocol as upstream;
 use tokio::sync::broadcast;
@@ -91,6 +91,9 @@ fn dedupe_agent_runtimes(runtimes: Vec<AgentRuntimeInfo>) -> Vec<AgentRuntimeInf
 
 pub struct AppStoreReducer {
     snapshot: RwLock<AppSnapshot>,
+    /// Serializes streamed UI-event application with conditional authoritative
+    /// refresh commits. Network work never holds this lock.
+    ui_event_generations: Mutex<HashMap<String, u64>>,
     last_thread_state_updates: RwLock<
         HashMap<
             ThreadKey,
@@ -139,6 +142,7 @@ impl AppStoreReducer {
         let (updates_tx, _) = broadcast::channel(1024);
         Self {
             snapshot: RwLock::new(AppSnapshot::default()),
+            ui_event_generations: Mutex::new(HashMap::new()),
             last_thread_state_updates: RwLock::new(HashMap::new()),
             last_thread_item_upserts: RwLock::new(HashMap::new()),
             dynamic_tool_arg_buffers: RwLock::new(HashMap::new()),
@@ -161,6 +165,33 @@ impl AppStoreReducer {
             .threads
             .get(key)
             .cloned()
+    }
+
+    pub(crate) fn server_event_generation(&self, server_id: &str) -> u64 {
+        self.ui_event_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(server_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Commits an authoritative response only when no newer streamed UI event
+    /// has started applying since the request was issued.
+    pub(crate) fn apply_if_server_event_generation<R>(
+        &self,
+        server_id: &str,
+        expected_generation: u64,
+        apply: impl FnOnce(&Self) -> R,
+    ) -> Option<R> {
+        let generations = self
+            .ui_event_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if generations.get(server_id).copied().unwrap_or(0) != expected_generation {
+            return None;
+        }
+        Some(apply(self))
     }
 
     /// Project a small read-only value from one canonical thread without
@@ -305,7 +336,7 @@ impl AppStoreReducer {
             server_id: server_id.to_string(),
         });
         for key in removed_thread_keys {
-            self.clear_thread_update_caches(&key);
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -447,7 +478,7 @@ impl AppStoreReducer {
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
         for key in removed_thread_keys {
-            self.clear_thread_update_caches(&key);
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -572,6 +603,7 @@ impl AppStoreReducer {
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
         for key in removed_thread_keys {
+            self.clear_removed_thread_caches(&key);
             self.emit(AppStoreUpdateRecord::ThreadRemoved {
                 key,
                 agent_directory_version,
@@ -616,6 +648,24 @@ impl AppStoreReducer {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
             let existing = snapshot.threads.get(&key).cloned();
             if let Some(existing) = existing.as_ref() {
+                let consume_claimed_follow_up = existing.active_turn_id.is_none()
+                    && thread
+                        .active_turn_id
+                        .as_ref()
+                        .is_some_and(|active_turn_id| {
+                            existing
+                                .queued_follow_up_drafts
+                                .first()
+                                .filter(|draft| draft.autosend_claimed)
+                                .and_then(|draft| local_user_message_overlay_item(&draft.inputs))
+                                .is_some_and(|local_item| {
+                                    thread.items.iter().any(|item| {
+                                        item.is_from_user_turn_boundary
+                                            && item.source_turn_id.as_ref() == Some(active_turn_id)
+                                            && item.content == local_item.content
+                                    })
+                                })
+                        });
                 // Diagnostic for the duplicate-user-message bug (task #11):
                 // catch transient overlap where the incoming snapshot's
                 // hydrated User items match an overlay that's already in
@@ -666,6 +716,13 @@ impl AppStoreReducer {
                 thread.is_resumed = thread.is_resumed || existing.is_resumed;
                 preserve_local_overlay_items(existing, &mut thread);
                 preserve_queued_follow_ups(existing, &mut thread);
+                if consume_claimed_follow_up {
+                    let turn_id = thread
+                        .active_turn_id
+                        .clone()
+                        .expect("claimed follow-up requires an active authoritative turn");
+                    consume_first_queued_follow_up_for_turn(&mut thread, &turn_id);
+                }
                 // Preserve existing items when the incoming snapshot has none
                 // (e.g. thread/read with include_turns=false).
                 if thread.items.is_empty() && !existing.items.is_empty() {
@@ -709,6 +766,8 @@ impl AppStoreReducer {
                 preview,
                 inputs: Vec::new(),
                 source_message_json: None,
+                causal_anchor_turn_id: None,
+                autosend_claimed: false,
             },
         );
     }
@@ -716,10 +775,18 @@ impl AppStoreReducer {
     pub(crate) fn enqueue_thread_follow_up_draft(
         &self,
         key: &ThreadKey,
-        draft: QueuedFollowUpDraft,
+        mut draft: QueuedFollowUpDraft,
     ) {
         if self
             .mutate_thread_with_result(key, |thread| {
+                if draft.causal_anchor_turn_id.is_none() {
+                    draft.causal_anchor_turn_id = thread.active_turn_id.clone().or_else(|| {
+                        thread
+                            .queued_follow_up_drafts
+                            .last()
+                            .and_then(|queued| queued.causal_anchor_turn_id.clone())
+                    });
+                }
                 thread.queued_follow_up_drafts.push(draft);
                 sync_thread_follow_up_projection(thread);
             })
@@ -727,6 +794,137 @@ impl AppStoreReducer {
         {
             self.emit_thread_metadata_changed(key);
         }
+    }
+
+    pub(crate) fn try_claim_first_queued_follow_up(
+        &self,
+        key: &ThreadKey,
+    ) -> Option<QueuedFollowUpDraft> {
+        let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+        let thread = snapshot.threads.get_mut(key)?;
+        if thread.active_turn_id.is_some() {
+            return None;
+        }
+        let draft = thread.queued_follow_up_drafts.first_mut()?;
+        if draft.autosend_claimed {
+            return None;
+        }
+        draft.autosend_claimed = true;
+        Some(draft.clone())
+    }
+
+    pub(crate) fn mark_turn_started_from_response(
+        &self,
+        key: &ThreadKey,
+        turn_id: &str,
+        consumed_follow_up_id: Option<&str>,
+    ) {
+        if self
+            .mutate_thread_with_result(key, |thread| {
+                if let Some(preview_id) = consumed_follow_up_id {
+                    let consumed_anchor_turn_id = thread
+                        .queued_follow_up_drafts
+                        .first()
+                        .filter(|draft| draft.preview.id == preview_id)
+                        .map(|draft| draft.causal_anchor_turn_id.clone());
+                    thread
+                        .queued_follow_up_drafts
+                        .retain(|draft| draft.preview.id != preview_id);
+                    if let Some(consumed_anchor_turn_id) = consumed_anchor_turn_id {
+                        reanchor_queued_follow_ups(
+                            thread,
+                            consumed_anchor_turn_id.as_deref(),
+                            turn_id,
+                        );
+                    }
+                    sync_thread_follow_up_projection(thread);
+                }
+                thread.active_turn_id = Some(turn_id.to_string());
+                thread.active_plan_progress = None;
+                thread.pending_plan_implementation_turn_id = None;
+                thread.info.status = ThreadSummaryStatus::Active;
+                if thread.info.parent_thread_id.is_some() {
+                    thread.info.agent_status = Some("running".to_string());
+                }
+            })
+            .is_some()
+        {
+            self.emit_thread_metadata_changed(key);
+        }
+    }
+
+    pub(crate) fn release_thread_follow_up_claim(&self, key: &ThreadKey, preview_id: &str) {
+        if self
+            .mutate_thread_with_result(key, |thread| {
+                let Some(draft) = thread
+                    .queued_follow_up_drafts
+                    .iter_mut()
+                    .find(|draft| draft.preview.id == preview_id && draft.autosend_claimed)
+                else {
+                    return false;
+                };
+                draft.autosend_claimed = false;
+                true
+            })
+            .unwrap_or(false)
+        {
+            self.emit_thread_metadata_changed(key);
+        }
+    }
+
+    pub(crate) fn consume_thread_follow_up_claim_after_authoritative_replay(
+        &self,
+        key: &ThreadKey,
+        replay_turn_id: &str,
+    ) -> bool {
+        let consumed = self
+            .mutate_thread_with_result(key, |thread| {
+                if !thread
+                    .queued_follow_up_drafts
+                    .first()
+                    .is_some_and(|draft| draft.autosend_claimed)
+                {
+                    return false;
+                }
+                consume_first_queued_follow_up_for_turn(thread, replay_turn_id);
+                true
+            })
+            .unwrap_or(false);
+        if consumed {
+            self.emit_thread_metadata_changed(key);
+        }
+        consumed
+    }
+
+    pub(crate) fn thread_follow_up_claim_matching_authoritative_turn_ids(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+        eligible_turn_ids: &HashSet<String>,
+    ) -> Vec<String> {
+        self.thread_snapshot(key).map_or_else(Vec::new, |thread| {
+            let Some(draft) = thread
+                .queued_follow_up_drafts
+                .first()
+                .filter(|draft| draft.autosend_claimed)
+            else {
+                return Vec::new();
+            };
+            let Some(local_item) = local_user_message_overlay_item(&draft.inputs) else {
+                return Vec::new();
+            };
+            authoritative_items
+                .iter()
+                .filter(|item| {
+                    item.is_from_user_turn_boundary
+                        && matches!(&item.content, HydratedConversationItemContent::User(_))
+                        && item.content.eq(&local_item.content)
+                })
+                .filter_map(|item| item.source_turn_id.as_ref())
+                .filter(|turn_id| eligible_turn_ids.contains(turn_id.as_str()))
+                .cloned()
+                .collect()
+        })
     }
 
     pub(crate) fn stage_local_user_message_overlay(
@@ -887,24 +1085,6 @@ impl AppStoreReducer {
         }
     }
 
-    pub fn remove_thread_follow_up_preview(&self, key: &ThreadKey, preview_id: &str) {
-        self.remove_thread_follow_up_draft(key, preview_id);
-    }
-
-    pub(crate) fn remove_thread_follow_up_draft(&self, key: &ThreadKey, preview_id: &str) {
-        if self
-            .mutate_thread_with_result(key, |thread| {
-                thread
-                    .queued_follow_up_drafts
-                    .retain(|draft| draft.preview.id != preview_id);
-                sync_thread_follow_up_projection(thread);
-            })
-            .is_some()
-        {
-            self.emit_thread_metadata_changed(key);
-        }
-    }
-
     /// Atomically transitions a queued follow-up draft from `Message` to
     /// `PendingSteer`. Returns the updated draft and a snapshot of the
     /// thread's drafts in the new state on success. Returns `None` when the
@@ -937,22 +1117,6 @@ impl AppStoreReducer {
             self.emit_thread_metadata_changed(key);
         }
         result
-    }
-
-    pub fn set_thread_follow_up_previews(
-        &self,
-        key: &ThreadKey,
-        previews: Vec<AppQueuedFollowUpPreview>,
-    ) {
-        let drafts = previews
-            .into_iter()
-            .map(|preview| QueuedFollowUpDraft {
-                preview,
-                inputs: Vec::new(),
-                source_message_json: None,
-            })
-            .collect();
-        self.set_thread_follow_up_drafts(key, drafts);
     }
 
     pub(crate) fn set_thread_follow_up_drafts(
@@ -1005,7 +1169,7 @@ impl AppStoreReducer {
                 .retain(|key, _| remaining_user_input_keys.contains(key));
             agent_directory_version = current_agent_directory_version(&snapshot);
         }
-        self.clear_thread_update_caches(key);
+        self.clear_removed_thread_caches(key);
         self.emit(AppStoreUpdateRecord::ThreadRemoved {
             key: key.clone(),
             agent_directory_version,
@@ -1359,19 +1523,6 @@ impl AppStoreReducer {
         }
     }
 
-    pub fn server_has_active_turns(&self, server_id: &str) -> bool {
-        self.snapshot
-            .read()
-            .expect("app store lock poisoned")
-            .threads
-            .iter()
-            .any(|(key, thread)| {
-                key.server_id == server_id
-                    && (thread.active_turn_id.is_some()
-                        || thread.info.status == ThreadSummaryStatus::Active)
-            })
-    }
-
     pub fn server_pending_mutation_kind(
         &self,
         server_id: &str,
@@ -1483,6 +1634,17 @@ impl AppStoreReducer {
     }
 
     pub(crate) fn apply_ui_event(&self, event: &UiEvent) {
+        // Keep the generation increment and event projection atomic with
+        // apply_if_server_event_generation. Code in this match must not call
+        // either generation API while this guard is held.
+        let mut generations = self
+            .ui_event_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(server_id) = event.server_id() {
+            let generation = generations.entry(server_id.to_string()).or_default();
+            *generation = generation.saturating_add(1);
+        }
         match event {
             UiEvent::ThreadStarted { key, notification } => {
                 let info = thread_info_from_upstream(notification.thread.clone());
@@ -1559,7 +1721,7 @@ impl AppStoreReducer {
             UiEvent::TurnStarted { key, turn_id } => {
                 if self
                     .mutate_thread_with_result(key, |thread| {
-                        remove_first_queued_follow_up(thread);
+                        consume_first_queued_follow_up_for_turn(thread, turn_id);
                         thread.active_turn_id = Some(turn_id.clone());
                         thread.active_plan_progress = None;
                         thread.pending_plan_implementation_turn_id = None;
@@ -1575,6 +1737,7 @@ impl AppStoreReducer {
                 }
             }
             UiEvent::TurnCompleted { key, turn_id, .. } => {
+                self.clear_dynamic_tool_arg_buffers_for_thread(key);
                 if self
                     .mutate_thread_with_result(key, |thread| {
                         thread.active_turn_id = None;
@@ -2170,6 +2333,11 @@ impl AppStoreReducer {
             .retain(|(thread_key, _), _| thread_key != key);
     }
 
+    fn clear_removed_thread_caches(&self, key: &ThreadKey) {
+        self.clear_thread_update_caches(key);
+        self.clear_dynamic_tool_arg_buffers_for_thread(key);
+    }
+
     pub(crate) fn emit_thread_upsert(&self, key: &ThreadKey) {
         self.clear_thread_update_caches(key);
         let update = {
@@ -2293,49 +2461,6 @@ impl AppStoreReducer {
                 .filter(|existing| is_superseded_overlay_item(existing, &item, active_turn_id))
                 .map(|existing| existing.id.clone())
                 .collect::<Vec<_>>();
-            // Diagnostic for the duplicate-user-message bug (task #11):
-            // when an upstream UserMessage arrives, log the surrounding
-            // store state so we can see whether the local overlay was
-            // present-and-deduped, present-and-NOT-deduped, or absent —
-            // and whether `thread.items` already contains a sibling User
-            // item with matching content.
-            if is_user_message {
-                let other_user_items: Vec<_> = thread
-                    .items
-                    .iter()
-                    .filter(|existing| {
-                        existing.id != item.id
-                            && matches!(&existing.content, HydratedConversationItemContent::User(_))
-                    })
-                    .map(|existing| existing.id.clone())
-                    .collect();
-                let overlay_count = thread.local_overlay_items.len();
-                let user_overlay_ids: Vec<_> = thread
-                    .local_overlay_items
-                    .iter()
-                    .filter_map(|existing| {
-                        if matches!(&existing.content, HydratedConversationItemContent::User(_)) {
-                            Some(existing.id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                tracing::warn!(
-                    target: "store",
-                    server_id = key.server_id,
-                    thread_id = key.thread_id,
-                    item_id = item.id,
-                    item_turn_id = item.source_turn_id.as_deref().unwrap_or(""),
-                    item_boundary = item.is_from_user_turn_boundary,
-                    existing_user_items = ?other_user_items,
-                    user_overlays = ?user_overlay_ids,
-                    overlay_count = overlay_count,
-                    will_remove_overlays = ?removed_overlay_ids,
-                    has_existing_with_id = existing.is_some(),
-                    "apply_item_update UserMessage diagnostic"
-                );
-            }
             thread
                 .local_overlay_items
                 .retain(|existing| !is_superseded_overlay_item(existing, &item, active_turn_id));
@@ -2343,9 +2468,17 @@ impl AppStoreReducer {
             let mutation = classify_item_mutation(existing.as_ref(), &item);
             let clears_queued_follow_up = item.is_from_user_turn_boundary
                 && matches!(&item.content, HydratedConversationItemContent::User(_));
+            let boundary_turn_id = item
+                .source_turn_id
+                .clone()
+                .or_else(|| thread.active_turn_id.clone());
             upsert_item(thread, item);
             if clears_queued_follow_up {
-                remove_first_queued_follow_up(thread);
+                if let Some(turn_id) = boundary_turn_id {
+                    consume_first_queued_follow_up_for_turn(thread, &turn_id);
+                } else {
+                    remove_first_queued_follow_up(thread);
+                }
             }
             (
                 mutation,
@@ -2521,6 +2654,13 @@ impl AppStoreReducer {
         guard.retain(|(existing_key, _), buffer| {
             !(existing_key == thread_key && buffer.item_id == item_id)
         });
+    }
+
+    fn clear_dynamic_tool_arg_buffers_for_thread(&self, thread_key: &ThreadKey) {
+        self.dynamic_tool_arg_buffers
+            .write()
+            .expect("app store dynamic_tool_arg_buffers poisoned")
+            .retain(|(existing_key, _), _| existing_key != thread_key);
     }
 }
 
@@ -2854,10 +2994,11 @@ mod realtime;
 mod thread_merge;
 use thread_merge::{
     LOCAL_USER_MESSAGE_ITEM_PREFIX, USER_INPUT_RESPONSE_ITEM_PREFIX, answered_user_input_item,
-    duplicate_local_overlay_item_ids, is_duplicate_overlay_item, is_superseded_overlay_item,
-    local_user_message_overlay_item, preserve_local_overlay_items, preserve_queued_follow_ups,
-    preserve_thread_created_at, preserve_thread_fork_lineage, preserve_thread_preview,
-    preserve_thread_runtime_state, preserve_thread_title, sync_thread_follow_up_projection,
+    consume_first_queued_follow_up_for_turn, duplicate_local_overlay_item_ids,
+    is_duplicate_overlay_item, is_superseded_overlay_item, local_user_message_overlay_item,
+    preserve_local_overlay_items, preserve_queued_follow_ups, preserve_thread_created_at,
+    preserve_thread_fork_lineage, preserve_thread_preview, preserve_thread_runtime_state,
+    preserve_thread_title, reanchor_queued_follow_ups, sync_thread_follow_up_projection,
 };
 pub(crate) use thread_merge::{
     remove_duplicate_local_overlay_items, remove_first_queued_follow_up,

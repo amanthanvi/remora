@@ -191,45 +191,6 @@ struct TipJarView: View {
     }
 }
 
-struct SupporterBadge: View {
-    @State private var showTipJar = false
-
-    var body: some View {
-        let store = TipJarStore.shared
-        Button { showTipJar = true } label: {
-            if let tier = store.supporterTier {
-                SupportBadgeIcon(name: tier.icon, size: 36)
-                    .frame(
-                        width: RemoraAccessibilityMetrics.minimumHitTarget,
-                        height: RemoraAccessibilityMetrics.minimumHitTarget
-                    )
-            } else {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(RemoraTheme.textMuted)
-                    .frame(
-                        width: RemoraAccessibilityMetrics.minimumHitTarget,
-                        height: RemoraAccessibilityMetrics.minimumHitTarget
-                    )
-            }
-        }
-        .accessibilityLabel("Open tip jar")
-        .accessibilityValue(store.supporterTier?.displayName ?? "No supporter badge")
-        .task { await store.loadProducts() }
-        .sheet(isPresented: $showTipJar) {
-            NavigationStack {
-                TipJarView()
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done") { showTipJar = false }
-                                .foregroundColor(RemoraTheme.accentForegroundOnSurface)
-                        }
-                    }
-            }
-        }
-    }
-}
-
 /// Renders support badges for a tier range (e.g. 0..<2 = lower tiers,
 /// 2..<4 = higher tiers) next to the home logo. Collapses to nothing for
 /// ranges with no purchased tiers. `loadProducts` is called by the host

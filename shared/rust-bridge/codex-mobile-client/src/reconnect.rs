@@ -621,12 +621,11 @@ pub(crate) async fn execute_reconnect_plan(
                 auth,
                 unlock_macos_keychain: credential.unlock_macos_keychain,
             };
-            let ssh_client = match SshClient::connect(
-                ssh_creds,
-                Box::new(move |_fingerprint| Box::pin(async move { true })),
-            )
-            .await
-            {
+            // Trust-on-first-use only: a saved server whose fingerprint was
+            // never recorded gets pinned on the first successful reconnect. A
+            // host that presents a *different* key than the recorded pin is
+            // refused here, before any credential is offered.
+            let ssh_client = match crate::ssh::connect_with_host_trust(ssh_creds, true).await {
                 Ok(client) => Arc::new(client),
                 Err(e) => {
                     warn!(
@@ -1028,6 +1027,104 @@ mod tests {
             passphrase: None,
             unlock_macos_keychain: false,
         }
+    }
+
+    // -- host-key trust on the automatic reconnect paths --
+    //
+    // Automatic reconnect runs without any user present, so a host that
+    // presents a different key than the one we recorded must be refused
+    // *before* the stored SSH password is offered. Both reconnect arms are
+    // driven end-to-end against a real in-process SSH server that answers
+    // with host key B while the trust store pins host key A.
+
+    /// Register a pin for the test server's address, run `body`, then drop
+    /// the process-wide store again.
+    async fn with_pinned_mismatch<F, Fut, T>(
+        server: &crate::ssh::test_server::TestSshServer,
+        body: F,
+    ) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _guard = crate::ssh::HOST_TRUST_TEST_LOCK.lock().await;
+        let store = crate::ssh::test_server::in_memory_trust_store();
+        let pinned_key = crate::ssh::test_server::test_host_key();
+        let pinned = crate::ssh::test_server::host_key_fingerprint(&pinned_key);
+        store.pin(server.host.clone(), server.port, pinned).unwrap();
+        crate::ssh::register_host_trust_store(store);
+        let result = body().await;
+        crate::ssh::clear_host_trust_store();
+        result
+    }
+
+    #[tokio::test]
+    async fn ssh_reconnect_plan_refuses_a_changed_host_key() {
+        let server =
+            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::test_host_key())
+                .await;
+        let plan = ReconnectPlan::Ssh {
+            server_id: "srv-host-key-ssh".into(),
+            display_name: "Test".into(),
+            host: server.host.clone(),
+            ssh_port: server.port,
+            credential: ssh_credential(),
+        };
+        let result = with_pinned_mismatch(&server, || async {
+            let client = MobileClient::new();
+            execute_reconnect_plan(&plan, &client).await
+        })
+        .await;
+
+        assert!(
+            !result.success,
+            "reconnect must not succeed on a changed host key"
+        );
+        let message = result.error_message.unwrap_or_default();
+        assert!(
+            message.contains("host-key-changed:"),
+            "expected a typed host-key-changed failure, got {message:?}"
+        );
+        assert_eq!(
+            server.auth_attempts(),
+            0,
+            "the saved SSH credential must never be offered to a host whose key changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ssh_bridge_reconnect_plan_refuses_a_changed_host_key() {
+        let server =
+            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::test_host_key())
+                .await;
+        let plan = ReconnectPlan::SshBridge {
+            server_id: "srv-host-key-bridge".into(),
+            display_name: "Test".into(),
+            host: server.host.clone(),
+            ssh_port: server.port,
+            credential: ssh_credential(),
+            runtime_kinds: vec!["codex".to_string()],
+        };
+        let result = with_pinned_mismatch(&server, || async {
+            let client = MobileClient::new();
+            execute_reconnect_plan(&plan, &client).await
+        })
+        .await;
+
+        assert!(
+            !result.success,
+            "ssh-bridge reconnect must not succeed on a changed host key"
+        );
+        let message = result.error_message.unwrap_or_default();
+        assert!(
+            message.contains("host-key-changed:"),
+            "expected a typed host-key-changed failure, got {message:?}"
+        );
+        assert_eq!(
+            server.auth_attempts(),
+            0,
+            "the saved SSH credential must never be offered to a host whose key changed"
+        );
     }
 
     // -- resolved_preferred_connection_mode tests --

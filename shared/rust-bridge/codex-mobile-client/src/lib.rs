@@ -14,7 +14,6 @@ pub mod android_exec;
 #[cfg(any(target_os = "android", test))]
 pub mod shell_preflight;
 
-pub mod ambient_suggestions;
 pub(crate) mod background_relay;
 pub mod capability;
 pub mod cloud_sync;

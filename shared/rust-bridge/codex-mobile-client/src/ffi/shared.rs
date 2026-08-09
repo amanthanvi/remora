@@ -22,9 +22,7 @@ pub(crate) fn shared_runtime() -> Arc<tokio::runtime::Runtime> {
 }
 
 pub(crate) fn shared_mobile_client() -> Arc<MobileClient> {
-    SHARED_MOBILE_CLIENT
-        .get_or_init(|| Arc::new(MobileClient::new()))
-        .clone()
+    SHARED_MOBILE_CLIENT.get_or_init(MobileClient::new).clone()
 }
 
 /// Non-initializing peek at the singleton. Returns `None` when

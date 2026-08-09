@@ -3143,7 +3143,7 @@ mod tests {
             Err(BackgroundRelayError::DeadlineExceeded)
         ));
 
-        let inner = Arc::new(crate::MobileClient::new());
+        let inner = crate::MobileClient::new();
         let first = AppClient {
             inner: inner.clone(),
             rt: crate::ffi::shared::shared_runtime(),

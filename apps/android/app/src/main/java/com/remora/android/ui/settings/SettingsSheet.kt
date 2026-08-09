@@ -46,8 +46,10 @@ import androidx.compose.ui.unit.sp
 import com.remora.android.state.DebugSettings
 import com.remora.android.state.SavedServer
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
+import com.remora.android.state.toRecord
 import com.remora.android.ui.BerkeleyMono
 import com.remora.android.ui.ConversationPrefs
 import com.remora.android.ui.LocalAppModel
@@ -55,7 +57,11 @@ import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.RemoraThemeManager
 import com.remora.android.ui.connection.SSHLoginDialog
 import com.remora.android.util.LLog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.Account
 import uniffi.codex_mobile_client.AppServerSnapshot
 
@@ -119,6 +125,8 @@ private fun SettingsTopLevel(
     val collapseTurns = ConversationPrefs.areTurnsCollapsed
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var serverRemovalError by remember { mutableStateOf<String?>(null) }
+    var sshTrustCleanupNotice by remember { mutableStateOf<String?>(null) }
 
     val currentServer = remember(snapshot) {
         val activeServerId = snapshot?.activeThread?.serverId
@@ -273,10 +281,52 @@ private fun SettingsTopLevel(
                     },
                     onRemove = {
                         scope.launch {
-                            SavedServerStore.remove(context, server.serverId)
-                            appModel.sshSessionStore.close(server.serverId)
-                            appModel.serverBridge.disconnectServer(server.serverId)
-                            appModel.refreshSnapshot()
+                            var removalLease: ULong? = null
+                            var removalCommitted = false
+                            try {
+                                val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
+                                    val lease = appModel.reconnectController
+                                        .prepareServerRemoval(server.serverId)
+                                        ?: error(
+                                        "Unable to stop reconnecting to this server. Try again."
+                                    )
+                                    removalLease = lease
+                                    appModel.sshSessionStore.close(server.serverId)
+                                    val outcome = SavedServerStore.remove(context, server.serverId)
+                                    removalCommitted = true
+                                    appModel.reconnectController.syncSavedServers(
+                                        SavedServerStore.load(context)
+                                            .filter { it.rememberedByUser }
+                                            .map { it.toRecord() },
+                                    )
+                                    outcome
+                                }
+                                appModel.refreshSnapshot()
+                                if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
+                                    sshTrustCleanupNotice =
+                                        "Server removed. SSH trust cleanup will finish when secure storage recovers."
+                                }
+                            } catch (cancellation: CancellationException) {
+                                if (!removalCommitted) {
+                                    removalLease?.let { lease ->
+                                        appModel.reconnectController.rollbackServerRemoval(
+                                            server.serverId,
+                                            lease,
+                                        )
+                                    }
+                                }
+                                throw cancellation
+                            } catch (error: Exception) {
+                                if (!removalCommitted) {
+                                    removalLease?.let { lease ->
+                                        appModel.reconnectController.rollbackServerRemoval(
+                                            server.serverId,
+                                            lease,
+                                        )
+                                    }
+                                }
+                                serverRemovalError = error.message ?: "Unable to remove the server."
+                            }
                         }
                     },
                 )
@@ -284,6 +334,32 @@ private fun SettingsTopLevel(
         }
 
         item { Spacer(Modifier.height(32.dp)) }
+    }
+
+    serverRemovalError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { serverRemovalError = null },
+            confirmButton = {
+                TextButton(onClick = { serverRemovalError = null }) {
+                    Text("OK")
+                }
+            },
+            title = { Text("Server Removal Failed") },
+            text = { Text(message) },
+        )
+    }
+
+    if (editTarget == null && sshReconnectTarget == null) sshTrustCleanupNotice?.let { message ->
+        AlertDialog(
+            onDismissRequest = { sshTrustCleanupNotice = null },
+            confirmButton = {
+                TextButton(onClick = { sshTrustCleanupNotice = null }) {
+                    Text("OK")
+                }
+            },
+            title = { Text("SSH Trust Cleanup Pending") },
+            text = { Text(message) },
+        )
     }
 
     renameTarget?.let { server ->
@@ -324,6 +400,7 @@ private fun SettingsTopLevel(
             server = server,
             onDismiss = { editTarget = null },
             onSave = { editTarget = null },
+            onCleanupPending = { message -> sshTrustCleanupNotice = message },
             onTriggerSshReconnect = { saved ->
                 editTarget = null
                 sshReconnectTarget = saved

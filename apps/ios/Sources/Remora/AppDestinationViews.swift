@@ -354,17 +354,3 @@ struct ApprovalPromptView: View {
         .transition(.opacity)
     }
 }
-
-struct LaunchView: View {
-    var body: some View {
-        ZStack {
-            RemoraTheme.backgroundGradient.ignoresSafeArea()
-            VStack(spacing: 24) {
-                RemoraLogo(size: 132)
-                Text("AI coding agent on iOS")
-                    .remoraFont(.body)
-                    .foregroundColor(RemoraTheme.textMuted)
-            }
-        }
-    }
-}

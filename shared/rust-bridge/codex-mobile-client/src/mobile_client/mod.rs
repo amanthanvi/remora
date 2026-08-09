@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
 use url::Url;
@@ -63,6 +63,54 @@ pub use self::thread_projection::{
 use self::user_input::normalize_pending_user_input_answers;
 
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
+const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const POST_RECONNECT_REFRESH_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
+
+#[derive(Clone, Debug)]
+struct PendingTurnReconciliation {
+    id: i64,
+    baseline_turn_ids: HashSet<String>,
+    baseline_history_known: bool,
+    causal_anchor_turn_id: Option<String>,
+    repair_cursor: Option<String>,
+    candidate_replay_turn_id: Option<String>,
+    unanchored_replay_turn_id: Option<String>,
+}
+
+impl PendingTurnReconciliation {
+    fn from_thread(thread: Option<&ThreadSnapshot>) -> Self {
+        Self::from_thread_with_anchor(thread, None)
+    }
+
+    fn from_thread_with_anchor(
+        thread: Option<&ThreadSnapshot>,
+        causal_anchor_turn_id: Option<String>,
+    ) -> Self {
+        thread
+            .map(|thread| Self {
+                id: crate::next_request_id(),
+                baseline_turn_ids: thread
+                    .items
+                    .iter()
+                    .filter_map(|item| item.source_turn_id.clone())
+                    .collect(),
+                baseline_history_known: thread.initial_turns_loaded,
+                causal_anchor_turn_id: causal_anchor_turn_id.clone(),
+                repair_cursor: None,
+                candidate_replay_turn_id: None,
+                unanchored_replay_turn_id: None,
+            })
+            .unwrap_or_else(|| Self {
+                id: crate::next_request_id(),
+                baseline_turn_ids: HashSet::new(),
+                baseline_history_known: false,
+                causal_anchor_turn_id,
+                repair_cursor: None,
+                candidate_replay_turn_id: None,
+                unanchored_replay_turn_id: None,
+            })
+    }
+}
 
 /// Top-level entry point for platform code (iOS / Android).
 ///
@@ -78,7 +126,6 @@ pub struct MobileClient {
     oauth_callback_tunnels: Arc<Mutex<HashMap<String, OAuthCallbackTunnel>>>,
     slingshot_apis: Arc<StdMutex<HashMap<String, codex_slingshot::SlingshotApi>>>,
     pub(crate) recorder: Arc<crate::recorder::MessageRecorder>,
-    pub(crate) ambient_cache: crate::ambient_suggestions::AmbientCache,
     /// One-shot hooks that fulfill when the next `show_widget` dynamic tool
     /// call finalizes on a specific thread. Keyed by `thread_id`.
     /// Used by `AppClient::update_saved_app`.
@@ -96,6 +143,10 @@ pub struct MobileClient {
     pub(crate) slingshot_credentials_directory: Arc<StdMutex<Option<String>>>,
     direct_resumed_threads: Arc<StdMutex<HashSet<ThreadKey>>>,
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
+    turn_start_locks: Arc<StdMutex<HashMap<ThreadKey, Weak<Mutex<()>>>>>,
+    pending_turn_reconciliation: Arc<StdMutex<HashMap<ThreadKey, PendingTurnReconciliation>>>,
+    timed_out_turn_requests: Arc<StdMutex<HashMap<ThreadKey, i64>>>,
+    turn_request_timeout: std::time::Duration,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
     /// bootstrap task.
@@ -187,38 +238,50 @@ fn is_method_not_found(error: &str) -> bool {
 
 impl MobileClient {
     /// Create a new `MobileClient`.
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Self> {
+        Self::new_with_turn_request_timeout(DEFAULT_TURN_REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn new_with_turn_request_timeout(
+        turn_request_timeout: std::time::Duration,
+    ) -> Arc<Self> {
         crate::logging::install_tracing_subscriber();
         let event_processor = Arc::new(EventProcessor::new());
         let app_store = Arc::new(AppStoreReducer::new());
         let sessions = Arc::new(RwLock::new(HashMap::new()));
-        spawn_store_listener(
-            Arc::clone(&app_store),
-            Arc::clone(&sessions),
-            event_processor.subscribe(),
-        );
-        Self {
-            sessions,
-            event_processor,
-            app_store,
-            agent_metadata: crate::store::AgentMetadataStore::new(),
-            discovery: RwLock::new(DiscoveryService::new(DiscoveryConfig::default())),
-            oauth_callback_tunnels: Arc::new(Mutex::new(HashMap::new())),
-            slingshot_apis: Arc::new(StdMutex::new(HashMap::new())),
-            recorder: Arc::new(crate::recorder::MessageRecorder::new()),
-            ambient_cache: crate::ambient_suggestions::new_ambient_cache(),
-            widget_waiters: Arc::new(StdMutex::new(HashMap::new())),
-            saved_apps_directory: Arc::new(StdMutex::new(None)),
-            slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
-            direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
-            thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
-            ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
-            background_relay: Arc::new(RwLock::new(None)),
-            background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
-            remora_link: Arc::new(RwLock::new(None)),
-            remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
-        }
+        Arc::new_cyclic(|owner: &Weak<MobileClient>| {
+            spawn_store_listener(
+                owner.clone(),
+                Arc::clone(&app_store),
+                Arc::clone(&sessions),
+                event_processor.subscribe(),
+            );
+            Self {
+                sessions,
+                event_processor,
+                app_store,
+                agent_metadata: crate::store::AgentMetadataStore::new(),
+                discovery: RwLock::new(DiscoveryService::new(DiscoveryConfig::default())),
+                oauth_callback_tunnels: Arc::new(Mutex::new(HashMap::new())),
+                slingshot_apis: Arc::new(StdMutex::new(HashMap::new())),
+                recorder: Arc::new(crate::recorder::MessageRecorder::new()),
+                widget_waiters: Arc::new(StdMutex::new(HashMap::new())),
+                saved_apps_directory: Arc::new(StdMutex::new(None)),
+                slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
+                direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
+                thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
+                turn_start_locks: Arc::new(StdMutex::new(HashMap::new())),
+                pending_turn_reconciliation: Arc::new(StdMutex::new(HashMap::new())),
+                timed_out_turn_requests: Arc::new(StdMutex::new(HashMap::new())),
+                turn_request_timeout,
+                ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
+                background_relay: Arc::new(RwLock::new(None)),
+                background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
+                remora_link: Arc::new(RwLock::new(None)),
+                remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
+            }
+        })
     }
 
     fn sessions_write(
@@ -243,6 +306,20 @@ impl MobileClient {
                 error.into_inner()
             }
         }
+    }
+
+    fn turn_start_lock(&self, key: &ThreadKey) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .turn_start_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key.clone(), Arc::downgrade(&lock));
+        lock
     }
 
     // ── Internal RPC helpers ──────────────────────────────────────────────
@@ -879,7 +956,7 @@ impl MobileClient {
         self.app_store.dismiss_plan_implementation_prompt(key);
     }
 
-    pub async fn implement_plan(&self, key: &ThreadKey) -> Result<(), RpcError> {
+    pub async fn implement_plan(self: &Arc<Self>, key: &ThreadKey) -> Result<(), RpcError> {
         self.app_store.dismiss_plan_implementation_prompt(key);
         let thread = self.snapshot_thread(key).ok();
         self.app_store
@@ -946,12 +1023,6 @@ impl MobileClient {
 
         rx
     }
-
-    /// Invalidate the in-memory ambient suggestions cache for a server.
-    /// If `project_root` is `None`, all entries for the server are cleared.
-    pub fn invalidate_ambient_suggestions(&self, server_id: &str, project_root: Option<&str>) {
-        crate::ambient_suggestions::invalidate_cache(&self.ambient_cache, server_id, project_root);
-    }
 }
 
 /// Listener that feeds session output bytes into the reducer's ring
@@ -990,12 +1061,6 @@ impl TerminalRingListener {
             .lock()
             .expect("terminal_sessions poisoned")
             .remove(&self.id);
-    }
-}
-
-impl Default for MobileClient {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1135,12 +1200,13 @@ pub(super) fn run_post_reconnect_resubscribe(
             // `exclude_turns: true`), and `reconcile_active_turn` keeps
             // any stale `active_turn_id` whose turn has already completed
             // server-side.
-            match client
-                .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
-                .await
-            {
-                Ok(()) => debug!(
+            match refresh_post_reconnect_thread_authoritative(&client, &key).await {
+                Ok(true) => debug!(
                     "MobileClient: post-reconnect resubscribe ok server_id={} thread_id={}",
+                    key.server_id, key.thread_id
+                ),
+                Ok(false) => debug!(
+                    "MobileClient: post-reconnect resubscribe discarded stale response server_id={} thread_id={}",
                     key.server_id, key.thread_id
                 ),
                 Err(error) => warn!(
@@ -1150,4 +1216,37 @@ pub(super) fn run_post_reconnect_resubscribe(
             }
         }
     });
+}
+
+async fn refresh_post_reconnect_thread_authoritative(
+    client: &MobileClient,
+    key: &ThreadKey,
+) -> Result<bool, RpcError> {
+    for attempt in 0..=POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len() {
+        if attempt > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                POST_RECONNECT_REFRESH_RETRY_DELAYS_MS[attempt - 1],
+            ))
+            .await;
+        }
+        let expected_generation = client.app_store.server_event_generation(&key.server_id);
+        match client
+            .force_refresh_thread_authoritative_if_ui_generation(
+                &key.server_id,
+                &key.thread_id,
+                expected_generation,
+            )
+            .await
+        {
+            Ok(false) if attempt < POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len() => continue,
+            Err(error)
+                if attempt < POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len()
+                    && matches!(error, RpcError::Timeout | RpcError::Transport(_)) =>
+            {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    Ok(false)
 }

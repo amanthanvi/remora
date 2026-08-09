@@ -681,16 +681,6 @@ final class NetworkDiscovery {
 }
 
 @MainActor
-/// Resolved Bonjour service — name, host (first IPv4), and port. Shared
-/// shape for `_codex._tcp` and `_ssh._tcp` clients.
-struct BonjourResolvedService: Hashable {
-    let name: String
-    let host: String
-    let port: UInt16
-    let serviceType: String
-}
-
-@MainActor
 final class BonjourServiceDiscoverer: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
     private struct ServiceRecord {
         let name: String

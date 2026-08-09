@@ -28,6 +28,11 @@ fn test_normalize_host_zone_id_removal() {
 }
 
 #[test]
+fn test_normalize_host_key_is_case_insensitive() {
+    assert_eq!(normalize_host_key("  EXAMPLE.COM  "), "example.com");
+}
+
+#[test]
 fn test_shell_quote_simple() {
     // Detailed contract lives in shell_quoting; this guards the re-export wiring.
     assert_eq!(shell_quote("hello"), "'hello'");
@@ -122,9 +127,32 @@ fn test_ssh_error_display() {
     assert_eq!(e.to_string(), "connection failed: refused");
 
     let e = SshError::HostKeyVerification {
+        host: "host.example".into(),
+        port: 22,
         fingerprint: "SHA256:abc".into(),
+        pinned: None,
     };
     assert!(e.to_string().contains("SHA256:abc"));
+    assert!(e.to_string().starts_with("unknown-host:host.example:22"));
+
+    let e = SshError::HostKeyVerification {
+        host: "host.example".into(),
+        port: 22,
+        fingerprint: "SHA256:new".into(),
+        pinned: Some("SHA256:old".into()),
+    };
+    assert!(e.to_string().starts_with("host-key-changed:host.example:22"));
+
+    let e = SshError::HostKeyStoreUnavailable {
+        host: "host.example".into(),
+        port: 22,
+        message: "keychain locked".into(),
+    };
+    assert!(
+        e.to_string()
+            .starts_with("host-key-store-unavailable:host.example:22")
+    );
+    assert!(e.to_string().contains("keychain locked"));
 
     let e = SshError::ExecFailed {
         exit_code: 127,

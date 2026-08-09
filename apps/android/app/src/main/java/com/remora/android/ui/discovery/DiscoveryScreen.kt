@@ -61,7 +61,10 @@ import com.remora.android.ui.common.isBeta
 import com.remora.android.util.LLog
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.AgentAvailabilityStatus
 import com.remora.android.ui.common.AgentRuntimeKind
 import com.remora.android.ui.common.metadata
@@ -85,6 +88,37 @@ private data class SshBridgeAgentContext(
 
 private const val SLINGSHOT_BASE_URL = "https://chatgpt.com/backend-api"
 private const val REMOTE_BRIDGE_STATE_DIRECTORY = "remora-bridges"
+
+internal suspend fun persistConnectionAdmissionOrCleanup(
+    persistAndAdmit: suspend (markAdmissionComplete: () -> Unit) -> Unit,
+    cleanup: suspend () -> Unit,
+) {
+    var admissionComplete = false
+    try {
+        persistAndAdmit { admissionComplete = true }
+    } catch (error: Exception) {
+        if (!admissionComplete) {
+            runCatching {
+                withContext(NonCancellable) { cleanup() }
+            }
+        }
+        throw error
+    }
+}
+
+internal suspend fun completeConnectionAdmission(
+    allowReconnect: suspend () -> Unit,
+    markAdmissionComplete: () -> Unit,
+    displacedSessionId: String?,
+    currentSessionId: String?,
+    closeSession: suspend (String) -> Unit,
+) {
+    allowReconnect()
+    markAdmissionComplete()
+    if (currentSessionId != null && displacedSessionId != null && displacedSessionId != currentSessionId) {
+        runCatching { closeSession(displacedSessionId) }
+    }
+}
 
 /**
  * Server discovery and connection screen.
@@ -118,6 +152,51 @@ fun DiscoveryScreen(
     var connectionChoiceServer by remember { mutableStateOf<SavedServer?>(null) }
     var pendingAutoNavigateServerId by remember { mutableStateOf<String?>(null) }
     var pendingSlingshotEnvironment by remember { mutableStateOf<AppSlingshotEnvironment?>(null) }
+
+    suspend fun rememberConnectedServerOrDisconnect(
+        server: SavedServer,
+        connectedServerId: String = server.id,
+        sshSessionId: String? = null,
+    ) {
+        val previouslyTrackedSessionId = sshSessionId?.let {
+            appModel.sshSessionStore.activeSessionId(connectedServerId)
+        }
+        var displacedSessionId = previouslyTrackedSessionId
+        var sessionRecordChanged = false
+        persistConnectionAdmissionOrCleanup(
+            persistAndAdmit = { markAdmissionComplete ->
+                withContext(NonCancellable + Dispatchers.IO) {
+                    SavedServerStore.remember(context, server)
+                    sshSessionId?.let { sessionId ->
+                        displacedSessionId = appModel.sshSessionStore.record(connectedServerId, sessionId)
+                        sessionRecordChanged = true
+                    }
+                    completeConnectionAdmission(
+                        allowReconnect = { appModel.reconnectController.allowServerReconnect(server.id) },
+                        markAdmissionComplete = markAdmissionComplete,
+                        displacedSessionId = displacedSessionId,
+                        currentSessionId = sshSessionId,
+                        closeSession = { appModel.ssh.sshClose(it) },
+                    )
+                }
+            },
+            cleanup = {
+                runCatching { appModel.serverBridge.disconnectServer(connectedServerId) }
+                sshSessionId?.let { sessionId ->
+                    if (sessionRecordChanged) {
+                        appModel.sshSessionStore.rollbackRecord(
+                            connectedServerId,
+                            sessionId,
+                            displacedSessionId,
+                        )
+                    }
+                    if (displacedSessionId != sessionId) {
+                        runCatching { appModel.ssh.sshClose(sessionId) }
+                    }
+                }
+            },
+        )
+    }
     var authorizedSlingshotConnect by remember { mutableStateOf<Pair<AppSlingshotEnvironment, String>?>(null) }
     var wakingServerId by remember { mutableStateOf<String?>(null) }
     var connectError by remember { mutableStateOf<String?>(null) }
@@ -196,7 +275,7 @@ fun DiscoveryScreen(
         }
         val server = slingshotSavedServer(environment)
         val tokens = loadSlingshotTokens(context)
-        appModel.serverBridge.connectRemoteSlingshotUrlServer(
+        val connectedServerId = appModel.serverBridge.connectRemoteSlingshotUrlServer(
             server.id,
             server.name,
             environment.connectionUrl,
@@ -204,7 +283,10 @@ fun DiscoveryScreen(
             tokens.accountId,
             stepUpToken,
         )
-        SavedServerStore.remember(context, server.normalizedForPersistence())
+        rememberConnectedServerOrDisconnect(
+            server = server.normalizedForPersistence(),
+            connectedServerId = connectedServerId,
+        )
         appModel.refreshSnapshot()
     }
 
@@ -307,7 +389,7 @@ fun DiscoveryScreen(
             )
         }
 
-    suspend fun startGuidedSshConnect(server: SavedServer, credential: SavedSshCredential) {
+    suspend fun startGuidedSshConnect(server: SavedServer, credential: SavedSshCredential): String =
         when (credential.method) {
             SshAuthMethod.PASSWORD -> {
                 appModel.serverBridge.startRemoteOverSshConnect(
@@ -341,7 +423,6 @@ fun DiscoveryScreen(
                 )
             }
         }
-    }
 
     suspend fun prepareServerForSelection(entry: SavedServer): SavedServer {
         if (entry.source == "local" || entry.websocketURL != null) {
@@ -382,9 +463,9 @@ fun DiscoveryScreen(
         }
     }
 
-    suspend fun connectPreparedRemoteUrl(prepared: SavedServer) {
-        val websocketURL = prepared.websocketURL ?: return
-        if (isSlingshotUrl(websocketURL)) {
+    suspend fun connectPreparedRemoteUrl(prepared: SavedServer): String {
+        val websocketURL = checkNotNull(prepared.websocketURL)
+        return if (isSlingshotUrl(websocketURL)) {
             val tokens = loadSlingshotTokens(context)
             appModel.serverBridge.connectRemoteSlingshotUrlServer(
                 prepared.id,
@@ -419,21 +500,27 @@ fun DiscoveryScreen(
             val prepared = prepareServerForSelection(entry)
             when {
                 prepared.source == "local" -> {
-                    appModel.serverBridge.connectLocalServer(
+                    val connectedServerId = appModel.serverBridge.connectLocalServer(
                         prepared.id,
                         prepared.name,
                         prepared.hostname,
                         prepared.port.toUShort(),
                     )
                     appModel.restoreStoredLocalAuthState(prepared.id)
-                    SavedServerStore.remember(context, prepared.normalizedForPersistence())
+                    rememberConnectedServerOrDisconnect(
+                        server = prepared.normalizedForPersistence(),
+                        connectedServerId = connectedServerId,
+                    )
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
 
                 prepared.websocketURL != null -> {
-                    connectPreparedRemoteUrl(prepared)
-                    SavedServerStore.remember(context, prepared.normalizedForPersistence())
+                    val connectedServerId = connectPreparedRemoteUrl(prepared)
+                    rememberConnectedServerOrDisconnect(
+                        server = prepared.normalizedForPersistence(),
+                        connectedServerId = connectedServerId,
+                    )
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -447,15 +534,15 @@ fun DiscoveryScreen(
                 }
 
                 prepared.directCodexPort != null -> {
-                    appModel.serverBridge.connectRemoteServer(
+                    val connectedServerId = appModel.serverBridge.connectRemoteServer(
                         prepared.id,
                         prepared.name,
                         prepared.hostname,
                         prepared.directCodexPort!!.toUShort(),
                     )
-                    SavedServerStore.remember(
-                        context,
-                        prepared.withPreferredConnection("directCodex", prepared.directCodexPort),
+                    rememberConnectedServerOrDisconnect(
+                        server = prepared.withPreferredConnection("directCodex", prepared.directCodexPort),
+                        connectedServerId = connectedServerId,
                     )
                     appModel.refreshSnapshot()
                     onDismiss()
@@ -594,15 +681,15 @@ fun DiscoveryScreen(
                                 connectionChoiceServer = null
                                 scope.launch {
                                     try {
-                                        appModel.serverBridge.connectRemoteServer(
+                                        val connectedServerId = appModel.serverBridge.connectRemoteServer(
                                             server.id,
                                             server.name,
                                             server.hostname,
                                             port.toUShort(),
                                         )
-                                        SavedServerStore.remember(
-                                            context,
-                                            server.withPreferredConnection("directCodex", port),
+                                        rememberConnectedServerOrDisconnect(
+                                            server = server.withPreferredConnection("directCodex", port),
+                                            connectedServerId = connectedServerId,
                                         )
                                         appModel.refreshSnapshot()
                                         onDismiss()
@@ -696,10 +783,10 @@ fun DiscoveryScreen(
                                 "host" to server.hostname,
                             ),
                         )
-                        startGuidedSshConnect(server, credential)
-                        SavedServerStore.remember(
-                            context,
-                            server.withPreferredConnection("ssh"),
+                        val connectedServerId = startGuidedSshConnect(server, credential)
+                        rememberConnectedServerOrDisconnect(
+                            server = server.withPreferredConnection("ssh"),
+                            connectedServerId = connectedServerId,
                         )
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = server.id
@@ -745,15 +832,34 @@ fun DiscoveryScreen(
             },
             onUseCodex = {
                 scope.launch {
-                    runCatching { appModel.ssh.sshClose(agentContext.sessionId) }
-                    startGuidedSshConnect(agentContext.server, agentContext.credential)
-                    SavedServerStore.remember(
-                        context,
-                        agentContext.server.withPreferredConnection("ssh"),
-                    )
-                    appModel.refreshSnapshot()
-                    pendingAutoNavigateServerId = agentContext.server.id
-                    sshAgentContext = null
+                    try {
+                        runCatching { appModel.ssh.sshClose(agentContext.sessionId) }
+                        val connectedServerId = startGuidedSshConnect(
+                            agentContext.server,
+                            agentContext.credential,
+                        )
+                        rememberConnectedServerOrDisconnect(
+                            server = agentContext.server.withPreferredConnection("ssh"),
+                            connectedServerId = connectedServerId,
+                        )
+                        appModel.refreshSnapshot()
+                        pendingAutoNavigateServerId = agentContext.server.id
+                        sshAgentContext = null
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (error: Exception) {
+                        LLog.e(
+                            logTag,
+                            "guided SSH bridge fallback failed",
+                            error,
+                            fields = mapOf(
+                                "serverId" to agentContext.server.id,
+                                "host" to agentContext.host,
+                            ),
+                        )
+                        sshAgentContext = null
+                        connectError = error.message ?: "Unable to connect over SSH."
+                    }
                 }
             },
             onConnect = { selectedKinds ->
@@ -777,8 +883,11 @@ fun DiscoveryScreen(
                         preferredConnectionMode = "ssh",
                         sshBridgeRuntimeKinds = selectedKinds,
                     )
-                    appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
-                    SavedServerStore.remember(context, server)
+                    rememberConnectedServerOrDisconnect(
+                        server = server,
+                        connectedServerId = result.serverId,
+                        sshSessionId = agentContext.sessionId,
+                    )
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = result.serverId
                     sshAgentContext = null

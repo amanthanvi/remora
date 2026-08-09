@@ -12,7 +12,7 @@ use crate::reconnect::{
 use crate::store::ServerHealthSnapshot;
 use crate::store::snapshot::AppLifecyclePhaseSnapshot;
 use codex_app_server_protocol as upstream;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -32,6 +32,20 @@ struct ReconnectCoordinator {
 struct ReconnectCoordinatorState {
     accepting: bool,
     in_flight: HashMap<String, ActiveReconnect>,
+    revoked_servers: HashMap<String, ServerRevocation>,
+    next_revocation_lease: u64,
+}
+
+struct ServerRevocation {
+    state: ServerRevocationState,
+    waiters: HashSet<u64>,
+    owners: HashSet<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerRevocationState {
+    Preparing,
+    Prepared,
 }
 
 struct ActiveReconnect {
@@ -58,6 +72,8 @@ impl ReconnectCoordinator {
             state: StdMutex::new(ReconnectCoordinatorState {
                 accepting: true,
                 in_flight: HashMap::new(),
+                revoked_servers: HashMap::new(),
+                next_revocation_lease: 0,
             }),
             cold_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_COLD_RECONNECTS)),
             state_changed: Notify::new(),
@@ -69,7 +85,7 @@ impl ReconnectCoordinator {
             Ok(state) => state,
             Err(error) => error.into_inner(),
         };
-        if !state.accepting {
+        if !state.accepting || state.revoked_servers.contains_key(server_id) {
             return BeginReconnect::Stopped;
         }
         if let Some(active) = state.in_flight.get(server_id) {
@@ -97,6 +113,122 @@ impl ReconnectCoordinator {
         match self.state.lock() {
             Ok(state) => state.in_flight.is_empty(),
             Err(error) => error.into_inner().in_flight.is_empty(),
+        }
+    }
+
+    async fn revoke_server(&self, server_id: &str, deadline: Duration) -> Option<u64> {
+        let lease = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            state.next_revocation_lease = state
+                .next_revocation_lease
+                .checked_add(1)
+                .expect("server revocation lease overflow");
+            let lease = state.next_revocation_lease;
+            if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
+                if revocation.state == ServerRevocationState::Prepared {
+                    assert!(revocation.owners.insert(lease));
+                    return Some(lease);
+                }
+                assert!(revocation.waiters.insert(lease));
+            } else {
+                state.revoked_servers.insert(
+                    server_id.to_string(),
+                    ServerRevocation {
+                        state: ServerRevocationState::Preparing,
+                        waiters: HashSet::from([lease]),
+                        owners: HashSet::new(),
+                    },
+                );
+            }
+            lease
+        };
+
+        let started = Instant::now();
+        loop {
+            let changed = self.state_changed.notified();
+            let drained = {
+                let mut state = match self.state.lock() {
+                    Ok(state) => state,
+                    Err(error) => error.into_inner(),
+                };
+                if !state
+                    .revoked_servers
+                    .get(server_id)
+                    .is_some_and(|revocation| revocation.waiters.contains(&lease))
+                {
+                    return None;
+                }
+                if let Some(active) = state.in_flight.get(server_id) {
+                    let _ = active.cancel_tx.send(true);
+                    false
+                } else {
+                    let revocation = state
+                        .revoked_servers
+                        .get_mut(server_id)
+                        .expect("matching server revocation disappeared while locked");
+                    revocation.state = ServerRevocationState::Prepared;
+                    assert!(revocation.waiters.remove(&lease));
+                    assert!(revocation.owners.insert(lease));
+                    true
+                }
+            };
+            if drained {
+                return Some(lease);
+            }
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() || tokio::time::timeout(remaining, changed).await.is_err() {
+                self.finish_server_preparation(server_id, lease);
+                return None;
+            }
+        }
+    }
+
+    fn allow_server(&self, server_id: &str) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        state.revoked_servers.remove(server_id);
+    }
+
+    fn finish_server_preparation(&self, server_id: &str, lease: u64) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        let should_remove = if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
+            if !revocation.waiters.remove(&lease) {
+                return;
+            }
+            revocation.waiters.is_empty()
+                && revocation.owners.is_empty()
+                && revocation.state == ServerRevocationState::Preparing
+        } else {
+            false
+        };
+        if should_remove {
+            state.revoked_servers.remove(server_id);
+        }
+    }
+
+    fn rollback_server_removal(&self, server_id: &str, lease: u64) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        let should_remove = if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
+            if !revocation.owners.remove(&lease) {
+                return;
+            }
+            revocation.waiters.is_empty() && revocation.owners.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            state.revoked_servers.remove(server_id);
         }
     }
 
@@ -354,6 +486,25 @@ pub struct ReconnectController {
     reconnect_coordinator: Arc<ReconnectCoordinator>,
 }
 
+impl ReconnectController {
+    async fn prepare_server_removal_with_deadline(
+        &self,
+        server_id: String,
+        deadline: Duration,
+    ) -> Option<u64> {
+        let coordinator = Arc::clone(&self.reconnect_coordinator);
+        let inner = Arc::clone(&self.inner);
+        self.rt
+            .spawn(async move {
+                let lease = coordinator.revoke_server(&server_id, deadline).await?;
+                inner.disconnect_server(&server_id);
+                Some(lease)
+            })
+            .await
+            .unwrap_or(None)
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ReconnectController {
     #[uniffi::constructor]
@@ -409,6 +560,29 @@ impl ReconnectController {
             Ok(mut guard) => *guard = servers,
             Err(e) => *e.into_inner() = servers,
         }
+    }
+
+    /// Fence a saved server against reconnect before its persisted record and
+    /// SSH trust are removed. Stale reconnect plans that already copied the
+    /// record are rejected by the coordinator, while an active attempt is
+    /// cancelled and joined before the live session is disconnected.
+    pub async fn prepare_server_removal(&self, server_id: String) -> Option<u64> {
+        self.prepare_server_removal_with_deadline(server_id, RECONNECT_SHUTDOWN_DEADLINE)
+            .await
+    }
+
+    /// Release exactly one successful removal preparation after that caller's
+    /// persisted mutation fails. Other removal owners retain the fence.
+    pub fn rollback_server_removal(&self, server_id: String, lease: u64) {
+        self.reconnect_coordinator
+            .rollback_server_removal(&server_id, lease);
+    }
+
+    /// Restore reconnect admission after an explicit user-driven save/re-add.
+    /// Ordinary saved-server synchronization never clears removal tombstones
+    /// because it may carry a stale platform read.
+    pub fn allow_server_reconnect(&self, server_id: String) {
+        self.reconnect_coordinator.allow_server(&server_id);
     }
 
     pub async fn reconnect_saved_servers(&self) -> Vec<ReconnectResult> {
@@ -749,7 +923,7 @@ async fn reconnect_server_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginReconnect, ReconnectCoordinator, ReconnectShutdownOutcome,
+        BeginReconnect, ReconnectController, ReconnectCoordinator, ReconnectShutdownOutcome,
         resolved_local_display_name, wait_for_coalesced_result,
     };
     use crate::reconnect::{ReconnectOutcome, ReconnectResult, SavedServerRecord};
@@ -880,6 +1054,242 @@ mod tests {
         assert!(matches!(
             coordinator.try_begin("srv-b"),
             BeginReconnect::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconnect_coordinator_revokes_one_server_and_joins_its_attempt() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(mut attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected first owner");
+        };
+        let attempt_task = tokio::spawn(async move {
+            attempt.cancelled().await;
+            drop(attempt);
+        });
+
+        assert!(
+            coordinator
+                .revoke_server("srv-a", std::time::Duration::from_millis(100))
+                .await
+                .is_some()
+        );
+        attempt_task.await.expect("cancelled attempt joined");
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+        assert!(matches!(
+            coordinator.try_begin("srv-b"),
+            BeginReconnect::Started(_)
+        ));
+
+        coordinator.allow_server("srv-a");
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Started(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_server_removal_preparation_restores_reconnect_admission() {
+        let controller = ReconnectController::new();
+        let coordinator = std::sync::Arc::clone(&controller.reconnect_coordinator);
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        assert!(
+            controller
+                .prepare_server_removal_with_deadline(
+                    "srv-a".to_string(),
+                    std::time::Duration::ZERO,
+                )
+                .await
+                .is_none()
+        );
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Coalesced(_)
+        ));
+
+        drop(attempt);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Started(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn overlapping_preparation_timeout_retains_the_other_waiters_fence() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        let waiting_coordinator = std::sync::Arc::clone(&coordinator);
+        let waiting = tokio::spawn(async move {
+            waiting_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        for _ in 0..100 {
+            let registered = {
+                let state = coordinator.state.lock().expect("coordinator state");
+                state
+                    .revoked_servers
+                    .get("srv-a")
+                    .is_some_and(|revocation| revocation.waiters.len() == 1)
+            };
+            if registered {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            coordinator
+                .state
+                .lock()
+                .expect("coordinator state")
+                .revoked_servers
+                .get("srv-a")
+                .map(|revocation| revocation.waiters.len()),
+            Some(1)
+        );
+
+        assert!(
+            coordinator
+                .revoke_server("srv-a", std::time::Duration::ZERO)
+                .await
+                .is_none()
+        );
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+
+        drop(attempt);
+        assert!(waiting.await.expect("preparation task joined").is_some());
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_preparation_timeout_cannot_clear_a_successor_fence() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        let stale_coordinator = std::sync::Arc::clone(&coordinator);
+        let stale = tokio::spawn(async move {
+            stale_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        let stale_lease = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(lease) = coordinator
+                    .state
+                    .lock()
+                    .expect("coordinator state")
+                    .revoked_servers
+                    .get("srv-a")
+                    .and_then(|revocation| revocation.waiters.iter().copied().next())
+                {
+                    break lease;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stale preparation registered");
+
+        coordinator.allow_server("srv-a");
+        let successor_coordinator = std::sync::Arc::clone(&coordinator);
+        let successor = tokio::spawn(async move {
+            successor_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        let successor_lease = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(lease) = coordinator
+                    .state
+                    .lock()
+                    .expect("coordinator state")
+                    .revoked_servers
+                    .get("srv-a")
+                    .and_then(|revocation| revocation.waiters.iter().copied().next())
+                    .filter(|lease| *lease != stale_lease)
+                {
+                    break lease;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor preparation registered");
+
+        coordinator.finish_server_preparation("srv-a", stale_lease);
+        let state = coordinator.state.lock().expect("coordinator state");
+        let revocation = state
+            .revoked_servers
+            .get("srv-a")
+            .expect("successor fence retained");
+        assert_eq!(revocation.waiters.len(), 1);
+        assert!(revocation.waiters.contains(&successor_lease));
+        drop(state);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+
+        drop(attempt);
+        assert!(stale.await.expect("stale preparation joined").is_none());
+        assert_eq!(
+            successor.await.expect("successor preparation joined"),
+            Some(successor_lease)
+        );
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn rolling_back_one_prepared_owner_retains_the_other_owners_fence() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let first_lease = coordinator
+            .revoke_server("srv-a", std::time::Duration::ZERO)
+            .await
+            .expect("first removal prepared");
+        let second_lease = coordinator
+            .revoke_server("srv-a", std::time::Duration::ZERO)
+            .await
+            .expect("second removal prepared");
+        assert_ne!(first_lease, second_lease);
+
+        coordinator.rollback_server_removal("srv-a", first_lease);
+        let state = coordinator.state.lock().expect("coordinator state");
+        let revocation = state
+            .revoked_servers
+            .get("srv-a")
+            .expect("other owner retains the fence");
+        assert_eq!(revocation.owners.len(), 1);
+        assert!(revocation.owners.contains(&second_lease));
+        drop(state);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+
+        coordinator.rollback_server_removal("srv-a", second_lease);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Started(_)
         ));
     }
 
