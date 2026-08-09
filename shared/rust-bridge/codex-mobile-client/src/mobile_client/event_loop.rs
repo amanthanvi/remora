@@ -280,6 +280,20 @@ impl MobileClient {
             .await
     }
 
+    pub(super) async fn request_typed_for_server_rpc<R>(
+        &self,
+        server_id: &str,
+        request: upstream::ClientRequest,
+    ) -> Result<R, RpcError>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let runtime_kind = self.runtime_for_request(server_id, &request);
+        let session = self.get_session(server_id)?;
+        self.request_typed_for_session_runtime_rpc(server_id, session, runtime_kind, request)
+            .await
+    }
+
     pub async fn request_typed_for_server_runtime<R>(
         &self,
         server_id: &str,
@@ -289,12 +303,62 @@ impl MobileClient {
     where
         R: serde::de::DeserializeOwned,
     {
+        self.request_typed_for_server_runtime_with_session(server_id, runtime_kind, request)
+            .await
+            .map(|(response, _session)| response)
+    }
+
+    pub(super) async fn request_typed_for_server_runtime_with_session<R>(
+        &self,
+        server_id: &str,
+        runtime_kind: AgentRuntimeKind,
+        request: upstream::ClientRequest,
+    ) -> Result<(R, Arc<ServerSession>), String>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let session = self.get_session(server_id).map_err(|e| e.to_string())?;
+        let response = self
+            .request_typed_for_session_runtime(
+                server_id,
+                Arc::clone(&session),
+                runtime_kind,
+                request,
+            )
+            .await?;
+        Ok((response, session))
+    }
+
+    pub(super) async fn request_typed_for_session_runtime<R>(
+        &self,
+        server_id: &str,
+        session: Arc<ServerSession>,
+        runtime_kind: AgentRuntimeKind,
+        request: upstream::ClientRequest,
+    ) -> Result<R, String>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        self.request_typed_for_session_runtime_rpc(server_id, session, runtime_kind, request)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) async fn request_typed_for_session_runtime_rpc<R>(
+        &self,
+        server_id: &str,
+        session: Arc<ServerSession>,
+        runtime_kind: AgentRuntimeKind,
+        request: upstream::ClientRequest,
+    ) -> Result<R, RpcError>
+    where
+        R: serde::de::DeserializeOwned,
+    {
         let mut request = request;
         self.normalize_model_selection_for_request(server_id, runtime_kind.clone(), &mut request);
         self.recorder.record_request(server_id, &request);
         let wire_method = client_request_wire_method(&request);
         let started_at = Instant::now();
-        let session = self.get_session(server_id).map_err(|e| e.to_string())?;
         info!(
             "server request start server_id={} runtime={:?} method={}",
             server_id, runtime_kind, wire_method
@@ -312,7 +376,7 @@ impl MobileClient {
                     started_at.elapsed().as_millis(),
                     error
                 );
-                error.to_string()
+                error
             })?;
         info!(
             "server request ok server_id={} runtime={:?} method={} duration_ms={}",
@@ -335,7 +399,7 @@ impl MobileClient {
         parsed.map_err(|e| {
             let error = format_typed_rpc_deserialization_error(wire_method, &e, &value);
             warn!("{error}\nraw payload: {value}");
-            error
+            RpcError::Deserialization(error)
         })
     }
 

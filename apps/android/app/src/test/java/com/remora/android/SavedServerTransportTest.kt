@@ -2,6 +2,7 @@ package com.remora.android
 
 import com.remora.android.state.SavedServer
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.hasSupportedConnectionPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -23,12 +24,13 @@ class SavedServerTransportTest {
     fun sshTrustCleanupJournalsBeforeUnpinAndFinalizesAfterward() {
         val steps = mutableListOf<String>()
 
-        SavedServerStore.runTrustCleanupTransaction(
+        val outcome = SavedServerStore.runTrustCleanupTransaction(
             begin = { steps += "begin" },
             unpin = { steps += "unpin" },
             finish = { steps += "finish" },
         )
 
+        assertEquals(SshTrustCleanupOutcome.Complete, outcome)
         assertEquals(listOf("begin", "unpin", "finish"), steps)
     }
 
@@ -36,7 +38,7 @@ class SavedServerTransportTest {
     fun failedSshTrustCleanupKeepsServerAbsentAndJournalDurable() {
         val steps = mutableListOf<String>()
 
-        SavedServerStore.runTrustCleanupTransaction(
+        val outcome = SavedServerStore.runTrustCleanupTransaction(
             begin = { steps += "begin" },
             unpin = {
                 steps += "unpin"
@@ -45,6 +47,7 @@ class SavedServerTransportTest {
             finish = { steps += "finish" },
         )
 
+        assertEquals(SshTrustCleanupOutcome.Pending, outcome)
         assertEquals(listOf("begin", "unpin"), steps)
     }
 

@@ -63,6 +63,7 @@ pub use self::thread_projection::{
 use self::user_input::normalize_pending_user_input_answers;
 
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
+const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Top-level entry point for platform code (iOS / Android).
 ///
@@ -96,6 +97,8 @@ pub struct MobileClient {
     direct_resumed_threads: Arc<StdMutex<HashSet<ThreadKey>>>,
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
     turn_start_locks: Arc<StdMutex<HashMap<ThreadKey, Weak<Mutex<()>>>>>,
+    pending_turn_reconciliation: Arc<StdMutex<HashSet<ThreadKey>>>,
+    turn_request_timeout: std::time::Duration,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
     /// bootstrap task.
@@ -188,6 +191,12 @@ fn is_method_not_found(error: &str) -> bool {
 impl MobileClient {
     /// Create a new `MobileClient`.
     pub fn new() -> Arc<Self> {
+        Self::new_with_turn_request_timeout(DEFAULT_TURN_REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn new_with_turn_request_timeout(
+        turn_request_timeout: std::time::Duration,
+    ) -> Arc<Self> {
         crate::logging::install_tracing_subscriber();
         let event_processor = Arc::new(EventProcessor::new());
         let app_store = Arc::new(AppStoreReducer::new());
@@ -214,6 +223,8 @@ impl MobileClient {
                 direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
                 thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
                 turn_start_locks: Arc::new(StdMutex::new(HashMap::new())),
+                pending_turn_reconciliation: Arc::new(StdMutex::new(HashSet::new())),
+                turn_request_timeout,
                 ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
                 background_relay: Arc::new(RwLock::new(None)),

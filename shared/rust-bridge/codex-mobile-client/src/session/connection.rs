@@ -36,6 +36,7 @@ use crate::types::AgentRuntimeKind;
 const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 const REMOTE_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
 const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
+const REMOTE_TURN_REQUEST_DEADLINE: Duration = Duration::from_secs(45);
 const CONNECTION_TIMELINE_CAPACITY: usize = 128;
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 const APP_SERVER_PROXY_WEBSOCKET_URL: &str = "ws://codex-app-server-proxy.localhost/rpc";
@@ -1094,16 +1095,17 @@ impl ServerSession {
                             SessionCommand::Request { request, response_tx } => {
                                 let sender = sender.clone();
                                 tokio::spawn(async move {
-                                    let result = match sender.request(request).await {
-                                        Ok(Ok(value)) => Ok(value),
-                                        Ok(Err(error)) => Err(RpcError::Server {
-                                            code: error.code,
-                                            message: error.message,
-                                        }),
-                                        Err(e) => Err(RpcError::Transport(
-                                            TransportError::SendFailed(e.to_string()),
-                                        )),
-                                    };
+                                    let turn_request = matches!(
+                                        &request,
+                                        ClientRequest::TurnStart { .. }
+                                            | ClientRequest::TurnSteer { .. }
+                                    );
+                                    let result = request_in_process_client(
+                                        &sender,
+                                        request,
+                                        turn_request.then_some(REMOTE_TURN_REQUEST_DEADLINE),
+                                    )
+                                    .await;
                                     let _ = response_tx.send(result);
                                 });
                             }
@@ -1268,6 +1270,7 @@ impl ServerSession {
                 connection_timeline.clone(),
                 args.clone(),
                 url.clone(),
+                REMOTE_TURN_REQUEST_DEADLINE,
                 resource.transport,
             ));
         }
@@ -2187,6 +2190,56 @@ impl RemoteTransport for SlingshotReconnectTransport {
     }
 }
 
+async fn await_request_with_deadline<F, T>(
+    future: F,
+    deadline: Option<Duration>,
+) -> Result<T, RpcError>
+where
+    F: std::future::Future<Output = T>,
+{
+    if let Some(deadline) = deadline {
+        return tokio::time::timeout(deadline, future)
+            .await
+            .map_err(|_| RpcError::Transport(TransportError::Disconnected));
+    }
+    Ok(future.await)
+}
+
+async fn request_in_process_client(
+    sender: &codex_app_server::in_process::InProcessClientSender,
+    request: ClientRequest,
+    deadline: Option<Duration>,
+) -> Result<JsonValue, RpcError> {
+    match await_request_with_deadline(sender.request(request), deadline).await? {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(RpcError::Server {
+            code: error.code,
+            message: error.message,
+        }),
+        Err(error) => Err(RpcError::Transport(TransportError::SendFailed(
+            error.to_string(),
+        ))),
+    }
+}
+
+async fn request_remote_client(
+    client: &AppServerClient,
+    request: ClientRequest,
+    deadline: Option<Duration>,
+) -> Result<JsonValue, RpcError> {
+    let response = await_request_with_deadline(client.request(request), deadline).await?;
+    match response {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(RpcError::Server {
+            code: error.code,
+            message: error.message,
+        }),
+        Err(error) => Err(RpcError::Transport(TransportError::SendFailed(
+            error.to_string(),
+        ))),
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the worker owns independent runtime channels and reconnect resources that must move into one spawned task"
@@ -2201,6 +2254,7 @@ fn spawn_remote_runtime_worker(
     timeline: ConnectionTimeline,
     reconnect_args: RemoteAppServerConnectArgs,
     reconnect_url: String,
+    turn_request_deadline: Duration,
     reconnect_transport: Option<Arc<dyn RemoteTransport>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -2213,16 +2267,16 @@ fn spawn_remote_runtime_worker(
                     match command {
                         SessionCommand::Request { request, response_tx } => {
                             let request_retry = request.clone();
-                            let mut result = match client.request(request).await {
-                                Ok(Ok(value)) => Ok(value),
-                                Ok(Err(error)) => Err(RpcError::Server {
-                                    code: error.code,
-                                    message: error.message,
-                                }),
-                                Err(error) => Err(RpcError::Transport(
-                                    TransportError::SendFailed(error.to_string()),
-                                )),
-                            };
+                            let ambiguous_turn_mutation = matches!(
+                                &request,
+                                ClientRequest::TurnStart { .. } | ClientRequest::TurnSteer { .. }
+                            );
+                            let mut result = request_remote_client(
+                                &client,
+                                request,
+                                ambiguous_turn_mutation.then_some(turn_request_deadline),
+                            )
+                            .await;
                             if matches!(result, Err(RpcError::Transport(_))) {
                                 reconnect_generation = reconnect_generation.saturating_add(1);
                                 if let Some(replay_outcome) = reconnect_remote_client(
@@ -2245,16 +2299,14 @@ fn spawn_remote_runtime_worker(
                                         reconnect_generation,
                                         replay_outcome,
                                     );
-                                    result = match client.request(request_retry).await {
-                                        Ok(Ok(value)) => Ok(value),
-                                        Ok(Err(error)) => Err(RpcError::Server {
-                                            code: error.code,
-                                            message: error.message,
-                                        }),
-                                        Err(error) => Err(RpcError::Transport(
-                                            TransportError::SendFailed(error.to_string()),
-                                        )),
-                                    };
+                                    if !ambiguous_turn_mutation {
+                                        result = request_remote_client(
+                                            &client,
+                                            request_retry,
+                                            None,
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                             let _ = response_tx.send(result);
@@ -2617,6 +2669,7 @@ mod tests {
 
     enum TestJsonLineServer {
         DropOnFirstRequest,
+        NeverRespond,
         Respond(JsonValue),
     }
 
@@ -2654,6 +2707,12 @@ mod tests {
                     // response, simulating the app-server process/bridge dying
                     // after the mobile client has already enqueued an RPC.
                     let _ = lines.next_line().await;
+                }
+                TestJsonLineServer::NeverRespond => {
+                    // Consume the request but keep the connection alive without
+                    // responding, reproducing a connected-silent peer.
+                    let _ = lines.next_line().await;
+                    std::future::pending::<()>().await;
                 }
                 TestJsonLineServer::Respond(response) => {
                     while let Ok(Some(line)) = lines.next_line().await {
@@ -2845,6 +2904,7 @@ mod tests {
             timeline.clone(),
             test_remote_args("drop-test-bridge"),
             "drop-test-bridge".to_string(),
+            REMOTE_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
 
@@ -2901,6 +2961,111 @@ mod tests {
             .await
             .expect("worker should accept shutdown");
         worker.await.expect("worker should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_times_out_silent_turn_start_without_replay() {
+        let initial_client = app_server_client_for_json_line_server(
+            TestJsonLineServer::NeverRespond,
+            "silent-turn-test-bridge",
+        )
+        .await;
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let reconnect_transport: Arc<dyn RemoteTransport> = Arc::new(TestReconnectTransport {
+            reconnects: Arc::clone(&reconnects),
+        });
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            initial_client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: health_state,
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("silent-turn-test-bridge"),
+            "silent-turn-test-bridge".to_string(),
+            Duration::from_millis(50),
+            Some(reconnect_transport),
+        );
+        let request: ClientRequest = serde_json::from_value(json!({
+            "id": 1,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "input": [{
+                    "type": "text",
+                    "text": "run once",
+                    "textElements": []
+                }]
+            }
+        }))
+        .expect("valid turn/start request");
+        let (response_tx, response_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request,
+                response_tx,
+            })
+            .await
+            .expect("worker should accept turn/start");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), response_rx)
+            .await
+            .expect("silent turn/start should be bounded")
+            .expect("worker should resolve the response waiter")
+            .expect_err("ambiguous turn/start must not be replayed");
+        assert!(matches!(
+            error,
+            RpcError::Transport(TransportError::Disconnected)
+        ));
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
+
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("worker should accept shutdown");
+        worker.await.expect("worker should shut down cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_turn_deadline_releases_serialization_lock_without_replay() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let task_lock = Arc::clone(&lock);
+        let task_attempts = Arc::clone(&attempts);
+        let task = tokio::spawn(async move {
+            let _guard = task_lock.lock().await;
+            let request = async move {
+                task_attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            };
+            await_request_with_deadline(request, Some(Duration::from_millis(50))).await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let error = task
+            .await
+            .expect("deadline task should join")
+            .expect_err("silent turn request should time out");
+        assert!(matches!(
+            error,
+            RpcError::Transport(TransportError::Disconnected)
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]

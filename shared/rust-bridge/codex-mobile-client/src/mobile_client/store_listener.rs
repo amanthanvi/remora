@@ -2,6 +2,16 @@ use super::*;
 
 const SUBAGENT_METADATA_HYDRATE_DELAYS_MS: [u64; 3] = [150, 800, 2500];
 const LAG_STALE_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
+const LAG_STALE_RETRY_CYCLE_DELAY_MS: u64 = 5000;
+
+fn next_lag_stale_retry_delay_ms(stale_retry_index: &mut usize) -> u64 {
+    if let Some(delay_ms) = LAG_STALE_RETRY_DELAYS_MS.get(*stale_retry_index) {
+        *stale_retry_index += 1;
+        return *delay_ms;
+    }
+    *stale_retry_index = 0;
+    LAG_STALE_RETRY_CYCLE_DELAY_MS
+}
 
 #[derive(Default)]
 struct LagReconcileState {
@@ -50,6 +60,40 @@ impl LagReconcileGate {
     }
 }
 
+async fn run_lag_reconcile_worker<F, Fut>(
+    owner: std::sync::Weak<MobileClient>,
+    lag_reconcile_gate: Arc<LagReconcileGate>,
+    mut reconcile: F,
+) where
+    F: FnMut(Arc<MobileClient>) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut stale_retry_index = 0;
+    loop {
+        let Some(client) = owner.upgrade() else {
+            warn!("MobileClient: lag reconcile skipped because the listener owner was dropped");
+            lag_reconcile_gate.cancel();
+            return;
+        };
+        if reconcile(client).await {
+            let delay_ms = next_lag_stale_retry_delay_ms(&mut stale_retry_index);
+            if delay_ms == LAG_STALE_RETRY_CYCLE_DELAY_MS {
+                warn!(
+                    "MobileClient: lag reconciliation remained stale after bounded retries; scheduling another coalesced pass"
+                );
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        }
+        if !lag_reconcile_gate.finish_pass() {
+            break;
+        }
+        // A separately observed lag burst warrants its own bounded
+        // stale-response backoff sequence.
+        stale_retry_index = 0;
+    }
+}
+
 pub(super) fn spawn_store_listener(
     owner: std::sync::Weak<MobileClient>,
     app_store: Arc<AppStoreReducer>,
@@ -90,37 +134,12 @@ pub(super) fn spawn_store_listener(
                     let owner = owner.clone();
                     let lag_reconcile_gate = Arc::clone(&lag_reconcile_gate);
                     MobileClient::spawn_detached(async move {
-                        let mut stale_retry_index = 0;
-                        loop {
-                            let Some(client) = owner.upgrade() else {
-                                warn!(
-                                    "MobileClient: lag reconcile skipped because the listener owner was dropped"
-                                );
-                                lag_reconcile_gate.cancel();
-                                return;
-                            };
-                            if reconcile_after_store_listener_lag(client).await {
-                                if let Some(delay_ms) =
-                                    LAG_STALE_RETRY_DELAYS_MS.get(stale_retry_index)
-                                {
-                                    stale_retry_index += 1;
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                                        *delay_ms,
-                                    ))
-                                    .await;
-                                    continue;
-                                }
-                                warn!(
-                                    "MobileClient: lag reconciliation remained stale after bounded retries"
-                                );
-                            }
-                            if !lag_reconcile_gate.finish_pass() {
-                                break;
-                            }
-                            // A separately observed lag burst warrants its own
-                            // bounded stale-response backoff sequence.
-                            stale_retry_index = 0;
-                        }
+                        run_lag_reconcile_worker(
+                            owner,
+                            lag_reconcile_gate,
+                            reconcile_after_store_listener_lag,
+                        )
+                        .await;
                     });
                 }
             }
@@ -392,7 +411,9 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
         )
         .await;
     if let Err(error) = result {
-        if !matches!(error, RpcError::Timeout) {
+        if matches!(error, RpcError::Transport(_)) {
+            client.schedule_ambiguous_turn_reconciliation(key.clone());
+        } else if !super::thread_operations::turn_request_error_is_ambiguous(&error) {
             client
                 .app_store
                 .release_thread_follow_up_claim(&key, &draft.preview.id);
@@ -409,6 +430,7 @@ mod tests {
     use super::*;
     use crate::session::connection::TestRequestHandler;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn lag_reconcile_gate_coalesces_concurrent_requests_into_one_follow_up() {
@@ -424,10 +446,68 @@ mod tests {
         assert!(gate.request_pass(), "cancel should return the gate to idle");
     }
 
-    #[test]
-    fn lag_reconcile_stale_retries_use_bounded_backoff() {
-        assert_eq!(LAG_STALE_RETRY_DELAYS_MS, [50, 250, 1000]);
-        assert_eq!(LAG_STALE_RETRY_DELAYS_MS.get(3), None);
+    #[tokio::test(start_paused = true)]
+    async fn lag_reconcile_retries_past_one_bounded_cycle_until_clean() {
+        let client = MobileClient::new();
+        let gate = Arc::new(LagReconcileGate::default());
+        assert!(gate.request_pass());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker = tokio::spawn(run_lag_reconcile_worker(
+            Arc::downgrade(&client),
+            Arc::clone(&gate),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_| {
+                    let attempts = Arc::clone(&attempts);
+                    async move { attempts.fetch_add(1, Ordering::SeqCst) < 6 }
+                }
+            },
+        ));
+
+        while attempts.load(Ordering::SeqCst) < 7 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(tokio::time::Duration::from_secs(5)).await;
+        }
+        worker.await.expect("lag reconcile worker should finish");
+        assert_eq!(attempts.load(Ordering::SeqCst), 7);
+        assert!(
+            gate.request_pass(),
+            "clean pass should return the gate to idle"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lag_reconcile_owner_drop_cancels_during_backoff() {
+        let client = MobileClient::new();
+        let gate = Arc::new(LagReconcileGate::default());
+        assert!(gate.request_pass());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker = tokio::spawn(run_lag_reconcile_worker(
+            Arc::downgrade(&client),
+            Arc::clone(&gate),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        ));
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        drop(client);
+        tokio::time::advance(tokio::time::Duration::from_millis(50)).await;
+        worker.await.expect("owner drop should stop the worker");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            gate.request_pass(),
+            "cancellation should return the gate to idle"
+        );
     }
 
     fn make_server_config(server_id: &str) -> ServerConfig {
@@ -473,6 +553,64 @@ mod tests {
         let draft = queued_follow_up_draft_from_inputs(&inputs, AppQueuedFollowUpKind::Message)
             .expect("queued follow-up draft");
         client.app_store.enqueue_thread_follow_up_draft(key, draft);
+    }
+
+    async fn client_with_ambiguous_autosend(
+        turn_error: fn() -> TransportError,
+    ) -> (Arc<MobileClient>, ThreadKey, ServerConfig, Arc<AtomicUsize>) {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::TurnStart { .. } => {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Err(RpcError::Transport(turn_error()))
+                }
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    Err(RpcError::Transport(TransportError::Disconnected))
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected ambiguous autosend request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("ambiguous thread snapshot");
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        (client, key, config, requests)
     }
 
     fn successful_turn_start_response() -> serde_json::Value {
@@ -559,6 +697,22 @@ mod tests {
             "sandbox": { "type": "dangerFullAccess" },
             "reasoningEffort": "medium"
         })
+    }
+
+    fn successful_active_thread_resume_response(thread_id: &str) -> serde_json::Value {
+        let mut response = successful_thread_resume_response(thread_id);
+        response["thread"]["status"] = serde_json::json!({ "type": "active", "activeFlags": [] });
+        response["thread"]["turns"] = serde_json::json!([{
+            "id": "turn-authoritative",
+            "items": [],
+            "itemsView": "full",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": 1,
+            "completedAt": null,
+            "durationMs": null
+        }]);
+        response
     }
 
     fn successful_thread_turns_list_response() -> serde_json::Value {
@@ -814,6 +968,275 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_disconnect_hydrates_active_without_resending_claim() {
+        let (client, key, config, turn_start_requests) =
+            client_with_ambiguous_autosend(|| TransportError::Disconnected).await;
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
+
+        let handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadResume { .. } => {
+                Ok(successful_active_thread_resume_response("thread-1"))
+            }
+            other => Err(RpcError::Deserialization(format!(
+                "unexpected request in active hydration test: {}",
+                other.method()
+            ))),
+        });
+        let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(key.server_id.clone(), replacement);
+
+        client
+            .external_resume_thread(&key.server_id, &key.thread_id, None)
+            .await
+            .expect("active authoritative hydration succeeds");
+
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("hydrated active thread");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-authoritative"));
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_disconnect_hydrates_idle_then_releases_claim_once() {
+        let (client, key, config, initial_turn_start_requests) =
+            client_with_ambiguous_autosend(|| TransportError::Disconnected).await;
+        let retry_turn_start_requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let retry_turn_start_requests = Arc::clone(&retry_turn_start_requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    Ok(successful_thread_resume_response("thread-1"))
+                }
+                upstream::ClientRequest::TurnStart { .. } => {
+                    retry_turn_start_requests.fetch_add(1, Ordering::SeqCst);
+                    Ok(successful_turn_start_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected request in idle hydration test: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(key.server_id.clone(), replacement);
+
+        client
+            .external_resume_thread(&key.server_id, &key.thread_id, None)
+            .await
+            .expect("idle authoritative hydration succeeds");
+
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("hydrated idle thread");
+        assert_eq!(thread.active_turn_id, None);
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(initial_turn_start_requests.load(Ordering::SeqCst), 1);
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        assert_eq!(retry_turn_start_requests.load(Ordering::SeqCst), 1);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("retried thread");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert!(thread.queued_follow_up_drafts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_failed_turn_start_retains_claim_for_authoritative_reconciliation() {
+        let (client, key, _config, turn_start_requests) = client_with_ambiguous_autosend(|| {
+            TransportError::SendFailed("response channel closed after write".to_string())
+        })
+        .await;
+
+        assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("ambiguous thread snapshot");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn pre_send_disconnect_hydrates_idle_then_retries_claim_once() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("ambiguous thread snapshot");
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+
+        let turn_start_requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let turn_start_requests = Arc::clone(&turn_start_requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    Ok(successful_thread_resume_response(thread_id))
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                upstream::ClientRequest::TurnStart { .. } => {
+                    turn_start_requests.fetch_add(1, Ordering::SeqCst);
+                    Ok(successful_turn_start_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected pre-send recovery request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), replacement);
+
+        client
+            .external_resume_thread(server_id, thread_id, None)
+            .await
+            .expect("idle authoritative hydration succeeds");
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("hydrated idle thread");
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("retried thread");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert!(thread.queued_follow_up_drafts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn autosend_releases_claim_without_duplication_when_turn_activates_behind_lock() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |_| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let lock_guard = client.turn_start_lock(&key).lock_owned().await;
+        let autosend = tokio::spawn(maybe_send_next_local_queued_follow_up(
+            Arc::clone(&client),
+            key.clone(),
+        ));
+        loop {
+            let claimed = client
+                .app_store
+                .thread_snapshot(&key)
+                .and_then(|thread| thread.queued_follow_up_drafts.first().cloned())
+                .is_some_and(|draft| draft.autosend_claimed);
+            if claimed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        client
+            .app_store
+            .mark_turn_started_from_response(&key, "turn-other", None);
+        drop(lock_guard);
+        autosend.await.expect("autosend task should finish");
+
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-other"));
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "retained");
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
     async fn concurrent_manual_turn_starts_serialize_and_queue_second_message() {
         let client = MobileClient::new();
         let server_id = "srv";
@@ -1005,7 +1428,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timed_out_manual_retry_holds_claim_until_exact_response_resolves() {
-        let client = MobileClient::new();
+        let client =
+            MobileClient::new_with_turn_request_timeout(tokio::time::Duration::from_millis(100));
         let server_id = "srv";
         let thread_id = "thread-1";
         let key = ThreadKey {
@@ -1020,11 +1444,16 @@ mod tests {
             .app_store
             .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
         enqueue_follow_up(&client, &key, "retained");
-        let handler: TestRequestHandler = Arc::new(|request| {
-            assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            Ok(successful_turn_start_response())
-        });
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                requests.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                Ok(successful_turn_start_response())
+            })
+        };
         let session = Arc::new(ServerSession::test_stub_with_handlers(
             config,
             Some(handler),
@@ -1043,6 +1472,12 @@ mod tests {
             .expect_err("hung turn/start should time out");
 
         assert!(matches!(error, RpcError::Timeout));
+        let retry_error = client
+            .start_turn(server_id, turn_start_params(thread_id, "retry"))
+            .await
+            .expect_err("second start should time out behind the exact waiter");
+        assert!(matches!(retry_error, RpcError::Timeout));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1092,6 +1527,128 @@ mod tests {
                 .pending_mutation
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn autosend_timeout_idle_hydration_retains_claim_until_late_success() {
+        let client =
+            MobileClient::new_with_turn_request_timeout(tokio::time::Duration::from_millis(100));
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+
+        let original_requests = Arc::new(AtomicUsize::new(0));
+        let original_handler: TestRequestHandler = {
+            let original_requests = Arc::clone(&original_requests);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                original_requests.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                Ok(successful_turn_start_response())
+            })
+        };
+        let original_session = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            Some(original_handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), original_session);
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+
+        assert_eq!(original_requests.load(Ordering::SeqCst), 1);
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("timed-out autosend thread");
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+
+        let replacement_turn_starts = Arc::new(AtomicUsize::new(0));
+        let replacement_handler: TestRequestHandler = {
+            let replacement_turn_starts = Arc::clone(&replacement_turn_starts);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    Ok(successful_thread_resume_response(thread_id))
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                upstream::ClientRequest::TurnStart { .. } => {
+                    replacement_turn_starts.fetch_add(1, Ordering::SeqCst);
+                    Ok(successful_turn_start_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected timeout hydration request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let replacement_session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(replacement_handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), replacement_session);
+
+        client
+            .external_resume_thread(server_id, thread_id, None)
+            .await
+            .expect("idle hydration should complete while request remains in flight");
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("idle hydrated thread");
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
+        assert_eq!(replacement_turn_starts.load(Ordering::SeqCst), 0);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let resolved = client
+                    .app_store
+                    .thread_snapshot(&key)
+                    .is_some_and(|thread| {
+                        thread.active_turn_id.as_deref() == Some("turn-follow-up")
+                    });
+                if resolved {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("late turn/start response should consume the held claim");
+
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("late-resolved thread");
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(original_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_turn_starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

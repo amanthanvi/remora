@@ -1542,6 +1542,9 @@ impl AppStoreReducer {
     }
 
     pub(crate) fn apply_ui_event(&self, event: &UiEvent) {
+        // Keep the generation increment and event projection atomic with
+        // apply_if_server_event_generation. Code in this match must not call
+        // either generation API while this guard is held.
         let mut generations = self
             .ui_event_generations
             .lock()

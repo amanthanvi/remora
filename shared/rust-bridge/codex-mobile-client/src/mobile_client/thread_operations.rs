@@ -1,11 +1,83 @@
 use super::*;
 
-#[cfg(not(test))]
-const TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(test)]
-const TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+struct LagRefreshFence<'a> {
+    generation: u64,
+    session: &'a Arc<ServerSession>,
+}
+
+fn reconcile_completed_turn_probe(
+    existing: &ThreadSnapshot,
+    turns: &[upstream::Turn],
+) -> (ThreadSnapshot, bool) {
+    let was_active = existing.active_turn_id.is_some();
+    let mut target = existing.clone();
+    target.active_turn_id = None;
+    target.info.status = ThreadSummaryStatus::Idle;
+    reconcile_active_turn(Some(existing), &mut target, turns);
+    let active_turn_cleared = was_active && target.active_turn_id.is_none();
+    let terminal_turn_observed = turns
+        .iter()
+        .any(|turn| !matches!(turn.status, upstream::TurnStatus::InProgress));
+    if target.active_turn_id.is_none()
+        && terminal_turn_observed
+        && target.info.parent_thread_id.is_some()
+    {
+        target.info.agent_status = Some("completed".to_string());
+    }
+    (target, active_turn_cleared)
+}
+
+pub(super) fn turn_request_error_is_ambiguous(error: &RpcError) -> bool {
+    matches!(error, RpcError::Timeout | RpcError::Transport(_))
+}
 
 impl MobileClient {
+    pub(super) fn pending_turn_reconciliation(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashSet<ThreadKey>> {
+        self.pending_turn_reconciliation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn schedule_ambiguous_turn_reconciliation(self: &Arc<Self>, key: ThreadKey) {
+        if !self.pending_turn_reconciliation().insert(key.clone()) {
+            return;
+        }
+        let client = Arc::clone(self);
+        MobileClient::spawn_detached(async move {
+            if let Err(error) = client
+                .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
+                .await
+            {
+                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                    "ambiguous turn reconciliation deferred server={} thread={} error={}",
+                    key.server_id, key.thread_id, error
+                );
+            }
+        });
+    }
+
+    fn reconcile_ambiguous_turn_claim(&self, key: &ThreadKey) {
+        if !self.pending_turn_reconciliation().remove(key) {
+            return;
+        }
+        let retained_claim = self.app_store.thread_snapshot(key).and_then(|thread| {
+            if thread.active_turn_id.is_some() {
+                return None;
+            }
+            thread
+                .queued_follow_up_drafts
+                .first()
+                .filter(|draft| draft.autosend_claimed)
+                .map(|draft| draft.preview.id.clone())
+        });
+        if let Some(claim_id) = retained_claim {
+            self.app_store
+                .release_thread_follow_up_claim(key, &claim_id);
+        }
+    }
+
     /// List threads from a specific server.
     #[cfg(test)]
     #[allow(dead_code)]
@@ -96,8 +168,24 @@ impl MobileClient {
     fn apply_if_lag_refresh_current<R>(
         &self,
         server_id: &str,
+        fence: &LagRefreshFence<'_>,
+        apply: impl FnOnce(&AppStoreReducer) -> R,
+    ) -> Option<R> {
+        let sessions = self.sessions_read();
+        if !sessions
+            .get(server_id)
+            .is_some_and(|current| Arc::ptr_eq(current, fence.session))
+        {
+            return None;
+        }
+        self.app_store
+            .apply_if_server_event_generation(server_id, fence.generation, apply)
+    }
+
+    fn apply_if_session_current<R>(
+        &self,
+        server_id: &str,
         expected_session: &Arc<ServerSession>,
-        expected_generation: u64,
         apply: impl FnOnce(&AppStoreReducer) -> R,
     ) -> Option<R> {
         let sessions = self.sessions_read();
@@ -107,8 +195,24 @@ impl MobileClient {
         {
             return None;
         }
-        self.app_store
-            .apply_if_server_event_generation(server_id, expected_generation, apply)
+        Some(apply(&self.app_store))
+    }
+
+    fn apply_if_refresh_current<R>(
+        &self,
+        server_id: &str,
+        request_session: &Arc<ServerSession>,
+        lag_fence: Option<&LagRefreshFence<'_>>,
+        apply: impl FnOnce(&AppStoreReducer) -> R,
+    ) -> Option<R> {
+        if let Some(fence) = lag_fence {
+            if !Arc::ptr_eq(request_session, fence.session) {
+                return None;
+            }
+            self.apply_if_lag_refresh_current(server_id, fence, apply)
+        } else {
+            self.apply_if_session_current(server_id, request_session, apply)
+        }
     }
 
     async fn external_resume_thread_inner(
@@ -120,6 +224,10 @@ impl MobileClient {
         expected_ui_generation: Option<u64>,
     ) -> Result<bool, RpcError> {
         let session = self.get_session(server_id)?;
+        let lag_fence = expected_ui_generation.map(|generation| LagRefreshFence {
+            generation,
+            session: &session,
+        });
         if host_id.is_some() {
             trace!(target: super::MOBILE_CLIENT_TRACING_TARGET,
                 "external_resume_thread ignoring explicit host_id for server={} thread={}",
@@ -205,17 +313,13 @@ impl MobileClient {
                     &key,
                     runtime_kind.clone(),
                     exclude_turns,
-                    expected_ui_generation,
-                    expected_ui_generation.map(|_| &session),
+                    lag_fence.as_ref(),
                 )
                 .await
             {
                 Ok(applied) => {
                     if !applied {
                         return Ok(false);
-                    }
-                    if expected_ui_generation.is_none() {
-                        self.note_thread_runtime(key.clone(), runtime_kind.clone());
                     }
                     if force_authoritative && supports_pagination {
                         if !self
@@ -224,8 +328,7 @@ impl MobileClient {
                                 thread_id,
                                 &key,
                                 runtime_kind,
-                                expected_ui_generation,
-                                expected_ui_generation.map(|_| &session),
+                                lag_fence.as_ref(),
                             )
                             .await
                         {
@@ -251,8 +354,7 @@ impl MobileClient {
                             server_id,
                             thread_id,
                             runtime_kind.clone(),
-                            expected_ui_generation,
-                            expected_ui_generation.map(|_| &session),
+                            lag_fence.as_ref(),
                         )
                         .await
                         .map_err(|fallback_error| {
@@ -262,9 +364,6 @@ impl MobileClient {
                         })?;
                     if !applied {
                         return Ok(false);
-                    }
-                    if expected_ui_generation.is_none() {
-                        self.note_thread_runtime(key.clone(), runtime_kind);
                     }
                     return Ok(true);
                 }
@@ -278,15 +377,11 @@ impl MobileClient {
                     server_id,
                     thread_id,
                     runtime_kind.clone(),
-                    expected_ui_generation,
-                    expected_ui_generation.map(|_| &session),
+                    lag_fence.as_ref(),
                 )
                 .await
             {
                 Ok(true) => {
-                    if expected_ui_generation.is_none() {
-                        self.note_thread_runtime(key.clone(), runtime_kind);
-                    }
                     return Ok(true);
                 }
                 Ok(false) => return Ok(false),
@@ -320,8 +415,7 @@ impl MobileClient {
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
         exclude_turns: bool,
-        expected_ui_generation: Option<u64>,
-        expected_session: Option<&Arc<ServerSession>>,
+        lag_fence: Option<&LagRefreshFence<'_>>,
     ) -> Result<bool, String> {
         // Use thread/resume (not thread/read) so the server attaches a
         // conversation listener for this connection. Without the listener
@@ -336,8 +430,8 @@ impl MobileClient {
                 ..Default::default()
             },
         };
-        let response = self
-            .request_typed_for_server_runtime::<upstream::ThreadResumeResponse>(
+        let (response, request_session) = self
+            .request_typed_for_server_runtime_with_session::<upstream::ThreadResumeResponse>(
                 server_id,
                 runtime_kind.clone(),
                 resume_request,
@@ -404,24 +498,14 @@ impl MobileClient {
             reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
             snapshot.is_resumed = true;
             app_store.upsert_thread_snapshot(snapshot);
-            if expected_ui_generation.is_some() {
-                self.thread_runtime_routes()
-                    .insert(key.clone(), runtime_kind.clone());
-            }
+            self.thread_runtime_routes()
+                .insert(key.clone(), runtime_kind.clone());
             self.mark_direct_resumed_thread(key.clone());
+            self.reconcile_ambiguous_turn_claim(key);
         };
-        let applied = if let Some(expected_generation) = expected_ui_generation {
-            self.apply_if_lag_refresh_current(
-                server_id,
-                expected_session.expect("fenced refresh carries its session"),
-                expected_generation,
-                apply_response,
-            )
-            .is_some()
-        } else {
-            apply_response(&self.app_store);
-            true
-        };
+        let applied = self
+            .apply_if_refresh_current(server_id, &request_session, lag_fence, apply_response)
+            .is_some();
         Ok(applied)
     }
 
@@ -439,8 +523,7 @@ impl MobileClient {
         thread_id: &str,
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
-        expected_ui_generation: Option<u64>,
-        expected_session: Option<&Arc<ServerSession>>,
+        lag_fence: Option<&LagRefreshFence<'_>>,
     ) -> bool {
         const PROBE_LIMIT: u32 = 5;
         let request = upstream::ClientRequest::ThreadTurnsList {
@@ -453,9 +536,20 @@ impl MobileClient {
                 items_view: Some(upstream::TurnItemsView::NotLoaded),
             },
         };
+        let probe_session = match self.get_session(server_id) {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                    "force_authoritative: turn-list probe missing session server={} thread={} error={}",
+                    server_id, thread_id, error
+                );
+                return false;
+            }
+        };
         let response = match self
-            .request_typed_for_server_runtime::<upstream::ThreadTurnsListResponse>(
+            .request_typed_for_session_runtime::<upstream::ThreadTurnsListResponse>(
                 server_id,
+                Arc::clone(&probe_session),
                 runtime_kind.clone(),
                 request,
             )
@@ -469,23 +563,16 @@ impl MobileClient {
                     // one embedded-turn resume so reconcile_active_turn can
                     // still clear a stale active turn after mobile reconnects.
                     if runtime_kind == "codex" {
-                        if let Some(generation) = expected_ui_generation {
-                            if self
-                                .apply_if_lag_refresh_current(
-                                    server_id,
-                                    expected_session.expect("fenced refresh carries its session"),
-                                    generation,
-                                    |store| {
-                                        store.set_server_supports_turn_pagination(server_id, false)
-                                    },
-                                )
-                                .is_none()
-                            {
-                                return false;
-                            }
-                        } else {
-                            self.app_store
-                                .set_server_supports_turn_pagination(server_id, false);
+                        if self
+                            .apply_if_refresh_current(
+                                server_id,
+                                &probe_session,
+                                lag_fence,
+                                |store| store.set_server_supports_turn_pagination(server_id, false),
+                            )
+                            .is_none()
+                        {
+                            return false;
                         }
                     }
                     if let Err(fallback_error) = self
@@ -495,8 +582,7 @@ impl MobileClient {
                             key,
                             runtime_kind.clone(),
                             false,
-                            expected_ui_generation,
-                            expected_session,
+                            lag_fence,
                         )
                         .await
                     {
@@ -511,24 +597,15 @@ impl MobileClient {
                         server_id, thread_id, error
                     );
                 }
-                return expected_ui_generation.is_none_or(|generation| {
-                    self.apply_if_lag_refresh_current(
-                        server_id,
-                        expected_session.expect("fenced refresh carries its session"),
-                        generation,
-                        |_| (),
-                    )
-                    .is_some()
-                });
+                return self
+                    .apply_if_refresh_current(server_id, &probe_session, lag_fence, |_| ())
+                    .is_some();
             }
         };
-        let needs_repair_page = self.app_store.thread_snapshot(key).is_some_and(|existing| {
-            let was_active = existing.active_turn_id.is_some();
-            let mut target = existing.clone();
-            target.active_turn_id = None;
-            reconcile_active_turn(Some(&existing), &mut target, &response.data);
-            was_active && target.active_turn_id.is_none()
-        });
+        let needs_repair_page = self
+            .app_store
+            .thread_snapshot(key)
+            .is_some_and(|existing| reconcile_completed_turn_probe(&existing, &response.data).1);
         let repair_page = if needs_repair_page {
             let request = upstream::ClientRequest::ThreadTurnsList {
                 request_id: upstream::RequestId::Integer(crate::next_request_id()),
@@ -541,8 +618,9 @@ impl MobileClient {
                 },
             };
             match self
-                .request_typed_for_server_runtime::<upstream::ThreadTurnsListResponse>(
+                .request_typed_for_session_runtime::<upstream::ThreadTurnsListResponse>(
                     server_id,
+                    Arc::clone(&probe_session),
                     runtime_kind,
                     request,
                 )
@@ -562,21 +640,13 @@ impl MobileClient {
         };
         let apply_response = |app_store: &AppStoreReducer| {
             let Some(existing) = app_store.thread_snapshot(key) else {
-                return false;
+                return;
             };
-            let was_active = existing.active_turn_id.is_some();
-            let mut target = existing.clone();
-            // Clear the field on the target so reconcile_active_turn can decide
-            // whether to restore it from `existing` based on the turn list.
-            target.active_turn_id = None;
-            target.info.status = ThreadSummaryStatus::Idle;
-            reconcile_active_turn(Some(&existing), &mut target, &response.data);
-            let active_turn_cleared = was_active && target.active_turn_id.is_none();
-            if active_turn_cleared && target.info.parent_thread_id.is_some() {
-                target.info.agent_status = Some("completed".to_string());
-            }
+            let (target, active_turn_cleared) =
+                reconcile_completed_turn_probe(&existing, &response.data);
             if target.active_turn_id != existing.active_turn_id
                 || target.info.status != existing.info.status
+                || target.info.agent_status != existing.info.agent_status
             {
                 app_store.upsert_thread_snapshot(target);
             }
@@ -594,20 +664,14 @@ impl MobileClient {
                     server_id, thread_id, error
                 );
             }
-            active_turn_cleared
+            self.reconcile_ambiguous_turn_claim(key);
         };
-        let Some(_) = (if let Some(expected_generation) = expected_ui_generation {
-            self.apply_if_lag_refresh_current(
-                server_id,
-                expected_session.expect("fenced refresh carries its session"),
-                expected_generation,
-                apply_response,
-            )
-        } else {
-            Some(apply_response(&self.app_store))
-        }) else {
+        if self
+            .apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
+            .is_none()
+        {
             return false;
-        };
+        }
         true
     }
 
@@ -646,7 +710,6 @@ impl MobileClient {
                     &key,
                     runtime_kind,
                     false,
-                    None,
                     None,
                 )
                 .await
@@ -708,7 +771,6 @@ impl MobileClient {
                     runtime_kind,
                     false,
                     None,
-                    None,
                 )
                 .await
                 .map_err(RpcError::Deserialization)?;
@@ -726,11 +788,10 @@ impl MobileClient {
         server_id: &str,
         thread_id: &str,
         runtime_kind: AgentRuntimeKind,
-        expected_ui_generation: Option<u64>,
-        expected_session: Option<&Arc<ServerSession>>,
+        lag_fence: Option<&LagRefreshFence<'_>>,
     ) -> Result<bool, RpcError> {
-        let response: upstream::ThreadReadResponse = self
-            .request_typed_for_server_runtime(
+        let (response, request_session): (upstream::ThreadReadResponse, Arc<ServerSession>) = self
+            .request_typed_for_server_runtime_with_session(
                 server_id,
                 runtime_kind.clone(),
                 upstream::ClientRequest::ThreadRead {
@@ -743,38 +804,21 @@ impl MobileClient {
             )
             .await
             .map_err(RpcError::Deserialization)?;
-        if let Some(expected_generation) = expected_ui_generation {
-            let mut response = Some(response);
-            self.apply_if_lag_refresh_current(
-                server_id,
-                expected_session.expect("fenced refresh carries its session"),
-                expected_generation,
-                |store| {
-                    upsert_thread_snapshot_from_app_server_read_response(
-                        store,
-                        server_id,
-                        response.take().expect("response is applied once"),
-                    )?;
-                    let key = ThreadKey {
-                        server_id: server_id.to_string(),
-                        thread_id: thread_id.to_string(),
-                    };
-                    self.thread_runtime_routes()
-                        .insert(key.clone(), runtime_kind.clone());
-                    store.set_thread_agent_runtime(&key, runtime_kind.clone());
-                    Ok(())
-                },
-            )
+        let apply_response = |store: &AppStoreReducer| {
+            upsert_thread_snapshot_from_app_server_read_response(store, server_id, response)?;
+            let key = ThreadKey {
+                server_id: server_id.to_string(),
+                thread_id: thread_id.to_string(),
+            };
+            self.thread_runtime_routes()
+                .insert(key.clone(), runtime_kind.clone());
+            store.set_thread_agent_runtime(&key, runtime_kind);
+            self.reconcile_ambiguous_turn_claim(&key);
+            Ok(())
+        };
+        self.apply_if_refresh_current(server_id, &request_session, lag_fence, apply_response)
             .transpose()
             .map(|applied| applied.is_some())
-        } else {
-            upsert_thread_snapshot_from_app_server_read_response(
-                &self.app_store,
-                server_id,
-                response,
-            )?;
-            Ok(true)
-        }
     }
 
     pub async fn thread_unsubscribe(
@@ -830,8 +874,17 @@ impl MobileClient {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
         };
+        if self.pending_turn_reconciliation().contains(&thread_key) {
+            return Err(RpcError::Timeout);
+        }
         let turn_start_lock = self.turn_start_lock(&thread_key);
-        let mut turn_start_guard = turn_start_lock.lock_owned().await;
+        let mut turn_start_guard =
+            tokio::time::timeout(self.turn_request_timeout, turn_start_lock.lock_owned())
+                .await
+                .map_err(|_| RpcError::Timeout)?;
+        if self.pending_turn_reconciliation().contains(&thread_key) {
+            return Err(RpcError::Timeout);
+        }
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
@@ -843,6 +896,14 @@ impl MobileClient {
                     .is_some_and(|draft| draft.preview.id == claim_id && draft.autosend_claimed)
             });
             if !claim_is_current {
+                return Ok(());
+            }
+            if thread_snapshot
+                .as_ref()
+                .is_some_and(|thread| thread.active_turn_id.is_some())
+            {
+                self.app_store
+                    .release_thread_follow_up_claim(&thread_key, claim_id);
                 return Ok(());
             }
         } else if thread_snapshot.as_ref().is_some_and(|thread| {
@@ -943,11 +1004,12 @@ impl MobileClient {
         {
             let steer_thread_id = params.thread_id.clone();
             let steer_input = direct_params.input.clone();
+            let steer_thread_key = thread_key.clone();
             let client = Arc::clone(self);
             let request_server_id = server_id.to_string();
             let mut steer_task = tokio::spawn(async move {
                 let result = client
-                    .request_typed_for_server::<upstream::TurnSteerResponse>(
+                    .request_typed_for_server_rpc::<upstream::TurnSteerResponse>(
                         &request_server_id,
                         upstream::ClientRequest::TurnSteer {
                             request_id: upstream::RequestId::Integer(crate::next_request_id()),
@@ -960,14 +1022,23 @@ impl MobileClient {
                         },
                     )
                     .await;
+                if let Err(error) = &result
+                    && turn_request_error_is_ambiguous(error)
+                {
+                    client.schedule_ambiguous_turn_reconciliation(steer_thread_key);
+                }
                 (result, turn_start_guard)
             });
-            let steer_result = tokio::time::timeout(TURN_REQUEST_TIMEOUT, &mut steer_task).await;
+            let steer_result =
+                tokio::time::timeout(self.turn_request_timeout, &mut steer_task).await;
             match steer_result {
                 Ok(Ok((Ok(_), _guard))) => {
                     // Draft cleanup happens via TurnStarted / item upsert;
                     // don't remove here so the user sees the queued preview.
                     return Ok(());
+                }
+                Ok(Ok((Err(error), _guard))) if turn_request_error_is_ambiguous(&error) => {
+                    return Err(error);
                 }
                 Ok(Ok((Err(_), guard))) => {
                     // Turn not steerable or gone — fall through to turn/start.
@@ -1005,15 +1076,14 @@ impl MobileClient {
         let mut response_task = tokio::spawn(async move {
             let _turn_start_guard = turn_start_guard;
             let response_result = completion_client
-                .request_typed_for_server::<upstream::TurnStartResponse>(
+                .request_typed_for_server_rpc::<upstream::TurnStartResponse>(
                     &completion_server_id,
                     upstream::ClientRequest::TurnStart {
                         request_id: upstream::RequestId::Integer(crate::next_request_id()),
                         params: direct_params,
                     },
                 )
-                .await
-                .map_err(RpcError::Deserialization);
+                .await;
             completion_client.finish_turn_start_request(
                 &completion_server_id,
                 &completion_thread_key,
@@ -1023,7 +1093,7 @@ impl MobileClient {
                 response_result,
             )
         });
-        match tokio::time::timeout(TURN_REQUEST_TIMEOUT, &mut response_task).await {
+        match tokio::time::timeout(self.turn_request_timeout, &mut response_task).await {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => Err(RpcError::Deserialization(format!(
                 "turn/start task failed to join: {error}"
@@ -1035,7 +1105,7 @@ impl MobileClient {
     }
 
     fn finish_turn_start_request(
-        &self,
+        self: &Arc<Self>,
         server_id: &str,
         thread_key: &ThreadKey,
         direct_command_id: &str,
@@ -1046,13 +1116,16 @@ impl MobileClient {
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
+                let ambiguous = turn_request_error_is_ambiguous(&error);
                 self.app_store
                     .finish_server_mutating_command_failure(server_id, direct_command_id);
                 if let Some(overlay_id) = optimistic_overlay_id {
                     self.app_store
                         .remove_local_overlay_item(thread_key, overlay_id);
                 }
-                if let Some(claim_id) = consumed_claim_id {
+                if ambiguous {
+                    self.schedule_ambiguous_turn_reconciliation(thread_key.clone());
+                } else if let Some(claim_id) = consumed_claim_id {
                     self.app_store
                         .release_thread_follow_up_claim(thread_key, claim_id);
                 }

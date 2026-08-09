@@ -285,6 +285,11 @@ fun SavedServer.toRecord() = SavedServerRecord(
     sshBridgeRuntimeKinds = sshBridgeRuntimeKinds,
 )
 
+enum class SshTrustCleanupOutcome {
+    Complete,
+    Pending,
+}
+
 object SavedServerStore {
     internal const val PREFERENCES_NAME = "remora_saved_servers_v2"
     internal const val VALUE_KEY = "saved_servers"
@@ -352,9 +357,9 @@ object SavedServerStore {
     }
 
     @Synchronized
-    fun replace(context: Context, server: SavedServer) {
+    fun replace(context: Context, server: SavedServer): SshTrustCleanupOutcome {
         val existing = load(context)
-        persistServerMutation(context, existing, planServerReplacement(existing, server))
+        return persistServerMutation(context, existing, planServerReplacement(existing, server))
     }
 
     internal fun replaceServer(
@@ -397,9 +402,9 @@ object SavedServerStore {
         load(context).filter { it.rememberedByUser }
 
     @Synchronized
-    fun remove(context: Context, serverId: String) {
+    fun remove(context: Context, serverId: String): SshTrustCleanupOutcome {
         val existing = load(context)
-        persistServerMutation(context, existing, planServerRemoval(existing, serverId))
+        return persistServerMutation(context, existing, planServerRemoval(existing, serverId))
     }
 
     internal fun removeServer(
@@ -436,11 +441,11 @@ object SavedServerStore {
         context: Context,
         existing: List<SavedServer>,
         mutation: SavedServerMutation,
-    ) {
+    ): SshTrustCleanupOutcome {
         val target = mutation.trustTarget
         if (target == null) {
             save(context, mutation.servers)
-            return
+            return SshTrustCleanupOutcome.Complete
         }
 
         val preferences = prefs(context)
@@ -453,7 +458,7 @@ object SavedServerStore {
             .put("host", target.first)
             .put("port", target.second)
             .toString()
-        runTrustCleanupTransaction(
+        return runTrustCleanupTransaction(
             begin = {
                 if (!preferences.edit()
                         .putString(VALUE_KEY, updatedJson)
@@ -530,16 +535,17 @@ object SavedServerStore {
         begin: () -> Unit,
         unpin: () -> Unit,
         finish: () -> Unit,
-    ) {
+    ): SshTrustCleanupOutcome {
         begin()
         try {
             unpin()
         } catch (_: Exception) {
             // Leave the journal durable and the server absent. A later load
             // retries cleanup without exposing an ambiguous first-use path.
-            return
+            return SshTrustCleanupOutcome.Pending
         }
         finish()
+        return SshTrustCleanupOutcome.Complete
     }
 
     private fun SavedServer.sshTrustTarget(): Pair<String, Int>? =

@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import com.remora.android.state.DebugSettings
 import com.remora.android.state.SavedServer
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
 import com.remora.android.ui.BerkeleyMono
@@ -278,12 +279,17 @@ private fun SettingsTopLevel(
                     onRemove = {
                         scope.launch {
                             try {
-                                withContext(Dispatchers.IO) {
-                                    SavedServerStore.remove(context, server.serverId)
+                                val cleanupOutcome = withContext(Dispatchers.IO) {
+                                    val outcome = SavedServerStore.remove(context, server.serverId)
                                     appModel.sshSessionStore.close(server.serverId)
                                     appModel.serverBridge.disconnectServer(server.serverId)
+                                    outcome
                                 }
                                 appModel.refreshSnapshot()
+                                if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
+                                    serverRemovalError =
+                                        "Server removed, but SSH trust cleanup is pending until secure storage recovers."
+                                }
                             } catch (cancellation: CancellationException) {
                                 throw cancellation
                             } catch (error: Exception) {

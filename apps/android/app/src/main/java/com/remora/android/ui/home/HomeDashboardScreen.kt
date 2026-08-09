@@ -87,6 +87,7 @@ import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.DebugSettings
 import com.remora.android.state.SavedProjectStore
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.connectionModeLabel
 import com.remora.android.state.displayTitle
@@ -1128,12 +1129,21 @@ fun HomeDashboardScreen(
                             }
                             is ConfirmAction.DisconnectServer -> {
                                 try {
-                                    withContext(Dispatchers.IO) {
-                                        SavedServerStore.remove(context, action.server.serverId)
+                                    val cleanupOutcome = withContext(Dispatchers.IO) {
+                                        val outcome = SavedServerStore.remove(
+                                            context,
+                                            action.server.serverId,
+                                        )
                                         appModel.sshSessionStore.close(action.server.serverId)
                                         appModel.serverBridge.disconnectServer(action.server.serverId)
+                                        outcome
                                     }
                                     appModel.refreshSnapshot()
+                                    if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
+                                        confirmAction = ConfirmAction.ReplyError(
+                                            "Server disconnected, but SSH trust cleanup is pending until secure storage recovers.",
+                                        )
+                                    }
                                 } catch (cancellation: CancellationException) {
                                     throw cancellation
                                 } catch (error: Exception) {

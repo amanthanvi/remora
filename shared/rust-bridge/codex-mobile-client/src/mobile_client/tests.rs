@@ -6,7 +6,7 @@ mod mobile_client_tests {
     use crate::types::{PendingUserInputOption, PendingUserInputQuestion};
     use serde_json::json;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Barrier, Mutex as StdMutex};
 
     #[test]
     fn account_sync_warmup_only_runs_when_codex_runtime_is_present() {
@@ -921,6 +921,102 @@ mod mobile_client_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_resume_thread_does_not_commit_after_session_replacement() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+
+        let (request_started_tx, request_started_rx) = std::sync::mpsc::sync_channel(1);
+        let release_response = Arc::new(Barrier::new(2));
+        let request_handler: TestRequestHandler = {
+            let release_response = Arc::clone(&release_response);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    request_started_tx.send(()).expect("signal request start");
+                    release_response.wait();
+                    Ok(json!({
+                        "thread": {
+                            "id": thread_id,
+                            "preview": "stale response",
+                            "ephemeral": false,
+                            "modelProvider": "openai",
+                            "createdAt": 1,
+                            "updatedAt": 2,
+                            "status": { "type": "idle" },
+                            "path": "/tmp/thread",
+                            "cwd": "/tmp/thread",
+                            "cliVersion": "1.0.0",
+                            "source": "cli",
+                            "agentNickname": null,
+                            "agentRole": null,
+                            "gitInfo": null,
+                            "name": "thread",
+                            "turns": []
+                        },
+                        "model": "gpt-5",
+                        "modelProvider": "openai",
+                        "cwd": "/tmp/thread",
+                        "approvalPolicy": "never",
+                        "approvalsReviewer": "user",
+                        "sandbox": { "type": "dangerFullAccess" },
+                        "reasoningEffort": "medium"
+                    }))
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected request in test: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let stale_session = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            Some(request_handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), stale_session);
+
+        let resume_task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .external_resume_thread(server_id, thread_id, None)
+                    .await
+            })
+        };
+        request_started_rx
+            .recv()
+            .expect("resume request should start");
+        let replacement = Arc::new(ServerSession::test_stub(config));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), replacement);
+        client.clear_direct_resume_markers_for_server(server_id);
+        release_response.wait();
+
+        resume_task
+            .await
+            .expect("resume task should finish")
+            .expect("stale resume response should be discarded without an RPC error");
+        assert!(!client.has_direct_resume_marker(&key));
+        assert!(client.app_store.thread_snapshot(&key).is_none());
+    }
+
     #[tokio::test]
     async fn load_thread_turns_page_falls_back_to_embedded_resume_when_method_missing() {
         let client = MobileClient::new();
@@ -1096,8 +1192,10 @@ mod mobile_client_tests {
         client.app_store.upsert_thread_snapshot(active);
 
         let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let turn_status = Arc::new(StdMutex::new("completed".to_string()));
         let request_handler: TestRequestHandler = {
             let requests = Arc::clone(&requests);
+            let turn_status = Arc::clone(&turn_status);
             Arc::new(move |request| match request {
                 upstream::ClientRequest::ThreadResume { params, .. } => {
                     requests
@@ -1134,6 +1232,7 @@ mod mobile_client_tests {
                     .map_err(|error| RpcError::Deserialization(error.to_string()))
                 }
                 upstream::ClientRequest::ThreadTurnsList { params, .. } => {
+                    let turn_status = turn_status.lock().expect("turn status lock").clone();
                     let skeleton =
                         matches!(params.items_view, Some(upstream::TurnItemsView::NotLoaded));
                     requests
@@ -1162,7 +1261,7 @@ mod mobile_client_tests {
                             "id": "turn-active",
                             "items": items,
                             "itemsView": if skeleton { "notLoaded" } else { "full" },
-                            "status": "completed",
+                            "status": turn_status,
                             "error": null,
                             "startedAt": 1,
                             "completedAt": 2,
@@ -1219,6 +1318,39 @@ mod mobile_client_tests {
             panic!("expected repaired user message");
         };
         assert_eq!(message.text, "finished while disconnected");
+
+        for terminal_status in ["failed", "interrupted"] {
+            let mut idle_child = client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("idle child snapshot");
+            idle_child.info.agent_status = Some("running".to_string());
+            client.app_store.upsert_thread_snapshot(idle_child);
+            *turn_status.lock().expect("turn status lock") = terminal_status.to_string();
+            requests.lock().expect("request log lock").clear();
+            let generation = client.app_store.server_event_generation(server_id);
+
+            assert!(
+                client
+                    .force_refresh_thread_authoritative_if_ui_generation(
+                        server_id, thread_id, generation,
+                    )
+                    .await
+                    .expect("idle child repair succeeds")
+            );
+            assert_eq!(
+                requests.lock().expect("request log lock").as_slice(),
+                ["thread/resume:true", "thread/turns/list:skeleton"],
+                "an already-cleared active ID should not need the full repair page"
+            );
+            let thread = client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("terminal child snapshot");
+            assert_eq!(thread.active_turn_id, None);
+            assert_eq!(thread.info.status, ThreadSummaryStatus::Idle);
+            assert_eq!(thread.info.agent_status.as_deref(), Some("completed"));
+        }
     }
 
     #[tokio::test]

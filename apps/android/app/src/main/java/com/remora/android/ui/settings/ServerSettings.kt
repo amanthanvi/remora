@@ -55,6 +55,7 @@ import com.remora.android.auth.ChatGPTOAuthActivity
 import com.remora.android.state.ChatGPTOAuth
 import com.remora.android.state.SavedServer
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.connectionModeLabel
 import com.remora.android.state.statusColor
 import com.remora.android.state.statusLabel
@@ -374,14 +375,17 @@ internal fun ServerEditSheet(
 
     suspend fun persist(saved: SavedServer): Boolean {
         return try {
-            val updated = withContext(Dispatchers.IO) {
-                SavedServerStore.replace(context, saved)
-                SavedServerStore.load(context)
+            val (updated, cleanupOutcome) = withContext(Dispatchers.IO) {
+                val outcome = SavedServerStore.replace(context, saved)
+                SavedServerStore.load(context) to outcome
             }
             appModel.reconnectController.syncSavedServers(
                 updated.filter { it.rememberedByUser }.map { it.toRecord() }
             )
             appModel.store.renameServer(saved.id, saved.name)
+            if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
+                error("Server updated, but SSH trust cleanup is pending until secure storage recovers.")
+            }
             true
         } catch (cancellation: CancellationException) {
             throw cancellation
