@@ -354,11 +354,33 @@ object SavedServerStore {
 
     @Synchronized
     fun upsert(context: Context, server: SavedServer) {
+        upsert(context, server, forceRemembered = false)
+    }
+
+    @Synchronized
+    fun remember(context: Context, server: SavedServer) {
+        upsert(context, server, forceRemembered = true)
+    }
+
+    private fun upsert(
+        context: Context,
+        server: SavedServer,
+        forceRemembered: Boolean,
+    ) {
         val preferences = prefs(context)
+        val trustStore = TerminalSshTrustStore(SshTrustStore(context))
         upsert(
             pendingCleanup = preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null),
             server = server,
+            forceRemembered = forceRemembered,
             loadServers = { recoverPendingCleanup -> load(context, recoverPendingCleanup) },
+            restorePendingTrust = { host, port, fingerprint ->
+                restorePendingSshTrust(
+                    originalFingerprint = fingerprint,
+                    pinned = { trustStore.pinned(host, port) },
+                    pin = { trustStore.pin(host, port, it) },
+                )
+            },
         ) { servers, cancelsPendingCleanup ->
             val editor = preferences.edit().putString(VALUE_KEY, encodeServers(servers))
             if (cancelsPendingCleanup) {
@@ -374,14 +396,31 @@ object SavedServerStore {
     internal fun upsert(
         pendingCleanup: String?,
         server: SavedServer,
+        forceRemembered: Boolean = false,
         loadServers: (recoverPendingCleanup: Boolean) -> List<SavedServer>,
+        restorePendingTrust: (host: String, port: UShort, fingerprint: String?) -> Unit = { _, _, _ -> },
         persist: (servers: List<SavedServer>, cancelsPendingCleanup: Boolean) -> Unit,
     ) {
-        val cancelsPendingCleanup = pendingSshTrustCleanupMatchesServer(pendingCleanup, server)
+        val cleanup = pendingCleanup?.let(::decodeSshTrustCleanupJournal)
+        val cancelsPendingCleanup = cleanup?.matches(server) == true
+        if (cancelsPendingCleanup) {
+            check(cleanup.fingerprintRecorded) {
+                "The pending SSH trust cleanup lacks the original fingerprint; re-add is blocked"
+            }
+            restorePendingTrust(cleanup.host, cleanup.port.toUShort(), cleanup.fingerprint)
+        }
         val existing = loadServers(!cancelsPendingCleanup).toMutableList()
         val prior = existing.firstOrNull { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
-        existing.add(server.copy(rememberedByUser = prior?.rememberedByUser ?: server.rememberedByUser))
+        existing.add(
+            server.copy(
+                rememberedByUser = if (forceRemembered) {
+                    true
+                } else {
+                    prior?.rememberedByUser ?: server.rememberedByUser
+                },
+            ),
+        )
         persist(existing, cancelsPendingCleanup)
     }
 
@@ -416,14 +455,6 @@ object SavedServerStore {
             .mapNotNull { it.sshTrustTarget() }
             .any { sshTrustIdentity(it.first, it.second) == identity }
         return SavedServerMutation(updated, target.takeUnless { stillReferenced })
-    }
-
-    @Synchronized
-    fun remember(context: Context, server: SavedServer) {
-        val existing = load(context).toMutableList()
-        existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
-        existing.add(server.copy(rememberedByUser = true))
-        save(context, existing)
     }
 
     @Synchronized
@@ -481,12 +512,15 @@ object SavedServerStore {
         ensureNoPendingSshTrustCleanup(
             preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null),
         )
+        val trustStore = TerminalSshTrustStore(SshTrustStore(context))
+        val originalFingerprint = trustStore.pinned(target.first, target.second.toUShort())
         val rollbackJson = encodeServers(existing)
         val updatedJson = encodeServers(mutation.servers)
-        val journal = JSONObject()
-            .put("host", target.first)
-            .put("port", target.second)
-            .toString()
+        val journal = encodeSshTrustCleanupJournal(
+            host = target.first,
+            port = target.second,
+            fingerprint = originalFingerprint,
+        )
         return runTrustCleanupTransaction(
             begin = {
                 if (!preferences.edit()
@@ -508,8 +542,7 @@ object SavedServerStore {
                 }
             },
             unpin = {
-                TerminalSshTrustStore(SshTrustStore(context))
-                    .unpin(target.first, target.second.toUShort())
+                trustStore.unpin(target.first, target.second.toUShort())
             },
             finish = {
                 // Failure leaves the durable journal intact; the next load
@@ -586,21 +619,68 @@ object SavedServerStore {
     }
 
     internal fun decodeSshTrustCleanupTarget(encoded: String): Pair<String, Int>? {
-        val journal = runCatching { JSONObject(encoded) }.getOrNull() ?: return null
-        val host = journal.optString("host").takeIf { it.isNotBlank() } ?: return null
-        val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
-            ?: return null
-        return host to port
+        val journal = decodeSshTrustCleanupJournal(encoded) ?: return null
+        return journal.host to journal.port
     }
 
-    private fun pendingSshTrustCleanupMatchesServer(
-        encodedCleanup: String?,
-        server: SavedServer,
-    ): Boolean {
-        val pendingTarget = encodedCleanup?.let(::decodeSshTrustCleanupTarget) ?: return false
+    internal fun encodeSshTrustCleanupJournal(
+        host: String,
+        port: Int,
+        fingerprint: String?,
+    ): String = JSONObject()
+        .put("host", host)
+        .put("port", port)
+        .put("fingerprint", fingerprint ?: JSONObject.NULL)
+        .toString()
+
+    private fun decodeSshTrustCleanupJournal(encoded: String): SshTrustCleanupJournal? {
+        val objectValue = runCatching { JSONObject(encoded) }.getOrNull() ?: return null
+        val host = objectValue.optString("host").takeIf { it.isNotBlank() } ?: return null
+        val port = objectValue.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
+            ?: return null
+        val fingerprintRecorded = objectValue.has("fingerprint")
+        val fingerprint = when {
+            !fingerprintRecorded || objectValue.isNull("fingerprint") -> null
+            else -> objectValue.optString("fingerprint").takeIf { it.isNotBlank() }
+                ?: return SshTrustCleanupJournal(host, port, null, fingerprintRecorded = false)
+        }
+        return SshTrustCleanupJournal(host, port, fingerprint, fingerprintRecorded)
+    }
+
+    private data class SshTrustCleanupJournal(
+        val host: String,
+        val port: Int,
+        val fingerprint: String?,
+        val fingerprintRecorded: Boolean,
+    )
+
+    private fun SshTrustCleanupJournal.matches(server: SavedServer): Boolean {
         val serverTarget = server.sshTrustTarget() ?: return false
-        return sshTrustIdentity(pendingTarget.first, pendingTarget.second) ==
+        return sshTrustIdentity(host, port) ==
             sshTrustIdentity(serverTarget.first, serverTarget.second)
+    }
+
+    internal fun restorePendingSshTrust(
+        originalFingerprint: String?,
+        pinned: () -> String?,
+        pin: (String) -> Unit,
+    ) {
+        val expected = originalFingerprint ?: return
+        val current = pinned()
+        check(current == null || current == expected) {
+            "The SSH host fingerprint changed while cleanup was pending"
+        }
+        if (current == expected) return
+
+        try {
+            pin(expected)
+        } catch (error: Exception) {
+            if (runCatching(pinned).getOrNull() != expected) throw error
+            return
+        }
+        check(pinned() == expected) {
+            "Unable to verify the restored SSH host fingerprint"
+        }
     }
 
     internal fun ensureNoPendingSshTrustCleanup(encoded: String?) {

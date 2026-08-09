@@ -312,7 +312,7 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
     }
 
-    func testReaddingPendingTrustTargetCancelsCleanupWithoutUnpinning() throws {
+    func testReaddingPendingTrustTargetRestoresPinAfterAmbiguousUnpin() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let removed = makeServer(
@@ -323,8 +323,15 @@ final class SavedServerStoreTests: XCTestCase {
             hasCodexServer: false
         )
         SavedServerStore.save([removed], to: defaults)
+        let originalFingerprint = "SHA256:original"
+        var storedFingerprint: String? = originalFingerprint
         XCTAssertThrowsError(
-            try SavedServerStore.remove(serverId: removed.id, from: defaults) { _, _ in
+            try SavedServerStore.remove(
+                serverId: removed.id,
+                from: defaults,
+                pinned: { _, _ in storedFingerprint }
+            ) { _, _ in
+                storedFingerprint = nil
                 throw NSError(domain: "SavedServerStoreTests", code: 5)
             }
         )
@@ -336,9 +343,23 @@ final class SavedServerStoreTests: XCTestCase {
             sshPort: 22,
             hasCodexServer: false
         )
-        SavedServerStore.save([readded], to: defaults)
+        var restored: [(String, UInt16, String)] = []
+        try SavedServerStore.save(
+            [readded],
+            to: defaults,
+            pinned: { _, _ in storedFingerprint },
+            pin: { host, port, fingerprint in
+                restored.append((host, port, fingerprint))
+                storedFingerprint = fingerprint
+            }
+        )
 
         XCTAssertEqual(SavedServerStore.load(from: defaults), [readded])
+        XCTAssertEqual(storedFingerprint, originalFingerprint)
+        XCTAssertEqual(restored.count, 1)
+        XCTAssertEqual(restored.first?.0, "[First.Example]")
+        XCTAssertEqual(restored.first?.1, 22)
+        XCTAssertEqual(restored.first?.2, originalFingerprint)
         XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
         var unpinned: [(String, UInt16)] = []
         XCTAssertFalse(
@@ -349,7 +370,7 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertTrue(unpinned.isEmpty)
     }
 
-    func testRecoveryCancelsLegacyJournalForReferencedTrustTarget() throws {
+    func testRecoveryBlocksLegacyJournalForReferencedTrustTarget() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let active = makeServer(
@@ -370,15 +391,58 @@ final class SavedServerStoreTests: XCTestCase {
         defaults.set(journal, forKey: SavedServerStore.sshTrustCleanupJournalKey)
 
         var unpinned: [(String, UInt16)] = []
-        XCTAssertTrue(
+        XCTAssertThrowsError(
             try SavedServerStore.resumePendingTrustCleanup(from: defaults) { host, port in
                 unpinned.append((host, port))
             }
         )
 
         XCTAssertTrue(unpinned.isEmpty)
-        XCTAssertEqual(SavedServerStore.load(from: defaults), [active])
-        XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [])
+        XCTAssertNotNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+    }
+
+    func testChangedPinBlocksReaddAndRetainsCleanupJournal() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let removed = makeServer(
+            id: "ssh-1",
+            hostname: "first.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([removed], to: defaults)
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(
+                serverId: removed.id,
+                from: defaults,
+                pinned: { _, _ in "SHA256:original" }
+            ) { _, _ in
+                throw NSError(domain: "SavedServerStoreTests", code: 7)
+            }
+        )
+        let readded = makeServer(
+            id: "ssh-2",
+            hostname: "FIRST.EXAMPLE",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        var pinAttempted = false
+
+        XCTAssertThrowsError(
+            try SavedServerStore.save(
+                [readded],
+                to: defaults,
+                pinned: { _, _ in "SHA256:changed" },
+                pin: { _, _, _ in pinAttempted = true }
+            )
+        )
+
+        XCTAssertFalse(pinAttempted)
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [])
+        XCTAssertNotNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
     }
 
     func testReaddingPendingHostOnDifferentPortStillCleansOriginalTarget() throws {

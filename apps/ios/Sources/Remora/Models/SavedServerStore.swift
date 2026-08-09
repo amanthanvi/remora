@@ -64,41 +64,103 @@ enum SavedServerStore {
         let servers: [SavedServer]
         let host: String
         let port: UInt16
+        let originalFingerprint: String?
+        let fingerprintRecorded: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case servers
+            case host
+            case port
+            case originalFingerprint
+        }
+
+        init(
+            servers: [SavedServer],
+            host: String,
+            port: UInt16,
+            originalFingerprint: String?,
+            fingerprintRecorded: Bool = true
+        ) {
+            self.servers = servers
+            self.host = host
+            self.port = port
+            self.originalFingerprint = originalFingerprint
+            self.fingerprintRecorded = fingerprintRecorded
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            servers = try container.decode([SavedServer].self, forKey: .servers)
+            host = try container.decode(String.self, forKey: .host)
+            port = try container.decode(UInt16.self, forKey: .port)
+            fingerprintRecorded = container.contains(.originalFingerprint)
+            originalFingerprint = try container.decodeIfPresent(
+                String.self,
+                forKey: .originalFingerprint
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(servers, forKey: .servers)
+            try container.encode(host, forKey: .host)
+            try container.encode(port, forKey: .port)
+            if fingerprintRecorded {
+                try container.encode(originalFingerprint, forKey: .originalFingerprint)
+            }
+        }
     }
 
     static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
         do {
-            if let pending = try pendingTrustCleanup(from: defaults) {
-                if containsSSHTrustTarget(
-                    host: pending.host,
-                    port: pending.port,
-                    in: servers
-                ) {
-                    try clearTrustCleanupJournal(from: defaults)
-                } else {
-                    let refreshed = SSHTrustCleanupJournal(
-                        servers: servers,
-                        host: pending.host,
-                        port: pending.port
-                    )
-                    let journalData = try JSONEncoder().encode(refreshed)
-                    try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
-                }
-            }
-            try persistServers(servers, to: defaults)
+            let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+            try save(
+                servers,
+                to: defaults,
+                pinned: { try trustStore.pinned(host: $0, port: $1) },
+                pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) }
+            )
         } catch {
             return
         }
+    }
+
+    static func save(
+        _ servers: [SavedServer],
+        to defaults: UserDefaults,
+        pinned: (String, UInt16) throws -> String?,
+        pin: (String, UInt16, String) throws -> Void
+    ) throws {
+        if let pending = try pendingTrustCleanup(from: defaults) {
+            let refreshed = SSHTrustCleanupJournal(
+                servers: servers,
+                host: pending.host,
+                port: pending.port,
+                originalFingerprint: pending.originalFingerprint,
+                fingerprintRecorded: pending.fingerprintRecorded
+            )
+            let journalData = try JSONEncoder().encode(refreshed)
+            try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
+            if containsSSHTrustTarget(host: pending.host, port: pending.port, in: servers) {
+                try restorePendingTrust(refreshed, pinned: pinned, pin: pin)
+                try persistServers(servers, to: defaults)
+                try clearTrustCleanupJournal(from: defaults)
+                postSavedServersDidChange()
+                return
+            }
+        }
+        try persistServers(servers, to: defaults)
         postSavedServersDidChange()
     }
 
     static func load() -> [SavedServer] {
-        try? resumePendingTrustCleanup(from: .standard) { host, port in
-            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
-                host: host,
-                port: port
-            )
-        }
+        let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+        _ = try? resumePendingTrustCleanup(
+            from: .standard,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) },
+            unpin: { try trustStore.unpin(host: $0, port: $1) }
+        )
         return load(from: .standard)
     }
 
@@ -131,7 +193,7 @@ enum SavedServerStore {
     }
 
     static func upsert(_ server: DiscoveredServer) {
-        var saved = load()
+        var saved = load(from: .standard)
         let existing = existingMatch(for: server, in: saved)
         saved.removeAll { entry in matches(server, entry) }
         saved.append(
@@ -145,14 +207,14 @@ enum SavedServerStore {
     }
 
     static func remember(_ server: DiscoveredServer) {
-        var saved = load()
+        var saved = load(from: .standard)
         saved.removeAll { entry in matches(server, entry) }
         saved.append(SavedServer.from(server, rememberedByUser: true))
         save(saved)
     }
 
     static func rememberSSHBridge(_ server: DiscoveredServer, runtimeKinds: [AgentRuntimeKind]) {
-        var saved = load()
+        var saved = load(from: .standard)
         saved.removeAll { entry in matches(server, entry) }
         saved.append(
             SavedServer
@@ -172,23 +234,25 @@ enum SavedServerStore {
     }
 
     static func replace(_ server: SavedServer) throws {
-        try resumePendingTrustCleanup(from: .standard) { host, port in
-            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
-                host: host,
-                port: port
-            )
-        }
-        try replace(server, from: .standard) { host, port in
-            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
-                host: host,
-                port: port
-            )
-        }
+        let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+        try resumePendingTrustCleanup(
+            from: .standard,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) },
+            unpin: { try trustStore.unpin(host: $0, port: $1) }
+        )
+        try replace(
+            server,
+            from: .standard,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            unpin: { try trustStore.unpin(host: $0, port: $1) }
+        )
     }
 
     static func replace(
         _ server: SavedServer,
         from defaults: UserDefaults,
+        pinned: (String, UInt16) throws -> String? = { _, _ in nil },
         unpin: (String, UInt16) throws -> Void
     ) throws {
         guard try pendingTrustCleanup(from: defaults) == nil else {
@@ -219,6 +283,7 @@ enum SavedServerStore {
                 servers: saved,
                 target: cleanupTarget,
                 to: defaults,
+                pinned: pinned,
                 unpin: unpin
             )
         } else {
@@ -228,23 +293,25 @@ enum SavedServerStore {
     }
 
     static func remove(serverId: String) throws {
-        try resumePendingTrustCleanup(from: .standard) { host, port in
-            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
-                host: host,
-                port: port
-            )
-        }
-        try remove(serverId: serverId, from: .standard) { host, port in
-            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
-                host: host,
-                port: port
-            )
-        }
+        let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+        try resumePendingTrustCleanup(
+            from: .standard,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) },
+            unpin: { try trustStore.unpin(host: $0, port: $1) }
+        )
+        try remove(
+            serverId: serverId,
+            from: .standard,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            unpin: { try trustStore.unpin(host: $0, port: $1) }
+        )
     }
 
     static func remove(
         serverId: String,
         from defaults: UserDefaults,
+        pinned: (String, UInt16) throws -> String? = { _, _ in nil },
         unpin: (String, UInt16) throws -> Void
     ) throws {
         guard try pendingTrustCleanup(from: defaults) == nil else {
@@ -268,6 +335,7 @@ enum SavedServerStore {
                 servers: saved,
                 target: cleanupTarget,
                 to: defaults,
+                pinned: pinned,
                 unpin: unpin
             )
         } else {
@@ -279,20 +347,25 @@ enum SavedServerStore {
     @discardableResult
     static func resumePendingTrustCleanup(
         from defaults: UserDefaults,
+        pinned: (String, UInt16) throws -> String? = { _, _ in nil },
+        pin: (String, UInt16, String) throws -> Void = { _, _, _ in },
         unpin: (String, UInt16) throws -> Void
     ) throws -> Bool {
         guard let journal = try pendingTrustCleanup(from: defaults) else { return false }
-        try persistServers(journal.servers, to: defaults)
-        postSavedServersDidChange()
         do {
             if containsSSHTrustTarget(
                 host: journal.host,
                 port: journal.port,
                 in: journal.servers
             ) {
+                try restorePendingTrust(journal, pinned: pinned, pin: pin)
+                try persistServers(journal.servers, to: defaults)
+                postSavedServersDidChange()
                 try clearTrustCleanupJournal(from: defaults)
                 return true
             }
+            try persistServers(journal.servers, to: defaults)
+            postSavedServersDidChange()
             try unpin(journal.host, journal.port)
             try clearTrustCleanupJournal(from: defaults)
         } catch {
@@ -419,12 +492,15 @@ enum SavedServerStore {
         servers: [SavedServer],
         target: (host: String, port: UInt16),
         to defaults: UserDefaults,
+        pinned: (String, UInt16) throws -> String?,
         unpin: (String, UInt16) throws -> Void
     ) throws {
+        let originalFingerprint = try pinned(target.host, target.port)
         let journal = SSHTrustCleanupJournal(
             servers: servers,
             host: target.host,
-            port: target.port
+            port: target.port,
+            originalFingerprint: originalFingerprint
         )
         let journalData = try JSONEncoder().encode(journal)
         try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
@@ -435,6 +511,38 @@ enum SavedServerStore {
             try clearTrustCleanupJournal(from: defaults)
         } catch {
             throw SavedServerStoreError.trustCleanupPending(error.localizedDescription)
+        }
+    }
+
+    private static func restorePendingTrust(
+        _ journal: SSHTrustCleanupJournal,
+        pinned: (String, UInt16) throws -> String?,
+        pin: (String, UInt16, String) throws -> Void
+    ) throws {
+        guard journal.fingerprintRecorded else {
+            throw SavedServerStoreError.invalidTrustCleanupJournal
+        }
+        guard let expected = journal.originalFingerprint else { return }
+        let current = try pinned(journal.host, journal.port)
+        guard current == nil || current == expected else {
+            throw SavedServerStoreError.trustCleanupPending(
+                "the SSH host fingerprint changed while cleanup was pending"
+            )
+        }
+        guard current == nil else { return }
+
+        do {
+            try pin(journal.host, journal.port, expected)
+        } catch {
+            guard (try? pinned(journal.host, journal.port)) == expected else {
+                throw error
+            }
+            return
+        }
+        guard try pinned(journal.host, journal.port) == expected else {
+            throw SavedServerStoreError.trustCleanupPending(
+                "the restored SSH host fingerprint could not be verified"
+            )
         }
     }
 

@@ -89,6 +89,12 @@ class SavedServerTransportTest {
                 JSONObject().put("host", "host.example").put("port", 2222).toString(),
             ),
         )
+        val encoded = SavedServerStore.encodeSshTrustCleanupJournal(
+            host = "host.example",
+            port = 2222,
+            fingerprint = "SHA256:original",
+        )
+        assertEquals("SHA256:original", JSONObject(encoded).getString("fingerprint"))
     }
 
     @Test
@@ -163,11 +169,13 @@ class SavedServerTransportTest {
             source = "ssh",
             preferredConnectionMode = "ssh",
         )
-        val pendingCleanup = JSONObject()
-            .put("host", "[FIRST.EXAMPLE]")
-            .put("port", 22)
-            .toString()
+        val pendingCleanup = SavedServerStore.encodeSshTrustCleanupJournal(
+            host = "[FIRST.EXAMPLE]",
+            port = 22,
+            fingerprint = "SHA256:original",
+        )
         val recoverySteps = mutableListOf<String>()
+        val restorationSteps = mutableListOf<String>()
         var persisted = emptyList<SavedServer>()
         var cancelledPendingCleanup = false
 
@@ -178,14 +186,120 @@ class SavedServerTransportTest {
                 if (recoverPendingCleanup) recoverySteps += "unpin"
                 emptyList()
             },
+            restorePendingTrust = { host, port, fingerprint ->
+                restorationSteps += "$host:$port=$fingerprint"
+            },
         ) { servers, cancelsPendingCleanup ->
+            restorationSteps += "persist"
             persisted = servers
             cancelledPendingCleanup = cancelsPendingCleanup
         }
 
         assertTrue(recoverySteps.isEmpty())
+        assertEquals(listOf("[FIRST.EXAMPLE]:22=SHA256:original", "persist"), restorationSteps)
         assertTrue(cancelledPendingCleanup)
         assertEquals(listOf(readded), persisted)
+    }
+
+    @Test
+    fun rememberUsesGuardedReaddPathAndForcesRememberedFlag() {
+        val readded = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val pendingCleanup = SavedServerStore.encodeSshTrustCleanupJournal(
+            host = "first.example",
+            port = 22,
+            fingerprint = "SHA256:original",
+        )
+        val steps = mutableListOf<String>()
+        var persisted = emptyList<SavedServer>()
+
+        SavedServerStore.upsert(
+            pendingCleanup = pendingCleanup,
+            server = readded,
+            forceRemembered = true,
+            loadServers = { recoverPendingCleanup ->
+                if (recoverPendingCleanup) steps += "unpin"
+                emptyList()
+            },
+            restorePendingTrust = { _, _, _ -> steps += "restore" },
+        ) { servers, _ ->
+            steps += "persist"
+            persisted = servers
+        }
+
+        assertEquals(listOf("restore", "persist"), steps)
+        assertTrue(persisted.single().rememberedByUser)
+    }
+
+    @Test
+    fun matchingLegacyCleanupJournalBlocksReaddBeforeRecovery() {
+        val readded = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val pendingCleanup = JSONObject()
+            .put("host", "first.example")
+            .put("port", 22)
+            .toString()
+        val steps = mutableListOf<String>()
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.upsert(
+                pendingCleanup = pendingCleanup,
+                server = readded,
+                loadServers = {
+                    steps += "load"
+                    emptyList()
+                },
+            ) { _, _ -> steps += "persist" }
+        }
+
+        assertTrue(error.message.orEmpty().contains("lacks the original fingerprint"))
+        assertTrue(steps.isEmpty())
+    }
+
+    @Test
+    fun ambiguousPinRestoreSucceedsOnlyWhenFingerprintCanBeVerified() {
+        var stored: String? = null
+
+        SavedServerStore.restorePendingSshTrust(
+            originalFingerprint = "SHA256:original",
+            pinned = { stored },
+            pin = { fingerprint ->
+                stored = fingerprint
+                throw IllegalStateException("ambiguous write")
+            },
+        )
+
+        assertEquals("SHA256:original", stored)
+    }
+
+    @Test
+    fun changedFingerprintBlocksPendingCleanupCancellation() {
+        var pinAttempted = false
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.restorePendingSshTrust(
+                originalFingerprint = "SHA256:original",
+                pinned = { "SHA256:changed" },
+                pin = { pinAttempted = true },
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("fingerprint changed"))
+        assertFalse(pinAttempted)
     }
 
     @Test
