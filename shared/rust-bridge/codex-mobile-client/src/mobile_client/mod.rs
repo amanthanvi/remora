@@ -1239,6 +1239,12 @@ async fn refresh_post_reconnect_thread_authoritative(
             .await
         {
             Ok(false) if attempt < POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len() => continue,
+            Err(error)
+                if attempt < POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len()
+                    && matches!(error, RpcError::Timeout | RpcError::Transport(_)) =>
+            {
+                continue;
+            }
             result => return result,
         }
     }

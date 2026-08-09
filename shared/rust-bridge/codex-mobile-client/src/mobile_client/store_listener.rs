@@ -3600,6 +3600,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_reconnect_refresh_retries_transient_transport_failure() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let attempts = Arc::clone(&attempts);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(RpcError::Transport(TransportError::Disconnected))
+                    } else {
+                        Ok(successful_thread_resume_response(thread_id))
+                    }
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected post-reconnect request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let applied = super::super::refresh_post_reconnect_thread_authoritative(&client, &key)
+            .await
+            .expect("transient post-reconnect failure should retry cleanly");
+
+        assert!(applied);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn lag_reconcile_refreshes_authoritative_thread_inventory() {
         let client = MobileClient::new();
         let server_id = "srv";

@@ -402,14 +402,19 @@ object SavedServerStore {
         persist: (servers: List<SavedServer>, cancelsPendingCleanup: Boolean) -> Unit,
     ) {
         val cleanup = pendingCleanup?.let(::decodeSshTrustCleanupJournal)
-        val cancelsPendingCleanup = cleanup?.matches(server) == true
-        if (cancelsPendingCleanup) {
-            check(cleanup.fingerprintRecorded) {
+        val matchingCleanupTarget = cleanup?.matchingTarget(server)
+        val cancelsPendingCleanup = matchingCleanupTarget != null && cleanup.targets.size == 1
+        if (matchingCleanupTarget != null) {
+            check(matchingCleanupTarget.fingerprintRecorded) {
                 "The pending SSH trust cleanup lacks the original fingerprint; re-add is blocked"
             }
-            restorePendingTrust(cleanup.host, cleanup.port.toUShort(), cleanup.fingerprint)
+            restorePendingTrust(
+                matchingCleanupTarget.host,
+                matchingCleanupTarget.port.toUShort(),
+                matchingCleanupTarget.fingerprint,
+            )
         }
-        val existing = loadServers(!cancelsPendingCleanup).toMutableList()
+        val existing = loadServers(matchingCleanupTarget == null).toMutableList()
         val prior = existing.firstOrNull { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.add(
@@ -436,7 +441,7 @@ object SavedServerStore {
         unpin: (String, UShort) -> Unit,
     ): List<SavedServer> {
         val mutation = planServerReplacement(existing, server)
-        mutation.trustTarget?.let { (host, port) -> unpin(host, port.toUShort()) }
+        mutation.trustTargets.forEach { (host, port) -> unpin(host, port.toUShort()) }
         return mutation.servers
     }
 
@@ -445,16 +450,16 @@ object SavedServerStore {
         server: SavedServer,
     ): SavedServerMutation {
         val index = existing.indexOfFirst { it.id == server.id }
-        if (index == -1) return SavedServerMutation(existing + server, null)
+        if (index == -1) return SavedServerMutation(existing + server, emptyList())
 
         val previous = existing[index]
         val updated = existing.toMutableList().apply { this[index] = server }
-        val target = previous.sshTrustTarget() ?: return SavedServerMutation(updated, null)
+        val target = previous.sshTrustTarget() ?: return SavedServerMutation(updated, emptyList())
         val identity = sshTrustIdentity(target.first, target.second)
         val stillReferenced = updated
             .mapNotNull { it.sshTrustTarget() }
             .any { sshTrustIdentity(it.first, it.second) == identity }
-        return SavedServerMutation(updated, target.takeUnless { stillReferenced })
+        return SavedServerMutation(updated, listOfNotNull(target.takeUnless { stillReferenced }))
     }
 
     @Synchronized
@@ -473,7 +478,7 @@ object SavedServerStore {
         unpin: (String, UShort) -> Unit,
     ): List<SavedServer> {
         val mutation = planServerRemoval(existing, serverId)
-        mutation.trustTarget?.let { (host, port) -> unpin(host, port.toUShort()) }
+        mutation.trustTargets.forEach { (host, port) -> unpin(host, port.toUShort()) }
         return mutation.servers
     }
 
@@ -481,19 +486,23 @@ object SavedServerStore {
         existing: List<SavedServer>,
         serverId: String,
     ): SavedServerMutation {
-        val removed = existing.firstOrNull { it.id == serverId }
-        val remaining = existing.filterNot { it.id == serverId }
-        val target = removed?.sshTrustTarget() ?: return SavedServerMutation(remaining, null)
-        val targetIdentity = sshTrustIdentity(target.first, target.second)
-        val stillReferenced = remaining
+        val removedTargets = existing
+            .filter { it.id == serverId }
             .mapNotNull { it.sshTrustTarget() }
-            .any { sshTrustIdentity(it.first, it.second) == targetIdentity }
-        return SavedServerMutation(remaining, target.takeUnless { stillReferenced })
+            .distinctBy { sshTrustIdentity(it.first, it.second) }
+        val remaining = existing.filterNot { it.id == serverId }
+        val remainingIdentities = remaining
+            .mapNotNull { it.sshTrustTarget() }
+            .mapTo(mutableSetOf()) { sshTrustIdentity(it.first, it.second) }
+        val cleanupTargets = removedTargets.filterNot { target ->
+            sshTrustIdentity(target.first, target.second) in remainingIdentities
+        }
+        return SavedServerMutation(remaining, cleanupTargets)
     }
 
     private data class SavedServerMutation(
         val servers: List<SavedServer>,
-        val trustTarget: Pair<String, Int>?,
+        val trustTargets: List<Pair<String, Int>>,
     )
 
     @SuppressLint("ApplySharedPref", "UseKtx")
@@ -502,8 +511,8 @@ object SavedServerStore {
         existing: List<SavedServer>,
         mutation: SavedServerMutation,
     ): SshTrustCleanupOutcome {
-        val target = mutation.trustTarget
-        if (target == null) {
+        val targets = mutation.trustTargets
+        if (targets.isEmpty()) {
             save(context, mutation.servers)
             return SshTrustCleanupOutcome.Complete
         }
@@ -513,14 +522,16 @@ object SavedServerStore {
             preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null),
         )
         val trustStore = TerminalSshTrustStore(SshTrustStore(context))
-        val originalFingerprint = trustStore.pinned(target.first, target.second.toUShort())
+        val journalTargets = targets.map { target ->
+            Triple(
+                target.first,
+                target.second,
+                trustStore.pinned(target.first, target.second.toUShort()),
+            )
+        }
         val rollbackJson = encodeServers(existing)
         val updatedJson = encodeServers(mutation.servers)
-        val journal = encodeSshTrustCleanupJournal(
-            host = target.first,
-            port = target.second,
-            fingerprint = originalFingerprint,
-        )
+        val journal = encodeSshTrustCleanupJournal(journalTargets)
         return runTrustCleanupTransaction(
             begin = {
                 if (!preferences.edit()
@@ -542,7 +553,9 @@ object SavedServerStore {
                 }
             },
             unpin = {
-                trustStore.unpin(target.first, target.second.toUShort())
+                targets.forEach { target ->
+                    trustStore.unpin(target.first, target.second.toUShort())
+                }
             },
             finish = {
                 // Failure leaves the durable journal intact; the next load
@@ -556,18 +569,17 @@ object SavedServerStore {
     private fun recoverPendingSshTrustCleanup(context: Context) {
         val preferences = prefs(context)
         val encoded = preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null) ?: return
-        val (host, port) = decodeSshTrustCleanupTarget(encoded) ?: run {
+        val journal = decodeSshTrustCleanupJournal(encoded) ?: run {
             // The server deletion and journal were persisted atomically. If the
-            // target is unreadable, retain the deletion and discard only the
+            // targets are unreadable, retain the deletion and discard only the
             // unusable journal; an obsolete pin is safer than restoring a server.
             preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
             return
         }
         runPendingSshTrustCleanupRecovery(
             encodedServers = preferences.getString(VALUE_KEY, null),
-            host = host,
-            port = port,
-            unpin = {
+            targets = journal.targets.map { it.host to it.port },
+            unpin = { host, port ->
                 TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
             },
             finish = {
@@ -584,18 +596,29 @@ object SavedServerStore {
         port: Int,
         unpin: () -> Unit,
         finish: () -> Unit,
+    ) = runPendingSshTrustCleanupRecovery(
+        encodedServers = encodedServers,
+        targets = listOf(host to port),
+        unpin = { _, _ -> unpin() },
+        finish = finish,
+    )
+
+    internal fun runPendingSshTrustCleanupRecovery(
+        encodedServers: String?,
+        targets: List<Pair<String, Int>>,
+        unpin: (String, Int) -> Unit,
+        finish: () -> Unit,
     ) {
-        if (encodedServersReferenceSshTrustTarget(encodedServers, host, port)) {
-            finish()
-            return
-        }
-        try {
-            unpin()
-        } catch (_: Exception) {
-            // The trust-store commit result is ambiguous: its in-memory map may
-            // already have removed the pin. Keep both the server deletion and
-            // journal so no reconnect can downgrade to first-use trust.
-            return
+        for ((host, port) in targets) {
+            if (encodedServersReferenceSshTrustTarget(encodedServers, host, port)) continue
+            try {
+                unpin(host, port)
+            } catch (_: Exception) {
+                // The trust-store commit result is ambiguous: its in-memory map may
+                // already have removed the pin. Keep both the server deletion and
+                // journal so no reconnect can downgrade to first-use trust.
+                return
+            }
         }
         finish()
     }
@@ -620,8 +643,11 @@ object SavedServerStore {
 
     internal fun decodeSshTrustCleanupTarget(encoded: String): Pair<String, Int>? {
         val journal = decodeSshTrustCleanupJournal(encoded) ?: return null
-        return journal.host to journal.port
+        return journal.targets.first().let { it.host to it.port }
     }
+
+    internal fun decodeSshTrustCleanupTargets(encoded: String): List<Pair<String, Int>>? =
+        decodeSshTrustCleanupJournal(encoded)?.targets?.map { it.host to it.port }
 
     internal fun encodeSshTrustCleanupJournal(
         host: String,
@@ -633,8 +659,41 @@ object SavedServerStore {
         .put("fingerprint", fingerprint ?: JSONObject.NULL)
         .toString()
 
+    internal fun encodeSshTrustCleanupJournal(
+        targets: List<Triple<String, Int, String?>>,
+    ): String = JSONObject()
+        .put(
+            "targets",
+            JSONArray().apply {
+                targets.forEach { (host, port, fingerprint) ->
+                    put(
+                        JSONObject()
+                            .put("host", host)
+                            .put("port", port)
+                            .put("fingerprint", fingerprint ?: JSONObject.NULL),
+                    )
+                }
+            },
+        )
+        .toString()
+
     private fun decodeSshTrustCleanupJournal(encoded: String): SshTrustCleanupJournal? {
         val objectValue = runCatching { JSONObject(encoded) }.getOrNull() ?: return null
+        val targets = objectValue.optJSONArray("targets")?.let { values ->
+            if (values.length() == 0) return null
+            (0 until values.length()).map { index ->
+                decodeSshTrustCleanupTarget(values.optJSONObject(index) ?: return null)
+                    ?: return null
+            }
+        } ?: listOf(decodeSshTrustCleanupTarget(objectValue) ?: return null)
+        return SshTrustCleanupJournal(
+            targets.distinctBy { sshTrustIdentity(it.host, it.port) },
+        )
+    }
+
+    private fun decodeSshTrustCleanupTarget(
+        objectValue: JSONObject,
+    ): SshTrustCleanupTarget? {
         val host = objectValue.optString("host").takeIf { it.isNotBlank() } ?: return null
         val port = objectValue.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
             ?: return null
@@ -642,22 +701,26 @@ object SavedServerStore {
         val fingerprint = when {
             !fingerprintRecorded || objectValue.isNull("fingerprint") -> null
             else -> objectValue.optString("fingerprint").takeIf { it.isNotBlank() }
-                ?: return SshTrustCleanupJournal(host, port, null, fingerprintRecorded = false)
+                ?: return SshTrustCleanupTarget(host, port, null, fingerprintRecorded = false)
         }
-        return SshTrustCleanupJournal(host, port, fingerprint, fingerprintRecorded)
+        return SshTrustCleanupTarget(host, port, fingerprint, fingerprintRecorded)
     }
 
-    private data class SshTrustCleanupJournal(
+    private data class SshTrustCleanupTarget(
         val host: String,
         val port: Int,
         val fingerprint: String?,
         val fingerprintRecorded: Boolean,
     )
 
-    private fun SshTrustCleanupJournal.matches(server: SavedServer): Boolean {
-        val serverTarget = server.sshTrustTarget() ?: return false
-        return sshTrustIdentity(host, port) ==
-            sshTrustIdentity(serverTarget.first, serverTarget.second)
+    private data class SshTrustCleanupJournal(
+        val targets: List<SshTrustCleanupTarget>,
+    )
+
+    private fun SshTrustCleanupJournal.matchingTarget(server: SavedServer): SshTrustCleanupTarget? {
+        val serverTarget = server.sshTrustTarget() ?: return null
+        val identity = sshTrustIdentity(serverTarget.first, serverTarget.second)
+        return targets.firstOrNull { sshTrustIdentity(it.host, it.port) == identity }
     }
 
     internal fun restorePendingSshTrust(

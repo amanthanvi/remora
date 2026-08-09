@@ -37,6 +37,8 @@ const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 const REMOTE_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
 const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
 const REMOTE_TURN_REQUEST_DEADLINE: Duration = Duration::from_secs(45);
+const REMOTE_NON_TURN_REQUEST_DEADLINE: Duration = Duration::from_secs(300);
+const REMOTE_COMMAND_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 const CONNECTION_TIMELINE_CAPACITY: usize = 128;
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 const APP_SERVER_PROXY_WEBSOCKET_URL: &str = "ws://codex-app-server-proxy.localhost/rpc";
@@ -1275,6 +1277,7 @@ impl ServerSession {
                 connection_timeline.clone(),
                 args.clone(),
                 url.clone(),
+                REMOTE_NON_TURN_REQUEST_DEADLINE,
                 resource.transport,
             ));
         }
@@ -2266,10 +2269,30 @@ async fn request_remote_client(
     }
 }
 
-fn remaining_turn_request_deadline(
+fn remote_request_deadline(
+    request: &ClientRequest,
     turn_deadline: Option<tokio::time::Instant>,
-) -> Option<Duration> {
-    turn_deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+    non_turn_request_deadline: Duration,
+) -> Option<tokio::time::Instant> {
+    if turn_deadline.is_some() {
+        return turn_deadline;
+    }
+    let duration = match request {
+        ClientRequest::OneOffCommandExec { params, .. } if params.disable_timeout => return None,
+        ClientRequest::OneOffCommandExec { params, .. } => params
+            .timeout_ms
+            .and_then(|timeout_ms| u64::try_from(timeout_ms).ok())
+            .filter(|timeout_ms| *timeout_ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(non_turn_request_deadline)
+            .saturating_add(REMOTE_COMMAND_RESPONSE_GRACE),
+        _ => non_turn_request_deadline,
+    };
+    Some(tokio::time::Instant::now() + duration)
+}
+
+fn remaining_request_deadline(request_deadline: Option<tokio::time::Instant>) -> Option<Duration> {
+    request_deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
 
 fn request_is_safe_to_replay_after_transport_error(request: &ClientRequest) -> bool {
@@ -2299,6 +2322,7 @@ fn spawn_remote_runtime_worker(
     timeline: ConnectionTimeline,
     reconnect_args: RemoteAppServerConnectArgs,
     reconnect_url: String,
+    non_turn_request_deadline: Duration,
     reconnect_transport: Option<Arc<dyn RemoteTransport>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -2325,11 +2349,15 @@ fn spawn_remote_runtime_worker(
                                 )));
                                 continue;
                             }
-                            let request_deadline = remaining_turn_request_deadline(turn_deadline);
+                            let request_deadline = remote_request_deadline(
+                                &request,
+                                turn_deadline,
+                                non_turn_request_deadline,
+                            );
                             let mut result = request_remote_client(
                                 &client,
                                 request,
-                                request_deadline,
+                                remaining_request_deadline(request_deadline),
                             )
                             .await;
                             if matches!(result, Err(RpcError::Transport(_))) {
@@ -2358,7 +2386,7 @@ fn spawn_remote_runtime_worker(
                                         result = request_remote_client(
                                             &client,
                                             request_retry,
-                                            request_deadline,
+                                            remaining_request_deadline(request_deadline),
                                         )
                                         .await;
                                     }
@@ -2966,6 +2994,7 @@ mod tests {
             timeline.clone(),
             test_remote_args("drop-test-bridge"),
             "drop-test-bridge".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
 
@@ -3058,6 +3087,7 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("drop-command-test-bridge"),
             "drop-command-test-bridge".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
 
@@ -3125,6 +3155,7 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("silent-turn-test-bridge"),
             "silent-turn-test-bridge".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
         let request: ClientRequest = serde_json::from_value(json!({
@@ -3176,6 +3207,12 @@ mod tests {
             "queued-turn-deadline-test-bridge",
         )
         .await;
+        let reconnect_started = Arc::new(tokio::sync::Notify::new());
+        let reconnect_release = Arc::new(tokio::sync::Notify::new());
+        let reconnect_transport: Arc<dyn RemoteTransport> = Arc::new(BlockingReconcileTransport {
+            started: Arc::clone(&reconnect_started),
+            release: Arc::clone(&reconnect_release),
+        });
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, _) = broadcast::channel(4);
         let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
@@ -3199,7 +3236,8 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("queued-turn-deadline-test-bridge"),
             "queued-turn-deadline-test-bridge".to_string(),
-            None,
+            request_deadline,
+            Some(reconnect_transport),
         );
 
         let non_turn_request: ClientRequest = serde_json::from_value(json!({
@@ -3246,13 +3284,18 @@ mod tests {
             RpcError::Transport(TransportError::Disconnected)
         ));
 
-        worker.abort();
-        assert!(
-            worker
-                .await
-                .expect_err("worker should be cancelled")
-                .is_cancelled()
-        );
+        tokio::time::timeout(Duration::from_secs(1), reconnect_started.notified())
+            .await
+            .expect("silent non-turn request should enter reconnect reconciliation");
+        reconnect_release.notify_one();
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("worker should accept shutdown");
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("worker should reject the expired queued turn and shut down")
+            .expect("worker should shut down cleanly");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3285,8 +3328,36 @@ mod tests {
     }
 
     #[test]
-    fn remote_request_deadline_preserves_unbounded_non_turn_request() {
-        assert_eq!(remaining_turn_request_deadline(None), None);
+    fn remote_request_deadline_bounds_reads_but_honors_command_timeout_controls() {
+        let read: ClientRequest = serde_json::from_value(json!({
+            "id": 1,
+            "method": "model/list",
+            "params": {"limit": 5}
+        }))
+        .expect("valid model/list request");
+        assert!(remote_request_deadline(&read, None, Duration::from_secs(300)).is_some());
+
+        let unbounded_command: ClientRequest = serde_json::from_value(json!({
+            "id": 2,
+            "method": "command/exec",
+            "params": {"command": ["sleep", "600"], "disableTimeout": true}
+        }))
+        .expect("valid unbounded command/exec request");
+        assert_eq!(
+            remote_request_deadline(&unbounded_command, None, Duration::from_secs(300)),
+            None
+        );
+
+        let custom_command: ClientRequest = serde_json::from_value(json!({
+            "id": 3,
+            "method": "command/exec",
+            "params": {"command": ["sleep", "120"], "timeoutMs": 120000}
+        }))
+        .expect("valid custom command/exec request");
+        let before = tokio::time::Instant::now();
+        let deadline = remote_request_deadline(&custom_command, None, Duration::from_secs(300))
+            .expect("custom command deadline");
+        assert!(deadline >= before + Duration::from_secs(125));
     }
 
     #[test]

@@ -464,14 +464,20 @@ impl MobileClient {
                     }
                     return Ok(true);
                 }
-                Err(error) if should_try_next_runtime_after_thread_lookup_error(&error) => {
+                Err(error)
+                    if should_try_next_runtime_after_thread_lookup_error(&error.to_string()) =>
+                {
                     info!(target: super::MOBILE_CLIENT_TRACING_TARGET,
                         "external_resume_thread: thread lookup missed runtime {:?} server={} thread={}: {}",
                         runtime_kind, server_id, thread_id, error
                     );
                     lookup_errors.push((runtime_kind, error));
                 }
-                Err(error) if should_fallback_to_thread_metadata_after_resume_error(&error) => {
+                Err(error)
+                    if should_fallback_to_thread_metadata_after_resume_error(
+                        &error.to_string(),
+                    ) =>
+                {
                     warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
                         "external_resume_thread: resume failed, falling back to metadata-only thread/read runtime={:?} server={} thread={} error={}",
                         runtime_kind, server_id, thread_id, error
@@ -494,7 +500,7 @@ impl MobileClient {
                     }
                     return Ok(true);
                 }
-                Err(error) => return Err(RpcError::Deserialization(error)),
+                Err(error) => return Err(error),
             }
         }
 
@@ -543,7 +549,7 @@ impl MobileClient {
         runtime_kind: AgentRuntimeKind,
         exclude_turns: bool,
         lag_fence: Option<&LagRefreshFence<'_>>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, RpcError> {
         // Use thread/resume (not thread/read) so the server attaches a
         // conversation listener for this connection. Without the listener
         // the WebSocket client only receives ThreadStatusChanged — no
@@ -580,7 +586,8 @@ impl MobileClient {
                 .map(reasoning_effort_string),
             Some(response.approval_policy.into()),
             Some(response.sandbox.into()),
-        )?;
+        )
+        .map_err(RpcError::Deserialization)?;
         let apply_response = |app_store: &AppStoreReducer| {
             let existing = app_store.thread_snapshot(key);
             // Diagnostic for the pagination-cursor-lost bug (task #13):
@@ -1112,8 +1119,7 @@ impl MobileClient {
                     false,
                     None,
                 )
-                .await
-                .map_err(RpcError::Deserialization)?;
+                .await?;
                 return Ok(crate::types::AppLoadThreadTurnsOutcome {
                     loaded: true,
                     has_more: false,
@@ -1172,8 +1178,7 @@ impl MobileClient {
                     false,
                     None,
                 )
-                .await
-                .map_err(RpcError::Deserialization)?;
+                .await?;
                 Ok(crate::types::AppLoadThreadTurnsOutcome {
                     loaded: true,
                     has_more: false,
@@ -1202,8 +1207,7 @@ impl MobileClient {
                     },
                 },
             )
-            .await
-            .map_err(RpcError::Deserialization)?;
+            .await?;
         let apply_response = |store: &AppStoreReducer| {
             upsert_thread_snapshot_from_app_server_read_response(store, server_id, response)?;
             let key = ThreadKey {

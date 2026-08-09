@@ -98,6 +98,21 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun sshTrustCleanupJournalRoundTripsEveryUniqueTarget() {
+        val encoded = SavedServerStore.encodeSshTrustCleanupJournal(
+            listOf(
+                Triple("first.example", 22, "SHA256:first"),
+                Triple("second.example", 2222, null),
+            ),
+        )
+
+        assertEquals(
+            listOf("first.example" to 22, "second.example" to 2222),
+            SavedServerStore.decodeSshTrustCleanupTargets(encoded),
+        )
+    }
+
+    @Test
     fun pendingSshTrustCleanupBlocksAnotherTrustTargetMutation() {
         SavedServerStore.ensureNoPendingSshTrustCleanup(null)
 
@@ -159,6 +174,24 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun multiTargetCleanupKeepsJournalUntilEveryUnpinSucceeds() {
+        val targets = listOf("first.example" to 22, "second.example" to 2222)
+        val steps = mutableListOf<String>()
+
+        SavedServerStore.runPendingSshTrustCleanupRecovery(
+            encodedServers = null,
+            targets = targets,
+            unpin = { host, _ ->
+                steps += host
+                if (host == "second.example") throw IllegalStateException("unavailable")
+            },
+            finish = { steps += "finish" },
+        )
+
+        assertEquals(listOf("first.example", "second.example"), steps)
+    }
+
+    @Test
     fun upsertCancelsPendingCleanupForSameNormalizedTarget() {
         val readded = SavedServer(
             id = "ssh",
@@ -199,6 +232,48 @@ class SavedServerTransportTest {
         assertEquals(listOf("[FIRST.EXAMPLE]:22=SHA256:original", "persist"), restorationSteps)
         assertTrue(cancelledPendingCleanup)
         assertEquals(listOf(readded), persisted)
+    }
+
+    @Test
+    fun upsertIntoMultiTargetCleanupRestoresMatchAndKeepsRemainingJournal() {
+        val readded = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val pendingCleanup = SavedServerStore.encodeSshTrustCleanupJournal(
+            listOf(
+                Triple("first.example", 22, "SHA256:first"),
+                Triple("second.example", 2222, "SHA256:second"),
+            ),
+        )
+        val steps = mutableListOf<String>()
+        var cancelledPendingCleanup = true
+
+        SavedServerStore.upsert(
+            pendingCleanup = pendingCleanup,
+            server = readded,
+            loadServers = { recoverPendingCleanup ->
+                steps += "load:$recoverPendingCleanup"
+                emptyList()
+            },
+            restorePendingTrust = { host, port, fingerprint ->
+                steps += "restore:$host:$port=$fingerprint"
+            },
+        ) { _, cancelsPendingCleanup ->
+            steps += "persist"
+            cancelledPendingCleanup = cancelsPendingCleanup
+        }
+
+        assertEquals(
+            listOf("restore:first.example:22=SHA256:first", "load:false", "persist"),
+            steps,
+        )
+        assertFalse(cancelledPendingCleanup)
     }
 
     @Test
@@ -429,6 +504,31 @@ class SavedServerTransportTest {
 
         assertTrue(empty.isEmpty())
         assertEquals(listOf("host.example" to 22.toUShort()), unpinned)
+    }
+
+    @Test
+    fun removingDuplicateServerIdsUnpinsEveryOrphanedTrustTarget() {
+        val first = SavedServer(
+            id = "duplicate",
+            name = "First",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val second = first.copy(name = "Second", hostname = "second.example", sshPort = 2222)
+        val unpinned = mutableListOf<Pair<String, UShort>>()
+
+        val remaining = SavedServerStore.removeServer(listOf(first, second), "duplicate") { host, port ->
+            unpinned += host to port
+        }
+
+        assertTrue(remaining.isEmpty())
+        assertEquals(
+            listOf("first.example" to 22.toUShort(), "second.example" to 2222.toUShort()),
+            unpinned,
+        )
     }
 
     @Test
