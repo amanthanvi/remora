@@ -103,6 +103,56 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun pendingCleanupSkipsUnpinWhenSavedListReferencesNormalizedTarget() {
+        val active = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val encodedServers = JSONArray().put(active.toJson()).toString()
+        val steps = mutableListOf<String>()
+
+        SavedServerStore.runPendingSshTrustCleanupRecovery(
+            encodedServers = encodedServers,
+            host = "[FIRST.EXAMPLE]",
+            port = 22,
+            unpin = { steps += "unpin" },
+            finish = { steps += "finish" },
+        )
+
+        assertEquals(listOf("finish"), steps)
+    }
+
+    @Test
+    fun pendingCleanupStillUnpinsSameHostOnDifferentPort() {
+        val active = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 2222,
+            sshPort = 2222,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val encodedServers = JSONArray().put(active.toJson()).toString()
+        val steps = mutableListOf<String>()
+
+        SavedServerStore.runPendingSshTrustCleanupRecovery(
+            encodedServers = encodedServers,
+            host = "First.Example",
+            port = 22,
+            unpin = { steps += "unpin" },
+            finish = { steps += "finish" },
+        )
+
+        assertEquals(listOf("unpin", "finish"), steps)
+    }
+
+    @Test
     fun explicitBridgeSelectionAndNonBridgeNullRemainDistinct() {
         val bridge = SavedServer.fromJson(
             baseJson("bridge").apply {

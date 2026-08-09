@@ -501,17 +501,59 @@ object SavedServerStore {
             preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
             return
         }
+        runPendingSshTrustCleanupRecovery(
+            encodedServers = preferences.getString(VALUE_KEY, null),
+            host = host,
+            port = port,
+            unpin = {
+                TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
+            },
+            finish = {
+                // A failed clear remains safe: recovery re-evaluates the
+                // durable list before attempting another idempotent cleanup.
+                preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+            },
+        )
+    }
+
+    internal fun runPendingSshTrustCleanupRecovery(
+        encodedServers: String?,
+        host: String,
+        port: Int,
+        unpin: () -> Unit,
+        finish: () -> Unit,
+    ) {
+        if (encodedServersReferenceSshTrustTarget(encodedServers, host, port)) {
+            finish()
+            return
+        }
         try {
-            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
+            unpin()
         } catch (_: Exception) {
             // The trust-store commit result is ambiguous: its in-memory map may
             // already have removed the pin. Keep both the server deletion and
             // journal so no reconnect can downgrade to first-use trust.
             return
         }
-        // A failed clear remains safe: the durable journal causes another
-        // idempotent cleanup attempt on the next process start.
-        preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+        finish()
+    }
+
+    private fun encodedServersReferenceSshTrustTarget(
+        encodedServers: String?,
+        host: String,
+        port: Int,
+    ): Boolean {
+        val array = encodedServers
+            ?.let { runCatching { JSONArray(it) }.getOrNull() }
+            ?: return false
+        val identity = sshTrustIdentity(host, port)
+        return (0 until array.length()).any { index ->
+            val objectValue = array.optJSONObject(index) ?: return@any false
+            if (!hasOnlyCurrentFields(objectValue)) return@any false
+            val server = runCatching { SavedServer.fromJson(objectValue) }.getOrNull()
+                ?: return@any false
+            server.sshTrustTarget()?.let { sshTrustIdentity(it.first, it.second) } == identity
+        }
     }
 
     internal fun decodeSshTrustCleanupTarget(encoded: String): Pair<String, Int>? {

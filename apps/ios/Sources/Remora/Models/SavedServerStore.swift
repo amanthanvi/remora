@@ -69,13 +69,21 @@ enum SavedServerStore {
     static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
         do {
             if let pending = try pendingTrustCleanup(from: defaults) {
-                let refreshed = SSHTrustCleanupJournal(
-                    servers: servers,
+                if containsSSHTrustTarget(
                     host: pending.host,
-                    port: pending.port
-                )
-                let journalData = try JSONEncoder().encode(refreshed)
-                try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
+                    port: pending.port,
+                    in: servers
+                ) {
+                    try clearTrustCleanupJournal(from: defaults)
+                } else {
+                    let refreshed = SSHTrustCleanupJournal(
+                        servers: servers,
+                        host: pending.host,
+                        port: pending.port
+                    )
+                    let journalData = try JSONEncoder().encode(refreshed)
+                    try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
+                }
             }
             try persistServers(servers, to: defaults)
         } catch {
@@ -277,6 +285,14 @@ enum SavedServerStore {
         try persistServers(journal.servers, to: defaults)
         postSavedServersDidChange()
         do {
+            if containsSSHTrustTarget(
+                host: journal.host,
+                port: journal.port,
+                in: journal.servers
+            ) {
+                try clearTrustCleanupJournal(from: defaults)
+                return true
+            }
             try unpin(journal.host, journal.port)
             try clearTrustCleanupJournal(from: defaults)
         } catch {
@@ -386,6 +402,17 @@ enum SavedServerStore {
         port: UInt16
     ) -> String {
         "\(normalizedHost(host)):\(port)"
+    }
+
+    private static func containsSSHTrustTarget(
+        host: String,
+        port: UInt16,
+        in servers: [SavedServer]
+    ) -> Bool {
+        let identity = sshTrustIdentity(host: host, port: port)
+        return servers
+            .compactMap(sshTrustTarget)
+            .contains { sshTrustIdentity(host: $0.host, port: $0.port) == identity }
     }
 
     private static func commitTrustCleanup(

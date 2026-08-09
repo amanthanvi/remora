@@ -312,6 +312,114 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
     }
 
+    func testReaddingPendingTrustTargetCancelsCleanupWithoutUnpinning() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let removed = makeServer(
+            id: "ssh-1",
+            hostname: "[First.Example]",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([removed], to: defaults)
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(serverId: removed.id, from: defaults) { _, _ in
+                throw NSError(domain: "SavedServerStoreTests", code: 5)
+            }
+        )
+
+        let readded = makeServer(
+            id: "ssh-2",
+            hostname: "first.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([readded], to: defaults)
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [readded])
+        XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+        var unpinned: [(String, UInt16)] = []
+        XCTAssertFalse(
+            try SavedServerStore.resumePendingTrustCleanup(from: defaults) { host, port in
+                unpinned.append((host, port))
+            }
+        )
+        XCTAssertTrue(unpinned.isEmpty)
+    }
+
+    func testRecoveryCancelsLegacyJournalForReferencedTrustTarget() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let active = makeServer(
+            id: "ssh",
+            hostname: "first.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let encodedServers = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode([active])
+        )
+        let journal = try JSONSerialization.data(withJSONObject: [
+            "servers": encodedServers,
+            "host": "[FIRST.EXAMPLE]",
+            "port": 22,
+        ])
+        defaults.set(journal, forKey: SavedServerStore.sshTrustCleanupJournalKey)
+
+        var unpinned: [(String, UInt16)] = []
+        XCTAssertTrue(
+            try SavedServerStore.resumePendingTrustCleanup(from: defaults) { host, port in
+                unpinned.append((host, port))
+            }
+        )
+
+        XCTAssertTrue(unpinned.isEmpty)
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [active])
+        XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+    }
+
+    func testReaddingPendingHostOnDifferentPortStillCleansOriginalTarget() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let removed = makeServer(
+            id: "ssh-1",
+            hostname: "First.Example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([removed], to: defaults)
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(serverId: removed.id, from: defaults) { _, _ in
+                throw NSError(domain: "SavedServerStoreTests", code: 6)
+            }
+        )
+
+        let readded = makeServer(
+            id: "ssh-2",
+            hostname: "first.example",
+            port: nil,
+            sshPort: 2_222,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([readded], to: defaults)
+
+        var unpinned: [(String, UInt16)] = []
+        XCTAssertTrue(
+            try SavedServerStore.resumePendingTrustCleanup(from: defaults) { host, port in
+                unpinned.append((host, port))
+            }
+        )
+        XCTAssertEqual(unpinned.count, 1)
+        XCTAssertEqual(unpinned.first?.0, "First.Example")
+        XCTAssertEqual(unpinned.first?.1, 22)
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [readded])
+        XCTAssertNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
+    }
+
     func testReplacingSSHEndpointUnpinsPreviousTrustTarget() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

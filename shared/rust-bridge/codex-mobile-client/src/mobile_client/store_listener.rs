@@ -1709,7 +1709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_matching_prompt_with_unknown_local_history_consumes_ambiguous_claim() {
+    async fn skew_band_matching_prompt_with_unknown_local_history_retains_ambiguous_claim() {
         let initial_thread = make_thread_snapshot("srv", "thread-1");
 
         let (client, key) = reconcile_completed_ambiguous_claim(
@@ -1723,11 +1723,50 @@ mod tests {
         )
         .await;
 
+        for refresh in 0..2 {
+            assert!(client.pending_turn_reconciliation().contains_key(&key));
+            assert!(
+                client
+                    .pending_turn_reconciliation()
+                    .get(&key)
+                    .is_some_and(|pending| pending.undecidable_replay_observed)
+            );
+            let thread = client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("skew-band unknown-history thread");
+            assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+            assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+            assert!(thread.items.is_empty());
+            if refresh == 0 {
+                client
+                    .force_refresh_thread_authoritative("srv", "thread-1")
+                    .await
+                    .expect("second skew-band ambiguity refresh succeeds");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_claim_matching_prompt_with_unknown_local_history_consumes_ambiguous_claim() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key) = reconcile_completed_ambiguous_claim(
+            initial_thread,
+            "continue",
+            "turn-unknown",
+            "continue",
+            None,
+            1_000,
+            Some(1_005),
+        )
+        .await;
+
         assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
-            .expect("recent unknown-history thread");
+            .expect("post-claim unknown-history thread");
         assert!(thread.queued_follow_up_drafts.is_empty());
         assert!(thread.initial_turns_loaded);
         assert_eq!(thread.items.len(), 1);
@@ -1760,7 +1799,7 @@ mod tests {
                 client
                     .pending_turn_reconciliation()
                     .get(&key)
-                    .is_some_and(|pending| pending.undated_replay_observed)
+                    .is_some_and(|pending| pending.undecidable_replay_observed)
             );
             let thread = client
                 .app_store
@@ -2053,8 +2092,9 @@ mod tests {
         assert_eq!(thread.older_turns_cursor.as_deref(), Some("page-2"));
     }
 
-    #[tokio::test]
-    async fn paginated_undated_replay_observation_survives_page_cap() {
+    async fn assert_paginated_undecidable_replay_observation_survives_page_cap(
+        head_started_at: Option<i64>,
+    ) {
         let initial_thread = make_thread_snapshot("srv", "thread-1");
         let head_requests = Arc::new(AtomicUsize::new(0));
         let head_requests_for_pages = Arc::clone(&head_requests);
@@ -2062,7 +2102,7 @@ mod tests {
             Arc::new(move |cursor| {
                 if cursor.is_none() {
                     let head_request = head_requests_for_pages.fetch_add(1, Ordering::SeqCst);
-                    return completed_undated_thread_turns_list_response(
+                    let mut response = completed_undated_thread_turns_list_response(
                         if head_request == 0 {
                             "turn-undated-match"
                         } else {
@@ -2080,6 +2120,10 @@ mod tests {
                         },
                         Some("page-1"),
                     );
+                    if let Some(started_at) = head_started_at {
+                        response["data"][0]["startedAt"] = started_at.into();
+                    }
+                    return response;
                 }
                 let page_index = cursor
                     .and_then(|cursor| cursor.strip_prefix("page-"))
@@ -2116,7 +2160,7 @@ mod tests {
             client
                 .pending_turn_reconciliation()
                 .get(&key)
-                .is_some_and(|pending| pending.undated_replay_observed
+                .is_some_and(|pending| pending.undecidable_replay_observed
                     && pending.repair_cursor.as_deref()
                         == Some(&format!("page-{AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT}")))
         );
@@ -2151,6 +2195,16 @@ mod tests {
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
         assert!(thread.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn paginated_undated_replay_observation_survives_page_cap() {
+        assert_paginated_undecidable_replay_observation_survives_page_cap(None).await;
+    }
+
+    #[tokio::test]
+    async fn paginated_skew_band_replay_observation_survives_page_cap() {
+        assert_paginated_undecidable_replay_observation_survives_page_cap(Some(995)).await;
     }
 
     #[tokio::test]
@@ -2273,7 +2327,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_recent_match_with_unknown_baseline_consumes_claim() {
+    async fn embedded_skew_band_match_with_unknown_baseline_retains_claim() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key, requests) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "retained",
+            "turn-unknown",
+            "retained",
+            2,
+            1_000,
+            Some(995),
+        )
+        .await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume:false", "thread/resume:false"]
+        );
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded skew-band thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(thread.initial_turns_loaded);
+        assert_eq!(thread.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_post_claim_match_with_unknown_baseline_consumes_claim() {
         let initial_thread = make_thread_snapshot("srv", "thread-1");
 
         let (client, key, requests) = reconcile_embedded_ambiguous_claim(
@@ -2284,7 +2369,7 @@ mod tests {
             "retained",
             1,
             1_000,
-            Some(995),
+            Some(1_005),
         )
         .await;
 
@@ -2296,7 +2381,7 @@ mod tests {
         let thread = client
             .app_store
             .thread_snapshot(&key)
-            .expect("embedded unknown-baseline thread");
+            .expect("embedded post-claim thread");
         assert!(thread.queued_follow_up_drafts.is_empty());
         assert!(thread.initial_turns_loaded);
         assert_eq!(thread.items.len(), 1);
