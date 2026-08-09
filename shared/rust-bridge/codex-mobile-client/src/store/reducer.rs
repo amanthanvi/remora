@@ -806,9 +806,18 @@ impl AppStoreReducer {
         if self
             .mutate_thread_with_result(key, |thread| {
                 if let Some(preview_id) = consumed_follow_up_id {
+                    let removed_first = thread
+                        .queued_follow_up_drafts
+                        .first()
+                        .is_some_and(|draft| draft.preview.id == preview_id);
                     thread
                         .queued_follow_up_drafts
                         .retain(|draft| draft.preview.id != preview_id);
+                    if removed_first
+                        && let Some(next_draft) = thread.queued_follow_up_drafts.first_mut()
+                    {
+                        next_draft.causal_anchor_turn_id = Some(turn_id.to_string());
+                    }
                     sync_thread_follow_up_projection(thread);
                 }
                 thread.active_turn_id = Some(turn_id.to_string());

@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_follow_ups_capture_and_inherit_active_turn_anchor() {
+    fn queued_follow_ups_capture_inherit_and_advance_active_turn_anchor() {
         let client = MobileClient::new();
         let key = ThreadKey {
             server_id: "srv".to_string(),
@@ -574,7 +574,7 @@ mod tests {
         let mut thread = make_thread_snapshot(&key.server_id, &key.thread_id);
         thread.active_turn_id = Some("turn-anchor".to_string());
         client.app_store.upsert_thread_snapshot(thread);
-        enqueue_follow_up(&client, &key, "first");
+        enqueue_follow_up(&client, &key, "repeat");
 
         let mut idle = client
             .app_store
@@ -582,7 +582,7 @@ mod tests {
             .expect("queued thread");
         idle.active_turn_id = None;
         client.app_store.upsert_thread_snapshot(idle);
-        enqueue_follow_up(&client, &key, "second");
+        enqueue_follow_up(&client, &key, "repeat");
 
         let thread = client
             .app_store
@@ -594,6 +594,29 @@ mod tests {
                 .queued_follow_up_drafts
                 .iter()
                 .all(|draft| { draft.causal_anchor_turn_id.as_deref() == Some("turn-anchor") })
+        );
+
+        let first_claim = client
+            .app_store
+            .try_claim_first_queued_follow_up(&key)
+            .expect("first queued follow-up claim");
+        client.app_store.mark_turn_started_from_response(
+            &key,
+            "turn-first-follow-up",
+            Some(&first_claim.preview.id),
+        );
+
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("re-anchored queued thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "repeat");
+        assert_eq!(
+            thread.queued_follow_up_drafts[0]
+                .causal_anchor_turn_id
+                .as_deref(),
+            Some("turn-first-follow-up")
         );
     }
 
