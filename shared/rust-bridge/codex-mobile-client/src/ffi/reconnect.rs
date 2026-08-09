@@ -33,9 +33,11 @@ struct ReconnectCoordinatorState {
     accepting: bool,
     in_flight: HashMap<String, ActiveReconnect>,
     revoked_servers: HashMap<String, ServerRevocation>,
+    next_revocation_generation: u64,
 }
 
 struct ServerRevocation {
+    generation: u64,
     state: ServerRevocationState,
     waiters: usize,
 }
@@ -71,6 +73,7 @@ impl ReconnectCoordinator {
                 accepting: true,
                 in_flight: HashMap::new(),
                 revoked_servers: HashMap::new(),
+                next_revocation_generation: 0,
             }),
             cold_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_COLD_RECONNECTS)),
             state_changed: Notify::new(),
@@ -114,49 +117,76 @@ impl ReconnectCoordinator {
     }
 
     async fn revoke_server(&self, server_id: &str, deadline: Duration) -> bool {
-        {
+        let generation = {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
                 Err(error) => error.into_inner(),
             };
-            let revocation = state
-                .revoked_servers
-                .entry(server_id.to_string())
-                .or_insert(ServerRevocation {
-                    state: ServerRevocationState::Preparing,
-                    waiters: 0,
-                });
-            if revocation.state == ServerRevocationState::Prepared {
-                return true;
+            if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
+                if revocation.state == ServerRevocationState::Prepared {
+                    return true;
+                }
+                revocation.waiters = revocation
+                    .waiters
+                    .checked_add(1)
+                    .expect("server revocation waiter overflow");
+                revocation.generation
+            } else {
+                state.next_revocation_generation = state
+                    .next_revocation_generation
+                    .checked_add(1)
+                    .expect("server revocation generation overflow");
+                let generation = state.next_revocation_generation;
+                state.revoked_servers.insert(
+                    server_id.to_string(),
+                    ServerRevocation {
+                        generation,
+                        state: ServerRevocationState::Preparing,
+                        waiters: 1,
+                    },
+                );
+                generation
             }
-            revocation.waiters += 1;
-        }
+        };
 
         let started = Instant::now();
         loop {
             let changed = self.state_changed.notified();
             let drained = {
-                let state = match self.state.lock() {
+                let mut state = match self.state.lock() {
                     Ok(state) => state,
                     Err(error) => error.into_inner(),
                 };
-                if !state.revoked_servers.contains_key(server_id) {
+                if state
+                    .revoked_servers
+                    .get(server_id)
+                    .map(|revocation| revocation.generation)
+                    != Some(generation)
+                {
                     return false;
                 }
                 if let Some(active) = state.in_flight.get(server_id) {
                     let _ = active.cancel_tx.send(true);
                     false
                 } else {
+                    let revocation = state
+                        .revoked_servers
+                        .get_mut(server_id)
+                        .expect("matching server revocation disappeared while locked");
+                    revocation.state = ServerRevocationState::Prepared;
+                    revocation.waiters = revocation
+                        .waiters
+                        .checked_sub(1)
+                        .expect("server revocation waiter underflow");
                     true
                 }
             };
             if drained {
-                self.finish_server_preparation(server_id, true);
                 return true;
             }
             let remaining = deadline.saturating_sub(started.elapsed());
             if remaining.is_zero() || tokio::time::timeout(remaining, changed).await.is_err() {
-                self.finish_server_preparation(server_id, false);
+                self.finish_server_preparation(server_id, generation);
                 return false;
             }
         }
@@ -170,16 +200,19 @@ impl ReconnectCoordinator {
         state.revoked_servers.remove(server_id);
     }
 
-    fn finish_server_preparation(&self, server_id: &str, prepared: bool) {
+    fn finish_server_preparation(&self, server_id: &str, generation: u64) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(error) => error.into_inner(),
         };
         let should_remove = if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
-            if prepared {
-                revocation.state = ServerRevocationState::Prepared;
+            if revocation.generation != generation {
+                return;
             }
-            revocation.waiters = revocation.waiters.saturating_sub(1);
+            revocation.waiters = revocation
+                .waiters
+                .checked_sub(1)
+                .expect("server revocation waiter underflow");
             revocation.waiters == 0 && revocation.state == ServerRevocationState::Preparing
         } else {
             false
@@ -1119,6 +1152,86 @@ mod tests {
 
         drop(attempt);
         assert!(waiting.await.expect("preparation task joined"));
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_preparation_timeout_cannot_clear_a_successor_fence() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        let stale_coordinator = std::sync::Arc::clone(&coordinator);
+        let stale = tokio::spawn(async move {
+            stale_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        let stale_generation = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(generation) = coordinator
+                    .state
+                    .lock()
+                    .expect("coordinator state")
+                    .revoked_servers
+                    .get("srv-a")
+                    .map(|revocation| revocation.generation)
+                {
+                    break generation;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stale preparation registered");
+
+        coordinator.allow_server("srv-a");
+        let successor_coordinator = std::sync::Arc::clone(&coordinator);
+        let successor = tokio::spawn(async move {
+            successor_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        let successor_generation = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(generation) = coordinator
+                    .state
+                    .lock()
+                    .expect("coordinator state")
+                    .revoked_servers
+                    .get("srv-a")
+                    .map(|revocation| revocation.generation)
+                    .filter(|generation| *generation != stale_generation)
+                {
+                    break generation;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor preparation registered");
+
+        coordinator.finish_server_preparation("srv-a", stale_generation);
+        let state = coordinator.state.lock().expect("coordinator state");
+        let revocation = state
+            .revoked_servers
+            .get("srv-a")
+            .expect("successor fence retained");
+        assert_eq!(revocation.generation, successor_generation);
+        assert_eq!(revocation.waiters, 1);
+        drop(state);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+
+        drop(attempt);
+        assert!(!stale.await.expect("stale preparation joined"));
+        assert!(successor.await.expect("successor preparation joined"));
         assert!(matches!(
             coordinator.try_begin("srv-a"),
             BeginReconnect::Stopped
