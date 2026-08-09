@@ -21,6 +21,28 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun rememberRequiresSynchronousPersistenceBeforeAdmission() {
+        val server = SavedServer(
+            id = "server",
+            name = "Server",
+            hostname = "host.example",
+            port = 8390,
+            hasCodexServer = true,
+        )
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.upsert(
+                pendingCleanup = null,
+                server = server,
+                forceRemembered = true,
+                loadServers = { emptyList() },
+            ) { _, _ -> false }
+        }
+
+        assertTrue(error.message.orEmpty().contains("Unable to persist the server"))
+    }
+
+    @Test
     fun sshTrustCleanupJournalsBeforeUnpinAndFinalizesAfterward() {
         val steps = mutableListOf<String>()
 
@@ -226,6 +248,7 @@ class SavedServerTransportTest {
             restorationSteps += "persist"
             persisted = servers
             cancelledPendingCleanup = cancelsPendingCleanup
+            true
         }
 
         assertTrue(recoverySteps.isEmpty())
@@ -267,6 +290,7 @@ class SavedServerTransportTest {
         ) { _, cancelsPendingCleanup ->
             steps += "persist"
             cancelledPendingCleanup = cancelsPendingCleanup
+            true
         }
 
         assertEquals(
@@ -307,6 +331,7 @@ class SavedServerTransportTest {
         ) { servers, _ ->
             steps += "persist"
             persisted = servers
+            true
         }
 
         assertEquals(listOf("restore", "persist"), steps)
@@ -338,7 +363,10 @@ class SavedServerTransportTest {
                     steps += "load"
                     emptyList()
                 },
-            ) { _, _ -> steps += "persist" }
+            ) { _, _ ->
+                steps += "persist"
+                true
+            }
         }
 
         assertTrue(error.message.orEmpty().contains("lacks the original fingerprint"))
@@ -404,6 +432,7 @@ class SavedServerTransportTest {
             },
         ) { _, cancelsPendingCleanup ->
             cancelledPendingCleanup = cancelsPendingCleanup
+            true
         }
 
         assertEquals(listOf("unpin"), recoverySteps)

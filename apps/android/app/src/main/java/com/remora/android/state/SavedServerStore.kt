@@ -362,6 +362,7 @@ object SavedServerStore {
         upsert(context, server, forceRemembered = true)
     }
 
+    @SuppressLint("ApplySharedPref", "UseKtx")
     private fun upsert(
         context: Context,
         server: SavedServer,
@@ -384,12 +385,9 @@ object SavedServerStore {
         ) { servers, cancelsPendingCleanup ->
             val editor = preferences.edit().putString(VALUE_KEY, encodeServers(servers))
             if (cancelsPendingCleanup) {
-                check(editor.remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()) {
-                    "Unable to persist the server while cancelling pending SSH trust cleanup"
-                }
-            } else {
-                editor.apply()
+                editor.remove(PENDING_SSH_TRUST_CLEANUP_KEY)
             }
+            editor.commit()
         }
     }
 
@@ -399,7 +397,7 @@ object SavedServerStore {
         forceRemembered: Boolean = false,
         loadServers: (recoverPendingCleanup: Boolean) -> List<SavedServer>,
         restorePendingTrust: (host: String, port: UShort, fingerprint: String?) -> Unit = { _, _, _ -> },
-        persist: (servers: List<SavedServer>, cancelsPendingCleanup: Boolean) -> Unit,
+        persist: (servers: List<SavedServer>, cancelsPendingCleanup: Boolean) -> Boolean,
     ) {
         val cleanup = pendingCleanup?.let(::decodeSshTrustCleanupJournal)
         val matchingCleanupTarget = cleanup?.matchingTarget(server)
@@ -426,7 +424,9 @@ object SavedServerStore {
                 },
             ),
         )
-        persist(existing, cancelsPendingCleanup)
+        check(persist(existing, cancelsPendingCleanup)) {
+            "Unable to persist the server before reconnect admission"
+        }
     }
 
     @Synchronized
@@ -513,7 +513,13 @@ object SavedServerStore {
     ): SshTrustCleanupOutcome {
         val targets = mutation.trustTargets
         if (targets.isEmpty()) {
-            save(context, mutation.servers)
+            check(
+                prefs(context).edit()
+                    .putString(VALUE_KEY, encodeServers(mutation.servers))
+                    .commit(),
+            ) {
+                "Unable to persist the server update before reconnect admission"
+            }
             return SshTrustCleanupOutcome.Complete
         }
 
