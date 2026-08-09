@@ -1289,7 +1289,9 @@ struct HomeNavigationView: View {
 
     private func disconnectServer(_ serverId: String) {
         Task {
-            guard await appModel.reconnectController.prepareServerRemoval(serverId: serverId) else {
+            guard let removalLease = await appModel.reconnectController.prepareServerRemoval(
+                serverId: serverId
+            ) else {
                 actionErrorMessage = "Unable to stop reconnecting to this server. Try again."
                 return
             }
@@ -1300,7 +1302,10 @@ struct HomeNavigationView: View {
                 actionErrorMessage = error.localizedDescription
                 guard let storeError = error as? SavedServerStoreError,
                       case .trustCleanupPending = storeError else {
-                    appModel.reconnectController.allowServerReconnect(serverId: serverId)
+                    appModel.reconnectController.rollbackServerRemoval(
+                        serverId: serverId,
+                        lease: removalLease
+                    )
                     return
                 }
             }
