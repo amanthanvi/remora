@@ -10,6 +10,15 @@ enum SavedServerStoreError: LocalizedError {
     case trustCleanupAlreadyPending
     case trustCleanupPending(String)
 
+    var mutationMayHaveCommitted: Bool {
+        switch self {
+        case .persistenceFailed, .trustCleanupPending:
+            return true
+        case .invalidTrustCleanupJournal, .trustCleanupAlreadyPending:
+            return false
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidTrustCleanupJournal:
