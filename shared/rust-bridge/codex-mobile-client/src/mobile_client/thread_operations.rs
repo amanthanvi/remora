@@ -83,6 +83,30 @@ impl MobileClient {
         true
     }
 
+    pub(super) fn timed_out_turn_request_pending(&self, key: &ThreadKey) -> bool {
+        self.timed_out_turn_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(key)
+    }
+
+    fn mark_timed_out_turn_request(&self, key: ThreadKey, request_id: i64) {
+        self.timed_out_turn_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, request_id);
+    }
+
+    fn clear_timed_out_turn_request(&self, key: &ThreadKey, request_id: i64) {
+        let mut pending = self
+            .timed_out_turn_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.get(key).copied() == Some(request_id) {
+            pending.remove(key);
+        }
+    }
+
     pub(super) fn schedule_ambiguous_turn_reconciliation(self: &Arc<Self>, key: ThreadKey) {
         let thread = self.app_store.thread_snapshot(&key);
         let baseline = PendingTurnReconciliation::from_thread(thread.as_ref());
@@ -1249,7 +1273,9 @@ impl MobileClient {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
         };
-        if self.pending_turn_reconciliation().contains_key(&thread_key) {
+        if self.pending_turn_reconciliation().contains_key(&thread_key)
+            || self.timed_out_turn_request_pending(&thread_key)
+        {
             warn!(
                 "MobileClient: blocked turn start while ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
@@ -1271,7 +1297,9 @@ impl MobileClient {
                     return Err(RpcError::Timeout);
                 }
             };
-        if self.pending_turn_reconciliation().contains_key(&thread_key) {
+        if self.pending_turn_reconciliation().contains_key(&thread_key)
+            || self.timed_out_turn_request_pending(&thread_key)
+        {
             warn!(
                 "MobileClient: blocked turn start after lock acquisition because ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
@@ -1414,6 +1442,9 @@ impl MobileClient {
             let steer_input = direct_params.input.clone();
             let steer_thread_key = thread_key.clone();
             let steer_reconciliation_baseline = turn_reconciliation_baseline.clone();
+            let steer_timeout_fence_id = steer_reconciliation_baseline.id;
+            let steer_timeout_state = Arc::new(StdMutex::new(false));
+            let task_timeout_state = Arc::clone(&steer_timeout_state);
             let client = Arc::clone(self);
             let request_server_id = server_id.to_string();
             let mut steer_task = tokio::spawn(async move {
@@ -1435,9 +1466,16 @@ impl MobileClient {
                     && turn_request_error_is_ambiguous(error)
                 {
                     client.schedule_ambiguous_turn_reconciliation_with_baseline(
-                        steer_thread_key,
+                        steer_thread_key.clone(),
                         steer_reconciliation_baseline,
                     );
+                }
+                {
+                    let mut completed = task_timeout_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    client.clear_timed_out_turn_request(&steer_thread_key, steer_timeout_fence_id);
+                    *completed = true;
                 }
                 (result, turn_start_guard)
             });
@@ -1465,6 +1503,15 @@ impl MobileClient {
                     // Dropping a Tokio JoinHandle detaches rather than cancels
                     // its task. The task keeps the exact waiter and per-thread
                     // lock until this ambiguous request resolves definitively.
+                    let completed = steer_timeout_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !*completed {
+                        self.mark_timed_out_turn_request(
+                            thread_key.clone(),
+                            steer_timeout_fence_id,
+                        );
+                    }
                     return Err(RpcError::Timeout);
                 }
             }
@@ -1486,6 +1533,9 @@ impl MobileClient {
         let completion_overlay_id = optimistic_overlay_id.clone();
         let completion_claim_id = autosend_claim_id.clone();
         let completion_reconciliation_baseline = turn_reconciliation_baseline;
+        let completion_timeout_fence_id = completion_reconciliation_baseline.id;
+        let completion_timeout_state = Arc::new(StdMutex::new(false));
+        let task_timeout_state = Arc::clone(&completion_timeout_state);
         let mut response_task = tokio::spawn(async move {
             let _turn_start_guard = turn_start_guard;
             let response_result = completion_client
@@ -1497,7 +1547,7 @@ impl MobileClient {
                     },
                 )
                 .await;
-            completion_client.finish_turn_start_request(
+            let result = completion_client.finish_turn_start_request(
                 &completion_server_id,
                 &completion_thread_key,
                 &completion_command_id,
@@ -1505,7 +1555,18 @@ impl MobileClient {
                 completion_claim_id.as_deref(),
                 completion_reconciliation_baseline,
                 response_result,
-            )
+            );
+            {
+                let mut completed = task_timeout_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                completion_client.clear_timed_out_turn_request(
+                    &completion_thread_key,
+                    completion_timeout_fence_id,
+                );
+                *completed = true;
+            }
+            result
         });
         match tokio::time::timeout(self.turn_request_timeout, &mut response_task).await {
             Ok(Ok(result)) => result,
@@ -1514,7 +1575,15 @@ impl MobileClient {
             ))),
             // The detached task owns finalization and the per-thread lock, so
             // neither timeout nor caller cancellation can reopen this input.
-            Err(_) => Err(RpcError::Timeout),
+            Err(_) => {
+                let completed = completion_timeout_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !*completed {
+                    self.mark_timed_out_turn_request(thread_key, completion_timeout_fence_id);
+                }
+                Err(RpcError::Timeout)
+            }
         }
     }
 

@@ -8,12 +8,15 @@ import uniffi.codex_mobile_client.TerminalSshTrustBackend
 /// Persistent host-key fingerprint pinning backed by EncryptedSharedPreferences.
 /// Implements the Rust [`TerminalSshTrustBackend`] callback interface so the
 /// shared terminal SSH backend can consult and update pins on every connect.
-class SshTrustStore private constructor(
-    private val prefs: Result<SharedPreferences>,
+class SshTrustStore internal constructor(
+    private val openPrefs: () -> SharedPreferences,
 ) : TerminalSshTrustBackend {
-    constructor(context: Context) : this(loadPrefs(context))
+    @Volatile
+    private var cachedPrefs: SharedPreferences? = null
 
-    internal constructor(openPrefs: () -> SharedPreferences) : this(capturePrefs(openPrefs))
+    constructor(context: Context) : this({
+        openEncryptedPrefs(context.applicationContext, PREFS_NAME)
+    })
 
     /**
      * Look up a pinned fingerprint.
@@ -25,9 +28,7 @@ class SshTrustStore private constructor(
      * trust-on-first-use.
      */
     override fun read(host: String, port: UShort): String? {
-        val prefs = prefs.getOrElse { error ->
-            throw unavailable("open", host, port, error)
-        }
+        val prefs = preferences("open", host, port)
         return try {
             prefs.getString(key(host, port), null)
         } catch (error: Exception) {
@@ -36,9 +37,7 @@ class SshTrustStore private constructor(
     }
 
     override fun write(host: String, port: UShort, fingerprint: String) {
-        val prefs = prefs.getOrElse { error ->
-            throw unavailable("write", host, port, error)
-        }
+        val prefs = preferences("write", host, port)
         try {
             val committed = prefs.edit()
                 .putString(key(host, port), fingerprint)
@@ -52,9 +51,7 @@ class SshTrustStore private constructor(
     }
 
     override fun remove(host: String, port: UShort) {
-        val prefs = prefs.getOrElse { error ->
-            throw unavailable("remove", host, port, error)
-        }
+        val prefs = preferences("remove", host, port)
         try {
             val committed = prefs.edit().remove(key(host, port)).commit()
             if (!committed) {
@@ -76,13 +73,18 @@ class SshTrustStore private constructor(
 
     private fun key(host: String, port: UShort): String = "${host.lowercase()}:$port"
 
+    private fun preferences(operation: String, host: String, port: UShort): SharedPreferences {
+        cachedPrefs?.let { return it }
+        return synchronized(this) {
+            cachedPrefs ?: try {
+                openPrefs().also { cachedPrefs = it }
+            } catch (error: Exception) {
+                throw unavailable(operation, host, port, error)
+            }
+        }
+    }
+
     companion object {
         private const val PREFS_NAME = "remora_ssh_trust"
-
-        private fun loadPrefs(context: Context): Result<SharedPreferences> =
-            runCatching { openEncryptedPrefs(context, PREFS_NAME) }
-
-        private fun capturePrefs(openPrefs: () -> SharedPreferences): Result<SharedPreferences> =
-            runCatching(openPrefs)
     }
 }

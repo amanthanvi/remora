@@ -3106,6 +3106,7 @@ mod tests {
             .expect_err("hung turn/start should time out");
 
         assert!(matches!(error, RpcError::Timeout));
+        assert!(client.timed_out_turn_request_pending(&key));
         let retry_error = client
             .start_turn(server_id, turn_start_params(thread_id, "retry"))
             .await
@@ -3149,6 +3150,7 @@ mod tests {
         let snapshot = client.app_store.snapshot();
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
         assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert!(!client.timed_out_turn_request_pending(&key));
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "new");
         assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
@@ -3524,6 +3526,77 @@ mod tests {
         assert!(!thread.is_resumed);
         assert!(!client.direct_resumed_threads().contains(&key));
         assert!(!client.thread_runtime_routes().contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn post_reconnect_refresh_retries_after_unrelated_event_invalidates_response() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let unrelated_key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: "thread-unrelated".to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let app_store = Arc::clone(&client.app_store);
+            let attempts = Arc::clone(&attempts);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        app_store.apply_ui_event(&UiEvent::ThreadNameUpdated {
+                            key: unrelated_key.clone(),
+                            thread_name: Some("unrelated update".to_string()),
+                        });
+                    }
+                    Ok(successful_thread_resume_response(thread_id))
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected post-reconnect request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let applied = super::super::refresh_post_reconnect_thread_authoritative(&client, &key)
+            .await
+            .expect("post-reconnect refresh should retry cleanly");
+
+        assert!(applied);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("refreshed thread")
+                .is_resumed
+        );
     }
 
     #[tokio::test]

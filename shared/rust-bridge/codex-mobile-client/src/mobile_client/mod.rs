@@ -64,6 +64,7 @@ use self::user_input::normalize_pending_user_input_answers;
 
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
 const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const POST_RECONNECT_REFRESH_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
 
 #[derive(Clone, Debug)]
 struct PendingTurnReconciliation {
@@ -144,6 +145,7 @@ pub struct MobileClient {
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
     turn_start_locks: Arc<StdMutex<HashMap<ThreadKey, Weak<Mutex<()>>>>>,
     pending_turn_reconciliation: Arc<StdMutex<HashMap<ThreadKey, PendingTurnReconciliation>>>,
+    timed_out_turn_requests: Arc<StdMutex<HashMap<ThreadKey, i64>>>,
     turn_request_timeout: std::time::Duration,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
@@ -270,6 +272,7 @@ impl MobileClient {
                 thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
                 turn_start_locks: Arc::new(StdMutex::new(HashMap::new())),
                 pending_turn_reconciliation: Arc::new(StdMutex::new(HashMap::new())),
+                timed_out_turn_requests: Arc::new(StdMutex::new(HashMap::new())),
                 turn_request_timeout,
                 ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
@@ -1191,21 +1194,13 @@ pub(super) fn run_post_reconnect_resubscribe(
         );
 
         for key in keys_to_resume {
-            let expected_generation = app_store.server_event_generation(&server_id);
             // Force-authoritative so the response carries the embedded
             // turn list. Without it `thread/resume` short-circuits via the
             // direct-resume marker (or returns an empty turn list under
             // `exclude_turns: true`), and `reconcile_active_turn` keeps
             // any stale `active_turn_id` whose turn has already completed
             // server-side.
-            match client
-                .force_refresh_thread_authoritative_if_ui_generation(
-                    &key.server_id,
-                    &key.thread_id,
-                    expected_generation,
-                )
-                .await
-            {
+            match refresh_post_reconnect_thread_authoritative(&client, &key).await {
                 Ok(true) => debug!(
                     "MobileClient: post-reconnect resubscribe ok server_id={} thread_id={}",
                     key.server_id, key.thread_id
@@ -1221,4 +1216,31 @@ pub(super) fn run_post_reconnect_resubscribe(
             }
         }
     });
+}
+
+async fn refresh_post_reconnect_thread_authoritative(
+    client: &MobileClient,
+    key: &ThreadKey,
+) -> Result<bool, RpcError> {
+    for attempt in 0..=POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len() {
+        if attempt > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                POST_RECONNECT_REFRESH_RETRY_DELAYS_MS[attempt - 1],
+            ))
+            .await;
+        }
+        let expected_generation = client.app_store.server_event_generation(&key.server_id);
+        match client
+            .force_refresh_thread_authoritative_if_ui_generation(
+                &key.server_id,
+                &key.thread_id,
+                expected_generation,
+            )
+            .await
+        {
+            Ok(false) if attempt < POST_RECONNECT_REFRESH_RETRY_DELAYS_MS.len() => continue,
+            result => return result,
+        }
+    }
+    Ok(false)
 }

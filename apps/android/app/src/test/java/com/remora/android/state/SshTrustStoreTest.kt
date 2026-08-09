@@ -2,6 +2,7 @@ package com.remora.android.state
 
 import android.content.SharedPreferences
 import java.lang.reflect.Proxy
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,6 +21,25 @@ class SshTrustStoreTest {
 
         assertTrue(error.detail.contains("open failed for host.example:22"))
         assertTrue(error.detail.contains("restored ciphertext cannot be decrypted"))
+    }
+
+    @Test
+    fun transientOpenFailureIsRetriedOnTheNextOperation() {
+        var attempts = 0
+        val store = SshTrustStore {
+            attempts += 1
+            if (attempts == 1) {
+                throw IllegalStateException("keystore temporarily unavailable")
+            }
+            preferencesWithValue("host.example:22", "SHA256:recovered")
+        }
+
+        assertThrows(SshTrustStoreException.Unavailable::class.java) {
+            store.read("host.example", 22u)
+        }
+
+        assertEquals("SHA256:recovered", store.read("host.example", 22u))
+        assertEquals(2, attempts)
     }
 
     @Test
@@ -95,4 +115,15 @@ class SshTrustStoreTest {
             }
         } as SharedPreferences
     }
+
+    private fun preferencesWithValue(key: String, value: String): SharedPreferences =
+        Proxy.newProxyInstance(
+            SharedPreferences::class.java.classLoader,
+            arrayOf(SharedPreferences::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "getString" -> if (args?.firstOrNull() == key) value else null
+                else -> throw UnsupportedOperationException(method.name)
+            }
+        } as SharedPreferences
 }
