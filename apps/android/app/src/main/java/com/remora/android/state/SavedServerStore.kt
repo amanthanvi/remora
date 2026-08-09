@@ -317,8 +317,13 @@ object SavedServerStore {
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
     @Synchronized
-    fun load(context: Context): List<SavedServer> {
-        recoverPendingSshTrustCleanup(context)
+    fun load(context: Context): List<SavedServer> = load(context, recoverPendingCleanup = true)
+
+    private fun load(
+        context: Context,
+        recoverPendingCleanup: Boolean,
+    ): List<SavedServer> {
+        if (recoverPendingCleanup) recoverPendingSshTrustCleanup(context)
         val json = prefs(context).getString(VALUE_KEY, null) ?: return emptyList()
         return try {
             val array = JSONArray(json)
@@ -349,11 +354,35 @@ object SavedServerStore {
 
     @Synchronized
     fun upsert(context: Context, server: SavedServer) {
-        val existing = load(context).toMutableList()
+        val preferences = prefs(context)
+        upsert(
+            pendingCleanup = preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null),
+            server = server,
+            loadServers = { recoverPendingCleanup -> load(context, recoverPendingCleanup) },
+        ) { servers, cancelsPendingCleanup ->
+            val editor = preferences.edit().putString(VALUE_KEY, encodeServers(servers))
+            if (cancelsPendingCleanup) {
+                check(editor.remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()) {
+                    "Unable to persist the server while cancelling pending SSH trust cleanup"
+                }
+            } else {
+                editor.apply()
+            }
+        }
+    }
+
+    internal fun upsert(
+        pendingCleanup: String?,
+        server: SavedServer,
+        loadServers: (recoverPendingCleanup: Boolean) -> List<SavedServer>,
+        persist: (servers: List<SavedServer>, cancelsPendingCleanup: Boolean) -> Unit,
+    ) {
+        val cancelsPendingCleanup = pendingSshTrustCleanupMatchesServer(pendingCleanup, server)
+        val existing = loadServers(!cancelsPendingCleanup).toMutableList()
         val prior = existing.firstOrNull { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
         existing.add(server.copy(rememberedByUser = prior?.rememberedByUser ?: server.rememberedByUser))
-        save(context, existing)
+        persist(existing, cancelsPendingCleanup)
     }
 
     @Synchronized
@@ -562,6 +591,16 @@ object SavedServerStore {
         val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
             ?: return null
         return host to port
+    }
+
+    private fun pendingSshTrustCleanupMatchesServer(
+        encodedCleanup: String?,
+        server: SavedServer,
+    ): Boolean {
+        val pendingTarget = encodedCleanup?.let(::decodeSshTrustCleanupTarget) ?: return false
+        val serverTarget = server.sshTrustTarget() ?: return false
+        return sshTrustIdentity(pendingTarget.first, pendingTarget.second) ==
+            sshTrustIdentity(serverTarget.first, serverTarget.second)
     }
 
     internal fun ensureNoPendingSshTrustCleanup(encoded: String?) {

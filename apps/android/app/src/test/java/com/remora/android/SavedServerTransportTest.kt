@@ -153,6 +153,75 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun upsertCancelsPendingCleanupForSameNormalizedTarget() {
+        val readded = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val pendingCleanup = JSONObject()
+            .put("host", "[FIRST.EXAMPLE]")
+            .put("port", 22)
+            .toString()
+        val recoverySteps = mutableListOf<String>()
+        var persisted = emptyList<SavedServer>()
+        var cancelledPendingCleanup = false
+
+        SavedServerStore.upsert(
+            pendingCleanup = pendingCleanup,
+            server = readded,
+            loadServers = { recoverPendingCleanup ->
+                if (recoverPendingCleanup) recoverySteps += "unpin"
+                emptyList()
+            },
+        ) { servers, cancelsPendingCleanup ->
+            persisted = servers
+            cancelledPendingCleanup = cancelsPendingCleanup
+        }
+
+        assertTrue(recoverySteps.isEmpty())
+        assertTrue(cancelledPendingCleanup)
+        assertEquals(listOf(readded), persisted)
+    }
+
+    @Test
+    fun upsertDoesNotCancelPendingCleanupForDifferentPort() {
+        val readded = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "first.example",
+            port = 2222,
+            sshPort = 2222,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val pendingCleanup = JSONObject()
+            .put("host", "First.Example")
+            .put("port", 22)
+            .toString()
+        val recoverySteps = mutableListOf<String>()
+        var cancelledPendingCleanup = true
+
+        SavedServerStore.upsert(
+            pendingCleanup = pendingCleanup,
+            server = readded,
+            loadServers = { recoverPendingCleanup ->
+                if (recoverPendingCleanup) recoverySteps += "unpin"
+                emptyList()
+            },
+        ) { _, cancelsPendingCleanup ->
+            cancelledPendingCleanup = cancelsPendingCleanup
+        }
+
+        assertEquals(listOf("unpin"), recoverySteps)
+        assertFalse(cancelledPendingCleanup)
+    }
+
+    @Test
     fun explicitBridgeSelectionAndNonBridgeNullRemainDistinct() {
         val bridge = SavedServer.fromJson(
             baseJson("bridge").apply {
