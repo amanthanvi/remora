@@ -3,6 +3,19 @@ import XCTest
 
 @MainActor
 final class SavedServerStoreTests: XCTestCase {
+    func testMutationCommitClassificationRetainsAmbiguousPersistence() {
+        XCTAssertTrue(SavedServerStoreError.persistenceFailed.mutationMayHaveCommitted)
+        XCTAssertTrue(
+            SavedServerStoreError.trustCleanupPending("retry").mutationMayHaveCommitted
+        )
+        XCTAssertFalse(
+            SavedServerStoreError.invalidTrustCleanupJournal.mutationMayHaveCommitted
+        )
+        XCTAssertFalse(
+            SavedServerStoreError.trustCleanupAlreadyPending.mutationMayHaveCommitted
+        )
+    }
+
     func testCurrentPersistenceRoundTripsDirectAndSSHServers() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
