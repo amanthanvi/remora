@@ -49,6 +49,7 @@ import com.remora.android.state.SavedServerStore
 import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.SshAuthMethod
 import com.remora.android.state.SshCredentialStore
+import com.remora.android.state.toRecord
 import com.remora.android.ui.BerkeleyMono
 import com.remora.android.ui.ConversationPrefs
 import com.remora.android.ui.LocalAppModel
@@ -58,6 +59,7 @@ import com.remora.android.ui.connection.SSHLoginDialog
 import com.remora.android.util.LLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.Account
@@ -279,21 +281,36 @@ private fun SettingsTopLevel(
                     },
                     onRemove = {
                         scope.launch {
+                            var removalPrepared = false
+                            var removalCommitted = false
                             try {
-                                val cleanupOutcome = withContext(Dispatchers.IO) {
-                                    val outcome = SavedServerStore.remove(context, server.serverId)
-                                    appModel.sshSessionStore.close(server.serverId)
-                                    appModel.serverBridge.disconnectServer(server.serverId)
-                                    outcome
+                                check(appModel.reconnectController.prepareServerRemoval(server.serverId)) {
+                                    "Unable to stop reconnecting to this server. Try again."
                                 }
+                                removalPrepared = true
+                                val (cleanupOutcome, remainingServers) = withContext(NonCancellable + Dispatchers.IO) {
+                                    appModel.sshSessionStore.close(server.serverId)
+                                    val outcome = SavedServerStore.remove(context, server.serverId)
+                                    outcome to SavedServerStore.load(context)
+                                }
+                                removalCommitted = true
+                                appModel.reconnectController.syncSavedServers(
+                                    remainingServers.filter { it.rememberedByUser }.map { it.toRecord() },
+                                )
                                 appModel.refreshSnapshot()
                                 if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
                                     sshTrustCleanupNotice =
                                         "Server removed. SSH trust cleanup will finish when secure storage recovers."
                                 }
                             } catch (cancellation: CancellationException) {
+                                if (removalPrepared && !removalCommitted) {
+                                    appModel.reconnectController.allowServerReconnect(server.serverId)
+                                }
                                 throw cancellation
                             } catch (error: Exception) {
+                                if (removalPrepared && !removalCommitted) {
+                                    appModel.reconnectController.allowServerReconnect(server.serverId)
+                                }
                                 serverRemovalError = error.message ?: "Unable to remove the server."
                             }
                         }

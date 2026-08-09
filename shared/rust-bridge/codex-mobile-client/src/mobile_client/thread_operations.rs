@@ -489,12 +489,7 @@ impl MobileClient {
                             runtime_kind.clone(),
                             lag_fence.as_ref(),
                         )
-                        .await
-                        .map_err(|fallback_error| {
-                            RpcError::Deserialization(format!(
-                                "{error}; metadata fallback failed: {fallback_error}"
-                            ))
-                        })?;
+                        .await?;
                     if !applied {
                         return Ok(false);
                     }
@@ -504,7 +499,7 @@ impl MobileClient {
             }
         }
 
-        for (runtime_kind, resume_error) in lookup_errors {
+        for (runtime_kind, _) in lookup_errors {
             match self
                 .read_thread_metadata_only_for_runtime(
                     server_id,
@@ -529,9 +524,7 @@ impl MobileClient {
                     );
                 }
                 Err(fallback_error) => {
-                    return Err(RpcError::Deserialization(format!(
-                        "{resume_error}; metadata fallback failed: {fallback_error}"
-                    )));
+                    return Err(fallback_error);
                 }
             }
         }

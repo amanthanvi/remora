@@ -393,13 +393,25 @@ struct SettingsView: View {
     }
 
     private func removeServer(_ server: HomeDashboardServer) {
-        do {
-            try SavedServerStore.remove(serverId: server.id)
-        } catch {
-            guard savedServerMutationCommitted(despite: error) else { return }
+        Task {
+            guard await appModel.reconnectController.prepareServerRemoval(serverId: server.id) else {
+                serverEditError = "Unable to stop reconnecting to this server. Try again."
+                return
+            }
+            await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh)
+            do {
+                try SavedServerStore.remove(serverId: server.id)
+            } catch {
+                guard savedServerMutationCommitted(despite: error) else {
+                    appModel.reconnectController.allowServerReconnect(serverId: server.id)
+                    return
+                }
+            }
+            appModel.reconnectController.syncSavedServers(
+                servers: SavedServerStore.reconnectRecords()
+            )
+            await appModel.refreshSnapshot()
         }
-        Task { await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh) }
-        appModel.serverBridge.disconnectServer(serverId: server.id)
     }
 
     private func saveServerConfiguration(
@@ -411,6 +423,9 @@ struct SettingsView: View {
         } catch {
             guard savedServerMutationCommitted(despite: error) else { return }
         }
+        appModel.reconnectController.allowServerReconnect(
+            serverId: configuration.savedServer.id
+        )
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )

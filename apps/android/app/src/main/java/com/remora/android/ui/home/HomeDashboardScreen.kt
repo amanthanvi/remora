@@ -94,6 +94,7 @@ import com.remora.android.state.displayTitle
 import com.remora.android.state.isConnected
 import com.remora.android.state.statusColor
 import com.remora.android.state.statusLabel
+import com.remora.android.state.toRecord
 import com.remora.android.ui.ExperimentalFeatures
 import com.remora.android.ui.RemoraFeature
 import com.remora.android.ui.RemoraTextStyle
@@ -105,6 +106,7 @@ import com.remora.android.ui.scaled
 import com.remora.android.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1128,16 +1130,29 @@ fun HomeDashboardScreen(
                                 appModel.refreshSnapshot()
                             }
                             is ConfirmAction.DisconnectServer -> {
+                                var removalPrepared = false
+                                var removalCommitted = false
                                 try {
-                                    val cleanupOutcome = withContext(Dispatchers.IO) {
+                                    check(
+                                        appModel.reconnectController.prepareServerRemoval(
+                                            action.server.serverId,
+                                        ),
+                                    ) {
+                                        "Unable to stop reconnecting to this server. Try again."
+                                    }
+                                    removalPrepared = true
+                                    val (cleanupOutcome, remainingServers) = withContext(NonCancellable + Dispatchers.IO) {
+                                        appModel.sshSessionStore.close(action.server.serverId)
                                         val outcome = SavedServerStore.remove(
                                             context,
                                             action.server.serverId,
                                         )
-                                        appModel.sshSessionStore.close(action.server.serverId)
-                                        appModel.serverBridge.disconnectServer(action.server.serverId)
-                                        outcome
+                                        outcome to SavedServerStore.load(context)
                                     }
+                                    removalCommitted = true
+                                    appModel.reconnectController.syncSavedServers(
+                                        remainingServers.filter { it.rememberedByUser }.map { it.toRecord() },
+                                    )
                                     appModel.refreshSnapshot()
                                     if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
                                         confirmAction = ConfirmAction.TrustCleanupPending(
@@ -1145,8 +1160,18 @@ fun HomeDashboardScreen(
                                         )
                                     }
                                 } catch (cancellation: CancellationException) {
+                                    if (removalPrepared && !removalCommitted) {
+                                        appModel.reconnectController.allowServerReconnect(
+                                            action.server.serverId,
+                                        )
+                                    }
                                     throw cancellation
                                 } catch (error: Exception) {
+                                    if (removalPrepared && !removalCommitted) {
+                                        appModel.reconnectController.allowServerReconnect(
+                                            action.server.serverId,
+                                        )
+                                    }
                                     confirmAction = ConfirmAction.ReplyError(
                                         error.message ?: "Unable to disconnect this server.",
                                     )

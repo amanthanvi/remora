@@ -211,6 +211,7 @@ struct DiscoveryView: View {
                         os: server.os,
                         sshBanner: server.sshBanner
                     ))
+                    appModel.reconnectController.allowServerReconnect(serverId: server.id)
                     if let idx = discovery.servers.firstIndex(where: { $0.id == server.id }) {
                         discovery.servers[idx] = DiscoveredServer(
                             id: server.id,
@@ -873,6 +874,7 @@ struct DiscoveryView: View {
                     port: port
                 )
                 SavedServerStore.remember(server.withConnectionPreference(.directCodex, codexPort: port))
+                appModel.reconnectController.allowServerReconnect(serverId: server.id)
             case .remoteURL(let url):
                 startedAsyncBootstrap = false
                 if url.scheme?.lowercased() == "slingshot" {
@@ -908,6 +910,7 @@ struct DiscoveryView: View {
                     )
                 }
                 SavedServerStore.remember(server)
+                appModel.reconnectController.allowServerReconnect(serverId: server.id)
             case .sshThenRemote(let host, let credentials):
                 startedAsyncBootstrap = true
                 connectedServerId = try await connectViaSSH(server: server, host: host, credentials: credentials)
@@ -947,6 +950,7 @@ struct DiscoveryView: View {
         SavedServerStore.remember(
             server.withConnectionPreference(.ssh)
         )
+        appModel.reconnectController.allowServerReconnect(serverId: server.id)
         return serverId
     }
 
@@ -1050,6 +1054,7 @@ struct DiscoveryView: View {
             sshBanner: baseServer.sshBanner
         )
         SavedServerStore.rememberSSHBridge(synthesized, runtimeKinds: result.runtimeKinds)
+        appModel.reconnectController.allowServerReconnect(serverId: result.serverId)
         await SshSessionStore.shared.record(sessionId: result.sessionId, for: result.serverId)
         await appModel.refreshSnapshot()
         if appModel.snapshot?.servers.first(where: { $0.serverId == result.serverId })?.health == .connected {

@@ -380,6 +380,7 @@ internal fun ServerEditSheet(
                 val outcome = SavedServerStore.replace(context, saved)
                 SavedServerStore.load(context) to outcome
             }
+            appModel.reconnectController.allowServerReconnect(saved.id)
             appModel.reconnectController.syncSavedServers(
                 updated.filter { it.rememberedByUser }.map { it.toRecord() }
             )

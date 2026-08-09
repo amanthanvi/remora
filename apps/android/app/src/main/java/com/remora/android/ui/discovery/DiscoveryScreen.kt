@@ -205,6 +205,7 @@ fun DiscoveryScreen(
             stepUpToken,
         )
         SavedServerStore.remember(context, server.normalizedForPersistence())
+        appModel.reconnectController.allowServerReconnect(server.id)
         appModel.refreshSnapshot()
     }
 
@@ -427,6 +428,7 @@ fun DiscoveryScreen(
                     )
                     appModel.restoreStoredLocalAuthState(prepared.id)
                     SavedServerStore.remember(context, prepared.normalizedForPersistence())
+                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -434,6 +436,7 @@ fun DiscoveryScreen(
                 prepared.websocketURL != null -> {
                     connectPreparedRemoteUrl(prepared)
                     SavedServerStore.remember(context, prepared.normalizedForPersistence())
+                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -457,6 +460,7 @@ fun DiscoveryScreen(
                         context,
                         prepared.withPreferredConnection("directCodex", prepared.directCodexPort),
                     )
+                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -604,6 +608,7 @@ fun DiscoveryScreen(
                                             context,
                                             server.withPreferredConnection("directCodex", port),
                                         )
+                                        appModel.reconnectController.allowServerReconnect(server.id)
                                         appModel.refreshSnapshot()
                                         onDismiss()
                                     } catch (e: Exception) {
@@ -701,6 +706,7 @@ fun DiscoveryScreen(
                             context,
                             server.withPreferredConnection("ssh"),
                         )
+                        appModel.reconnectController.allowServerReconnect(server.id)
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = server.id
                         LLog.t(
@@ -751,6 +757,7 @@ fun DiscoveryScreen(
                         context,
                         agentContext.server.withPreferredConnection("ssh"),
                     )
+                    appModel.reconnectController.allowServerReconnect(agentContext.server.id)
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = agentContext.server.id
                     sshAgentContext = null
@@ -779,6 +786,7 @@ fun DiscoveryScreen(
                     )
                     appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
                     SavedServerStore.remember(context, server)
+                    appModel.reconnectController.allowServerReconnect(result.serverId)
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = result.serverId
                     sshAgentContext = null

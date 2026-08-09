@@ -719,6 +719,54 @@ mod mobile_client_tests {
     }
 
     #[tokio::test]
+    async fn metadata_read_fallback_preserves_transient_transport_error() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+
+        let request_handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadResume { .. } => {
+                Err(RpcError::Transport(TransportError::SendFailed(
+                    "remote app-server worker channel is closed".to_string(),
+                )))
+            }
+            upstream::ClientRequest::ThreadRead { params, .. } => {
+                assert!(!params.include_turns);
+                Err(RpcError::Transport(TransportError::Disconnected))
+            }
+            other => Err(RpcError::Deserialization(format!(
+                "unexpected request in test: {}",
+                other.method()
+            ))),
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(request_handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock should not be poisoned")
+            .insert(server_id.to_string(), session);
+
+        let error = client
+            .external_resume_thread(server_id, thread_id, None)
+            .await
+            .expect_err("metadata transport failure should propagate");
+
+        assert!(matches!(
+            error,
+            RpcError::Transport(TransportError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
     async fn external_resume_thread_tries_registered_runtimes_for_unknown_pinned_thread() {
         let client = MobileClient::new();
         let server_id = "srv";
