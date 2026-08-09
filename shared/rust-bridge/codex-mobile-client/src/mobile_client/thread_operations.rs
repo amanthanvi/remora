@@ -457,7 +457,7 @@ impl MobileClient {
                                 runtime_kind,
                                 lag_fence.as_ref(),
                             )
-                            .await
+                            .await?
                         {
                             return Ok(false);
                         }
@@ -745,9 +745,9 @@ impl MobileClient {
     /// returns turn skeletons only (no item bodies). The result is fed into
     /// `reconcile_active_turn` so a locally-cached `active_turn_id` whose
     /// underlying turn has already completed server-side gets cleared, even
-    /// though we asked the resume to skip the embedded turn list. Failures
-    /// here are logged and ignored — the worst case is a transient stale
-    /// active-turn indicator until the next streamed event arrives.
+    /// though we asked the resume to skip the embedded turn list. RPC failures
+    /// propagate so lag and post-reconnect callers keep their bounded repair
+    /// loops active instead of accepting a potentially stale turn state.
     async fn reconcile_active_turn_via_turn_list_probe(
         &self,
         server_id: &str,
@@ -755,7 +755,7 @@ impl MobileClient {
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
         lag_fence: Option<&LagRefreshFence<'_>>,
-    ) -> bool {
+    ) -> Result<bool, RpcError> {
         const PROBE_LIMIT: u32 = 5;
         // Only reconcile the ambiguity that existed before this probe. A new
         // turn failure that races the request must retain its fresh token for
@@ -772,18 +772,9 @@ impl MobileClient {
                 items_view: Some(upstream::TurnItemsView::NotLoaded),
             },
         };
-        let probe_session = match self.get_session(server_id) {
-            Ok(session) => session,
-            Err(error) => {
-                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                    "force_authoritative: turn-list probe missing session server={} thread={} error={}",
-                    server_id, thread_id, error
-                );
-                return false;
-            }
-        };
+        let probe_session = self.get_session(server_id)?;
         let response = match self
-            .request_typed_for_session_runtime::<upstream::ThreadTurnsListResponse>(
+            .request_typed_for_session_runtime_rpc::<upstream::ThreadTurnsListResponse>(
                 server_id,
                 Arc::clone(&probe_session),
                 runtime_kind.clone(),
@@ -793,7 +784,7 @@ impl MobileClient {
         {
             Ok(response) => response,
             Err(error) => {
-                if is_method_not_found(&error) {
+                if is_method_not_found(&error.to_string()) {
                     // Some non-Codex runtimes can resume a thread but do not
                     // implement the lightweight turn-list probe. Fall back to
                     // one embedded-turn resume so reconcile_active_turn can
@@ -808,10 +799,10 @@ impl MobileClient {
                             )
                             .is_none()
                         {
-                            return false;
+                            return Ok(false);
                         }
                     }
-                    if let Err(fallback_error) = self
+                    return self
                         .resume_thread_for_runtime(
                             server_id,
                             thread_id,
@@ -820,22 +811,9 @@ impl MobileClient {
                             false,
                             lag_fence,
                         )
-                        .await
-                    {
-                        warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                            "force_authoritative: embedded resume fallback failed server={} thread={} runtime={:?} error={}",
-                            server_id, thread_id, runtime_kind, fallback_error
-                        );
-                    }
-                } else {
-                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                        "force_authoritative: turn-list probe failed server={} thread={} error={}",
-                        server_id, thread_id, error
-                    );
+                        .await;
                 }
-                return self
-                    .apply_if_refresh_current(server_id, &probe_session, lag_fence, |_| ())
-                    .is_some();
+                return Err(error);
             }
         };
         let terminal_turn_observed = response
@@ -879,7 +857,7 @@ impl MobileClient {
                     },
                 };
                 let response = match self
-                    .request_typed_for_session_runtime::<upstream::ThreadTurnsListResponse>(
+                    .request_typed_for_session_runtime_rpc::<upstream::ThreadTurnsListResponse>(
                         server_id,
                         Arc::clone(&probe_session),
                         runtime_kind.clone(),
@@ -888,13 +866,7 @@ impl MobileClient {
                     .await
                 {
                     Ok(response) => response,
-                    Err(error) => {
-                        warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                            "force_authoritative: completed-turn repair page failed server={} thread={}: {}",
-                            server_id, thread_id, error
-                        );
-                        break;
-                    }
+                    Err(error) => return Err(error),
                 };
                 let mut candidate_turn_ids = HashSet::new();
                 let mut unanchored_turn_ids = HashSet::new();
@@ -961,7 +933,7 @@ impl MobileClient {
             Vec::new()
         };
         if repair_required_for_ambiguity && repair_pages.is_empty() {
-            return false;
+            return Ok(false);
         }
         let apply_response = |app_store: &AppStoreReducer| -> bool {
             let Some(existing) = app_store.thread_snapshot(key) else {
@@ -1078,8 +1050,9 @@ impl MobileClient {
             }
             true
         };
-        self.apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
-            .unwrap_or(false)
+        Ok(self
+            .apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
+            .unwrap_or(false))
     }
 
     /// Composite action: page a thread's older turns via `thread/turns/list`

@@ -330,21 +330,6 @@ impl MobileClient {
         Ok((response, session))
     }
 
-    pub(super) async fn request_typed_for_session_runtime<R>(
-        &self,
-        server_id: &str,
-        session: Arc<ServerSession>,
-        runtime_kind: AgentRuntimeKind,
-        request: upstream::ClientRequest,
-    ) -> Result<R, String>
-    where
-        R: serde::de::DeserializeOwned,
-    {
-        self.request_typed_for_session_runtime_rpc(server_id, session, runtime_kind, request)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
     pub(super) async fn request_typed_for_session_runtime_rpc<R>(
         &self,
         server_id: &str,

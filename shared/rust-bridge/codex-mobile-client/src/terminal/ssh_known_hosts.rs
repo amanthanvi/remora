@@ -105,14 +105,14 @@ impl TerminalSshTrustStore {
         fingerprint: String,
     ) -> Result<(), SshTrustStoreError> {
         let host = normalize_host(&host);
-        self.backend.write(host, port, fingerprint)
+        crate::ssh::pin_host_trust(self, &host, port, fingerprint)
     }
 
     /// Remove any pin for the given host/port. Safe to call when no pin
     /// exists.
     pub fn unpin(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
         let host = normalize_host(&host);
-        self.backend.remove(host, port)
+        crate::ssh::unpin_host_trust(self, &host, port)
     }
 }
 
@@ -125,6 +125,19 @@ impl TerminalSshTrustStore {
         port: u16,
     ) -> Result<Option<String>, SshTrustStoreError> {
         self.backend.read(normalize_host(host), port)
+    }
+
+    pub(crate) fn write_pin(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: String,
+    ) -> Result<(), SshTrustStoreError> {
+        self.backend.write(normalize_host(host), port, fingerprint)
+    }
+
+    pub(crate) fn remove_pin(&self, host: &str, port: u16) -> Result<(), SshTrustStoreError> {
+        self.backend.remove(normalize_host(host), port)
     }
 }
 

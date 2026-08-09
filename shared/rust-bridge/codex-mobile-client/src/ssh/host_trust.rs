@@ -42,7 +42,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::{SshClient, SshCredentials, SshError, normalize_host_key};
-use crate::terminal::TerminalSshTrustStore;
+use crate::terminal::{SshTrustStoreError, TerminalSshTrustStore};
 
 /// Process-wide trust store used by SSH paths that cannot thread a store
 /// through their call chain (app-server connect, SSH bridge, reconnect).
@@ -63,8 +63,7 @@ pub fn register_host_trust_store(store: Arc<TerminalSshTrustStore>) {
 
 /// Serializes tests that mutate the process-wide store.
 #[cfg(test)]
-pub(crate) static HOST_TRUST_TEST_LOCK: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
+pub(crate) static HOST_TRUST_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Drop the process-wide store so one test's registration cannot leak into
 /// another. Hold [`HOST_TRUST_TEST_LOCK`] across register/clear.
@@ -151,6 +150,12 @@ fn lookup_pin(
 static TOFU_LOCKS: LazyLock<StdMutex<HashMap<(String, u16), Weak<Mutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+/// Per-host mutation generations shared by first-use recording and platform
+/// pin removal. A verifier retains its fence across authentication, so an
+/// intervening forget/unpin cannot be followed by that verifier's stale write.
+static TRUST_MUTATION_FENCES: LazyLock<StdMutex<HashMap<(String, u16), Weak<StdMutex<u64>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
 fn tofu_lock(host: &str, port: u16) -> Arc<Mutex<()>> {
     let mut guard = match TOFU_LOCKS.lock() {
         Ok(guard) => guard,
@@ -166,6 +171,59 @@ fn tofu_lock(host: &str, port: u16) -> Arc<Mutex<()>> {
     lock
 }
 
+fn trust_mutation_fence(host: &str, port: u16) -> Arc<StdMutex<u64>> {
+    let mut guard = match TRUST_MUTATION_FENCES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.retain(|_, fence| fence.strong_count() > 0);
+    let key = (host.to_string(), port);
+    if let Some(fence) = guard.get(&key).and_then(Weak::upgrade) {
+        return fence;
+    }
+    let fence = Arc::new(StdMutex::new(0));
+    guard.insert(key, Arc::downgrade(&fence));
+    fence
+}
+
+fn lock_trust_generation(fence: &StdMutex<u64>) -> std::sync::MutexGuard<'_, u64> {
+    match fence.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[derive(Clone)]
+struct TrustMutationClaim {
+    fence: Arc<StdMutex<u64>>,
+    generation: u64,
+}
+
+pub(crate) fn pin_host_trust(
+    store: &TerminalSshTrustStore,
+    host: &str,
+    port: u16,
+    fingerprint: String,
+) -> Result<(), SshTrustStoreError> {
+    let host = normalize_host_key(host);
+    let fence = trust_mutation_fence(&host, port);
+    let mut generation = lock_trust_generation(&fence);
+    *generation = generation.wrapping_add(1);
+    store.write_pin(&host, port, fingerprint)
+}
+
+pub(crate) fn unpin_host_trust(
+    store: &TerminalSshTrustStore,
+    host: &str,
+    port: u16,
+) -> Result<(), SshTrustStoreError> {
+    let host = normalize_host_key(host);
+    let fence = trust_mutation_fence(&host, port);
+    let mut generation = lock_trust_generation(&fence);
+    *generation = generation.wrapping_add(1);
+    store.remove_pin(&host, port)
+}
+
 /// Evaluates presented host keys for one `host:port` against the trust store.
 pub(crate) struct HostKeyVerifier {
     host: String,
@@ -174,6 +232,8 @@ pub(crate) struct HostKeyVerifier {
     allow_first_use: bool,
     store: Option<Arc<TerminalSshTrustStore>>,
     observed: Arc<Mutex<Option<String>>>,
+    mutation_fence: Arc<StdMutex<u64>>,
+    mutation_generation: u64,
 }
 
 impl HostKeyVerifier {
@@ -183,14 +243,38 @@ impl HostKeyVerifier {
     /// Fails closed when the store cannot be read: without a trustworthy
     /// answer we cannot distinguish "new host" from "pinned host", and
     /// guessing "new host" is the downgrade pinning exists to prevent.
+    #[cfg(test)]
     pub(crate) fn try_with_store(
         store: Option<Arc<TerminalSshTrustStore>>,
         host: &str,
         port: u16,
         allow_first_use: bool,
     ) -> Result<Self, SshError> {
+        Self::try_with_store_claim(store, host, port, allow_first_use, None)
+    }
+
+    fn try_with_store_claim(
+        store: Option<Arc<TerminalSshTrustStore>>,
+        host: &str,
+        port: u16,
+        allow_first_use: bool,
+        mutation_claim: Option<TrustMutationClaim>,
+    ) -> Result<Self, SshError> {
         let host = normalize_host_key(host);
-        let pinned = lookup_pin(store.as_deref(), &host, port)?;
+        let mutation_fence = mutation_claim
+            .as_ref()
+            .map(|claim| Arc::clone(&claim.fence))
+            .unwrap_or_else(|| trust_mutation_fence(&host, port));
+        let (pinned, mutation_generation) = {
+            let generation = lock_trust_generation(&mutation_fence);
+            (
+                lookup_pin(store.as_deref(), &host, port)?,
+                mutation_claim
+                    .as_ref()
+                    .map(|claim| claim.generation)
+                    .unwrap_or(*generation),
+            )
+        };
         Ok(Self {
             host,
             port,
@@ -198,6 +282,8 @@ impl HostKeyVerifier {
             allow_first_use,
             store,
             observed: Arc::new(Mutex::new(None)),
+            mutation_fence,
+            mutation_generation,
         })
     }
 
@@ -269,6 +355,20 @@ impl HostKeyVerifier {
         let Some(fingerprint) = self.observed_fingerprint().await else {
             return Ok(());
         };
+        let generation = lock_trust_generation(&self.mutation_fence);
+        if *generation != self.mutation_generation {
+            let pinned = lookup_pin(Some(store.as_ref()), &self.host, self.port)?;
+            warn!(
+                "ssh host trust: refusing a stale first-use pin after trust changed host={} port={} presented={}",
+                self.host, self.port, fingerprint
+            );
+            return Err(SshError::HostKeyVerification {
+                host: self.host.clone(),
+                port: self.port,
+                fingerprint,
+                pinned,
+            });
+        }
         if let Some(winner) = lookup_pin(Some(store.as_ref()), &self.host, self.port)? {
             if winner == fingerprint {
                 // Someone recorded the same key first; nothing to do.
@@ -290,7 +390,7 @@ impl HostKeyVerifier {
             self.host, self.port, fingerprint
         );
         store
-            .pin(self.host.clone(), self.port, fingerprint)
+            .write_pin(&self.host, self.port, fingerprint)
             .map_err(|error| SshError::HostKeyStoreUnavailable {
                 host: self.host.clone(),
                 port: self.port,
@@ -365,17 +465,29 @@ pub(crate) async fn connect_with_trust_store(
 ) -> Result<SshClient, SshError> {
     let host = normalize_host_key(&credentials.host);
     let port = credentials.port;
-    let may_record =
-        allow_first_use && store.is_some() && lookup_pin(store.as_deref(), &host, port)?.is_none();
+    let (initial_pin, mutation_claim) = if store.is_some() {
+        let fence = trust_mutation_fence(&host, port);
+        let generation = lock_trust_generation(&fence);
+        let initial_pin = lookup_pin(store.as_deref(), &host, port)?;
+        let claim = TrustMutationClaim {
+            fence: Arc::clone(&fence),
+            generation: *generation,
+        };
+        drop(generation);
+        (initial_pin, Some(claim))
+    } else {
+        (None, None)
+    };
+    let may_record = allow_first_use && store.is_some() && initial_pin.is_none();
     if !may_record {
-        return connect_verified(store, credentials, allow_first_use).await;
+        return connect_verified(store, credentials, allow_first_use, mutation_claim).await;
     }
     let lock = tofu_lock(&host, port);
     let _claim = lock.lock().await;
     // Re-read under the lock: another first contact may have recorded a pin
     // between the check above and acquiring the claim, in which case this
     // connect is now an ordinary pinned connect.
-    connect_verified(store, credentials, allow_first_use).await
+    connect_verified(store, credentials, allow_first_use, mutation_claim).await
 }
 
 /// One connect attempt under an already-decided serialization policy.
@@ -383,12 +495,14 @@ async fn connect_verified(
     store: Option<Arc<TerminalSshTrustStore>>,
     credentials: SshCredentials,
     allow_first_use: bool,
+    mutation_claim: Option<TrustMutationClaim>,
 ) -> Result<SshClient, SshError> {
-    let verifier = HostKeyVerifier::try_with_store(
+    let verifier = HostKeyVerifier::try_with_store_claim(
         store,
         &credentials.host,
         credentials.port,
         allow_first_use,
+        mutation_claim,
     )?;
     match SshClient::connect(credentials, verifier.callback()).await {
         Ok(client) => {
@@ -653,6 +767,31 @@ mod tests {
         assert!(
             server.auth_attempts() > 0,
             "the test server should have seen the rejected credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpin_fences_a_late_authenticated_first_use_write() {
+        let store = store();
+        let verifier =
+            HostKeyVerifier::try_with_store(Some(store.clone()), "removed.example", 22, true)
+                .expect("store reads succeed");
+        assert!((verifier.callback())("SHA256:observed").await);
+
+        store
+            .unpin("removed.example".to_string(), 22)
+            .expect("removal succeeds even without an existing pin");
+
+        let error = verifier
+            .record_trust_on_first_use()
+            .await
+            .expect_err("the pre-removal verifier must not recreate the pin");
+        assert!(matches!(error, SshError::HostKeyVerification { .. }));
+        assert_eq!(
+            store
+                .pinned("removed.example".to_string(), 22)
+                .expect("store remains readable"),
+            None
         );
     }
 

@@ -63,7 +63,7 @@ pub use host_trust::register_host_trust_store;
 pub(crate) use host_trust::{HOST_TRUST_TEST_LOCK, clear_host_trust_store};
 pub(crate) use host_trust::{
     connect_with_host_trust, connect_with_trust_store, global_host_trust_store,
-    host_key_error_message,
+    host_key_error_message, pin_host_trust, unpin_host_trust,
 };
 pub use types::{
     ExecResult, SshAuth, SshBootstrapResult, SshCredentials, SshError, SshExecChild, SshExecIo,
