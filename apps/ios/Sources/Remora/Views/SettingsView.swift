@@ -404,7 +404,7 @@ struct SettingsView: View {
             do {
                 try SavedServerStore.remove(serverId: server.id)
             } catch {
-                guard savedServerMutationCommitted(despite: error) else {
+                guard savedServerMutationMayHaveCommitted(despite: error) else {
                     appModel.reconnectController.rollbackServerRemoval(
                         serverId: server.id,
                         lease: removalLease
@@ -426,7 +426,7 @@ struct SettingsView: View {
         do {
             try SavedServerStore.replace(configuration.savedServer)
         } catch {
-            guard savedServerMutationCommitted(despite: error) else { return }
+            guard savedServerMutationMayHaveCommitted(despite: error) else { return }
         }
         appModel.reconnectController.allowServerReconnect(
             serverId: configuration.savedServer.id
@@ -443,13 +443,10 @@ struct SettingsView: View {
         reconnectServer(using: configuration)
     }
 
-    private func savedServerMutationCommitted(despite error: Error) -> Bool {
+    private func savedServerMutationMayHaveCommitted(despite error: Error) -> Bool {
         serverEditError = error.localizedDescription
         guard let storeError = error as? SavedServerStoreError else { return false }
-        if case .trustCleanupPending = storeError {
-            return true
-        }
-        return false
+        return storeError.mutationMayHaveCommitted
     }
 
     private func reconnectServer(using configuration: SettingsServerConnectionConfiguration) {
