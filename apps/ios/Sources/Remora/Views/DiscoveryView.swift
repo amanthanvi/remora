@@ -196,7 +196,7 @@ struct DiscoveryView: View {
                 if let server = renameTarget {
                     let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
                     let newName = trimmed.isEmpty ? server.hostname : trimmed
-                    SavedServerStore.upsert(DiscoveredServer(
+                    let renamedServer = DiscoveredServer(
                         id: server.id,
                         name: newName,
                         hostname: server.hostname,
@@ -210,24 +210,15 @@ struct DiscoveryView: View {
                         preferredCodexPort: server.preferredCodexPort,
                         os: server.os,
                         sshBanner: server.sshBanner
-                    ))
-                    appModel.reconnectController.allowServerReconnect(serverId: server.id)
-                    if let idx = discovery.servers.firstIndex(where: { $0.id == server.id }) {
-                        discovery.servers[idx] = DiscoveredServer(
-                            id: server.id,
-                            name: newName,
-                            hostname: server.hostname,
-                            port: server.port,
-                            codexPorts: server.codexPorts,
-                            sshPort: server.sshPort,
-                            source: server.source,
-                            hasCodexServer: server.hasCodexServer,
-                            wakeMAC: server.wakeMAC,
-                            preferredConnectionMode: server.preferredConnectionMode,
-                            preferredCodexPort: server.preferredCodexPort,
-                            os: server.os,
-                            sshBanner: server.sshBanner
-                        )
+                    )
+                    do {
+                        try SavedServerStore.upsert(renamedServer)
+                        appModel.reconnectController.allowServerReconnect(serverId: server.id)
+                        if let idx = discovery.servers.firstIndex(where: { $0.id == server.id }) {
+                            discovery.servers[idx] = renamedServer
+                        }
+                    } catch {
+                        connectError = error.localizedDescription
                     }
                 }
                 renameTarget = nil
@@ -861,22 +852,22 @@ struct DiscoveryView: View {
             return
         }
 
-        let connectedServerId: String
-        let startedAsyncBootstrap: Bool
+        var connectedServerId: String?
+        var startedAsyncBootstrap = false
         do {
             switch target {
             case .remote(let host, let port):
-                startedAsyncBootstrap = false
                 connectedServerId = try await appModel.serverBridge.connectRemoteServer(
                     serverId: server.id,
                     displayName: server.name,
                     host: host,
                     port: port
                 )
-                SavedServerStore.remember(server.withConnectionPreference(.directCodex, codexPort: port))
+                try SavedServerStore.remember(
+                    server.withConnectionPreference(.directCodex, codexPort: port)
+                )
                 appModel.reconnectController.allowServerReconnect(serverId: server.id)
             case .remoteURL(let url):
-                startedAsyncBootstrap = false
                 if url.scheme?.lowercased() == "slingshot" {
                     let tokens = try await ChatGPTOAuth.loadStoredOrRefreshedTokens()
                     do {
@@ -909,15 +900,23 @@ struct DiscoveryView: View {
                         websocketUrl: url.absoluteString
                     )
                 }
-                SavedServerStore.remember(server)
+                try SavedServerStore.remember(server)
                 appModel.reconnectController.allowServerReconnect(serverId: server.id)
             case .sshThenRemote(let host, let credentials):
                 startedAsyncBootstrap = true
                 connectedServerId = try await connectViaSSH(server: server, host: host, credentials: credentials)
             }
         } catch {
+            if let connectedServerId {
+                appModel.serverBridge.disconnectServer(serverId: connectedServerId)
+            }
             connectingServer = nil
             connectError = error.localizedDescription
+            return
+        }
+        guard let connectedServerId else {
+            connectingServer = nil
+            connectError = "Failed to connect"
             return
         }
         await appModel.refreshSnapshot()
@@ -947,9 +946,14 @@ struct DiscoveryView: View {
             credentials: credentials,
             port: server.resolvedSSHPort
         )
-        SavedServerStore.remember(
-            server.withConnectionPreference(.ssh)
-        )
+        do {
+            try SavedServerStore.remember(
+                server.withConnectionPreference(.ssh)
+            )
+        } catch {
+            appModel.serverBridge.disconnectServer(serverId: serverId)
+            throw error
+        }
         appModel.reconnectController.allowServerReconnect(serverId: server.id)
         return serverId
     }
@@ -1053,7 +1057,17 @@ struct DiscoveryView: View {
             os: baseServer.os,
             sshBanner: baseServer.sshBanner
         )
-        SavedServerStore.rememberSSHBridge(synthesized, runtimeKinds: result.runtimeKinds)
+        do {
+            try SavedServerStore.rememberSSHBridge(
+                synthesized,
+                runtimeKinds: result.runtimeKinds
+            )
+        } catch {
+            appModel.serverBridge.disconnectServer(serverId: result.serverId)
+            try? await appModel.ssh.sshClose(sessionId: result.sessionId)
+            connectError = error.localizedDescription
+            return
+        }
         appModel.reconnectController.allowServerReconnect(serverId: result.serverId)
         await SshSessionStore.shared.record(sessionId: result.sessionId, for: result.serverId)
         await appModel.refreshSnapshot()
