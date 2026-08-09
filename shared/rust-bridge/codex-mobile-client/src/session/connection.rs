@@ -807,6 +807,7 @@ impl ReconnectBackoff {
 enum SessionCommand {
     Request {
         request: ClientRequest,
+        turn_deadline: Option<tokio::time::Instant>,
         response_tx: oneshot::Sender<Result<JsonValue, RpcError>>,
     },
     Notify {
@@ -899,6 +900,7 @@ fn spawn_test_command_worker(
                 SessionCommand::Request {
                     request,
                     response_tx,
+                    ..
                 } => {
                     let result = request_handler
                         .as_ref()
@@ -1092,18 +1094,21 @@ impl ServerSession {
                     command = command_rx.recv() => {
                         let Some(command) = command else { break; };
                         match command {
-                            SessionCommand::Request { request, response_tx } => {
+                            SessionCommand::Request {
+                                request,
+                                turn_deadline,
+                                response_tx,
+                            } => {
                                 let sender = sender.clone();
                                 tokio::spawn(async move {
-                                    let turn_request = matches!(
-                                        &request,
-                                        ClientRequest::TurnStart { .. }
-                                            | ClientRequest::TurnSteer { .. }
-                                    );
+                                    let deadline = turn_deadline.map(|deadline| {
+                                        deadline
+                                            .saturating_duration_since(tokio::time::Instant::now())
+                                    });
                                     let result = request_in_process_client(
                                         &sender,
                                         request,
-                                        turn_request.then_some(REMOTE_TURN_REQUEST_DEADLINE),
+                                        deadline,
                                     )
                                     .await;
                                     let _ = response_tx.send(result);
@@ -1440,7 +1445,6 @@ impl ServerSession {
                     .and_then(|method| method.as_str().map(str::to_string))
             })
             .unwrap_or_else(|| "<unknown>".to_string());
-        let (response_tx, response_rx) = oneshot::channel();
         let command_tx = self
             .runtime_command_txs
             .get(&runtime_kind)
@@ -1449,17 +1453,7 @@ impl ServerSession {
             "session request route server_id={} runtime={:?} method={}",
             self.config.server_id, runtime_kind, wire_method
         );
-        command_tx
-            .send(SessionCommand::Request {
-                request,
-                response_tx,
-            })
-            .await
-            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?;
-
-        response_rx
-            .await
-            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?
+        request_session_command(command_tx, request, REMOTE_TURN_REQUEST_DEADLINE).await
     }
 
     /// Send a JSON-RPC request (constructed from method + params) and await the response.
@@ -2205,6 +2199,39 @@ where
     Ok(future.await)
 }
 
+async fn request_session_command(
+    command_tx: &mpsc::Sender<SessionCommand>,
+    request: ClientRequest,
+    turn_request_deadline: Duration,
+) -> Result<JsonValue, RpcError> {
+    let turn_deadline = matches!(
+        &request,
+        ClientRequest::TurnStart { .. } | ClientRequest::TurnSteer { .. }
+    )
+    .then(|| tokio::time::Instant::now() + turn_request_deadline);
+    let (response_tx, response_rx) = oneshot::channel();
+    let send = command_tx.send(SessionCommand::Request {
+        request,
+        turn_deadline,
+        response_tx,
+    });
+    if let Some(deadline) = turn_deadline {
+        tokio::time::timeout_at(deadline, send)
+            .await
+            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?
+            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?;
+        return tokio::time::timeout_at(deadline, response_rx)
+            .await
+            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?
+            .map_err(|_| RpcError::Transport(TransportError::Disconnected))?;
+    }
+    send.await
+        .map_err(|_| RpcError::Transport(TransportError::Disconnected))?;
+    response_rx
+        .await
+        .map_err(|_| RpcError::Transport(TransportError::Disconnected))?
+}
+
 async fn request_in_process_client(
     sender: &codex_app_server::in_process::InProcessClientSender,
     request: ClientRequest,
@@ -2265,16 +2292,33 @@ fn spawn_remote_runtime_worker(
                 command = command_rx.recv() => {
                     let Some(command) = command else { break; };
                     match command {
-                        SessionCommand::Request { request, response_tx } => {
+                        SessionCommand::Request {
+                            request,
+                            turn_deadline,
+                            response_tx,
+                        } => {
                             let request_retry = request.clone();
                             let ambiguous_turn_mutation = matches!(
                                 &request,
                                 ClientRequest::TurnStart { .. } | ClientRequest::TurnSteer { .. }
                             );
+                            if turn_deadline
+                                .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+                            {
+                                let _ = response_tx.send(Err(RpcError::Transport(
+                                    TransportError::Disconnected,
+                                )));
+                                continue;
+                            }
+                            let request_deadline = turn_deadline
+                                .map(|deadline| {
+                                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                                })
+                                .unwrap_or(turn_request_deadline);
                             let mut result = request_remote_client(
                                 &client,
                                 request,
-                                ambiguous_turn_mutation.then_some(turn_request_deadline),
+                                Some(request_deadline),
                             )
                             .await;
                             if matches!(result, Err(RpcError::Transport(_))) {
@@ -2303,7 +2347,7 @@ fn spawn_remote_runtime_worker(
                                         result = request_remote_client(
                                             &client,
                                             request_retry,
-                                            None,
+                                            Some(turn_request_deadline),
                                         )
                                         .await;
                                     }
@@ -2513,6 +2557,7 @@ impl ServerSession {
                     SessionCommand::Request {
                         request,
                         response_tx,
+                        ..
                     } => {
                         let result = request_handler
                             .as_ref()
@@ -2670,6 +2715,7 @@ mod tests {
     enum TestJsonLineServer {
         DropOnFirstRequest,
         NeverRespond,
+        NeverRespondAfterNotifying(Arc<tokio::sync::Notify>),
         Respond(JsonValue),
     }
 
@@ -2712,6 +2758,11 @@ mod tests {
                     // Consume the request but keep the connection alive without
                     // responding, reproducing a connected-silent peer.
                     let _ = lines.next_line().await;
+                    std::future::pending::<()>().await;
+                }
+                TestJsonLineServer::NeverRespondAfterNotifying(request_seen) => {
+                    let _ = lines.next_line().await;
+                    request_seen.notify_one();
                     std::future::pending::<()>().await;
                 }
                 TestJsonLineServer::Respond(response) => {
@@ -2918,6 +2969,7 @@ mod tests {
         command_tx
             .send(SessionCommand::Request {
                 request,
+                turn_deadline: None,
                 response_tx,
             })
             .await
@@ -3016,6 +3068,7 @@ mod tests {
         command_tx
             .send(SessionCommand::Request {
                 request,
+                turn_deadline: Some(tokio::time::Instant::now() + Duration::from_millis(50)),
                 response_tx,
             })
             .await
@@ -3037,6 +3090,105 @@ mod tests {
             .await
             .expect("worker should accept shutdown");
         worker.await.expect("worker should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn queued_turn_uses_submission_deadline_behind_silent_non_turn() {
+        let request_seen = Arc::new(tokio::sync::Notify::new());
+        let initial_client = app_server_client_for_json_line_server(
+            TestJsonLineServer::NeverRespondAfterNotifying(Arc::clone(&request_seen)),
+            "queued-turn-deadline-test-bridge",
+        )
+        .await;
+        let reconnect_started = Arc::new(tokio::sync::Notify::new());
+        let reconnect_release = Arc::new(tokio::sync::Notify::new());
+        let reconnect_transport: Arc<dyn RemoteTransport> = Arc::new(BlockingReconcileTransport {
+            started: Arc::clone(&reconnect_started),
+            release: Arc::clone(&reconnect_release),
+        });
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let health_state = Arc::new(StdMutex::new(RuntimeHealthState {
+            by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+            generation: 0,
+            cold_repair_claimed: false,
+        }));
+        let request_deadline = Duration::from_millis(50);
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            initial_client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: health_state,
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("queued-turn-deadline-test-bridge"),
+            "queued-turn-deadline-test-bridge".to_string(),
+            request_deadline,
+            Some(reconnect_transport),
+        );
+
+        let non_turn_request: ClientRequest = serde_json::from_value(json!({
+            "id": 1,
+            "method": "model/list",
+            "params": {"limit": 5}
+        }))
+        .expect("valid model/list request");
+        let (non_turn_response_tx, _non_turn_response_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request: non_turn_request,
+                turn_deadline: None,
+                response_tx: non_turn_response_tx,
+            })
+            .await
+            .expect("worker should accept non-turn request");
+        tokio::time::timeout(Duration::from_secs(1), request_seen.notified())
+            .await
+            .expect("non-turn request should be in flight before turn submission");
+
+        let turn_request: ClientRequest = serde_json::from_value(json!({
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-1",
+                "input": [{
+                    "type": "text",
+                    "text": "must not dispatch late",
+                    "textElements": []
+                }]
+            }
+        }))
+        .expect("valid turn/start request");
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            request_session_command(&command_tx, turn_request, request_deadline),
+        )
+        .await
+        .expect("queued turn should honor its submission deadline")
+        .expect_err("queued turn must fail ambiguously when its deadline expires");
+        assert!(matches!(
+            error,
+            RpcError::Transport(TransportError::Disconnected)
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), reconnect_started.notified())
+            .await
+            .expect("silent non-turn request should enter reconnect reconciliation");
+        reconnect_release.notify_one();
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("worker should accept shutdown");
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("worker should reject the expired queued turn and shut down")
+            .expect("worker should shut down cleanly");
     }
 
     #[tokio::test(start_paused = true)]

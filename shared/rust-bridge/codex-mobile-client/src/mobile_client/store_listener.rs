@@ -414,6 +414,8 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
         )
         .await;
     if let Err(error) = result {
+        // A transport error is ambiguous: the detached reconciliation task owns
+        // claim resolution so a timed-out turn cannot be sent twice.
         if matches!(error, RpcError::Transport(_)) {
             client.schedule_ambiguous_turn_reconciliation(key.clone());
         } else if !super::thread_operations::turn_request_error_is_ambiguous(&error) {

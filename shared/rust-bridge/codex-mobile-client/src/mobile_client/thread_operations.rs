@@ -897,6 +897,10 @@ impl MobileClient {
             thread_id: params.thread_id.clone(),
         };
         if self.pending_turn_reconciliation().contains(&thread_key) {
+            warn!(
+                "MobileClient: blocked turn start while ambiguous reconciliation is pending for server {} thread {}",
+                thread_key.server_id, thread_key.thread_id
+            );
             return Err(RpcError::Timeout);
         }
         let turn_start_lock = self.turn_start_lock(&thread_key);
@@ -905,6 +909,10 @@ impl MobileClient {
                 .await
                 .map_err(|_| RpcError::Timeout)?;
         if self.pending_turn_reconciliation().contains(&thread_key) {
+            warn!(
+                "MobileClient: blocked turn start after lock acquisition because ambiguous reconciliation is pending for server {} thread {}",
+                thread_key.server_id, thread_key.thread_id
+            );
             return Err(RpcError::Timeout);
         }
         self.app_store

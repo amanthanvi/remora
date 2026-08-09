@@ -164,6 +164,7 @@ internal fun ServerEditSheet(
     server: AppServerSnapshot,
     onDismiss: () -> Unit,
     onSave: () -> Unit,
+    onCleanupPending: (String) -> Unit,
     onTriggerSshReconnect: (SavedServer) -> Unit,
 ) {
     val context = LocalContext.current
@@ -384,7 +385,9 @@ internal fun ServerEditSheet(
             )
             appModel.store.renameServer(saved.id, saved.name)
             if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
-                error("Server updated, but SSH trust cleanup is pending until secure storage recovers.")
+                onCleanupPending(
+                    "Server updated. SSH trust cleanup will finish when secure storage recovers.",
+                )
             }
             true
         } catch (cancellation: CancellationException) {

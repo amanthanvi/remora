@@ -124,6 +124,7 @@ private fun SettingsTopLevel(
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
     var serverRemovalError by remember { mutableStateOf<String?>(null) }
+    var sshTrustCleanupNotice by remember { mutableStateOf<String?>(null) }
 
     val currentServer = remember(snapshot) {
         val activeServerId = snapshot?.activeThread?.serverId
@@ -287,8 +288,8 @@ private fun SettingsTopLevel(
                                 }
                                 appModel.refreshSnapshot()
                                 if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
-                                    serverRemovalError =
-                                        "Server removed, but SSH trust cleanup is pending until secure storage recovers."
+                                    sshTrustCleanupNotice =
+                                        "Server removed. SSH trust cleanup will finish when secure storage recovers."
                                 }
                             } catch (cancellation: CancellationException) {
                                 throw cancellation
@@ -313,6 +314,19 @@ private fun SettingsTopLevel(
                 }
             },
             title = { Text("Server Removal Failed") },
+            text = { Text(message) },
+        )
+    }
+
+    if (editTarget == null && sshReconnectTarget == null) sshTrustCleanupNotice?.let { message ->
+        AlertDialog(
+            onDismissRequest = { sshTrustCleanupNotice = null },
+            confirmButton = {
+                TextButton(onClick = { sshTrustCleanupNotice = null }) {
+                    Text("OK")
+                }
+            },
+            title = { Text("SSH Trust Cleanup Pending") },
             text = { Text(message) },
         )
     }
@@ -355,6 +369,7 @@ private fun SettingsTopLevel(
             server = server,
             onDismiss = { editTarget = null },
             onSave = { editTarget = null },
+            onCleanupPending = { message -> sshTrustCleanupNotice = message },
             onTriggerSshReconnect = { saved ->
                 editTarget = null
                 sshReconnectTarget = saved

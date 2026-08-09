@@ -1140,8 +1140,8 @@ fun HomeDashboardScreen(
                                     }
                                     appModel.refreshSnapshot()
                                     if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
-                                        confirmAction = ConfirmAction.ReplyError(
-                                            "Server disconnected, but SSH trust cleanup is pending until secure storage recovers.",
+                                        confirmAction = ConfirmAction.TrustCleanupPending(
+                                            "Server disconnected. SSH trust cleanup will finish when secure storage recovers.",
                                         )
                                     }
                                 } catch (cancellation: CancellationException) {
@@ -1153,6 +1153,9 @@ fun HomeDashboardScreen(
                                 }
                             }
                             is ConfirmAction.ReplyError -> {
+                                // Informational dialog only — "Confirm" just dismisses.
+                            }
+                            is ConfirmAction.TrustCleanupPending -> {
                                 // Informational dialog only — "Confirm" just dismisses.
                             }
                         }
@@ -1307,6 +1310,11 @@ private sealed class ConfirmAction {
 
     data class ReplyError(val reason: String) : ConfirmAction() {
         override val title = "Reply Failed"
+        override val message = reason
+    }
+
+    data class TrustCleanupPending(val reason: String) : ConfirmAction() {
+        override val title = "SSH Trust Cleanup Pending"
         override val message = reason
     }
 }
