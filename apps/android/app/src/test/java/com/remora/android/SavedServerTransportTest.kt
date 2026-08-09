@@ -67,6 +67,28 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun sshTrustCleanupJournalRejectsMalformedTargetsWithoutThrowing() {
+        assertNull(SavedServerStore.decodeSshTrustCleanupTarget("not-json"))
+        assertNull(SavedServerStore.decodeSshTrustCleanupTarget("{}"))
+        assertNull(
+            SavedServerStore.decodeSshTrustCleanupTarget(
+                JSONObject().put("host", " ").put("port", 22).toString(),
+            ),
+        )
+        assertNull(
+            SavedServerStore.decodeSshTrustCleanupTarget(
+                JSONObject().put("host", "host.example").put("port", 0).toString(),
+            ),
+        )
+        assertEquals(
+            "host.example" to 2222,
+            SavedServerStore.decodeSshTrustCleanupTarget(
+                JSONObject().put("host", "host.example").put("port", 2222).toString(),
+            ),
+        )
+    }
+
+    @Test
     fun explicitBridgeSelectionAndNonBridgeNullRemainDistinct() {
         val bridge = SavedServer.fromJson(
             baseJson("bridge").apply {

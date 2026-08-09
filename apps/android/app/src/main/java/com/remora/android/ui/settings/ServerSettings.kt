@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -167,8 +168,55 @@ internal fun ServerEditSheet(
     val context = LocalContext.current
     val appModel = LocalAppModel.current
     val scope = rememberCoroutineScope()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    val savedServers = remember { SavedServerStore.load(context) }
+    var loadedSavedServers by remember(context) { mutableStateOf<List<SavedServer>?>(null) }
+    var savedServerLoadError by remember(context) { mutableStateOf<String?>(null) }
+    LaunchedEffect(context) {
+        try {
+            loadedSavedServers = withContext(Dispatchers.IO) {
+                SavedServerStore.load(context)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            savedServerLoadError = error.localizedMessage
+                ?: error.message
+                ?: "Unable to load saved server."
+        }
+    }
+
+    val savedServers = loadedSavedServers
+    if (savedServers == null) {
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            sheetState = sheetState,
+            containerColor = RemoraTheme.background,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (savedServerLoadError == null) {
+                    CircularProgressIndicator(color = RemoraTheme.accent, strokeWidth = 2.dp)
+                } else {
+                    Text(
+                        savedServerLoadError.orEmpty(),
+                        color = RemoraTheme.textSecondary,
+                        fontSize = 13.sp,
+                    )
+                    TextButton(onClick = onDismiss) {
+                        Text("Done", color = RemoraTheme.accent)
+                    }
+                }
+            }
+        }
+        return
+    }
+
     val originalSaved = remember(savedServers, server.serverId) {
         savedServers.firstOrNull { it.id == server.serverId }
     }
@@ -192,8 +240,6 @@ internal fun ServerEditSheet(
     var validationError by remember { mutableStateOf<String?>(null) }
     var isReconnecting by remember { mutableStateOf(false) }
     var pendingSlingshotReconnect by remember { mutableStateOf<SavedServer?>(null) }
-
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     fun validateAndBuild(): SavedServer? {
         val name = displayName.trim()

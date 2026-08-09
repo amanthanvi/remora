@@ -486,15 +486,13 @@ object SavedServerStore {
     private fun recoverPendingSshTrustCleanup(context: Context) {
         val preferences = prefs(context)
         val encoded = preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null) ?: return
-        val journal = try {
-            JSONObject(encoded)
-        } catch (error: Exception) {
-            throw IllegalStateException("Unreadable SSH trust cleanup journal", error)
+        val (host, port) = decodeSshTrustCleanupTarget(encoded) ?: run {
+            // The server deletion and journal were persisted atomically. If the
+            // target is unreadable, retain the deletion and discard only the
+            // unusable journal; an obsolete pin is safer than restoring a server.
+            preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+            return
         }
-        val host = journal.optString("host").takeIf { it.isNotBlank() }
-            ?: error("SSH trust cleanup journal is missing its host")
-        val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
-            ?: error("SSH trust cleanup journal has an invalid port")
         try {
             TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
         } catch (_: Exception) {
@@ -506,6 +504,14 @@ object SavedServerStore {
         // A failed clear remains safe: the durable journal causes another
         // idempotent cleanup attempt on the next process start.
         preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+    }
+
+    internal fun decodeSshTrustCleanupTarget(encoded: String): Pair<String, Int>? {
+        val journal = runCatching { JSONObject(encoded) }.getOrNull() ?: return null
+        val host = journal.optString("host").takeIf { it.isNotBlank() } ?: return null
+        val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
+            ?: return null
+        return host to port
     }
 
     private fun encodeServers(servers: List<SavedServer>): String =
