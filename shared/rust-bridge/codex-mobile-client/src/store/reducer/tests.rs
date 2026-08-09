@@ -1679,12 +1679,21 @@ fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
         thread_id: "thread".to_string(),
     };
     reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
-    reducer.enqueue_thread_follow_up_preview(
+    reducer.enqueue_thread_follow_up_draft(
         &key,
-        AppQueuedFollowUpPreview {
-            id: "queued-1".to_string(),
-            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
-            text: "first".to_string(),
+        QueuedFollowUpDraft {
+            preview: AppQueuedFollowUpPreview {
+                id: "queued-1".to_string(),
+                kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+                text: "first".to_string(),
+            },
+            inputs: vec![upstream::UserInput::Text {
+                text: "first".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source_message_json: None,
+            causal_anchor_turn_id: None,
+            autosend_claimed: false,
         },
     );
     reducer.enqueue_thread_follow_up_preview(
@@ -1700,6 +1709,17 @@ fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
     let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
     authoritative.active_turn_id = Some("turn-follow-up".to_string());
     authoritative.info.status = ThreadSummaryStatus::Active;
+    authoritative.items.push(HydratedConversationItem {
+        id: "user-follow-up".to_string(),
+        content: HydratedConversationItemContent::User(HydratedUserMessageData {
+            text: "first".to_string(),
+            image_data_uris: Vec::new(),
+        }),
+        source_turn_id: Some("turn-follow-up".to_string()),
+        source_turn_index: Some(0),
+        timestamp: None,
+        is_from_user_turn_boundary: true,
+    });
     reducer.upsert_thread_snapshot(authoritative);
 
     let snapshot = reducer.snapshot();
@@ -1712,6 +1732,57 @@ fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
             .as_deref(),
         Some("turn-follow-up")
     );
+}
+
+#[test]
+fn authoritative_unrelated_active_turn_preserves_claimed_queued_follow_up() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    reducer.enqueue_thread_follow_up_draft(
+        &key,
+        QueuedFollowUpDraft {
+            preview: AppQueuedFollowUpPreview {
+                id: "queued-1".to_string(),
+                kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+                text: "claimed follow-up".to_string(),
+            },
+            inputs: vec![upstream::UserInput::Text {
+                text: "claimed follow-up".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source_message_json: None,
+            causal_anchor_turn_id: None,
+            autosend_claimed: false,
+        },
+    );
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
+
+    let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    authoritative.active_turn_id = Some("turn-other-client".to_string());
+    authoritative.info.status = ThreadSummaryStatus::Active;
+    authoritative.items.push(HydratedConversationItem {
+        id: "other-user-message".to_string(),
+        content: HydratedConversationItemContent::User(HydratedUserMessageData {
+            text: "unrelated request".to_string(),
+            image_data_uris: Vec::new(),
+        }),
+        source_turn_id: Some("turn-other-client".to_string()),
+        source_turn_index: Some(0),
+        timestamp: None,
+        is_from_user_turn_boundary: true,
+    });
+    reducer.upsert_thread_snapshot(authoritative);
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-other-client"));
+    assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+    assert_eq!(thread.queued_follow_up_drafts[0].preview.id, "queued-1");
+    assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
 }
 
 #[test]

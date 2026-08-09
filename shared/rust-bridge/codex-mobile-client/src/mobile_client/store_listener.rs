@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_disconnect_hydrates_active_without_resending_claim() {
+    async fn ambiguous_disconnect_retains_claim_without_matching_active_turn_evidence() {
         let (client, key, config, turn_start_requests) =
             client_with_ambiguous_autosend(|| TransportError::Disconnected).await;
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
@@ -1420,13 +1420,14 @@ mod tests {
             .await
             .expect("active authoritative hydration succeeds");
 
-        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
             .expect("hydrated active thread");
         assert_eq!(thread.active_turn_id.as_deref(), Some("turn-authoritative"));
-        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
         assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
     }
 
@@ -1492,7 +1493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_ambiguous_claim_is_consumed_only_after_active_probe() {
+    async fn paginated_active_probe_without_items_retains_ambiguous_claim() {
         let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
@@ -1563,13 +1564,14 @@ mod tests {
             requests.lock().expect("request log lock").as_slice(),
             ["thread/resume", "thread/turns/list"]
         );
-        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
             .expect("authoritative active thread");
         assert_eq!(thread.active_turn_id.as_deref(), Some("turn-authoritative"));
-        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
         assert!(
             client
                 .app_store

@@ -1275,7 +1275,6 @@ impl ServerSession {
                 connection_timeline.clone(),
                 args.clone(),
                 url.clone(),
-                REMOTE_TURN_REQUEST_DEADLINE,
                 resource.transport,
             ));
         }
@@ -2267,6 +2266,12 @@ async fn request_remote_client(
     }
 }
 
+fn remaining_turn_request_deadline(
+    turn_deadline: Option<tokio::time::Instant>,
+) -> Option<Duration> {
+    turn_deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+}
+
 fn request_is_safe_to_replay_after_transport_error(request: &ClientRequest) -> bool {
     matches!(
         request,
@@ -2294,7 +2299,6 @@ fn spawn_remote_runtime_worker(
     timeline: ConnectionTimeline,
     reconnect_args: RemoteAppServerConnectArgs,
     reconnect_url: String,
-    turn_request_deadline: Duration,
     reconnect_transport: Option<Arc<dyn RemoteTransport>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -2321,15 +2325,11 @@ fn spawn_remote_runtime_worker(
                                 )));
                                 continue;
                             }
-                            let request_deadline = turn_deadline
-                                .map(|deadline| {
-                                    deadline.saturating_duration_since(tokio::time::Instant::now())
-                                })
-                                .unwrap_or(turn_request_deadline);
+                            let request_deadline = remaining_turn_request_deadline(turn_deadline);
                             let mut result = request_remote_client(
                                 &client,
                                 request,
-                                Some(request_deadline),
+                                request_deadline,
                             )
                             .await;
                             if matches!(result, Err(RpcError::Transport(_))) {
@@ -2358,7 +2358,7 @@ fn spawn_remote_runtime_worker(
                                         result = request_remote_client(
                                             &client,
                                             request_retry,
-                                            Some(turn_request_deadline),
+                                            request_deadline,
                                         )
                                         .await;
                                     }
@@ -2966,7 +2966,6 @@ mod tests {
             timeline.clone(),
             test_remote_args("drop-test-bridge"),
             "drop-test-bridge".to_string(),
-            REMOTE_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
 
@@ -3059,7 +3058,6 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("drop-command-test-bridge"),
             "drop-command-test-bridge".to_string(),
-            REMOTE_TURN_REQUEST_DEADLINE,
             Some(reconnect_transport),
         );
 
@@ -3127,7 +3125,6 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("silent-turn-test-bridge"),
             "silent-turn-test-bridge".to_string(),
-            Duration::from_millis(50),
             Some(reconnect_transport),
         );
         let request: ClientRequest = serde_json::from_value(json!({
@@ -3179,12 +3176,6 @@ mod tests {
             "queued-turn-deadline-test-bridge",
         )
         .await;
-        let reconnect_started = Arc::new(tokio::sync::Notify::new());
-        let reconnect_release = Arc::new(tokio::sync::Notify::new());
-        let reconnect_transport: Arc<dyn RemoteTransport> = Arc::new(BlockingReconcileTransport {
-            started: Arc::clone(&reconnect_started),
-            release: Arc::clone(&reconnect_release),
-        });
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, _) = broadcast::channel(4);
         let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
@@ -3208,8 +3199,7 @@ mod tests {
             ConnectionTimeline::default(),
             test_remote_args("queued-turn-deadline-test-bridge"),
             "queued-turn-deadline-test-bridge".to_string(),
-            request_deadline,
-            Some(reconnect_transport),
+            None,
         );
 
         let non_turn_request: ClientRequest = serde_json::from_value(json!({
@@ -3256,18 +3246,13 @@ mod tests {
             RpcError::Transport(TransportError::Disconnected)
         ));
 
-        tokio::time::timeout(Duration::from_secs(1), reconnect_started.notified())
-            .await
-            .expect("silent non-turn request should enter reconnect reconciliation");
-        reconnect_release.notify_one();
-        command_tx
-            .send(SessionCommand::Shutdown)
-            .await
-            .expect("worker should accept shutdown");
-        tokio::time::timeout(Duration::from_secs(1), worker)
-            .await
-            .expect("worker should reject the expired queued turn and shut down")
-            .expect("worker should shut down cleanly");
+        worker.abort();
+        assert!(
+            worker
+                .await
+                .expect_err("worker should be cancelled")
+                .is_cancelled()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3297,6 +3282,11 @@ mod tests {
         ));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn remote_request_deadline_preserves_unbounded_non_turn_request() {
+        assert_eq!(remaining_turn_request_deadline(None), None);
     }
 
     #[test]

@@ -674,7 +674,20 @@ impl MobileClient {
                 }
                 let active_turn_observed = snapshot.active_turn_id.is_some();
                 app_store.upsert_thread_snapshot(snapshot);
-                if pending.is_none()
+                let retain_active_claim = pending.is_some()
+                    && app_store.thread_snapshot(key).is_some_and(|thread| {
+                        thread.active_turn_id.is_some()
+                            && thread
+                                .queued_follow_up_drafts
+                                .first()
+                                .is_some_and(|draft| draft.autosend_claimed)
+                    });
+                if retain_active_claim {
+                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "external_resume_thread: active turn lacked matching evidence for an ambiguous claim server={} thread={}",
+                        server_id, thread_id
+                    );
+                } else if pending.is_none()
                     || active_turn_observed
                     || causal_boundary_found
                     || unanchored_replay_turn_id.is_none()
@@ -1021,7 +1034,16 @@ impl MobileClient {
                 }
             }
             if ambiguous_reconciliation_pending {
-                self.reconcile_ambiguous_turn_claim(key);
+                let retain_active_claim = app_store.thread_snapshot(key).is_some_and(|thread| {
+                    thread.active_turn_id.is_some()
+                        && thread
+                            .queued_follow_up_drafts
+                            .first()
+                            .is_some_and(|draft| draft.autosend_claimed)
+                });
+                if !retain_active_claim {
+                    self.reconcile_ambiguous_turn_claim(key);
+                }
             }
             true
         };

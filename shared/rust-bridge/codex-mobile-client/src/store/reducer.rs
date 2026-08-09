@@ -649,11 +649,23 @@ impl AppStoreReducer {
             let existing = snapshot.threads.get(&key).cloned();
             if let Some(existing) = existing.as_ref() {
                 let consume_claimed_follow_up = existing.active_turn_id.is_none()
-                    && thread.active_turn_id.is_some()
-                    && existing
-                        .queued_follow_up_drafts
-                        .first()
-                        .is_some_and(|draft| draft.autosend_claimed);
+                    && thread
+                        .active_turn_id
+                        .as_ref()
+                        .is_some_and(|active_turn_id| {
+                            existing
+                                .queued_follow_up_drafts
+                                .first()
+                                .filter(|draft| draft.autosend_claimed)
+                                .and_then(|draft| local_user_message_overlay_item(&draft.inputs))
+                                .is_some_and(|local_item| {
+                                    thread.items.iter().any(|item| {
+                                        item.is_from_user_turn_boundary
+                                            && item.source_turn_id.as_ref() == Some(active_turn_id)
+                                            && item.content == local_item.content
+                                    })
+                                })
+                        });
                 // Diagnostic for the duplicate-user-message bug (task #11):
                 // catch transient overlap where the incoming snapshot's
                 // hydrated User items match an overlay that's already in
