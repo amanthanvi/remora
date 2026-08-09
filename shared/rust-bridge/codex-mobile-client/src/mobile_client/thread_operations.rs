@@ -701,18 +701,6 @@ impl MobileClient {
             if (active_turn_cleared || repair_required_for_ambiguity)
                 && let Some(page) = repair_page.as_ref()
             {
-                if let Err(error) = self.apply_thread_turns_page(
-                    server_id,
-                    thread_id,
-                    page,
-                    crate::types::AppTurnsSortDirection::Descending,
-                ) {
-                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                        "force_authoritative: completed-turn repair merge failed server={} thread={}: {}",
-                        server_id, thread_id, error
-                    );
-                    return false;
-                }
                 if repair_required_for_ambiguity {
                     let replayed = history_known
                         && app_store.consume_thread_follow_up_claim_if_replayed(
@@ -737,6 +725,18 @@ impl MobileClient {
                         );
                         return true;
                     }
+                }
+                if let Err(error) = self.apply_thread_turns_page(
+                    server_id,
+                    thread_id,
+                    page,
+                    crate::types::AppTurnsSortDirection::Descending,
+                ) {
+                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "force_authoritative: completed-turn repair merge failed server={} thread={}: {}",
+                        server_id, thread_id, error
+                    );
+                    return false;
                 }
             }
             if ambiguous_reconciliation_pending {

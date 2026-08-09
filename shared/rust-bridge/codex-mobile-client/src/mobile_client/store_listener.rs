@@ -1486,6 +1486,23 @@ mod tests {
             .expect("unknown-history thread");
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(!thread.initial_turns_loaded);
+        assert!(thread.items.is_empty());
+
+        client
+            .force_refresh_thread_authoritative("srv", "thread-1")
+            .await
+            .expect("second unknown-history refresh succeeds");
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("unknown-history thread after retry");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(!thread.initial_turns_loaded);
+        assert!(thread.items.is_empty());
     }
 
     #[tokio::test]
@@ -1512,6 +1529,29 @@ mod tests {
             .expect("unanchored repair thread");
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(thread.items.len(), 1);
+        assert_eq!(
+            thread.items[0].source_turn_id.as_deref(),
+            Some("turn-anchor")
+        );
+
+        client
+            .force_refresh_thread_authoritative("srv", "thread-1")
+            .await
+            .expect("second unanchored repair refresh succeeds");
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("unanchored repair thread after retry");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(thread.items.len(), 1);
+        assert_eq!(
+            thread.items[0].source_turn_id.as_deref(),
+            Some("turn-anchor")
+        );
     }
 
     #[tokio::test]
