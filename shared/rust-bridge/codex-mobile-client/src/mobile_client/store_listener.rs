@@ -1783,7 +1783,7 @@ mod tests {
                 client
                     .pending_turn_reconciliation()
                     .get(&key)
-                    .is_some_and(|pending| pending.unanchored_replay_observed)
+                    .is_some_and(|pending| pending.unanchored_replay_turn_id.is_some())
             );
             let thread = client
                 .app_store
@@ -1969,6 +1969,8 @@ mod tests {
             pages,
         )
         .await;
+        enqueue_follow_up(&client, &key, "continue");
+        enqueue_follow_up(&client, &key, "continue");
 
         client
             .force_refresh_thread_authoritative("srv", "thread-1")
@@ -1984,7 +1986,18 @@ mod tests {
             .app_store
             .thread_snapshot(&key)
             .expect("replay-walk thread");
-        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.queued_follow_up_drafts.len(), 2);
+        assert!(thread.queued_follow_up_drafts.iter().all(|draft| {
+            !draft.autosend_claimed && draft.causal_anchor_turn_id.as_deref() == Some("turn-replay")
+        }));
+        let next_claim = client
+            .app_store
+            .try_claim_first_queued_follow_up(&key)
+            .expect("next repeated follow-up claim");
+        assert_eq!(
+            next_claim.causal_anchor_turn_id.as_deref(),
+            Some("turn-replay")
+        );
     }
 
     #[tokio::test]
@@ -2230,7 +2243,7 @@ mod tests {
             client
                 .pending_turn_reconciliation()
                 .get(&key)
-                .is_some_and(|pending| pending.unanchored_replay_observed
+                .is_some_and(|pending| pending.unanchored_replay_turn_id.is_some()
                     && pending.repair_cursor.as_deref()
                         == Some(&format!("page-{AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT}")))
         );

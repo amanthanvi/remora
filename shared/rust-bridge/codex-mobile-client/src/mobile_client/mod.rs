@@ -72,8 +72,8 @@ struct PendingTurnReconciliation {
     baseline_history_known: bool,
     causal_anchor_turn_id: Option<String>,
     repair_cursor: Option<String>,
-    candidate_replay_observed: bool,
-    unanchored_replay_observed: bool,
+    candidate_replay_turn_id: Option<String>,
+    unanchored_replay_turn_id: Option<String>,
 }
 
 impl PendingTurnReconciliation {
@@ -96,8 +96,8 @@ impl PendingTurnReconciliation {
                 baseline_history_known: thread.initial_turns_loaded,
                 causal_anchor_turn_id: causal_anchor_turn_id.clone(),
                 repair_cursor: None,
-                candidate_replay_observed: false,
-                unanchored_replay_observed: false,
+                candidate_replay_turn_id: None,
+                unanchored_replay_turn_id: None,
             })
             .unwrap_or_else(|| Self {
                 id: crate::next_request_id(),
@@ -105,8 +105,8 @@ impl PendingTurnReconciliation {
                 baseline_history_known: false,
                 causal_anchor_turn_id,
                 repair_cursor: None,
-                candidate_replay_observed: false,
-                unanchored_replay_observed: false,
+                candidate_replay_turn_id: None,
+                unanchored_replay_turn_id: None,
             })
     }
 }

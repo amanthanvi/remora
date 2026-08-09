@@ -339,6 +339,12 @@ pub(crate) fn remove_first_queued_follow_up(thread: &mut ThreadSnapshot) {
     }
 }
 
+pub(super) fn reanchor_queued_follow_ups(thread: &mut ThreadSnapshot, turn_id: &str) {
+    for draft in &mut thread.queued_follow_up_drafts {
+        draft.causal_anchor_turn_id = Some(turn_id.to_string());
+    }
+}
+
 pub(super) fn is_duplicate_overlay_item(
     local: &HydratedConversationItem,
     existing: &HydratedConversationItem,

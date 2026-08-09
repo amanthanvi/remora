@@ -157,8 +157,8 @@ impl MobileClient {
         key: &ThreadKey,
         pending_id: i64,
         next_cursor: Option<String>,
-        candidate_replay_observed: bool,
-        unanchored_replay_observed: bool,
+        candidate_replay_turn_id: Option<String>,
+        unanchored_replay_turn_id: Option<String>,
     ) -> bool {
         let mut pending = self.pending_turn_reconciliation();
         let Some(current) = pending
@@ -168,8 +168,12 @@ impl MobileClient {
             return false;
         };
         current.repair_cursor = next_cursor;
-        current.candidate_replay_observed |= candidate_replay_observed;
-        current.unanchored_replay_observed |= unanchored_replay_observed;
+        if current.candidate_replay_turn_id.is_none() {
+            current.candidate_replay_turn_id = candidate_replay_turn_id;
+        }
+        if current.unanchored_replay_turn_id.is_none() {
+            current.unanchored_replay_turn_id = unanchored_replay_turn_id;
+        }
         true
     }
 
@@ -642,27 +646,38 @@ impl MobileClient {
                         }
                     })
                     .unwrap_or_default();
-                let candidate_replay_observed = pending.is_some()
-                    && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
+                let candidate_replay_turn_id = pending.as_ref().and_then(|_| {
+                    app_store
+                        .thread_follow_up_claim_matching_authoritative_turn_ids(
+                            key,
+                            &snapshot.items,
+                            &eligible_turn_ids,
+                        )
+                        .into_iter()
+                        .next_back()
+                });
+                let unanchored_replay_turn_id = pending.as_ref().and_then(|_| {
+                    app_store
+                        .thread_follow_up_claim_matching_authoritative_turn_ids(
+                            key,
+                            &snapshot.items,
+                            &unanchored_turn_ids,
+                        )
+                        .into_iter()
+                        .next_back()
+                });
+                if causal_boundary_found && let Some(replay_turn_id) = candidate_replay_turn_id {
+                    app_store.consume_thread_follow_up_claim_after_authoritative_replay(
                         key,
-                        &snapshot.items,
-                        &eligible_turn_ids,
+                        &replay_turn_id,
                     );
-                let unanchored_replay_observed = pending.is_some()
-                    && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
-                        key,
-                        &snapshot.items,
-                        &unanchored_turn_ids,
-                    );
-                if causal_boundary_found && candidate_replay_observed {
-                    app_store.consume_thread_follow_up_claim_after_authoritative_replay(key);
                 }
                 let active_turn_observed = snapshot.active_turn_id.is_some();
                 app_store.upsert_thread_snapshot(snapshot);
                 if pending.is_none()
                     || active_turn_observed
                     || causal_boundary_found
-                    || !unanchored_replay_observed
+                    || unanchored_replay_turn_id.is_none()
                 {
                     self.reconcile_ambiguous_turn_claim(key);
                 } else {
@@ -918,25 +933,35 @@ impl MobileClient {
             }
             if active_turn_cleared || repair_required_for_ambiguity {
                 if repair_required_for_ambiguity {
-                    let candidate_replay_observed = pending_ambiguity
+                    let candidate_replay_turn_id = pending_ambiguity
                         .as_ref()
-                        .is_some_and(|pending| pending.candidate_replay_observed)
-                        || repair_pages.iter().any(|repair_page| {
-                            app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
-                                key,
-                                &repair_page.page.turns,
-                                &repair_page.candidate_turn_ids,
-                            )
+                        .and_then(|pending| pending.candidate_replay_turn_id.clone())
+                        .or_else(|| {
+                            repair_pages.iter().find_map(|repair_page| {
+                                app_store
+                                    .thread_follow_up_claim_matching_authoritative_turn_ids(
+                                        key,
+                                        &repair_page.page.turns,
+                                        &repair_page.candidate_turn_ids,
+                                    )
+                                    .into_iter()
+                                    .next()
+                            })
                         });
-                    let unanchored_replay_observed = pending_ambiguity
+                    let unanchored_replay_turn_id = pending_ambiguity
                         .as_ref()
-                        .is_some_and(|pending| pending.unanchored_replay_observed)
-                        || repair_pages.iter().any(|repair_page| {
-                            app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
-                                key,
-                                &repair_page.page.turns,
-                                &repair_page.unanchored_turn_ids,
-                            )
+                        .and_then(|pending| pending.unanchored_replay_turn_id.clone())
+                        .or_else(|| {
+                            repair_pages.iter().find_map(|repair_page| {
+                                app_store
+                                    .thread_follow_up_claim_matching_authoritative_turn_ids(
+                                        key,
+                                        &repair_page.page.turns,
+                                        &repair_page.unanchored_turn_ids,
+                                    )
+                                    .into_iter()
+                                    .next()
+                            })
                         });
                     let baseline_set_is_authoritative =
                         pending_ambiguity.as_ref().is_some_and(|pending| {
@@ -948,15 +973,16 @@ impl MobileClient {
                     let repair_scan_complete =
                         repair_reached_causal_boundary || repair_history_exhausted;
                     let unresolved_matching_history = !replay_classification_trusted
-                        && (candidate_replay_observed || unanchored_replay_observed);
+                        && (candidate_replay_turn_id.is_some()
+                            || unanchored_replay_turn_id.is_some());
                     if !repair_scan_complete || unresolved_matching_history {
                         if let Some(pending) = pending_ambiguity.as_ref() {
                             self.advance_ambiguous_turn_repair_state(
                                 key,
                                 pending.id,
                                 repair_continuation_cursor.clone(),
-                                candidate_replay_observed,
-                                unanchored_replay_observed,
+                                candidate_replay_turn_id.clone(),
+                                unanchored_replay_turn_id,
                             );
                         }
                         warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -965,8 +991,13 @@ impl MobileClient {
                         );
                         return true;
                     }
-                    if candidate_replay_observed && replay_classification_trusted {
-                        app_store.consume_thread_follow_up_claim_after_authoritative_replay(key);
+                    if replay_classification_trusted
+                        && let Some(replay_turn_id) = candidate_replay_turn_id
+                    {
+                        app_store.consume_thread_follow_up_claim_after_authoritative_replay(
+                            key,
+                            &replay_turn_id,
+                        );
                     }
                 }
                 let repair_pages_to_merge = if repair_used_resume_cursor {

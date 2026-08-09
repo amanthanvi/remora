@@ -814,9 +814,7 @@ impl AppStoreReducer {
                         .queued_follow_up_drafts
                         .retain(|draft| draft.preview.id != preview_id);
                     if removed_first {
-                        for queued_draft in &mut thread.queued_follow_up_drafts {
-                            queued_draft.causal_anchor_turn_id = Some(turn_id.to_string());
-                        }
+                        reanchor_queued_follow_ups(thread, turn_id);
                     }
                     sync_thread_follow_up_projection(thread);
                 }
@@ -856,6 +854,7 @@ impl AppStoreReducer {
     pub(crate) fn consume_thread_follow_up_claim_after_authoritative_replay(
         &self,
         key: &ThreadKey,
+        replay_turn_id: &str,
     ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
@@ -867,6 +866,7 @@ impl AppStoreReducer {
                     return false;
                 }
                 remove_first_queued_follow_up(thread);
+                reanchor_queued_follow_ups(thread, replay_turn_id);
                 true
             })
             .unwrap_or(false);
@@ -876,45 +876,34 @@ impl AppStoreReducer {
         consumed
     }
 
-    pub(crate) fn thread_follow_up_claim_matches_authoritative_items_in_turns(
+    pub(crate) fn thread_follow_up_claim_matching_authoritative_turn_ids(
         &self,
         key: &ThreadKey,
         authoritative_items: &[HydratedConversationItem],
         eligible_turn_ids: &HashSet<String>,
-    ) -> bool {
-        self.thread_follow_up_claim_matches_authoritative_items_where(
-            key,
-            authoritative_items,
-            |turn_id| eligible_turn_ids.contains(turn_id),
-        )
-    }
-
-    fn thread_follow_up_claim_matches_authoritative_items_where(
-        &self,
-        key: &ThreadKey,
-        authoritative_items: &[HydratedConversationItem],
-        turn_is_eligible: impl Fn(&str) -> bool,
-    ) -> bool {
-        self.thread_snapshot(key).is_some_and(|thread| {
+    ) -> Vec<String> {
+        self.thread_snapshot(key).map_or_else(Vec::new, |thread| {
             let Some(draft) = thread
                 .queued_follow_up_drafts
                 .first()
                 .filter(|draft| draft.autosend_claimed)
             else {
-                return false;
+                return Vec::new();
             };
             let Some(local_item) = local_user_message_overlay_item(&draft.inputs) else {
-                return false;
+                return Vec::new();
             };
-            authoritative_items.iter().any(|item| {
-                item.is_from_user_turn_boundary
-                    && matches!(&item.content, HydratedConversationItemContent::User(_))
-                    && item.content.eq(&local_item.content)
-                    && item
-                        .source_turn_id
-                        .as_deref()
-                        .is_some_and(&turn_is_eligible)
-            })
+            authoritative_items
+                .iter()
+                .filter(|item| {
+                    item.is_from_user_turn_boundary
+                        && matches!(&item.content, HydratedConversationItemContent::User(_))
+                        && item.content.eq(&local_item.content)
+                })
+                .filter_map(|item| item.source_turn_id.as_ref())
+                .filter(|turn_id| eligible_turn_ids.contains(turn_id.as_str()))
+                .cloned()
+                .collect()
         })
     }
 
@@ -2980,7 +2969,8 @@ use thread_merge::{
     duplicate_local_overlay_item_ids, is_duplicate_overlay_item, is_superseded_overlay_item,
     local_user_message_overlay_item, preserve_local_overlay_items, preserve_queued_follow_ups,
     preserve_thread_created_at, preserve_thread_fork_lineage, preserve_thread_preview,
-    preserve_thread_runtime_state, preserve_thread_title, sync_thread_follow_up_projection,
+    preserve_thread_runtime_state, preserve_thread_title, reanchor_queued_follow_ups,
+    sync_thread_follow_up_projection,
 };
 pub(crate) use thread_merge::{
     remove_duplicate_local_overlay_items, remove_first_queued_follow_up,
