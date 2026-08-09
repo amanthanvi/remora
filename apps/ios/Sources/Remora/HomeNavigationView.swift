@@ -1292,6 +1292,10 @@ struct HomeNavigationView: View {
             try SavedServerStore.remove(serverId: serverId)
         } catch {
             actionErrorMessage = error.localizedDescription
+            guard let storeError = error as? SavedServerStoreError,
+                  case .trustCleanupPending = storeError else {
+                return
+            }
         }
         Task { await SshSessionStore.shared.close(serverId: serverId, ssh: appModel.ssh) }
         // Remote transport resources are owned by the Rust `ServerSession` and
