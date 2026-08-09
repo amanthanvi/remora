@@ -284,19 +284,21 @@ private fun SettingsTopLevel(
                             var removalPrepared = false
                             var removalCommitted = false
                             try {
-                                check(appModel.reconnectController.prepareServerRemoval(server.serverId)) {
-                                    "Unable to stop reconnecting to this server. Try again."
-                                }
-                                removalPrepared = true
-                                val (cleanupOutcome, remainingServers) = withContext(NonCancellable + Dispatchers.IO) {
+                                val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
+                                    check(appModel.reconnectController.prepareServerRemoval(server.serverId)) {
+                                        "Unable to stop reconnecting to this server. Try again."
+                                    }
+                                    removalPrepared = true
                                     appModel.sshSessionStore.close(server.serverId)
                                     val outcome = SavedServerStore.remove(context, server.serverId)
-                                    outcome to SavedServerStore.load(context)
+                                    removalCommitted = true
+                                    appModel.reconnectController.syncSavedServers(
+                                        SavedServerStore.load(context)
+                                            .filter { it.rememberedByUser }
+                                            .map { it.toRecord() },
+                                    )
+                                    outcome
                                 }
-                                removalCommitted = true
-                                appModel.reconnectController.syncSavedServers(
-                                    remainingServers.filter { it.rememberedByUser }.map { it.toRecord() },
-                                )
                                 appModel.refreshSnapshot()
                                 if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
                                     sshTrustCleanupNotice =
