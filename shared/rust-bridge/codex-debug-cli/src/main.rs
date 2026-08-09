@@ -683,7 +683,7 @@ fn app_update_event(update: &AppStoreUpdateRecord) -> serde_json::Value {
 }
 
 async fn connect_mobile_client(args: &AppArgs) -> Result<(Arc<MobileClient>, String), String> {
-    let client = Arc::new(MobileClient::new());
+    let client = MobileClient::new();
     let server_id = "debug-cli-app".to_string();
     let config = ServerConfig {
         server_id: server_id.clone(),

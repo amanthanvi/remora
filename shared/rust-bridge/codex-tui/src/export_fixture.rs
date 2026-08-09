@@ -6,7 +6,6 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use codex_app_server_protocol as upstream;
 use codex_mobile_client::MobileClient;
@@ -66,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 
     eprintln!("Connecting to {host}:{port}...");
 
-    let client = Arc::new(MobileClient::new());
+    let client = MobileClient::new();
     let config = ServerConfig {
         server_id: format!("{host}:{port}"),
         display_name: host.clone(),

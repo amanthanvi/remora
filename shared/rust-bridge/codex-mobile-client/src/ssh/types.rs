@@ -236,8 +236,36 @@ pub enum SshError {
     ConnectionFailed(String),
     #[error("auth failed: {0}")]
     AuthFailed(String),
-    #[error("host key verification failed: fingerprint {fingerprint}")]
-    HostKeyVerification { fingerprint: String },
+    /// The host-key trust policy rejected the presented key.
+    ///
+    /// `pinned` is `Some` when a fingerprint was already recorded for this
+    /// host — i.e. the key *changed* — and `None` for an untrusted first
+    /// contact. `SshClient::connect` cannot know the pin, so it constructs
+    /// this with `pinned: None`; the trust-aware connect path fills in the
+    /// context via `HostKeyVerifier::enrich_error`.
+    ///
+    /// The `Display` form is the stable, machine-parsable message platforms
+    /// surface (`host-key-changed:…` / `unknown-host:…`).
+    #[error("{}", super::host_key_error_message(host, *port, fingerprint, pinned.as_deref()))]
+    HostKeyVerification {
+        host: String,
+        port: u16,
+        fingerprint: String,
+        pinned: Option<String>,
+    },
+    /// The pinned-fingerprint store could not be read, so we cannot tell an
+    /// unknown host from a pinned one. Always fatal: treating an unreadable
+    /// store as "no pin" would silently downgrade a pinned host to
+    /// trust-on-first-use, which is exactly the attack pinning prevents.
+    #[error(
+        "host-key-store-unavailable:{host}:{port} — the SSH host-key trust store could not be \
+         read ({message}). Remora refused to connect rather than treat {host}:{port} as a new host."
+    )]
+    HostKeyStoreUnavailable {
+        host: String,
+        port: u16,
+        message: String,
+    },
     #[error("command failed (exit {exit_code}): {stderr}")]
     ExecFailed { exit_code: u32, stderr: String },
     #[error("port forward failed: {0}")]

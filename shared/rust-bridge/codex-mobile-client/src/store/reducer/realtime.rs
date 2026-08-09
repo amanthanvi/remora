@@ -55,7 +55,7 @@ impl AppStoreReducer {
             UiEvent::RealtimeTranscriptUpdated { key, role, text } => {
                 for update in self
                     .voice_state
-                    .handle_typed_transcript_delta(key, role, text)
+                    .handle_typed_transcript_final(key, role, text)
                 {
                     if let VoiceDerivedUpdate::Transcript(update) = update {
                         self.apply_voice_transcript_update(key, &update);

@@ -44,4 +44,4 @@ pub use session::{
     TerminalOutputSnapshot, TerminalOutputStreamEvent, TerminalSession, TerminalSize,
 };
 pub use ssh::TerminalSshAuth;
-pub use ssh_known_hosts::{TerminalSshTrustBackend, TerminalSshTrustStore};
+pub use ssh_known_hosts::{SshTrustStoreError, TerminalSshTrustBackend, TerminalSshTrustStore};

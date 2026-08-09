@@ -32,6 +32,13 @@ struct ReconnectCoordinator {
 struct ReconnectCoordinatorState {
     accepting: bool,
     in_flight: HashMap<String, ActiveReconnect>,
+    revoked_servers: HashMap<String, ServerRevocationState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerRevocationState {
+    Preparing,
+    Prepared,
 }
 
 struct ActiveReconnect {
@@ -58,6 +65,7 @@ impl ReconnectCoordinator {
             state: StdMutex::new(ReconnectCoordinatorState {
                 accepting: true,
                 in_flight: HashMap::new(),
+                revoked_servers: HashMap::new(),
             }),
             cold_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_COLD_RECONNECTS)),
             state_changed: Notify::new(),
@@ -69,7 +77,7 @@ impl ReconnectCoordinator {
             Ok(state) => state,
             Err(error) => error.into_inner(),
         };
-        if !state.accepting {
+        if !state.accepting || state.revoked_servers.contains_key(server_id) {
             return BeginReconnect::Stopped;
         }
         if let Some(active) = state.in_flight.get(server_id) {
@@ -97,6 +105,57 @@ impl ReconnectCoordinator {
         match self.state.lock() {
             Ok(state) => state.in_flight.is_empty(),
             Err(error) => error.into_inner().in_flight.is_empty(),
+        }
+    }
+
+    async fn revoke_server(&self, server_id: &str, deadline: Duration) -> bool {
+        let started = Instant::now();
+        loop {
+            let changed = self.state_changed.notified();
+            let drained = {
+                let mut state = match self.state.lock() {
+                    Ok(state) => state,
+                    Err(error) => error.into_inner(),
+                };
+                state
+                    .revoked_servers
+                    .entry(server_id.to_string())
+                    .or_insert(ServerRevocationState::Preparing);
+                if let Some(active) = state.in_flight.get(server_id) {
+                    let _ = active.cancel_tx.send(true);
+                    false
+                } else {
+                    state
+                        .revoked_servers
+                        .insert(server_id.to_string(), ServerRevocationState::Prepared);
+                    true
+                }
+            };
+            if drained {
+                return true;
+            }
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() || tokio::time::timeout(remaining, changed).await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    fn allow_server(&self, server_id: &str) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        state.revoked_servers.remove(server_id);
+    }
+
+    fn rollback_server_preparation(&self, server_id: &str) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        if state.revoked_servers.get(server_id) == Some(&ServerRevocationState::Preparing) {
+            state.revoked_servers.remove(server_id);
         }
     }
 
@@ -354,6 +413,34 @@ pub struct ReconnectController {
     reconnect_coordinator: Arc<ReconnectCoordinator>,
 }
 
+impl ReconnectController {
+    async fn prepare_server_removal_with_deadline(
+        &self,
+        server_id: String,
+        deadline: Duration,
+    ) -> bool {
+        let coordinator = Arc::clone(&self.reconnect_coordinator);
+        let inner = Arc::clone(&self.inner);
+        let rollback_server_id = server_id.clone();
+        let prepared = self
+            .rt
+            .spawn(async move {
+                if !coordinator.revoke_server(&server_id, deadline).await {
+                    return false;
+                }
+                inner.disconnect_server(&server_id);
+                true
+            })
+            .await
+            .unwrap_or(false);
+        if !prepared {
+            self.reconnect_coordinator
+                .rollback_server_preparation(&rollback_server_id);
+        }
+        prepared
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ReconnectController {
     #[uniffi::constructor]
@@ -409,6 +496,22 @@ impl ReconnectController {
             Ok(mut guard) => *guard = servers,
             Err(e) => *e.into_inner() = servers,
         }
+    }
+
+    /// Fence a saved server against reconnect before its persisted record and
+    /// SSH trust are removed. Stale reconnect plans that already copied the
+    /// record are rejected by the coordinator, while an active attempt is
+    /// cancelled and joined before the live session is disconnected.
+    pub async fn prepare_server_removal(&self, server_id: String) -> bool {
+        self.prepare_server_removal_with_deadline(server_id, RECONNECT_SHUTDOWN_DEADLINE)
+            .await
+    }
+
+    /// Restore reconnect admission after a failed removal or an explicit
+    /// user-driven save/re-add. Ordinary saved-server synchronization never
+    /// clears removal tombstones because it may carry a stale platform read.
+    pub fn allow_server_reconnect(&self, server_id: String) {
+        self.reconnect_coordinator.allow_server(&server_id);
     }
 
     pub async fn reconnect_saved_servers(&self) -> Vec<ReconnectResult> {
@@ -749,7 +852,7 @@ async fn reconnect_server_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginReconnect, ReconnectCoordinator, ReconnectShutdownOutcome,
+        BeginReconnect, ReconnectController, ReconnectCoordinator, ReconnectShutdownOutcome,
         resolved_local_display_name, wait_for_coalesced_result,
     };
     use crate::reconnect::{ReconnectOutcome, ReconnectResult, SavedServerRecord};
@@ -879,6 +982,93 @@ mod tests {
         attempt_task.await.expect("cancelled attempt joined");
         assert!(matches!(
             coordinator.try_begin("srv-b"),
+            BeginReconnect::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconnect_coordinator_revokes_one_server_and_joins_its_attempt() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(mut attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected first owner");
+        };
+        let attempt_task = tokio::spawn(async move {
+            attempt.cancelled().await;
+            drop(attempt);
+        });
+
+        assert!(
+            coordinator
+                .revoke_server("srv-a", std::time::Duration::from_millis(100))
+                .await
+        );
+        attempt_task.await.expect("cancelled attempt joined");
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
+        assert!(matches!(
+            coordinator.try_begin("srv-b"),
+            BeginReconnect::Started(_)
+        ));
+
+        coordinator.allow_server("srv-a");
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Started(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_server_removal_preparation_restores_reconnect_admission() {
+        let controller = ReconnectController::new();
+        let coordinator = std::sync::Arc::clone(&controller.reconnect_coordinator);
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        assert!(
+            !controller
+                .prepare_server_removal_with_deadline(
+                    "srv-a".to_string(),
+                    std::time::Duration::ZERO,
+                )
+                .await
+        );
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Coalesced(_)
+        ));
+
+        drop(attempt);
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Started(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_server_preparation_survives_a_late_timeout_rollback() {
+        let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
+        let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
+            panic!("expected active reconnect");
+        };
+
+        assert!(
+            !coordinator
+                .revoke_server("srv-a", std::time::Duration::ZERO)
+                .await
+        );
+        drop(attempt);
+        assert!(
+            coordinator
+                .revoke_server("srv-a", std::time::Duration::ZERO)
+                .await
+        );
+
+        coordinator.rollback_server_preparation("srv-a");
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
             BeginReconnect::Stopped
         ));
     }

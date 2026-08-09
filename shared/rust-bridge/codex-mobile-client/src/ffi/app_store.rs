@@ -614,11 +614,8 @@ impl AppStore {
         &self,
         kind: crate::terminal::TerminalBackendKind,
         size: crate::terminal::TerminalSize,
-    ) -> Result<String, ClientError> {
-        self.inner
-            .open_terminal_session(kind, size, None)
-            .await
-            .map_err(|e| ClientError::Rpc(e.to_string()))
+    ) -> Result<String, crate::terminal::TerminalError> {
+        self.inner.open_terminal_session(kind, size, None).await
     }
 
     /// Same as [`Self::open_terminal_session`] but consults `trust_store`
@@ -629,11 +626,10 @@ impl AppStore {
         kind: crate::terminal::TerminalBackendKind,
         size: crate::terminal::TerminalSize,
         trust_store: Arc<crate::terminal::TerminalSshTrustStore>,
-    ) -> Result<String, ClientError> {
+    ) -> Result<String, crate::terminal::TerminalError> {
         self.inner
             .open_terminal_session(kind, size, Some(trust_store))
             .await
-            .map_err(|e| ClientError::Rpc(e.to_string()))
     }
 
     /// Close a terminal session by id. Drops the live handle (the

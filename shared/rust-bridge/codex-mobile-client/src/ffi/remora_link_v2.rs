@@ -4044,7 +4044,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_code_fails_closed_without_v2_configuration() {
         let client = AppClient {
-            inner: Arc::new(crate::MobileClient::new()),
+            inner: crate::MobileClient::new(),
             rt: crate::ffi::shared::shared_runtime(),
         };
         let payload = serde_json::json!({
@@ -4164,7 +4164,7 @@ mod tests {
     #[tokio::test]
     async fn clear_waits_for_an_in_flight_configuration_read_lease() {
         let client = Arc::new(AppClient {
-            inner: Arc::new(crate::MobileClient::new()),
+            inner: crate::MobileClient::new(),
             rt: crate::ffi::shared::shared_runtime(),
         });
         let operation_lease = client.inner.remora_link_configuration.read().await;
@@ -4191,7 +4191,7 @@ mod tests {
     {
         let loads = Arc::new(AtomicUsize::new(0));
         let client = AppClient {
-            inner: Arc::new(crate::MobileClient::new()),
+            inner: crate::MobileClient::new(),
             rt: crate::ffi::shared::shared_runtime(),
         };
 
@@ -4305,7 +4305,7 @@ mod tests {
     #[tokio::test]
     async fn pairing_cancellation_requires_configuration() {
         let client = AppClient {
-            inner: Arc::new(crate::MobileClient::new()),
+            inner: crate::MobileClient::new(),
             rt: crate::ffi::shared::shared_runtime(),
         };
 

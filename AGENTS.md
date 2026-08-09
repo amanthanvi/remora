@@ -11,7 +11,7 @@
 - `apps/android/docs/qa-matrix.md` tracks Android parity QA coverage.
 - `shared/rust-bridge/codex-mobile-client/` is the single shared Rust client library consumed by both iOS and Android. It owns the public UniFFI surface, generated upstream RPC coverage, canonical store/reducer state, hydration, discovery, SSH, and shared runtime logic. `MobileClient` is the top-level internal Rust facade.
 - `apps/ios/Sources/Remora/Bridge/Rust*.swift` — iOS bridge files mapping Swift to the shared Rust layer.
-- `apps/android/core/bridge/.../Rust*.kt` — Android bridge files mapping Kotlin to the shared Rust layer. UniFFI Kotlin sources are generated into `shared/rust-bridge/generated/kotlin/` and consumed directly from there; do not maintain copied binding files under Android source roots.
+- `apps/android/core/bridge/` — Android bridge module: `UniffiInit.kt` (native library bootstrap) and `GhosttyRendererBridge.kt` (Ghostty JNI interop). UniFFI Kotlin sources are generated into `shared/rust-bridge/generated/kotlin/` and consumed directly from there; do not maintain copied binding files under Android source roots.
 - `shared/third_party/codex/` is the upstream Codex submodule.
 - `apps/ios/GeneratedRust/` contains local generated Rust artifacts for iOS builds: UniFFI headers/modulemap plus raw device/simulator staticlibs. These artifacts are not committed.
 - `apps/ios/Frameworks/` contains package-lane iOS XCFrameworks such as `codex_mobile_client.xcframework`. These artifacts are not committed.
@@ -19,10 +19,10 @@
 
 ## Architecture
 
-- **iOS root layout:** `ContentView` uses a `ZStack` with a persistent `HeaderView`, main content area, and a `SidebarOverlay` that slides from the left.
+- **iOS root layout:** `ContentView` is a thin `ZStack` root: background gradient, `HomeNavigationView` as the single content root, and overlays (`ApprovalPromptView`, `ConversationWarmupView`) plus sheets (`DiscoveryView`, `SettingsView`, `CommandPaletteView`). `HomeNavigationView` owns real navigation — a `NavigationStack` on compact widths, and a `NavigationSplitView` on regular widths whose sidebar column is `sidebarDashboard` (the same dashboard data/callbacks as the primary `homeDashboard`).
 - **iOS state management:** `AppStore` (Rust, via UniFFI) is the canonical runtime state owner. `AppModel` is the thin Swift observation shell over Rust snapshots and updates. `AppState` is UI-only state.
 - **iOS server flow:** discovery and SSH are separate utility bridges; thread/session/account operations come from generated Rust RPC plus store updates.
-- **Android root layout:** `RemoraAppShell` is the Compose entry; `DefaultRemoraAppState` maps backend state into UI state.
+- **Android root layout:** `RemoraApp(appModel:)` in `ui/RemoraApp.kt` is the Compose entry, called from `MainActivity.setContent` inside `RemoraAppTheme`. Backend state reaches the UI through `state/AppModel`, a thin singleton wrapper over the Rust `AppStore` that republishes Rust snapshots as a `snapshot: StateFlow<AppSnapshotRecord?>` (plus sibling flows such as `lastError` and `composerDrafts`); screens observe it with `collectAsState`.
 - **Android state/transport:** Android should use the same Rust-owned runtime model as iOS instead of re-implementing shared session/thread/account logic in Kotlin.
 - **Android server flow:** discovery seeds come from Android NSD, but discovery merge/probe policy lives in Rust; connection, auth, and thread/account flows go through Rust RPC + store updates.
 - **Message rendering parity:** both platforms support reasoning/system sections, code block rendering, and inline image handling.
@@ -54,14 +54,14 @@
 
 - Add or change direct server coverage:
   - update `shared/rust-bridge/codex-mobile-client/src/ffi/client.rs`
-  - update `shared/rust-bridge/codex-mobile-client/src/rpc/client_impl.rs` and/or reconciliation code as needed
+  - update the internal `MobileClient` facade under `shared/rust-bridge/codex-mobile-client/src/mobile_client/` (`mod.rs`, `thread_operations.rs`, `user_input.rs`, `event_loop.rs`, …) and/or reconciliation code as needed
   - regenerate bindings
 - Add canonical runtime state, reducer logic, or reconciliation:
   - `shared/rust-bridge/codex-mobile-client/src/store/`
 - Add conversation hydration, typed item shaping, or shared status normalization:
   - `shared/rust-bridge/codex-mobile-client/src/conversation.rs`
   - `shared/rust-bridge/codex-mobile-client/src/conversation_uniffi.rs`
-  - `shared/rust-bridge/codex-mobile-client/src/uniffi_shared.rs`
+  - `shared/rust-bridge/codex-mobile-client/src/ffi/shared.rs`
 - Add discovery ranking/dedupe/reconciliation:
   - `shared/rust-bridge/codex-mobile-client/src/discovery.rs`
   - `shared/rust-bridge/codex-mobile-client/src/discovery_uniffi.rs`
@@ -91,7 +91,9 @@
 
 ### iOS (SPM via `apps/ios/project.yml`)
 
-- **Textual** — Renders Markdown in assistant/system messages with custom theming (successor to MarkdownUI).
+- **Hairball** (`HairballUI` product, `dnakov/hairball`, revision `fbb4282ca428e4a76f6a4379d4ae844e9bfea95a`) — Renders Markdown in assistant/system messages with custom theming (`MarkdownTheme` / `HeadingStyleSet` in `MessageBubbleView.swift`).
+- **WebRTC** (`stasel/WebRTC`, exact `147.0.0`) — Google libwebrtc binary framework backing realtime voice.
+- **Nuke** / **NukeUI** (`kean/Nuke`, from `12.8.0`) — image loading and caching for inline/remote images.
 
 ### Android (Gradle)
 
@@ -177,13 +179,6 @@ Incremental policy:
 - `./apps/ios/scripts/regenerate-project.sh` — regenerate Xcode project via xcodegen; this is the safe path because it removes any accidental nested `apps/ios/Remora.xcodeproj/Remora.xcodeproj` before regenerating
 - `./shared/rust-bridge/generate-bindings.sh` — generate UniFFI Swift/Kotlin bindings
 - `./tools/scripts/build-android-rust.sh` — cross-compile Rust JNI libs for Android via `cargo-ndk`
-
-### Hot Reload (InjectionIII)
-
-- Install: `brew install --cask injectioniii`
-- Key views have `@ObserveInjection` + `.enableInjection()` wired up (ContentView, ConversationView, HeaderView, SessionSidebarView, MessageBubbleView).
-- Debug builds include `-Xlinker -interposable` in linker flags.
-- Run the app in simulator, open InjectionIII pointed at the project directory, then save any Swift file to see changes without relaunching.
 
 ## Autonomous Debugging Runbook
 

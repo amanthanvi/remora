@@ -8,7 +8,6 @@ mod widgets;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -103,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     // Initialize the shared Rust client
-    let client = Arc::new(MobileClient::new());
+    let client = MobileClient::new();
 
     // Auto-connect if --connect was passed
     if let Some(addr) = &cli.connect {

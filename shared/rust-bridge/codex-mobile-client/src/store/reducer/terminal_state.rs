@@ -147,16 +147,6 @@ impl AppStoreReducer {
         session.last_activity_ts_ms = now_ms();
     }
 
-    /// Update the session's row/col dimensions after a successful resize.
-    pub fn update_terminal_size(&self, id: &str, cols: u16, rows: u16) {
-        let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-        if let Some(session) = snapshot.terminal_sessions.iter_mut().find(|s| s.id == id) {
-            session.cols = cols;
-            session.rows = rows;
-            session.last_activity_ts_ms = now_ms();
-        }
-    }
-
     /// Mark the session as exited with the given code and clear it from
     /// being active.
     pub fn mark_terminal_exited(&self, id: &str, exit_code: i32) {
