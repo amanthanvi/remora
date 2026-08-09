@@ -72,6 +72,26 @@ fn sync_thread_list_for_runtime_tags_threads() {
 }
 
 #[test]
+fn authoritative_refresh_fence_rejects_state_older_than_streamed_event() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "archived".to_string(),
+    };
+    let stale = ThreadSnapshot::from_info("srv", make_thread_info(&key.thread_id));
+    reducer.upsert_thread_snapshot(stale.clone());
+    let request_generation = reducer.ui_event_generation();
+
+    reducer.apply_ui_event(&UiEvent::ThreadArchived { key: key.clone() });
+    let applied = reducer.apply_if_ui_event_generation(request_generation, |store| {
+        store.upsert_thread_snapshot(stale);
+    });
+
+    assert!(applied.is_none());
+    assert!(!reducer.snapshot().threads.contains_key(&key));
+}
+
+#[test]
 fn authoritative_runtime_refresh_prunes_only_that_runtime() {
     let reducer = AppStoreReducer::new();
     for (runtime, thread_id) in [("codex", "stale-codex"), ("pi", "keep-pi")] {

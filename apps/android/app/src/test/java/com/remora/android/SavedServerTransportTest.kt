@@ -20,6 +20,59 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun sshTrustCleanupJournalsBeforeUnpinAndFinalizesAfterward() {
+        val steps = mutableListOf<String>()
+
+        SavedServerStore.runTrustCleanupTransaction(
+            begin = { steps += "begin" },
+            unpin = { steps += "unpin" },
+            rollback = { steps += "rollback" },
+            finish = { steps += "finish" },
+        )
+
+        assertEquals(listOf("begin", "unpin", "finish"), steps)
+    }
+
+    @Test
+    fun failedSshTrustCleanupRestoresJournaledServerState() {
+        val steps = mutableListOf<String>()
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.runTrustCleanupTransaction(
+                begin = { steps += "begin" },
+                unpin = {
+                    steps += "unpin"
+                    throw IllegalStateException("unpin failed")
+                },
+                rollback = { steps += "rollback" },
+                finish = { steps += "finish" },
+            )
+        }
+
+        assertEquals("unpin failed", error.message)
+        assertEquals(listOf("begin", "unpin", "rollback"), steps)
+    }
+
+    @Test
+    fun failedSshTrustCleanupBeginNeverDeletesThePin() {
+        val steps = mutableListOf<String>()
+
+        assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.runTrustCleanupTransaction(
+                begin = {
+                    steps += "begin"
+                    throw IllegalStateException("journal failed")
+                },
+                unpin = { steps += "unpin" },
+                rollback = { steps += "rollback" },
+                finish = { steps += "finish" },
+            )
+        }
+
+        assertEquals(listOf("begin"), steps)
+    }
+
+    @Test
     fun explicitBridgeSelectionAndNonBridgeNullRemainDistinct() {
         val bridge = SavedServer.fromJson(
             baseJson("bridge").apply {

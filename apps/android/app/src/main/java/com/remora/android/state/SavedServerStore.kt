@@ -288,6 +288,7 @@ fun SavedServer.toRecord() = SavedServerRecord(
 object SavedServerStore {
     internal const val PREFERENCES_NAME = "remora_saved_servers_v2"
     internal const val VALUE_KEY = "saved_servers"
+    private const val PENDING_SSH_TRUST_CLEANUP_KEY = "pending_ssh_trust_cleanup"
     private val currentFields = setOf(
         "id",
         "name",
@@ -310,7 +311,9 @@ object SavedServerStore {
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    @Synchronized
     fun load(context: Context): List<SavedServer> {
+        recoverPendingSshTrustCleanup(context)
         val json = prefs(context).getString(VALUE_KEY, null) ?: return emptyList()
         return try {
             val array = JSONArray(json)
@@ -334,12 +337,12 @@ object SavedServerStore {
         }
     }
 
+    @Synchronized
     fun save(context: Context, servers: List<SavedServer>) {
-        val array = JSONArray()
-        servers.forEach { array.put(it.toJson()) }
-        prefs(context).edit().putString(VALUE_KEY, array.toString()).apply()
+        prefs(context).edit().putString(VALUE_KEY, encodeServers(servers)).apply()
     }
 
+    @Synchronized
     fun upsert(context: Context, server: SavedServer) {
         val existing = load(context).toMutableList()
         val prior = existing.firstOrNull { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
@@ -348,11 +351,10 @@ object SavedServerStore {
         save(context, existing)
     }
 
+    @Synchronized
     fun replace(context: Context, server: SavedServer) {
-        val updated = replaceServer(load(context), server) { host, port ->
-            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port)
-        }
-        save(context, updated)
+        val existing = load(context)
+        persistServerMutation(context, existing, planServerReplacement(existing, server))
     }
 
     internal fun replaceServer(
@@ -360,22 +362,29 @@ object SavedServerStore {
         server: SavedServer,
         unpin: (String, UShort) -> Unit,
     ): List<SavedServer> {
+        val mutation = planServerReplacement(existing, server)
+        mutation.trustTarget?.let { (host, port) -> unpin(host, port.toUShort()) }
+        return mutation.servers
+    }
+
+    private fun planServerReplacement(
+        existing: List<SavedServer>,
+        server: SavedServer,
+    ): SavedServerMutation {
         val index = existing.indexOfFirst { it.id == server.id }
-        if (index == -1) return existing + server
+        if (index == -1) return SavedServerMutation(existing + server, null)
 
         val previous = existing[index]
         val updated = existing.toMutableList().apply { this[index] = server }
-        val target = previous.sshTrustTarget() ?: return updated
+        val target = previous.sshTrustTarget() ?: return SavedServerMutation(updated, null)
         val identity = sshTrustIdentity(target.first, target.second)
         val stillReferenced = updated
             .mapNotNull { it.sshTrustTarget() }
             .any { sshTrustIdentity(it.first, it.second) == identity }
-        if (!stillReferenced) {
-            unpin(target.first, target.second.toUShort())
-        }
-        return updated
+        return SavedServerMutation(updated, target.takeUnless { stillReferenced })
     }
 
+    @Synchronized
     fun remember(context: Context, server: SavedServer) {
         val existing = load(context).toMutableList()
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }
@@ -383,14 +392,14 @@ object SavedServerStore {
         save(context, existing)
     }
 
+    @Synchronized
     fun remembered(context: Context): List<SavedServer> =
         load(context).filter { it.rememberedByUser }
 
+    @Synchronized
     fun remove(context: Context, serverId: String) {
-        val remaining = removeServer(load(context), serverId) { host, port ->
-            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port)
-        }
-        save(context, remaining)
+        val existing = load(context)
+        persistServerMutation(context, existing, planServerRemoval(existing, serverId))
     }
 
     internal fun removeServer(
@@ -398,17 +407,142 @@ object SavedServerStore {
         serverId: String,
         unpin: (String, UShort) -> Unit,
     ): List<SavedServer> {
+        val mutation = planServerRemoval(existing, serverId)
+        mutation.trustTarget?.let { (host, port) -> unpin(host, port.toUShort()) }
+        return mutation.servers
+    }
+
+    private fun planServerRemoval(
+        existing: List<SavedServer>,
+        serverId: String,
+    ): SavedServerMutation {
         val removed = existing.firstOrNull { it.id == serverId }
         val remaining = existing.filterNot { it.id == serverId }
-        val target = removed?.sshTrustTarget() ?: return remaining
+        val target = removed?.sshTrustTarget() ?: return SavedServerMutation(remaining, null)
         val targetIdentity = sshTrustIdentity(target.first, target.second)
         val stillReferenced = remaining
             .mapNotNull { it.sshTrustTarget() }
             .any { sshTrustIdentity(it.first, it.second) == targetIdentity }
-        if (!stillReferenced) {
-            unpin(target.first, target.second.toUShort())
+        return SavedServerMutation(remaining, target.takeUnless { stillReferenced })
+    }
+
+    private data class SavedServerMutation(
+        val servers: List<SavedServer>,
+        val trustTarget: Pair<String, Int>?,
+    )
+
+    @SuppressLint("ApplySharedPref", "UseKtx")
+    private fun persistServerMutation(
+        context: Context,
+        existing: List<SavedServer>,
+        mutation: SavedServerMutation,
+    ) {
+        val target = mutation.trustTarget
+        if (target == null) {
+            save(context, mutation.servers)
+            return
         }
-        return remaining
+
+        val preferences = prefs(context)
+        val rollbackJson = encodeServers(existing)
+        val updatedJson = encodeServers(mutation.servers)
+        val journal = JSONObject()
+            .put("host", target.first)
+            .put("port", target.second)
+            .put("rollbackServers", rollbackJson)
+            .toString()
+        runTrustCleanupTransaction(
+            begin = {
+                if (!preferences.edit()
+                        .putString(VALUE_KEY, updatedJson)
+                        .putString(PENDING_SSH_TRUST_CLEANUP_KEY, journal)
+                        .commit()
+                ) {
+                    preferences.edit()
+                        .putString(VALUE_KEY, rollbackJson)
+                        .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
+                        .commit()
+                    error("Unable to persist the SSH trust cleanup transaction")
+                }
+            },
+            unpin = {
+                TerminalSshTrustStore(SshTrustStore(context))
+                    .unpin(target.first, target.second.toUShort())
+            },
+            rollback = {
+                if (!preferences.edit()
+                        .putString(VALUE_KEY, rollbackJson)
+                        .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
+                        .commit()
+                ) {
+                    error("Unable to roll back the SSH trust cleanup transaction")
+                }
+            },
+            finish = {
+                // Failure leaves the durable journal intact; the next load
+                // retries the idempotent unpin before exposing the server list.
+                preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+            },
+        )
+    }
+
+    @SuppressLint("ApplySharedPref", "UseKtx")
+    private fun recoverPendingSshTrustCleanup(context: Context) {
+        val preferences = prefs(context)
+        val encoded = preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null) ?: return
+        val journal = try {
+            JSONObject(encoded)
+        } catch (error: Exception) {
+            throw IllegalStateException("Unreadable SSH trust cleanup journal", error)
+        }
+        val host = journal.optString("host").takeIf { it.isNotBlank() }
+            ?: error("SSH trust cleanup journal is missing its host")
+        val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
+            ?: error("SSH trust cleanup journal has an invalid port")
+        val rollbackJson = journal.optString("rollbackServers").takeIf { it.isNotBlank() }
+            ?: error("SSH trust cleanup journal is missing rollback state")
+
+        try {
+            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
+        } catch (unpinError: Exception) {
+            if (!preferences.edit()
+                    .putString(VALUE_KEY, rollbackJson)
+                    .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
+                    .commit()
+            ) {
+                throw IllegalStateException(
+                    "Unable to roll back an interrupted SSH trust cleanup",
+                    unpinError,
+                )
+            }
+            return
+        }
+        // A failed clear remains safe: the durable journal causes another
+        // idempotent cleanup attempt on the next process start.
+        preferences.edit().remove(PENDING_SSH_TRUST_CLEANUP_KEY).commit()
+    }
+
+    private fun encodeServers(servers: List<SavedServer>): String =
+        JSONArray().apply { servers.forEach { put(it.toJson()) } }.toString()
+
+    internal fun runTrustCleanupTransaction(
+        begin: () -> Unit,
+        unpin: () -> Unit,
+        rollback: () -> Unit,
+        finish: () -> Unit,
+    ) {
+        begin()
+        try {
+            unpin()
+        } catch (unpinError: Exception) {
+            try {
+                rollback()
+            } catch (rollbackError: Exception) {
+                unpinError.addSuppressed(rollbackError)
+            }
+            throw unpinError
+        }
+        finish()
     }
 
     private fun SavedServer.sshTrustTarget(): Pair<String, Int>? =
@@ -422,6 +556,7 @@ object SavedServerStore {
         normalizedHostKey(host) to port
 
     @SuppressLint("ApplySharedPref", "UseKtx") // Callers require a synchronous durability result before marking cutover complete.
+    @Synchronized
     fun removeAllForSecurityCutover(context: Context): Boolean {
         val currentRemoved = prefs(context).edit().clear().commit() &&
             prefs(context).all.isEmpty()
@@ -439,6 +574,7 @@ object SavedServerStore {
         return currentRemoved && retiredRemoved
     }
 
+    @Synchronized
     fun rename(context: Context, serverId: String, newName: String) {
         val trimmed = newName.trim()
         if (trimmed.isEmpty()) return
@@ -452,6 +588,7 @@ object SavedServerStore {
         }
     }
 
+    @Synchronized
     fun updateWakeMac(context: Context, serverId: String, host: String, wakeMac: String?) {
         val normalizedWakeMac = SavedServer.normalizeWakeMac(wakeMac) ?: return
         val existing = load(context)

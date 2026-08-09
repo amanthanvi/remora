@@ -39,8 +39,9 @@ impl MobileClient {
         thread_id: &str,
         host_id: Option<String>,
     ) -> Result<(), RpcError> {
-        self.external_resume_thread_inner(server_id, thread_id, host_id, false)
+        self.external_resume_thread_inner(server_id, thread_id, host_id, false, None)
             .await
+            .map(|_| ())
     }
 
     /// Force a fresh `thread/resume` against the server even if a direct
@@ -66,8 +67,25 @@ impl MobileClient {
         server_id: &str,
         thread_id: &str,
     ) -> Result<(), RpcError> {
-        self.external_resume_thread_inner(server_id, thread_id, None, true)
+        self.external_resume_thread_inner(server_id, thread_id, None, true, None)
             .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn force_refresh_thread_authoritative_if_ui_generation(
+        &self,
+        server_id: &str,
+        thread_id: &str,
+        expected_generation: u64,
+    ) -> Result<bool, RpcError> {
+        self.external_resume_thread_inner(
+            server_id,
+            thread_id,
+            None,
+            true,
+            Some(expected_generation),
+        )
+        .await
     }
 
     async fn external_resume_thread_inner(
@@ -76,7 +94,8 @@ impl MobileClient {
         thread_id: &str,
         host_id: Option<String>,
         force_authoritative: bool,
-    ) -> Result<(), RpcError> {
+        expected_ui_generation: Option<u64>,
+    ) -> Result<bool, RpcError> {
         let session = self.get_session(server_id)?;
         if host_id.is_some() {
             trace!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -118,7 +137,7 @@ impl MobileClient {
                         server_id, thread_id, thread_has_loaded_turns, pagination_supported
                     );
                     self.app_store.mark_thread_resumed(&key, true);
-                    return Ok(());
+                    return Ok(true);
                 }
                 debug!(target: super::MOBILE_CLIENT_TRACING_TARGET,
                     "external_resume_thread: direct listener exists but thread has no loaded turns and pagination is off, refreshing server={} thread={}",
@@ -163,21 +182,30 @@ impl MobileClient {
                     &key,
                     runtime_kind.clone(),
                     exclude_turns,
+                    expected_ui_generation,
                 )
                 .await
             {
-                Ok(()) => {
+                Ok(applied) => {
+                    if !applied {
+                        return Ok(false);
+                    }
                     self.note_thread_runtime(key.clone(), runtime_kind.clone());
                     if force_authoritative && supports_pagination {
-                        self.reconcile_active_turn_via_turn_list_probe(
-                            server_id,
-                            thread_id,
-                            &key,
-                            runtime_kind,
-                        )
-                        .await;
+                        if !self
+                            .reconcile_active_turn_via_turn_list_probe(
+                                server_id,
+                                thread_id,
+                                &key,
+                                runtime_kind,
+                                expected_ui_generation,
+                            )
+                            .await
+                        {
+                            return Ok(false);
+                        }
                     }
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(error) if should_try_next_runtime_after_thread_lookup_error(&error) => {
                     info!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -191,19 +219,24 @@ impl MobileClient {
                         "external_resume_thread: resume failed, falling back to metadata-only thread/read runtime={:?} server={} thread={} error={}",
                         runtime_kind, server_id, thread_id, error
                     );
-                    self.read_thread_metadata_only_for_runtime(
-                        server_id,
-                        thread_id,
-                        runtime_kind.clone(),
-                    )
-                    .await
-                    .map_err(|fallback_error| {
-                        RpcError::Deserialization(format!(
-                            "{error}; metadata fallback failed: {fallback_error}"
-                        ))
-                    })?;
+                    let applied = self
+                        .read_thread_metadata_only_for_runtime(
+                            server_id,
+                            thread_id,
+                            runtime_kind.clone(),
+                            expected_ui_generation,
+                        )
+                        .await
+                        .map_err(|fallback_error| {
+                            RpcError::Deserialization(format!(
+                                "{error}; metadata fallback failed: {fallback_error}"
+                            ))
+                        })?;
+                    if !applied {
+                        return Ok(false);
+                    }
                     self.note_thread_runtime(key.clone(), runtime_kind);
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(error) => return Err(RpcError::Deserialization(error)),
             }
@@ -211,13 +244,19 @@ impl MobileClient {
 
         for (runtime_kind, resume_error) in lookup_errors {
             match self
-                .read_thread_metadata_only_for_runtime(server_id, thread_id, runtime_kind.clone())
+                .read_thread_metadata_only_for_runtime(
+                    server_id,
+                    thread_id,
+                    runtime_kind.clone(),
+                    expected_ui_generation,
+                )
                 .await
             {
-                Ok(()) => {
+                Ok(true) => {
                     self.note_thread_runtime(key.clone(), runtime_kind);
-                    return Ok(());
+                    return Ok(true);
                 }
+                Ok(false) => return Ok(false),
                 Err(fallback_error)
                     if should_try_next_runtime_after_thread_lookup_error(
                         &fallback_error.to_string(),
@@ -248,7 +287,8 @@ impl MobileClient {
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
         exclude_turns: bool,
-    ) -> Result<(), String> {
+        expected_ui_generation: Option<u64>,
+    ) -> Result<bool, String> {
         // Use thread/resume (not thread/read) so the server attaches a
         // conversation listener for this connection. Without the listener
         // the WebSocket client only receives ThreadStatusChanged — no
@@ -269,38 +309,13 @@ impl MobileClient {
                 resume_request,
             )
             .await?;
-        let existing = self.app_store.thread_snapshot(key);
-        // Diagnostic for the pagination-cursor-lost bug (task #13):
-        // capture what we read as `existing` BEFORE overwriting, so
-        // logcat shows whether the cursor was present at the moment
-        // resume reconciles.
-        tracing::info!(
-            target: "store",
-            server_id,
-            thread_id,
-            existing_present = existing.is_some(),
-            existing_items = existing.as_ref().map(|e| e.items.len()).unwrap_or(0),
-            existing_older_turns_cursor = existing
-                .as_ref()
-                .and_then(|e| e.older_turns_cursor.clone())
-                .unwrap_or_default(),
-            existing_initial_turns_loaded = existing
-                .as_ref()
-                .map(|e| e.initial_turns_loaded)
-                .unwrap_or(false),
-            "external_resume_thread existing snapshot"
-        );
         let turns = response.thread.turns.clone();
         let server_honored_exclude_turns = exclude_turns && turns.is_empty();
         // Legacy v0.124 remotes ignore `exclude_turns` and return the
         // full embedded turn history. Flip the capability flag so
         // future code paths (load_thread_turns_page) short-circuit
         // and the UI keeps relying on embedded turns.
-        if exclude_turns && !server_honored_exclude_turns {
-            self.app_store
-                .set_server_supports_turn_pagination(server_id, false);
-        }
-        let mut snapshot = thread_snapshot_from_upstream_thread_with_overrides(
+        let snapshot = thread_snapshot_from_upstream_thread_with_overrides(
             server_id,
             response.thread,
             Some(response.model),
@@ -311,27 +326,61 @@ impl MobileClient {
             Some(response.approval_policy.into()),
             Some(response.sandbox.into()),
         )?;
-        snapshot.agent_runtime_kind = runtime_kind.clone();
-        // Preserve existing store items when the server returned empty turns
-        // (paginated path); mark initial_turns_loaded so the UI spinner knows
-        // to wait for load_thread_turns_page.
-        if server_honored_exclude_turns {
-            if let Some(current) = existing.as_ref() {
-                snapshot.items = current.items.clone();
-                snapshot.older_turns_cursor = current.older_turns_cursor.clone();
-                snapshot.initial_turns_loaded = current.initial_turns_loaded;
-            } else {
-                snapshot.initial_turns_loaded = false;
+        let apply_response = |app_store: &AppStoreReducer| {
+            let existing = app_store.thread_snapshot(key);
+            // Diagnostic for the pagination-cursor-lost bug (task #13):
+            // capture what exists while the response is committed so a newer
+            // streamed event cannot slip between this read and the upsert.
+            tracing::info!(
+                target: "store",
+                server_id,
+                thread_id,
+                existing_present = existing.is_some(),
+                existing_items = existing.as_ref().map(|e| e.items.len()).unwrap_or(0),
+                existing_older_turns_cursor = existing
+                    .as_ref()
+                    .and_then(|e| e.older_turns_cursor.clone())
+                    .unwrap_or_default(),
+                existing_initial_turns_loaded = existing
+                    .as_ref()
+                    .map(|e| e.initial_turns_loaded)
+                    .unwrap_or(false),
+                "external_resume_thread existing snapshot"
+            );
+            if exclude_turns && !server_honored_exclude_turns {
+                app_store.set_server_supports_turn_pagination(server_id, false);
             }
+            let mut snapshot = snapshot;
+            snapshot.agent_runtime_kind = runtime_kind.clone();
+            // Preserve existing store items when the server returned empty turns
+            // (paginated path); mark initial_turns_loaded so the UI spinner knows
+            // to wait for load_thread_turns_page.
+            if server_honored_exclude_turns {
+                if let Some(current) = existing.as_ref() {
+                    snapshot.items = current.items.clone();
+                    snapshot.older_turns_cursor = current.older_turns_cursor.clone();
+                    snapshot.initial_turns_loaded = current.initial_turns_loaded;
+                } else {
+                    snapshot.initial_turns_loaded = false;
+                }
+            } else {
+                snapshot.initial_turns_loaded = true;
+                snapshot.older_turns_cursor = None;
+            }
+            reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
+            snapshot.is_resumed = true;
+            app_store.upsert_thread_snapshot(snapshot);
+        };
+        let applied = if let Some(expected_generation) = expected_ui_generation {
+            self.app_store
+                .apply_if_ui_event_generation(expected_generation, apply_response)
+                .is_some()
         } else {
-            snapshot.initial_turns_loaded = true;
-            snapshot.older_turns_cursor = None;
-        }
-        reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
-        snapshot.is_resumed = true;
-        self.app_store.upsert_thread_snapshot(snapshot);
+            apply_response(&self.app_store);
+            true
+        };
         self.mark_direct_resumed_thread(key.clone());
-        Ok(())
+        Ok(applied)
     }
 
     /// On the authoritative refresh path (`force_refresh_thread_authoritative`)
@@ -348,7 +397,8 @@ impl MobileClient {
         thread_id: &str,
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
-    ) {
+        expected_ui_generation: Option<u64>,
+    ) -> bool {
         const PROBE_LIMIT: u32 = 5;
         let request = upstream::ClientRequest::ThreadTurnsList {
             request_id: upstream::RequestId::Integer(crate::next_request_id()),
@@ -386,6 +436,7 @@ impl MobileClient {
                             key,
                             runtime_kind.clone(),
                             false,
+                            expected_ui_generation,
                         )
                         .await
                     {
@@ -400,25 +451,38 @@ impl MobileClient {
                         server_id, thread_id, error
                     );
                 }
-                return;
+                return expected_ui_generation
+                    .is_none_or(|generation| self.app_store.ui_event_generation() == generation);
             }
         };
-        let Some(existing) = self.app_store.thread_snapshot(key) else {
-            return;
+        let apply_response = |app_store: &AppStoreReducer| {
+            let Some(existing) = app_store.thread_snapshot(key) else {
+                return false;
+            };
+            let was_active = existing.active_turn_id.is_some();
+            let mut target = existing.clone();
+            // Clear the field on the target so reconcile_active_turn can decide
+            // whether to restore it from `existing` based on the turn list.
+            target.active_turn_id = None;
+            reconcile_active_turn(Some(&existing), &mut target, &response.data);
+            let active_turn_cleared = was_active && target.active_turn_id.is_none();
+            if target.active_turn_id != existing.active_turn_id
+                || target.info.status != existing.info.status
+            {
+                app_store.upsert_thread_snapshot(target);
+            }
+            active_turn_cleared
         };
-        let was_active = existing.active_turn_id.is_some();
-        let mut target = existing.clone();
-        // Clear the field on the target so reconcile_active_turn can decide
-        // whether to restore it from `existing` based on the turn list.
-        target.active_turn_id = None;
-        reconcile_active_turn(Some(&existing), &mut target, &response.data);
-        let active_turn_cleared = was_active && target.active_turn_id.is_none();
-        if target.active_turn_id != existing.active_turn_id
-            || target.info.status != existing.info.status
-        {
-            self.app_store.upsert_thread_snapshot(target);
-        }
+        let Some(active_turn_cleared) = (if let Some(expected_generation) = expected_ui_generation {
+            self.app_store
+                .apply_if_ui_event_generation(expected_generation, apply_response)
+        } else {
+            Some(apply_response(&self.app_store))
+        }) else {
+            return false;
+        };
         if active_turn_cleared
+            && expected_ui_generation.is_none()
             && let Err(error) = self
                 .load_thread_turns_page(server_id, thread_id, None, Some(PROBE_LIMIT))
                 .await
@@ -428,6 +492,7 @@ impl MobileClient {
                 server_id, thread_id, error
             );
         }
+        true
     }
 
     /// Composite action: page a thread's older turns via `thread/turns/list`
@@ -459,9 +524,16 @@ impl MobileClient {
                 .is_none_or(|thread| thread.items.is_empty() && !thread.initial_turns_loaded);
             if needs_embedded_resume {
                 let runtime_kind = self.runtime_for_thread(&key);
-                self.resume_thread_for_runtime(server_id, thread_id, &key, runtime_kind, false)
-                    .await
-                    .map_err(RpcError::Deserialization)?;
+                self.resume_thread_for_runtime(
+                    server_id,
+                    thread_id,
+                    &key,
+                    runtime_kind,
+                    false,
+                    None,
+                )
+                .await
+                .map_err(RpcError::Deserialization)?;
                 return Ok(crate::types::AppLoadThreadTurnsOutcome {
                     loaded: true,
                     has_more: false,
@@ -512,9 +584,16 @@ impl MobileClient {
                     self.app_store
                         .set_server_supports_turn_pagination(server_id, false);
                 }
-                self.resume_thread_for_runtime(server_id, thread_id, &key, runtime_kind, false)
-                    .await
-                    .map_err(RpcError::Deserialization)?;
+                self.resume_thread_for_runtime(
+                    server_id,
+                    thread_id,
+                    &key,
+                    runtime_kind,
+                    false,
+                    None,
+                )
+                .await
+                .map_err(RpcError::Deserialization)?;
                 Ok(crate::types::AppLoadThreadTurnsOutcome {
                     loaded: true,
                     has_more: false,
@@ -529,7 +608,8 @@ impl MobileClient {
         server_id: &str,
         thread_id: &str,
         runtime_kind: AgentRuntimeKind,
-    ) -> Result<(), RpcError> {
+        expected_ui_generation: Option<u64>,
+    ) -> Result<bool, RpcError> {
         let response: upstream::ThreadReadResponse = self
             .request_typed_for_server_runtime(
                 server_id,
@@ -544,7 +624,26 @@ impl MobileClient {
             )
             .await
             .map_err(RpcError::Deserialization)?;
-        upsert_thread_snapshot_from_app_server_read_response(&self.app_store, server_id, response)
+        if let Some(expected_generation) = expected_ui_generation {
+            let mut response = Some(response);
+            self.app_store
+                .apply_if_ui_event_generation(expected_generation, |store| {
+                    upsert_thread_snapshot_from_app_server_read_response(
+                        store,
+                        server_id,
+                        response.take().expect("response is applied once"),
+                    )
+                })
+                .transpose()
+                .map(|applied| applied.is_some())
+        } else {
+            upsert_thread_snapshot_from_app_server_read_response(
+                &self.app_store,
+                server_id,
+                response,
+            )?;
+            Ok(true)
+        }
     }
 
     pub async fn thread_unsubscribe(

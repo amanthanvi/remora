@@ -97,7 +97,9 @@ pub(super) fn spawn_store_listener(
                                 lag_reconcile_gate.cancel();
                                 return;
                             };
-                            reconcile_after_store_listener_lag(client).await;
+                            if reconcile_after_store_listener_lag(client).await {
+                                lag_reconcile_gate.request_pass();
+                            }
                             if !lag_reconcile_gate.finish_pass() {
                                 break;
                             }
@@ -109,7 +111,7 @@ pub(super) fn spawn_store_listener(
     });
 }
 
-async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) {
+async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
     let sessions = client
         .sessions_read()
         .iter()
@@ -121,14 +123,29 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) {
         .collect::<HashSet<_>>();
 
     for (server_id, session) in sessions {
-        if let Err(error) =
-            refresh_thread_list_from_app_server(session, Arc::clone(&client.app_store), &server_id)
-                .await
+        let expected_generation = client.app_store.ui_event_generation();
+        match refresh_thread_list_from_app_server_if_ui_generation(
+            session,
+            Arc::clone(&client.app_store),
+            &server_id,
+            expected_generation,
+        )
+        .await
         {
-            warn!(
-                "MobileClient: lag reconcile thread-list refresh failed for {}: {}",
-                server_id, error
-            );
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    "MobileClient: discarding stale lag thread-list refresh for {}",
+                    server_id
+                );
+                return true;
+            }
+            Err(error) => {
+                warn!(
+                    "MobileClient: lag reconcile thread-list refresh failed for {}: {}",
+                    server_id, error
+                );
+            }
         }
     }
 
@@ -142,18 +159,34 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) {
         .collect::<Vec<_>>();
 
     for key in keys {
-        if let Err(error) = client
-            .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
+        let expected_generation = client.app_store.ui_event_generation();
+        match client
+            .force_refresh_thread_authoritative_if_ui_generation(
+                &key.server_id,
+                &key.thread_id,
+                expected_generation,
+            )
             .await
         {
-            warn!(
-                "MobileClient: lag reconcile failed for {} thread {}: {}",
-                key.server_id, key.thread_id, error
-            );
-            continue;
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    "MobileClient: discarding stale lag refresh for {} thread {}",
+                    key.server_id, key.thread_id
+                );
+                return true;
+            }
+            Err(error) => {
+                warn!(
+                    "MobileClient: lag reconcile failed for {} thread {}: {}",
+                    key.server_id, key.thread_id, error
+                );
+                continue;
+            }
         }
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key).await;
     }
+    false
 }
 
 fn maybe_hydrate_collab_agent_metadata(
