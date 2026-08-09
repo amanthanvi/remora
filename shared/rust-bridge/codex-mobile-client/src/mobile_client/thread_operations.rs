@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(not(test))]
+const TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl MobileClient {
     /// List threads from a specific server.
     #[cfg(test)]
@@ -86,6 +91,24 @@ impl MobileClient {
             Some(expected_generation),
         )
         .await
+    }
+
+    fn apply_if_lag_refresh_current<R>(
+        &self,
+        server_id: &str,
+        expected_session: &Arc<ServerSession>,
+        expected_generation: u64,
+        apply: impl FnOnce(&AppStoreReducer) -> R,
+    ) -> Option<R> {
+        let sessions = self.sessions_read();
+        if !sessions
+            .get(server_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected_session))
+        {
+            return None;
+        }
+        self.app_store
+            .apply_if_server_event_generation(server_id, expected_generation, apply)
     }
 
     async fn external_resume_thread_inner(
@@ -183,6 +206,7 @@ impl MobileClient {
                     runtime_kind.clone(),
                     exclude_turns,
                     expected_ui_generation,
+                    expected_ui_generation.map(|_| &session),
                 )
                 .await
             {
@@ -190,7 +214,9 @@ impl MobileClient {
                     if !applied {
                         return Ok(false);
                     }
-                    self.note_thread_runtime(key.clone(), runtime_kind.clone());
+                    if expected_ui_generation.is_none() {
+                        self.note_thread_runtime(key.clone(), runtime_kind.clone());
+                    }
                     if force_authoritative && supports_pagination {
                         if !self
                             .reconcile_active_turn_via_turn_list_probe(
@@ -199,6 +225,7 @@ impl MobileClient {
                                 &key,
                                 runtime_kind,
                                 expected_ui_generation,
+                                expected_ui_generation.map(|_| &session),
                             )
                             .await
                         {
@@ -225,6 +252,7 @@ impl MobileClient {
                             thread_id,
                             runtime_kind.clone(),
                             expected_ui_generation,
+                            expected_ui_generation.map(|_| &session),
                         )
                         .await
                         .map_err(|fallback_error| {
@@ -235,7 +263,9 @@ impl MobileClient {
                     if !applied {
                         return Ok(false);
                     }
-                    self.note_thread_runtime(key.clone(), runtime_kind);
+                    if expected_ui_generation.is_none() {
+                        self.note_thread_runtime(key.clone(), runtime_kind);
+                    }
                     return Ok(true);
                 }
                 Err(error) => return Err(RpcError::Deserialization(error)),
@@ -249,11 +279,14 @@ impl MobileClient {
                     thread_id,
                     runtime_kind.clone(),
                     expected_ui_generation,
+                    expected_ui_generation.map(|_| &session),
                 )
                 .await
             {
                 Ok(true) => {
-                    self.note_thread_runtime(key.clone(), runtime_kind);
+                    if expected_ui_generation.is_none() {
+                        self.note_thread_runtime(key.clone(), runtime_kind);
+                    }
                     return Ok(true);
                 }
                 Ok(false) => return Ok(false),
@@ -288,6 +321,7 @@ impl MobileClient {
         runtime_kind: AgentRuntimeKind,
         exclude_turns: bool,
         expected_ui_generation: Option<u64>,
+        expected_session: Option<&Arc<ServerSession>>,
     ) -> Result<bool, String> {
         // Use thread/resume (not thread/read) so the server attaches a
         // conversation listener for this connection. Without the listener
@@ -370,16 +404,26 @@ impl MobileClient {
             reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
             snapshot.is_resumed = true;
             app_store.upsert_thread_snapshot(snapshot);
+            if expected_ui_generation.is_some() {
+                self.thread_runtime_routes()
+                    .insert(key.clone(), runtime_kind.clone());
+            }
         };
         let applied = if let Some(expected_generation) = expected_ui_generation {
-            self.app_store
-                .apply_if_ui_event_generation(expected_generation, apply_response)
-                .is_some()
+            self.apply_if_lag_refresh_current(
+                server_id,
+                expected_session.expect("fenced refresh carries its session"),
+                expected_generation,
+                apply_response,
+            )
+            .is_some()
         } else {
             apply_response(&self.app_store);
             true
         };
-        self.mark_direct_resumed_thread(key.clone());
+        if applied {
+            self.mark_direct_resumed_thread(key.clone());
+        }
         Ok(applied)
     }
 
@@ -398,6 +442,7 @@ impl MobileClient {
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
         expected_ui_generation: Option<u64>,
+        expected_session: Option<&Arc<ServerSession>>,
     ) -> bool {
         const PROBE_LIMIT: u32 = 5;
         let request = upstream::ClientRequest::ThreadTurnsList {
@@ -426,8 +471,24 @@ impl MobileClient {
                     // one embedded-turn resume so reconcile_active_turn can
                     // still clear a stale active turn after mobile reconnects.
                     if runtime_kind == "codex" {
-                        self.app_store
-                            .set_server_supports_turn_pagination(server_id, false);
+                        if let Some(generation) = expected_ui_generation {
+                            if self
+                                .apply_if_lag_refresh_current(
+                                    server_id,
+                                    expected_session.expect("fenced refresh carries its session"),
+                                    generation,
+                                    |store| {
+                                        store.set_server_supports_turn_pagination(server_id, false)
+                                    },
+                                )
+                                .is_none()
+                            {
+                                return false;
+                            }
+                        } else {
+                            self.app_store
+                                .set_server_supports_turn_pagination(server_id, false);
+                        }
                     }
                     if let Err(fallback_error) = self
                         .resume_thread_for_runtime(
@@ -437,6 +498,7 @@ impl MobileClient {
                             runtime_kind.clone(),
                             false,
                             expected_ui_generation,
+                            expected_session,
                         )
                         .await
                     {
@@ -451,9 +513,54 @@ impl MobileClient {
                         server_id, thread_id, error
                     );
                 }
-                return expected_ui_generation
-                    .is_none_or(|generation| self.app_store.ui_event_generation() == generation);
+                return expected_ui_generation.is_none_or(|generation| {
+                    self.apply_if_lag_refresh_current(
+                        server_id,
+                        expected_session.expect("fenced refresh carries its session"),
+                        generation,
+                        |_| (),
+                    )
+                    .is_some()
+                });
             }
+        };
+        let needs_repair_page = self.app_store.thread_snapshot(key).is_some_and(|existing| {
+            let was_active = existing.active_turn_id.is_some();
+            let mut target = existing.clone();
+            target.active_turn_id = None;
+            reconcile_active_turn(Some(&existing), &mut target, &response.data);
+            was_active && target.active_turn_id.is_none()
+        });
+        let repair_page = if needs_repair_page {
+            let request = upstream::ClientRequest::ThreadTurnsList {
+                request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                params: upstream::ThreadTurnsListParams {
+                    thread_id: thread_id.to_string(),
+                    cursor: None,
+                    limit: Some(PROBE_LIMIT),
+                    sort_direction: Some(upstream::SortDirection::Desc),
+                    items_view: None,
+                },
+            };
+            match self
+                .request_typed_for_server_runtime::<upstream::ThreadTurnsListResponse>(
+                    server_id,
+                    runtime_kind,
+                    request,
+                )
+                .await
+            {
+                Ok(response) => Some(crate::types::AppListThreadTurnsResponse::from(response)),
+                Err(error) => {
+                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "force_authoritative: completed-turn repair page failed server={} thread={}: {}",
+                        server_id, thread_id, error
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
         let apply_response = |app_store: &AppStoreReducer| {
             let Some(existing) = app_store.thread_snapshot(key) else {
@@ -471,27 +578,34 @@ impl MobileClient {
             {
                 app_store.upsert_thread_snapshot(target);
             }
+            if active_turn_cleared
+                && let Some(page) = repair_page.as_ref()
+                && let Err(error) = self.apply_thread_turns_page(
+                    server_id,
+                    thread_id,
+                    page,
+                    crate::types::AppTurnsSortDirection::Descending,
+                )
+            {
+                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                    "force_authoritative: completed-turn repair merge failed server={} thread={}: {}",
+                    server_id, thread_id, error
+                );
+            }
             active_turn_cleared
         };
-        let Some(active_turn_cleared) = (if let Some(expected_generation) = expected_ui_generation {
-            self.app_store
-                .apply_if_ui_event_generation(expected_generation, apply_response)
+        let Some(_) = (if let Some(expected_generation) = expected_ui_generation {
+            self.apply_if_lag_refresh_current(
+                server_id,
+                expected_session.expect("fenced refresh carries its session"),
+                expected_generation,
+                apply_response,
+            )
         } else {
             Some(apply_response(&self.app_store))
         }) else {
             return false;
         };
-        if active_turn_cleared
-            && expected_ui_generation.is_none()
-            && let Err(error) = self
-                .load_thread_turns_page(server_id, thread_id, None, Some(PROBE_LIMIT))
-                .await
-        {
-            warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                "force_authoritative: completed-turn repair page failed server={} thread={}: {}",
-                server_id, thread_id, error
-            );
-        }
         true
     }
 
@@ -530,6 +644,7 @@ impl MobileClient {
                     &key,
                     runtime_kind,
                     false,
+                    None,
                     None,
                 )
                 .await
@@ -591,6 +706,7 @@ impl MobileClient {
                     runtime_kind,
                     false,
                     None,
+                    None,
                 )
                 .await
                 .map_err(RpcError::Deserialization)?;
@@ -609,11 +725,12 @@ impl MobileClient {
         thread_id: &str,
         runtime_kind: AgentRuntimeKind,
         expected_ui_generation: Option<u64>,
+        expected_session: Option<&Arc<ServerSession>>,
     ) -> Result<bool, RpcError> {
         let response: upstream::ThreadReadResponse = self
             .request_typed_for_server_runtime(
                 server_id,
-                runtime_kind,
+                runtime_kind.clone(),
                 upstream::ClientRequest::ThreadRead {
                     request_id: upstream::RequestId::Integer(crate::next_request_id()),
                     params: upstream::ThreadReadParams {
@@ -626,16 +743,28 @@ impl MobileClient {
             .map_err(RpcError::Deserialization)?;
         if let Some(expected_generation) = expected_ui_generation {
             let mut response = Some(response);
-            self.app_store
-                .apply_if_ui_event_generation(expected_generation, |store| {
+            self.apply_if_lag_refresh_current(
+                server_id,
+                expected_session.expect("fenced refresh carries its session"),
+                expected_generation,
+                |store| {
                     upsert_thread_snapshot_from_app_server_read_response(
                         store,
                         server_id,
                         response.take().expect("response is applied once"),
-                    )
-                })
-                .transpose()
-                .map(|applied| applied.is_some())
+                    )?;
+                    let key = ThreadKey {
+                        server_id: server_id.to_string(),
+                        thread_id: thread_id.to_string(),
+                    };
+                    self.thread_runtime_routes()
+                        .insert(key.clone(), runtime_kind.clone());
+                    store.set_thread_agent_runtime(&key, runtime_kind.clone());
+                    Ok(())
+                },
+            )
+            .transpose()
+            .map(|applied| applied.is_some())
         } else {
             upsert_thread_snapshot_from_app_server_read_response(
                 &self.app_store,
@@ -694,6 +823,8 @@ impl MobileClient {
     ) -> Result<(), RpcError> {
         self.get_session(server_id)?;
         let mut params = params;
+        let mut autosend_claim_id = autosend_claim_id;
+        let mut manual_retry_claim_id = None;
         let thread_key = ThreadKey {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
@@ -722,7 +853,31 @@ impl MobileClient {
                 self.app_store
                     .enqueue_thread_follow_up_draft(&thread_key, draft);
             }
-            return Ok(());
+            let Some(draft) = self.app_store.try_claim_first_queued_follow_up(&thread_key) else {
+                // Another autosend task already owns the retained first draft.
+                return Ok(());
+            };
+            params = upstream::TurnStartParams {
+                thread_id: thread_key.thread_id.clone(),
+                input: draft.inputs,
+                responsesapi_client_metadata: None,
+                cwd: None,
+                runtime_workspace_roots: None,
+                approval_policy: None,
+                approvals_reviewer: None,
+                sandbox_policy: None,
+                environments: None,
+                permissions: None,
+                model: None,
+                service_tier: None,
+                effort: None,
+                summary: None,
+                personality: None,
+                output_schema: None,
+                collaboration_mode: None,
+            };
+            manual_retry_claim_id = Some(draft.preview.id.clone());
+            autosend_claim_id = manual_retry_claim_id.clone();
         }
         if let Some(thread) = thread_snapshot.as_ref()
             && thread.collaboration_mode == AppModeKind::Plan
@@ -786,8 +941,9 @@ impl MobileClient {
             .as_ref()
             .and_then(|t| t.active_turn_id.clone())
         {
-            let steer_result = self
-                .request_typed_for_server::<upstream::TurnSteerResponse>(
+            let steer_result = tokio::time::timeout(
+                TURN_REQUEST_TIMEOUT,
+                self.request_typed_for_server::<upstream::TurnSteerResponse>(
                     server_id,
                     upstream::ClientRequest::TurnSteer {
                         request_id: upstream::RequestId::Integer(crate::next_request_id()),
@@ -798,17 +954,19 @@ impl MobileClient {
                             expected_turn_id: active_turn_id,
                         },
                     },
-                )
-                .await;
+                ),
+            )
+            .await;
             match steer_result {
-                Ok(_) => {
+                Ok(Ok(_)) => {
                     // Draft cleanup happens via TurnStarted / item upsert;
                     // don't remove here so the user sees the queued preview.
                     return Ok(());
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     // Turn not steerable or gone — fall through to turn/start.
                 }
+                Err(_) => return Err(RpcError::Timeout),
             }
         }
 
@@ -821,15 +979,21 @@ impl MobileClient {
             },
             &params.thread_id,
         );
-        let response_result = self
-            .request_typed_for_server::<upstream::TurnStartResponse>(
+        let response_result = match tokio::time::timeout(
+            TURN_REQUEST_TIMEOUT,
+            self.request_typed_for_server::<upstream::TurnStartResponse>(
                 server_id,
                 upstream::ClientRequest::TurnStart {
                     request_id: upstream::RequestId::Integer(crate::next_request_id()),
                     params: direct_params,
                 },
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(RpcError::Deserialization),
+            Err(_) => Err(RpcError::Timeout),
+        };
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
@@ -843,7 +1007,11 @@ impl MobileClient {
                     self.app_store
                         .remove_thread_follow_up_draft(&thread_key, &draft.preview.id);
                 }
-                return Err(RpcError::Deserialization(error));
+                if let Some(claim_id) = manual_retry_claim_id.as_deref() {
+                    self.app_store
+                        .release_thread_follow_up_claim(&thread_key, claim_id);
+                }
+                return Err(error);
             }
         };
         self.app_store

@@ -64,6 +64,8 @@ pub(crate) struct InMemoryTrustBackend {
     /// When set, writes fail after authentication — models a keychain or
     /// encrypted preferences store that cannot durably record a first-use pin.
     fail_writes: AtomicBool,
+    /// When set, removals fail — models a store that cannot durably delete a pin.
+    fail_removes: AtomicBool,
 }
 
 impl InMemoryTrustBackend {
@@ -73,6 +75,10 @@ impl InMemoryTrustBackend {
 
     pub(crate) fn set_write_failing(&self, failing: bool) {
         self.fail_writes.store(failing, Ordering::SeqCst);
+    }
+
+    pub(crate) fn set_remove_failing(&self, failing: bool) {
+        self.fail_removes.store(failing, Ordering::SeqCst);
     }
 }
 
@@ -103,6 +109,11 @@ impl TerminalSshTrustBackend for InMemoryTrustBackend {
         Ok(())
     }
     fn remove(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
+        if self.fail_removes.load(Ordering::SeqCst) {
+            return Err(SshTrustStoreError::Unavailable {
+                detail: "test backend remove failure".to_string(),
+            });
+        }
         self.entries.lock().unwrap().remove(&(host, port));
         Ok(())
     }

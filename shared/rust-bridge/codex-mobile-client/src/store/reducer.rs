@@ -93,7 +93,7 @@ pub struct AppStoreReducer {
     snapshot: RwLock<AppSnapshot>,
     /// Serializes streamed UI-event application with conditional authoritative
     /// refresh commits. Network work never holds this lock.
-    ui_event_generation: Mutex<u64>,
+    ui_event_generations: Mutex<HashMap<String, u64>>,
     last_thread_state_updates: RwLock<
         HashMap<
             ThreadKey,
@@ -142,7 +142,7 @@ impl AppStoreReducer {
         let (updates_tx, _) = broadcast::channel(1024);
         Self {
             snapshot: RwLock::new(AppSnapshot::default()),
-            ui_event_generation: Mutex::new(0),
+            ui_event_generations: Mutex::new(HashMap::new()),
             last_thread_state_updates: RwLock::new(HashMap::new()),
             last_thread_item_upserts: RwLock::new(HashMap::new()),
             dynamic_tool_arg_buffers: RwLock::new(HashMap::new()),
@@ -167,25 +167,28 @@ impl AppStoreReducer {
             .cloned()
     }
 
-    pub(crate) fn ui_event_generation(&self) -> u64 {
-        *self
-            .ui_event_generation
+    pub(crate) fn server_event_generation(&self, server_id: &str) -> u64 {
+        self.ui_event_generations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(server_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Commits an authoritative response only when no newer streamed UI event
     /// has started applying since the request was issued.
-    pub(crate) fn apply_if_ui_event_generation<R>(
+    pub(crate) fn apply_if_server_event_generation<R>(
         &self,
+        server_id: &str,
         expected_generation: u64,
         apply: impl FnOnce(&Self) -> R,
     ) -> Option<R> {
-        let generation = self
-            .ui_event_generation
+        let generations = self
+            .ui_event_generations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *generation != expected_generation {
+        if generations.get(server_id).copied().unwrap_or(0) != expected_generation {
             return None;
         }
         Some(apply(self))
@@ -1553,11 +1556,14 @@ impl AppStoreReducer {
     }
 
     pub(crate) fn apply_ui_event(&self, event: &UiEvent) {
-        let mut generation = self
-            .ui_event_generation
+        let mut generations = self
+            .ui_event_generations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *generation = generation.saturating_add(1);
+        if let Some(server_id) = event.server_id() {
+            let generation = generations.entry(server_id.to_string()).or_default();
+            *generation = generation.saturating_add(1);
+        }
         match event {
             UiEvent::ThreadStarted { key, notification } => {
                 let info = thread_info_from_upstream(notification.thread.clone());

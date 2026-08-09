@@ -80,15 +80,32 @@ fn authoritative_refresh_fence_rejects_state_older_than_streamed_event() {
     };
     let stale = ThreadSnapshot::from_info("srv", make_thread_info(&key.thread_id));
     reducer.upsert_thread_snapshot(stale.clone());
-    let request_generation = reducer.ui_event_generation();
+    let request_generation = reducer.server_event_generation("srv");
 
     reducer.apply_ui_event(&UiEvent::ThreadArchived { key: key.clone() });
-    let applied = reducer.apply_if_ui_event_generation(request_generation, |store| {
+    let applied = reducer.apply_if_server_event_generation("srv", request_generation, |store| {
         store.upsert_thread_snapshot(stale);
     });
 
     assert!(applied.is_none());
     assert!(!reducer.snapshot().threads.contains_key(&key));
+}
+
+#[test]
+fn authoritative_refresh_fence_ignores_unrelated_server_events() {
+    let reducer = AppStoreReducer::new();
+    let request_generation = reducer.server_event_generation("srv-a");
+
+    reducer.apply_ui_event(&UiEvent::ThreadArchived {
+        key: ThreadKey {
+            server_id: "srv-b".to_string(),
+            thread_id: "other".to_string(),
+        },
+    });
+    let applied =
+        reducer.apply_if_server_event_generation("srv-a", request_generation, |_| "applied");
+
+    assert_eq!(applied, Some("applied"));
 }
 
 #[test]

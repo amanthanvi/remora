@@ -1078,6 +1078,151 @@ mod mobile_client_tests {
     }
 
     #[tokio::test]
+    async fn fenced_authoritative_refresh_merges_completed_turn_repair_page() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(thread_snapshot_with_active_turn(
+                server_id,
+                thread_id,
+                "turn-active",
+            ));
+
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let request_handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { params, .. } => {
+                    requests
+                        .lock()
+                        .expect("request log lock")
+                        .push(format!("thread/resume:{}", params.exclude_turns));
+                    serde_json::to_value(json!({
+                        "thread": {
+                            "id": thread_id,
+                            "preview": "completed",
+                            "ephemeral": false,
+                            "modelProvider": "openai",
+                            "createdAt": 1,
+                            "updatedAt": 2,
+                            "status": { "type": "idle" },
+                            "path": "/tmp/thread",
+                            "cwd": "/tmp/thread",
+                            "cliVersion": "1.0.0",
+                            "source": "cli",
+                            "agentNickname": null,
+                            "agentRole": null,
+                            "gitInfo": null,
+                            "name": "thread",
+                            "turns": []
+                        },
+                        "model": "gpt-5",
+                        "modelProvider": "openai",
+                        "cwd": "/tmp/thread",
+                        "approvalPolicy": "never",
+                        "approvalsReviewer": "user",
+                        "sandbox": { "type": "dangerFullAccess" },
+                        "reasoningEffort": "medium"
+                    }))
+                    .map_err(|error| RpcError::Deserialization(error.to_string()))
+                }
+                upstream::ClientRequest::ThreadTurnsList { params, .. } => {
+                    let skeleton =
+                        matches!(params.items_view, Some(upstream::TurnItemsView::NotLoaded));
+                    requests
+                        .lock()
+                        .expect("request log lock")
+                        .push(if skeleton {
+                            "thread/turns/list:skeleton".to_string()
+                        } else {
+                            "thread/turns/list:full".to_string()
+                        });
+                    let items = if skeleton {
+                        json!([])
+                    } else {
+                        json!([{
+                            "id": "item-1",
+                            "type": "userMessage",
+                            "content": [{
+                                "type": "text",
+                                "text": "finished while disconnected",
+                                "textElements": []
+                            }]
+                        }])
+                    };
+                    Ok(json!({
+                        "data": [{
+                            "id": "turn-active",
+                            "items": items,
+                            "itemsView": if skeleton { "notLoaded" } else { "full" },
+                            "status": "completed",
+                            "error": null,
+                            "startedAt": 1,
+                            "completedAt": 2,
+                            "durationMs": 1
+                        }],
+                        "nextCursor": null,
+                        "backwardsCursor": null
+                    }))
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected request in test: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(request_handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+        let generation = client.app_store.server_event_generation(server_id);
+
+        let applied = client
+            .force_refresh_thread_authoritative_if_ui_generation(server_id, thread_id, generation)
+            .await
+            .expect("authoritative refresh succeeds");
+
+        assert!(applied);
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            [
+                "thread/resume:true",
+                "thread/turns/list:skeleton",
+                "thread/turns/list:full"
+            ]
+        );
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.active_turn_id, None);
+        assert_eq!(thread.items.len(), 1);
+        let crate::conversation_uniffi::HydratedConversationItemContent::User(message) =
+            &thread.items[0].content
+        else {
+            panic!("expected repaired user message");
+        };
+        assert_eq!(message.text, "finished while disconnected");
+    }
+
+    #[tokio::test]
     async fn force_refresh_thread_authoritative_falls_back_to_embedded_resume_for_amp_probe_miss() {
         let client = MobileClient::new();
         let server_id = "srv";

@@ -449,7 +449,6 @@ object SavedServerStore {
         val journal = JSONObject()
             .put("host", target.first)
             .put("port", target.second)
-            .put("rollbackServers", rollbackJson)
             .toString()
         runTrustCleanupTransaction(
             begin = {
@@ -458,25 +457,22 @@ object SavedServerStore {
                         .putString(PENDING_SSH_TRUST_CLEANUP_KEY, journal)
                         .commit()
                 ) {
-                    preferences.edit()
+                    val restored = preferences.edit()
                         .putString(VALUE_KEY, rollbackJson)
                         .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
                         .commit()
-                    error("Unable to persist the SSH trust cleanup transaction")
+                    error(
+                        if (restored) {
+                            "Unable to persist the SSH trust cleanup transaction"
+                        } else {
+                            "Unable to persist or roll back the SSH trust cleanup transaction"
+                        },
+                    )
                 }
             },
             unpin = {
                 TerminalSshTrustStore(SshTrustStore(context))
                     .unpin(target.first, target.second.toUShort())
-            },
-            rollback = {
-                if (!preferences.edit()
-                        .putString(VALUE_KEY, rollbackJson)
-                        .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
-                        .commit()
-                ) {
-                    error("Unable to roll back the SSH trust cleanup transaction")
-                }
             },
             finish = {
                 // Failure leaves the durable journal intact; the next load
@@ -499,22 +495,12 @@ object SavedServerStore {
             ?: error("SSH trust cleanup journal is missing its host")
         val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
             ?: error("SSH trust cleanup journal has an invalid port")
-        val rollbackJson = journal.optString("rollbackServers").takeIf { it.isNotBlank() }
-            ?: error("SSH trust cleanup journal is missing rollback state")
-
         try {
             TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port.toUShort())
-        } catch (unpinError: Exception) {
-            if (!preferences.edit()
-                    .putString(VALUE_KEY, rollbackJson)
-                    .remove(PENDING_SSH_TRUST_CLEANUP_KEY)
-                    .commit()
-            ) {
-                throw IllegalStateException(
-                    "Unable to roll back an interrupted SSH trust cleanup",
-                    unpinError,
-                )
-            }
+        } catch (_: Exception) {
+            // The trust-store commit result is ambiguous: its in-memory map may
+            // already have removed the pin. Keep both the server deletion and
+            // journal so no reconnect can downgrade to first-use trust.
             return
         }
         // A failed clear remains safe: the durable journal causes another
@@ -528,19 +514,15 @@ object SavedServerStore {
     internal fun runTrustCleanupTransaction(
         begin: () -> Unit,
         unpin: () -> Unit,
-        rollback: () -> Unit,
         finish: () -> Unit,
     ) {
         begin()
         try {
             unpin()
-        } catch (unpinError: Exception) {
-            try {
-                rollback()
-            } catch (rollbackError: Exception) {
-                unpinError.addSuppressed(rollbackError)
-            }
-            throw unpinError
+        } catch (_: Exception) {
+            // Leave the journal durable and the server absent. A later load
+            // retries cleanup without exposing an ambiguous first-use path.
+            return
         }
         finish()
     }

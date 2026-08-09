@@ -60,7 +60,10 @@ import com.remora.android.state.statusLabel
 import com.remora.android.state.toRecord
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.AppServerSnapshot
 
 @Composable
@@ -323,15 +326,19 @@ internal fun ServerEditSheet(
         }
     }
 
-    fun persist(saved: SavedServer): Boolean {
+    suspend fun persist(saved: SavedServer): Boolean {
         return try {
-            SavedServerStore.replace(context, saved)
-            val updated = SavedServerStore.load(context)
+            val updated = withContext(Dispatchers.IO) {
+                SavedServerStore.replace(context, saved)
+                SavedServerStore.load(context)
+            }
             appModel.reconnectController.syncSavedServers(
                 updated.filter { it.rememberedByUser }.map { it.toRecord() }
             )
             appModel.store.renameServer(saved.id, saved.name)
             true
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (error: Exception) {
             validationError = error.localizedMessage ?: error.message ?: "Unable to update server."
             false
@@ -339,7 +346,9 @@ internal fun ServerEditSheet(
     }
 
     suspend fun reconnect(serverId: String) {
-        val servers = SavedServerStore.load(context).map { it.toRecord() }
+        val servers = withContext(Dispatchers.IO) {
+            SavedServerStore.load(context).map { it.toRecord() }
+        }
         appModel.reconnectController.syncSavedServers(servers)
         val result = appModel.reconnectController.reconnectServer(serverId)
         if (result.needsLocalAuthRestore) {
@@ -594,8 +603,12 @@ internal fun ServerEditSheet(
                                 onClick = {
                                     validationError = null
                                     val saved = validateAndBuild()
-                                    if (saved != null && persist(saved)) {
-                                        onSave()
+                                    if (saved != null) {
+                                        scope.launch {
+                                            if (persist(saved)) {
+                                                onSave()
+                                            }
+                                        }
                                     }
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = RemoraTheme.accent),
@@ -608,18 +621,23 @@ internal fun ServerEditSheet(
                                     onClick = {
                                         validationError = null
                                         val saved = validateAndBuild()
-                                        if (saved != null && persist(saved)) {
-                                            // SSH mode requires interactive credentials, mirroring iOS:
-                                            // hand off to the parent which will open SSHLoginDialog.
-                                            if (connectionMode == ServerConnectionMode.SSH && !server.isLocal) {
-                                                onTriggerSshReconnect(saved)
-                                                return@Button
-                                            }
+                                        if (saved != null) {
                                             scope.launch {
+                                                if (!persist(saved)) {
+                                                    return@launch
+                                                }
+                                                // SSH mode requires interactive credentials, mirroring iOS:
+                                                // hand off to the parent which will open SSHLoginDialog.
+                                                if (connectionMode == ServerConnectionMode.SSH && !server.isLocal) {
+                                                    onTriggerSshReconnect(saved)
+                                                    return@launch
+                                                }
                                                 isReconnecting = true
                                                 try {
                                                     reconnectSaved(saved)
                                                     onSave()
+                                                } catch (cancellation: CancellationException) {
+                                                    throw cancellation
                                                 } catch (e: Exception) {
                                                     isReconnecting = false
                                                     if (

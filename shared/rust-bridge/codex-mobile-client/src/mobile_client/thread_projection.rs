@@ -508,14 +508,25 @@ pub(super) async fn refresh_thread_list_from_app_server(
 
 pub(super) async fn refresh_thread_list_from_app_server_if_ui_generation(
     session: Arc<ServerSession>,
+    sessions: Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
     app_store: Arc<AppStoreReducer>,
     server_id: &str,
     expected_generation: u64,
 ) -> Result<bool, RpcError> {
     let (runtime_pages, incoming_ids) =
-        read_thread_list_from_app_server(session, server_id).await?;
+        read_thread_list_from_app_server(Arc::clone(&session), server_id).await?;
+    let sessions = match sessions.read() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    if !sessions
+        .get(server_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &session))
+    {
+        return Ok(false);
+    }
     Ok(app_store
-        .apply_if_ui_event_generation(expected_generation, |store| {
+        .apply_if_server_event_generation(server_id, expected_generation, |store| {
             apply_thread_list_refresh(store, server_id, runtime_pages, incoming_ids);
         })
         .is_some())
@@ -812,7 +823,7 @@ mod authoritative_thread_list_tests {
             server_id,
             cached_thread_info(thread_id),
         ));
-        let request_generation = app_store.ui_event_generation();
+        let request_generation = app_store.server_event_generation(server_id);
         let event_store = Arc::clone(&app_store);
         let event_key = key.clone();
         let handler: TestRequestHandler = Arc::new(move |_| {
@@ -849,9 +860,14 @@ mod authoritative_thread_list_tests {
             None,
             None,
         ));
+        let sessions = Arc::new(RwLock::new(HashMap::from([(
+            server_id.to_string(),
+            Arc::clone(&session),
+        )])));
 
         let applied = refresh_thread_list_from_app_server_if_ui_generation(
             session,
+            sessions,
             Arc::clone(&app_store),
             server_id,
             request_generation,
@@ -861,6 +877,98 @@ mod authoritative_thread_list_tests {
 
         assert!(!applied);
         assert!(!app_store.snapshot().threads.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn stale_thread_list_response_from_replaced_session_is_discarded() {
+        let server_id = "srv";
+        let thread_id = "cached";
+        let config = ServerConfig {
+            server_id: server_id.to_string(),
+            display_name: "Server".to_string(),
+            host: "example.local".to_string(),
+            port: 0,
+            websocket_url: None,
+            is_local: false,
+            tls: false,
+        };
+        let app_store = Arc::new(AppStoreReducer::new());
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        app_store.upsert_thread_snapshot(ThreadSnapshot::from_info(
+            server_id,
+            cached_thread_info(thread_id),
+        ));
+        let request_generation = app_store.server_event_generation(server_id);
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            None,
+            None,
+            None,
+        ));
+        let handler: TestRequestHandler = {
+            let sessions = Arc::clone(&sessions);
+            let replacement = Arc::clone(&replacement);
+            Arc::new(move |_| {
+                sessions
+                    .write()
+                    .expect("sessions lock")
+                    .insert(server_id.to_string(), Arc::clone(&replacement));
+                Ok(serde_json::json!({
+                    "data": [{
+                        "id": thread_id,
+                        "sessionId": thread_id,
+                        "preview": "stale",
+                        "ephemeral": false,
+                        "modelProvider": "openai",
+                        "createdAt": 1,
+                        "updatedAt": 2,
+                        "status": { "type": "idle" },
+                        "path": "/tmp/stale",
+                        "cwd": "/tmp/stale",
+                        "cliVersion": "1.0.0",
+                        "source": "cli",
+                        "agentNickname": null,
+                        "agentRole": null,
+                        "gitInfo": null,
+                        "name": "Stale thread",
+                        "turns": []
+                    }],
+                    "nextCursor": null,
+                    "backwardsCursor": null
+                }))
+            })
+        };
+        let stale_session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), Arc::clone(&stale_session));
+
+        let applied = refresh_thread_list_from_app_server_if_ui_generation(
+            stale_session,
+            Arc::clone(&sessions),
+            Arc::clone(&app_store),
+            server_id,
+            request_generation,
+        )
+        .await
+        .expect("thread/list should deserialize");
+
+        assert!(!applied);
+        let thread = app_store
+            .thread_snapshot(&key)
+            .expect("cached thread remains");
+        assert_eq!(thread.info.title.as_deref(), Some("Cached thread"));
+        assert_eq!(thread.info.cwd.as_deref(), Some("/tmp"));
     }
 }
 

@@ -213,6 +213,48 @@ pub(crate) enum UiEvent {
     },
 }
 
+impl UiEvent {
+    pub(crate) fn server_id(&self) -> Option<&str> {
+        match self {
+            Self::ThreadStarted { key, .. }
+            | Self::ThreadArchived { key }
+            | Self::ThreadNameUpdated { key, .. }
+            | Self::ThreadStatusChanged { key, .. }
+            | Self::ThreadGoalUpdated { key, .. }
+            | Self::ThreadGoalCleared { key }
+            | Self::ModelRerouted { key, .. }
+            | Self::TurnStarted { key, .. }
+            | Self::TurnCompleted { key, .. }
+            | Self::TurnDiffUpdated { key, .. }
+            | Self::TurnPlanUpdated { key, .. }
+            | Self::FileChangePatchUpdated { key, .. }
+            | Self::ItemStarted { key, .. }
+            | Self::ItemCompleted { key, .. }
+            | Self::McpToolCallProgress { key, .. }
+            | Self::ServerRequestResolved { key, .. }
+            | Self::MessageDelta { key, .. }
+            | Self::ReasoningDelta { key, .. }
+            | Self::PlanDelta { key, .. }
+            | Self::CommandOutputDelta { key, .. }
+            | Self::DynamicToolCallArgumentsDelta { key, .. }
+            | Self::ApprovalRequested { key, .. }
+            | Self::RealtimeStarted { key, .. }
+            | Self::RealtimeSdp { key, .. }
+            | Self::RealtimeItemAdded { key, .. }
+            | Self::RealtimeTranscriptUpdated { key, .. }
+            | Self::RealtimeOutputAudioDelta { key, .. }
+            | Self::RealtimeError { key, .. }
+            | Self::RealtimeClosed { key, .. }
+            | Self::ContextTokensUpdated { key, .. } => Some(&key.server_id),
+            Self::UserInputRequested { request, .. } => Some(&request.server_id),
+            Self::AccountRateLimitsUpdated { server_id, .. }
+            | Self::ConnectionStateChanged { server_id, .. }
+            | Self::RawNotification { server_id, .. } => Some(server_id),
+            Self::Error { key, .. } => key.as_ref().map(|key| key.server_id.as_str()),
+        }
+    }
+}
+
 /// Processes upstream typed server notifications/requests and emits high-level [`UiEvent`]s.
 ///
 /// The processor is `Send + Sync` — all mutable state is behind `Arc<Mutex<_>>`.

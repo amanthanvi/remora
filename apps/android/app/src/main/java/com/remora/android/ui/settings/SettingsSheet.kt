@@ -55,7 +55,10 @@ import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.RemoraThemeManager
 import com.remora.android.ui.connection.SSHLoginDialog
 import com.remora.android.util.LLog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.Account
 import uniffi.codex_mobile_client.AppServerSnapshot
 
@@ -275,12 +278,16 @@ private fun SettingsTopLevel(
                     onRemove = {
                         scope.launch {
                             try {
-                                SavedServerStore.remove(context, server.serverId)
-                                appModel.sshSessionStore.close(server.serverId)
-                                appModel.serverBridge.disconnectServer(server.serverId)
+                                withContext(Dispatchers.IO) {
+                                    SavedServerStore.remove(context, server.serverId)
+                                    appModel.sshSessionStore.close(server.serverId)
+                                    appModel.serverBridge.disconnectServer(server.serverId)
+                                }
                                 appModel.refreshSnapshot()
+                            } catch (cancellation: CancellationException) {
+                                throw cancellation
                             } catch (error: Exception) {
-                                serverRemovalError = error.message ?: "Unable to remove SSH trust pin."
+                                serverRemovalError = error.message ?: "Unable to remove the server."
                             }
                         }
                     },

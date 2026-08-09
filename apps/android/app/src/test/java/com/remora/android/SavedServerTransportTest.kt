@@ -26,7 +26,6 @@ class SavedServerTransportTest {
         SavedServerStore.runTrustCleanupTransaction(
             begin = { steps += "begin" },
             unpin = { steps += "unpin" },
-            rollback = { steps += "rollback" },
             finish = { steps += "finish" },
         )
 
@@ -34,23 +33,19 @@ class SavedServerTransportTest {
     }
 
     @Test
-    fun failedSshTrustCleanupRestoresJournaledServerState() {
+    fun failedSshTrustCleanupKeepsServerAbsentAndJournalDurable() {
         val steps = mutableListOf<String>()
 
-        val error = assertThrows(IllegalStateException::class.java) {
-            SavedServerStore.runTrustCleanupTransaction(
-                begin = { steps += "begin" },
-                unpin = {
-                    steps += "unpin"
-                    throw IllegalStateException("unpin failed")
-                },
-                rollback = { steps += "rollback" },
-                finish = { steps += "finish" },
-            )
-        }
+        SavedServerStore.runTrustCleanupTransaction(
+            begin = { steps += "begin" },
+            unpin = {
+                steps += "unpin"
+                throw IllegalStateException("unpin failed")
+            },
+            finish = { steps += "finish" },
+        )
 
-        assertEquals("unpin failed", error.message)
-        assertEquals(listOf("begin", "unpin", "rollback"), steps)
+        assertEquals(listOf("begin", "unpin"), steps)
     }
 
     @Test
@@ -64,7 +59,6 @@ class SavedServerTransportTest {
                     throw IllegalStateException("journal failed")
                 },
                 unpin = { steps += "unpin" },
-                rollback = { steps += "rollback" },
                 finish = { steps += "finish" },
             )
         }
@@ -188,7 +182,6 @@ class SavedServerTransportTest {
         }
 
         assertEquals("pin removal failed", error.message)
-        assertEquals(listOf(ssh), existing)
     }
 
     @Test
@@ -260,7 +253,6 @@ class SavedServerTransportTest {
         }
 
         assertEquals("pin replacement failed", error.message)
-        assertEquals(listOf(previous), existing)
     }
 
     @Test

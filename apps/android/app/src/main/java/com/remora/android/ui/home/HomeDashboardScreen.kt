@@ -102,8 +102,11 @@ import com.remora.android.ui.common.DebugBuildLabel
 import com.remora.android.ui.common.runtimeSortIndex
 import com.remora.android.ui.scaled
 import com.remora.android.R
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.remora.android.ui.common.AgentRuntimeKind
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AppServerSnapshot
@@ -1125,13 +1128,17 @@ fun HomeDashboardScreen(
                             }
                             is ConfirmAction.DisconnectServer -> {
                                 try {
-                                    SavedServerStore.remove(context, action.server.serverId)
-                                    appModel.sshSessionStore.close(action.server.serverId)
-                                    appModel.serverBridge.disconnectServer(action.server.serverId)
+                                    withContext(Dispatchers.IO) {
+                                        SavedServerStore.remove(context, action.server.serverId)
+                                        appModel.sshSessionStore.close(action.server.serverId)
+                                        appModel.serverBridge.disconnectServer(action.server.serverId)
+                                    }
                                     appModel.refreshSnapshot()
+                                } catch (cancellation: CancellationException) {
+                                    throw cancellation
                                 } catch (error: Exception) {
                                     confirmAction = ConfirmAction.ReplyError(
-                                        error.message ?: "Unable to remove SSH trust pin.",
+                                        error.message ?: "Unable to disconnect this server.",
                                     )
                                 }
                             }

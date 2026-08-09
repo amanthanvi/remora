@@ -89,6 +89,7 @@ pub(super) fn spawn_store_listener(
                     let owner = owner.clone();
                     let lag_reconcile_gate = Arc::clone(&lag_reconcile_gate);
                     MobileClient::spawn_detached(async move {
+                        let mut allow_stale_retry = true;
                         loop {
                             let Some(client) = owner.upgrade() else {
                                 warn!(
@@ -97,12 +98,18 @@ pub(super) fn spawn_store_listener(
                                 lag_reconcile_gate.cancel();
                                 return;
                             };
-                            if reconcile_after_store_listener_lag(client).await {
-                                lag_reconcile_gate.request_pass();
+                            if reconcile_after_store_listener_lag(client).await && allow_stale_retry
+                            {
+                                allow_stale_retry = false;
+                                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                                continue;
                             }
                             if !lag_reconcile_gate.finish_pass() {
                                 break;
                             }
+                            // A separately observed lag burst warrants its own
+                            // bounded stale-response retry.
+                            allow_stale_retry = true;
                         }
                     });
                 }
@@ -123,9 +130,10 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
         .collect::<HashSet<_>>();
 
     for (server_id, session) in sessions {
-        let expected_generation = client.app_store.ui_event_generation();
+        let expected_generation = client.app_store.server_event_generation(&server_id);
         match refresh_thread_list_from_app_server_if_ui_generation(
             session,
+            Arc::clone(&client.sessions),
             Arc::clone(&client.app_store),
             &server_id,
             expected_generation,
@@ -159,7 +167,7 @@ async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {
         .collect::<Vec<_>>();
 
     for key in keys {
-        let expected_generation = client.app_store.ui_event_generation();
+        let expected_generation = client.app_store.server_event_generation(&key.server_id);
         match client
             .force_refresh_thread_authoritative_if_ui_generation(
                 &key.server_id,
@@ -854,6 +862,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_send_retries_idle_retained_draft_before_new_message() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        let handler: TestRequestHandler = {
+            let sent = Arc::clone(&sent);
+            Arc::new(move |request| {
+                let upstream::ClientRequest::TurnStart { params, .. } = request else {
+                    panic!("expected turn/start");
+                };
+                let text = params
+                    .input
+                    .iter()
+                    .find_map(|input| match input {
+                        upstream::UserInput::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .expect("text input");
+                sent.lock().expect("request log lock").push(text);
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .start_turn(server_id, turn_start_params(thread_id, "new"))
+            .await
+            .expect("retained draft retry succeeds");
+
+        assert_eq!(
+            sent.lock().expect("request log lock").as_slice(),
+            ["retained"]
+        );
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "new");
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn failed_manual_retry_keeps_both_idle_drafts_claimable() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        let handler: TestRequestHandler = Arc::new(|request| {
+            assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+            Err(RpcError::Deserialization("retry failed".to_string()))
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        assert!(
+            client
+                .start_turn(server_id, turn_start_params(thread_id, "new"))
+                .await
+                .is_err()
+        );
+
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.active_turn_id, None);
+        assert_eq!(thread.queued_follow_up_drafts.len(), 2);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "retained");
+        assert_eq!(thread.queued_follow_up_drafts[1].preview.text, "new");
+        assert!(
+            thread
+                .queued_follow_up_drafts
+                .iter()
+                .all(|draft| !draft.autosend_claimed)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_manual_retry_releases_retained_draft_claim() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        let handler: TestRequestHandler = Arc::new(|request| {
+            assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            Ok(successful_turn_start_response())
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let error = client
+            .start_turn(server_id, turn_start_params(thread_id, "new"))
+            .await
+            .expect_err("hung turn/start should time out");
+
+        assert!(matches!(error, RpcError::Timeout));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert_eq!(thread.active_turn_id, None);
+        assert_eq!(thread.queued_follow_up_drafts.len(), 2);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "retained");
+        assert_eq!(thread.queued_follow_up_drafts[1].preview.text, "new");
+        assert!(
+            thread
+                .queued_follow_up_drafts
+                .iter()
+                .all(|draft| !draft.autosend_claimed)
+        );
+    }
+
+    #[tokio::test]
     async fn failed_queued_follow_up_releases_the_claim_for_retry() {
         let client = MobileClient::new();
         let server_id = "srv";
@@ -957,6 +1145,71 @@ mod tests {
             requests.lock().expect("request log lock").as_slice(),
             ["thread/list", "thread/resume"]
         );
+    }
+
+    #[tokio::test]
+    async fn authoritative_refresh_from_replaced_session_is_discarded() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        let generation = client.app_store.server_event_generation(server_id);
+        let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            None,
+            None,
+            None,
+        ));
+        let handler: TestRequestHandler = {
+            let sessions = Arc::clone(&client.sessions);
+            let replacement = Arc::clone(&replacement);
+            Arc::new(move |request| {
+                assert!(matches!(
+                    request,
+                    upstream::ClientRequest::ThreadResume { .. }
+                ));
+                sessions
+                    .write()
+                    .expect("sessions lock")
+                    .insert(server_id.to_string(), Arc::clone(&replacement));
+                Ok(successful_thread_resume_response(thread_id))
+            })
+        };
+        let stale_session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), stale_session);
+
+        let applied = client
+            .force_refresh_thread_authoritative_if_ui_generation(server_id, thread_id, generation)
+            .await
+            .expect("stale refresh should return cleanly");
+
+        assert!(!applied);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("cached thread remains");
+        assert!(!thread.is_resumed);
+        assert!(!client.direct_resumed_threads().contains(&key));
+        assert!(!client.thread_runtime_routes().contains_key(&key));
     }
 
     #[tokio::test]

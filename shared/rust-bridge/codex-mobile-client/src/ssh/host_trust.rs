@@ -412,6 +412,7 @@ mod tests {
         TEST_HOST_KEY_A, TEST_HOST_KEY_B, TestSshServer, host_key, in_memory_trust_store as store,
         in_memory_trust_store_with_backend,
     };
+    use crate::terminal::SshTrustStoreError;
 
     /// The pin currently recorded for the server's address.
     fn pin_for(store: &TerminalSshTrustStore, server: &TestSshServer) -> Option<String> {
@@ -705,6 +706,29 @@ mod tests {
             "write failure should occur only after successful authentication"
         );
         assert_eq!(pin_for(&store, &server), None);
+    }
+
+    #[test]
+    fn unpin_propagates_trust_store_removal_failure() {
+        let (store, backend) = in_memory_trust_store_with_backend();
+        store
+            .pin("host.example".to_string(), 22, "SHA256:pinned".to_string())
+            .expect("test pin succeeds");
+        backend.set_remove_failing(true);
+
+        let error = store
+            .unpin("host.example".to_string(), 22)
+            .expect_err("removal failure should propagate");
+
+        assert!(matches!(error, SshTrustStoreError::Unavailable { .. }));
+        backend.set_remove_failing(false);
+        assert_eq!(
+            store
+                .pinned("host.example".to_string(), 22)
+                .expect("pin remains readable")
+                .as_deref(),
+            Some("SHA256:pinned")
+        );
     }
 
     #[test]
