@@ -2447,8 +2447,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/dnakov/hairball.git";
 			requirement = {
-				branch = main;
-				kind = branch;
+				kind = revision;
+				revision = fbb4282ca428e4a76f6a4379d4ae844e9bfea95a;
 			};
 		};
 		F758A023196BEB449D7AB2A8 /* XCRemoteSwiftPackageReference "WebRTC" */ = {

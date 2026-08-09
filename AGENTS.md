@@ -91,7 +91,7 @@
 
 ### iOS (SPM via `apps/ios/project.yml`)
 
-- **Hairball** (`HairballUI` product, `dnakov/hairball`, `main` branch) — Renders Markdown in assistant/system messages with custom theming (`MarkdownTheme` / `HeadingStyleSet` in `MessageBubbleView.swift`).
+- **Hairball** (`HairballUI` product, `dnakov/hairball`, revision `fbb4282ca428e4a76f6a4379d4ae844e9bfea95a`) — Renders Markdown in assistant/system messages with custom theming (`MarkdownTheme` / `HeadingStyleSet` in `MessageBubbleView.swift`).
 - **WebRTC** (`stasel/WebRTC`, exact `147.0.0`) — Google libwebrtc binary framework backing realtime voice.
 - **Nuke** / **NukeUI** (`kean/Nuke`, from `12.8.0`) — image loading and caching for inline/remote images.
 

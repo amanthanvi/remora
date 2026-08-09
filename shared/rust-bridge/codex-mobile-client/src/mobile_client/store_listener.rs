@@ -2,12 +2,60 @@ use super::*;
 
 const SUBAGENT_METADATA_HYDRATE_DELAYS_MS: [u64; 3] = [150, 800, 2500];
 
+#[derive(Default)]
+struct LagReconcileState {
+    running: bool,
+    pending: bool,
+}
+
+#[derive(Default)]
+struct LagReconcileGate {
+    state: StdMutex<LagReconcileState>,
+}
+
+impl LagReconcileGate {
+    fn request_pass(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.running {
+            state.pending = true;
+            return false;
+        }
+        state.running = true;
+        true
+    }
+
+    fn finish_pass(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.pending {
+            state.pending = false;
+            return true;
+        }
+        state.running = false;
+        false
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = LagReconcileState::default();
+    }
+}
+
 pub(super) fn spawn_store_listener(
     owner: std::sync::Weak<MobileClient>,
     app_store: Arc<AppStoreReducer>,
     sessions: Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
     mut rx: broadcast::Receiver<UiEvent>,
 ) {
+    let lag_reconcile_gate = Arc::new(LagReconcileGate::default());
     MobileClient::spawn_detached(async move {
         loop {
             match rx.recv().await {
@@ -35,15 +83,25 @@ pub(super) fn spawn_store_listener(
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!("MobileClient: lagged {skipped} UI events");
+                    if !lag_reconcile_gate.request_pass() {
+                        continue;
+                    }
                     let owner = owner.clone();
+                    let lag_reconcile_gate = Arc::clone(&lag_reconcile_gate);
                     MobileClient::spawn_detached(async move {
-                        let Some(client) = owner.upgrade() else {
-                            warn!(
-                                "MobileClient: lag reconcile skipped because the listener owner was dropped"
-                            );
-                            return;
-                        };
-                        reconcile_after_store_listener_lag(client).await;
+                        loop {
+                            let Some(client) = owner.upgrade() else {
+                                warn!(
+                                    "MobileClient: lag reconcile skipped because the listener owner was dropped"
+                                );
+                                lag_reconcile_gate.cancel();
+                                return;
+                            };
+                            reconcile_after_store_listener_lag(client).await;
+                            if !lag_reconcile_gate.finish_pass() {
+                                break;
+                            }
+                        }
                     });
                 }
             }
@@ -297,6 +355,20 @@ mod tests {
     use super::*;
     use crate::session::connection::TestRequestHandler;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn lag_reconcile_gate_coalesces_concurrent_requests_into_one_follow_up() {
+        let gate = LagReconcileGate::default();
+
+        assert!(gate.request_pass());
+        assert!(!gate.request_pass());
+        assert!(!gate.request_pass());
+        assert!(gate.finish_pass(), "one follow-up pass should be pending");
+        assert!(!gate.finish_pass(), "the gate should return to idle");
+        assert!(gate.request_pass(), "idle gate should start a new pass");
+        gate.cancel();
+        assert!(gate.request_pass(), "cancel should return the gate to idle");
+    }
 
     fn make_server_config(server_id: &str) -> ServerConfig {
         ServerConfig {
