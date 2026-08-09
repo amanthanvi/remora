@@ -1301,7 +1301,7 @@ struct HomeNavigationView: View {
             } catch {
                 actionErrorMessage = error.localizedDescription
                 guard let storeError = error as? SavedServerStoreError,
-                      storeError.mutationMayHaveCommitted else {
+                      storeError.removalMayHaveCommitted else {
                     appModel.reconnectController.rollbackServerRemoval(
                         serverId: serverId,
                         lease: removalLease

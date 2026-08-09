@@ -3,17 +3,113 @@ import XCTest
 
 @MainActor
 final class SavedServerStoreTests: XCTestCase {
-    func testMutationCommitClassificationRetainsAmbiguousPersistence() {
-        XCTAssertTrue(SavedServerStoreError.persistenceFailed.mutationMayHaveCommitted)
+    func testRemovalCommitClassificationRetainsOnlyAmbiguousPersistence() {
+        XCTAssertTrue(SavedServerStoreError.persistenceUncertain.removalMayHaveCommitted)
         XCTAssertTrue(
-            SavedServerStoreError.trustCleanupPending("retry").mutationMayHaveCommitted
+            SavedServerStoreError.trustCleanupPending("retry").removalMayHaveCommitted
         )
         XCTAssertFalse(
-            SavedServerStoreError.invalidTrustCleanupJournal.mutationMayHaveCommitted
+            SavedServerStoreError.persistenceFailed.removalMayHaveCommitted
         )
         XCTAssertFalse(
-            SavedServerStoreError.trustCleanupAlreadyPending.mutationMayHaveCommitted
+            SavedServerStoreError.invalidTrustCleanupJournal.removalMayHaveCommitted
         )
+        XCTAssertFalse(
+            SavedServerStoreError.trustCleanupAlreadyPending.removalMayHaveCommitted
+        )
+    }
+
+    func testUnsynchronizedVisibleWriteIsPersistenceUncertain() throws {
+        let (defaults, suiteName) = try makeControlledDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.synchronizeResult = false
+        let server = makeServer(
+            id: "direct",
+            hostname: "direct.local",
+            port: 8_390,
+            sshPort: nil,
+            hasCodexServer: true
+        )
+
+        XCTAssertThrowsError(
+            try SavedServerStore.save(
+                [server],
+                to: defaults,
+                pinned: { _, _ in nil },
+                pin: { _, _, _ in }
+            )
+        ) { error in
+            guard let storeError = error as? SavedServerStoreError,
+                  case .persistenceUncertain = storeError else {
+                XCTFail("expected persistenceUncertain, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [server])
+    }
+
+    func testSynchronizedMismatchedReadbackIsPersistenceFailed() throws {
+        let (defaults, suiteName) = try makeControlledDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.dataOverrides[SavedServerStore.savedServersKey] = Data("stale".utf8)
+        let server = makeServer(
+            id: "direct",
+            hostname: "direct.local",
+            port: 8_390,
+            sshPort: nil,
+            hasCodexServer: true
+        )
+
+        XCTAssertThrowsError(
+            try SavedServerStore.save(
+                [server],
+                to: defaults,
+                pinned: { _, _ in nil },
+                pin: { _, _, _ in }
+            )
+        ) { error in
+            guard let storeError = error as? SavedServerStoreError,
+                  case .persistenceFailed = storeError else {
+                XCTFail("expected persistenceFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testReadbackFailureAfterDurableCleanupJournalRemainsPending() throws {
+        let (defaults, suiteName) = try makeControlledDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let server = makeServer(
+            id: "ssh",
+            hostname: "ssh.local",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([server], to: defaults)
+        defaults.dataOverrides[SavedServerStore.savedServersKey] = try XCTUnwrap(
+            defaults.data(forKey: SavedServerStore.savedServersKey)
+        )
+        var unpinCalled = false
+
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(
+                serverId: server.id,
+                from: defaults,
+                pinned: { _, _ in "SHA256:original" },
+                unpin: { _, _ in unpinCalled = true }
+            )
+        ) { error in
+            guard let storeError = error as? SavedServerStoreError,
+                  case .trustCleanupPending = storeError else {
+                XCTFail("expected trustCleanupPending, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertFalse(unpinCalled)
+        XCTAssertNotNil(defaults.data(forKey: SavedServerStore.sshTrustCleanupJournalKey))
     }
 
     func testCurrentPersistenceRoundTripsDirectAndSSHServers() throws {
@@ -670,5 +766,23 @@ final class SavedServerStoreTests: XCTestCase {
     private func makeDefaults() throws -> (UserDefaults, String) {
         let suiteName = "SavedServerStoreTests.\(UUID().uuidString)"
         return (try XCTUnwrap(UserDefaults(suiteName: suiteName)), suiteName)
+    }
+
+    private func makeControlledDefaults() throws -> (ControlledUserDefaults, String) {
+        let suiteName = "SavedServerStoreTests.\(UUID().uuidString)"
+        return (try XCTUnwrap(ControlledUserDefaults(suiteName: suiteName)), suiteName)
+    }
+}
+
+private final class ControlledUserDefaults: UserDefaults {
+    var synchronizeResult = true
+    var dataOverrides: [String: Data] = [:]
+
+    override func synchronize() -> Bool {
+        synchronizeResult
+    }
+
+    override func data(forKey defaultName: String) -> Data? {
+        dataOverrides[defaultName] ?? super.data(forKey: defaultName)
     }
 }

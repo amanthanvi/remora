@@ -7,14 +7,15 @@ extension Notification.Name {
 enum SavedServerStoreError: LocalizedError {
     case invalidTrustCleanupJournal
     case persistenceFailed
+    case persistenceUncertain
     case trustCleanupAlreadyPending
     case trustCleanupPending(String)
 
-    var mutationMayHaveCommitted: Bool {
+    var removalMayHaveCommitted: Bool {
         switch self {
-        case .persistenceFailed, .trustCleanupPending:
+        case .persistenceUncertain, .trustCleanupPending:
             return true
-        case .invalidTrustCleanupJournal, .trustCleanupAlreadyPending:
+        case .invalidTrustCleanupJournal, .persistenceFailed, .trustCleanupAlreadyPending:
             return false
         }
     }
@@ -25,6 +26,8 @@ enum SavedServerStoreError: LocalizedError {
             return "The pending SSH trust cleanup record is invalid."
         case .persistenceFailed:
             return "The saved-server change could not be persisted."
+        case .persistenceUncertain:
+            return "The saved-server change may not have been persisted."
         case .trustCleanupAlreadyPending:
             return "A previous SSH trust cleanup is still pending."
         case .trustCleanupPending(let detail):
@@ -161,16 +164,23 @@ enum SavedServerStore {
 
     static func save(_ servers: [SavedServer], to defaults: UserDefaults = .standard) {
         do {
-            let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
-            try save(
-                servers,
-                to: defaults,
-                pinned: { try trustStore.pinned(host: $0, port: $1) },
-                pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) }
-            )
+            try saveReportingFailure(servers, to: defaults)
         } catch {
             LLog.error("saved-servers", "save failed", error: error)
         }
+    }
+
+    private static func saveReportingFailure(
+        _ servers: [SavedServer],
+        to defaults: UserDefaults = .standard
+    ) throws {
+        let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+        try save(
+            servers,
+            to: defaults,
+            pinned: { try trustStore.pinned(host: $0, port: $1) },
+            pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) }
+        )
     }
 
     static func save(
@@ -259,7 +269,7 @@ enum SavedServerStore {
         return normalized
     }
 
-    static func upsert(_ server: DiscoveredServer) {
+    static func upsert(_ server: DiscoveredServer) throws {
         var saved = load(from: .standard)
         let existing = existingMatch(for: server, in: saved)
         saved.removeAll { entry in matches(server, entry) }
@@ -270,17 +280,20 @@ enum SavedServerStore {
             )
             .withSSHBridge(runtimeKinds: existing?.sshBridgeRuntimeKinds)
         )
-        save(saved)
+        try saveReportingFailure(saved)
     }
 
-    static func remember(_ server: DiscoveredServer) {
+    static func remember(_ server: DiscoveredServer) throws {
         var saved = load(from: .standard)
         saved.removeAll { entry in matches(server, entry) }
         saved.append(SavedServer.from(server, rememberedByUser: true))
-        save(saved)
+        try saveReportingFailure(saved)
     }
 
-    static func rememberSSHBridge(_ server: DiscoveredServer, runtimeKinds: [AgentRuntimeKind]) {
+    static func rememberSSHBridge(
+        _ server: DiscoveredServer,
+        runtimeKinds: [AgentRuntimeKind]
+    ) throws {
         var saved = load(from: .standard)
         saved.removeAll { entry in matches(server, entry) }
         saved.append(
@@ -288,7 +301,7 @@ enum SavedServerStore {
                 .from(server, rememberedByUser: true)
                 .withSSHBridge(runtimeKinds: runtimeKinds)
         )
-        save(saved)
+        try saveReportingFailure(saved)
     }
 
     static func rememberedServers() -> [SavedServer] {
@@ -595,9 +608,9 @@ enum SavedServerStore {
         )
         let journalData = try JSONEncoder().encode(journal)
         try persist(journalData, forKey: sshTrustCleanupJournalKey, to: defaults)
-        try persistServers(servers, to: defaults)
-        postSavedServersDidChange()
         do {
+            try persistServers(servers, to: defaults)
+            postSavedServersDidChange()
             for target in targets {
                 try unpin(target.host, target.port)
             }
@@ -663,16 +676,20 @@ enum SavedServerStore {
         to defaults: UserDefaults
     ) throws {
         defaults.set(data, forKey: key)
-        guard defaults.synchronize(), defaults.data(forKey: key) == data else {
+        let synchronized = defaults.synchronize()
+        guard defaults.data(forKey: key) == data else {
             throw SavedServerStoreError.persistenceFailed
         }
+        guard synchronized else { throw SavedServerStoreError.persistenceUncertain }
     }
 
     private static func clearTrustCleanupJournal(from defaults: UserDefaults) throws {
         defaults.removeObject(forKey: sshTrustCleanupJournalKey)
-        guard defaults.synchronize(), defaults.object(forKey: sshTrustCleanupJournalKey) == nil else {
+        let synchronized = defaults.synchronize()
+        guard defaults.object(forKey: sshTrustCleanupJournalKey) == nil else {
             throw SavedServerStoreError.persistenceFailed
         }
+        guard synchronized else { throw SavedServerStoreError.persistenceUncertain }
     }
 
     private static func postSavedServersDidChange() {
