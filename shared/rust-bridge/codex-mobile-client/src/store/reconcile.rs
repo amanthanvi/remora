@@ -347,6 +347,16 @@ impl MobileClient {
         page: &AppListThreadTurnsResponse,
         direction: AppTurnsSortDirection,
     ) -> Result<(), String> {
+        self.apply_thread_turns_pages(server_id, thread_id, std::iter::once(page), direction)
+    }
+
+    pub(crate) fn apply_thread_turns_pages<'a>(
+        &self,
+        server_id: &str,
+        thread_id: &str,
+        pages: impl IntoIterator<Item = &'a AppListThreadTurnsResponse>,
+        direction: AppTurnsSortDirection,
+    ) -> Result<(), String> {
         let key = ThreadKey {
             server_id: server_id.to_string(),
             thread_id: thread_id.to_string(),
@@ -355,7 +365,9 @@ impl MobileClient {
             Some(thread) => thread,
             None => return Err(format!("thread {thread_id} not in store")),
         };
-        merge_paged_turns(&mut thread, page, direction);
+        for page in pages {
+            merge_paged_turns(&mut thread, page, direction);
+        }
         // Diagnostic for the pagination-cursor-lost bug (task #13): log
         // the post-merge state so platform teams can correlate a logcat
         // entry here with the `AppLoadThreadTurnsOutcome` they received.

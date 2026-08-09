@@ -64,28 +64,56 @@ use self::user_input::normalize_pending_user_input_answers;
 
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
 const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS: i64 = 10 * 60;
 
 #[derive(Clone, Debug)]
 struct PendingTurnReconciliation {
+    id: i64,
     baseline_turn_ids: HashSet<String>,
     baseline_history_known: bool,
+    claimed_at_unix_secs: i64,
+    repair_cursor: Option<String>,
 }
 
 impl PendingTurnReconciliation {
     fn from_thread(thread: Option<&ThreadSnapshot>) -> Self {
+        let claimed_at_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        Self::from_thread_at(thread, claimed_at_unix_secs)
+    }
+
+    fn from_thread_at(thread: Option<&ThreadSnapshot>, claimed_at_unix_secs: i64) -> Self {
         thread
             .map(|thread| Self {
+                id: crate::next_request_id(),
                 baseline_turn_ids: thread
                     .items
                     .iter()
                     .filter_map(|item| item.source_turn_id.clone())
                     .collect(),
                 baseline_history_known: thread.initial_turns_loaded,
+                claimed_at_unix_secs,
+                repair_cursor: None,
             })
             .unwrap_or_else(|| Self {
+                id: crate::next_request_id(),
                 baseline_turn_ids: HashSet::new(),
                 baseline_history_known: false,
+                claimed_at_unix_secs,
+                repair_cursor: None,
             })
+    }
+
+    fn turn_could_follow_claim(&self, turn: &upstream::Turn) -> bool {
+        turn.started_at.is_none_or(|started_at| {
+            started_at
+                >= self
+                    .claimed_at_unix_secs
+                    .saturating_sub(AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS)
+        })
     }
 }
 

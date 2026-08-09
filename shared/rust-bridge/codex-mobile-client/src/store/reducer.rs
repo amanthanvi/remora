@@ -841,6 +841,28 @@ impl AppStoreReducer {
         authoritative_items: &[HydratedConversationItem],
         known_turn_ids: &HashSet<String>,
     ) -> bool {
+        self.consume_thread_follow_up_claim_if_replayed_where(key, authoritative_items, |turn_id| {
+            !known_turn_ids.contains(turn_id)
+        })
+    }
+
+    pub(crate) fn consume_thread_follow_up_claim_if_replayed_in_turns(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+        eligible_turn_ids: &HashSet<String>,
+    ) -> bool {
+        self.consume_thread_follow_up_claim_if_replayed_where(key, authoritative_items, |turn_id| {
+            eligible_turn_ids.contains(turn_id)
+        })
+    }
+
+    fn consume_thread_follow_up_claim_if_replayed_where(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+        turn_is_eligible: impl Fn(&str) -> bool,
+    ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
                 let Some(draft) = thread
@@ -860,7 +882,7 @@ impl AppStoreReducer {
                         && item
                             .source_turn_id
                             .as_ref()
-                            .is_some_and(|turn_id| !known_turn_ids.contains(turn_id))
+                            .is_some_and(|turn_id| turn_is_eligible(turn_id))
                 });
                 if replayed {
                     remove_first_queued_follow_up(thread);
@@ -874,10 +896,24 @@ impl AppStoreReducer {
         consumed
     }
 
-    pub(crate) fn thread_follow_up_claim_matches_authoritative_items(
+    pub(crate) fn thread_follow_up_claim_matches_authoritative_items_in_turns(
         &self,
         key: &ThreadKey,
         authoritative_items: &[HydratedConversationItem],
+        eligible_turn_ids: &HashSet<String>,
+    ) -> bool {
+        self.thread_follow_up_claim_matches_authoritative_items_where(
+            key,
+            authoritative_items,
+            |turn_id| eligible_turn_ids.contains(turn_id),
+        )
+    }
+
+    fn thread_follow_up_claim_matches_authoritative_items_where(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+        turn_is_eligible: impl Fn(&str) -> bool,
     ) -> bool {
         self.thread_snapshot(key).is_some_and(|thread| {
             let Some(draft) = thread
@@ -894,6 +930,10 @@ impl AppStoreReducer {
                 item.is_from_user_turn_boundary
                     && matches!(&item.content, HydratedConversationItemContent::User(_))
                     && item.content.eq(&local_item.content)
+                    && item
+                        .source_turn_id
+                        .as_deref()
+                        .is_some_and(&turn_is_eligible)
             })
         })
     }
