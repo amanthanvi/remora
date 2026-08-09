@@ -177,14 +177,37 @@ impl MobileClient {
         // so resume can rebuild the full SSH transport.
         self.replace_existing_session(server_id.as_str()).await;
 
-        let ssh_client = Arc::new(
-            SshClient::connect(
-                ssh_credentials.clone(),
-                Box::new(move |_fingerprint| Box::pin(async move { accept_unknown_host })),
-            )
-            .await
-            .map_err(map_ssh_transport_error)?,
-        );
+        // `accept_unknown_host` means "trust on first use"; a recorded
+        // fingerprint that no longer matches always fails closed, including on
+        // the automatic background reconnect that calls straight into here.
+        //
+        // We already published `Connecting` and dropped the previous session
+        // above, so a refused host key has to clear that state on the way out.
+        // Returning straight through `?` would strand the server in
+        // `Connecting` forever and mask the typed host-key failure behind a
+        // spinner that never resolves.
+        let ssh_client = match crate::ssh::connect_with_host_trust(
+            ssh_credentials.clone(),
+            accept_unknown_host,
+        )
+        .await
+        {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                    "MobileClient: SSH host-key trust refused connect server_id={} host={} ssh_port={} error={}",
+                    server_id,
+                    ssh_credentials.host.as_str(),
+                    ssh_credentials.port,
+                    error
+                );
+                self.app_store
+                    .update_server_health(server_id.as_str(), ServerHealthSnapshot::Disconnected);
+                self.app_store
+                    .update_server_connection_progress(server_id.as_str(), None);
+                return Err(map_ssh_transport_error(error));
+            }
+        };
         info!(target: super::MOBILE_CLIENT_TRACING_TARGET,
             "MobileClient: SSH transport established server_id={} host={} ssh_port={}",
             config.server_id,
