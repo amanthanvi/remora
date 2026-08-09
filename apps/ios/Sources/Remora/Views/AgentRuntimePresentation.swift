@@ -100,18 +100,6 @@ extension AgentRuntimeKind {
         return UIImage(named: candidate) != nil ? candidate : nil
     }
 
-    /// Picker / add-server callers check whether an agent should show
-    /// a BETA badge before its metadata has been promoted into the
-    /// store. With no enum to consult, defer entirely to the cached
-    /// metadata; unknown agents are beta by default except Codex.
-    static func isBetaAgentName(_ name: String, displayName: String) -> Bool {
-        let key = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if isStableAgentIdentity(key, displayName: displayName) {
-            return false
-        }
-        return AgentRuntimeMetadataProvider.lookup?(key)?.presentation?.isBeta ?? true
-    }
-
     private static func isStableAgentIdentity(_ name: String, displayName: String) -> Bool {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "codex"
             || displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "codex"

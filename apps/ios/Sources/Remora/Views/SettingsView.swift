@@ -393,22 +393,39 @@ struct SettingsView: View {
     }
 
     private func removeServer(_ server: HomeDashboardServer) {
-        SavedServerStore.remove(serverId: server.id)
-        Task { await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh) }
-        appModel.serverBridge.disconnectServer(serverId: server.id)
+        Task {
+            guard await appModel.reconnectController.prepareServerRemoval(serverId: server.id) else {
+                serverEditError = "Unable to stop reconnecting to this server. Try again."
+                return
+            }
+            await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh)
+            do {
+                try SavedServerStore.remove(serverId: server.id)
+            } catch {
+                guard savedServerMutationCommitted(despite: error) else {
+                    appModel.reconnectController.allowServerReconnect(serverId: server.id)
+                    return
+                }
+            }
+            appModel.reconnectController.syncSavedServers(
+                servers: SavedServerStore.reconnectRecords()
+            )
+            await appModel.refreshSnapshot()
+        }
     }
 
     private func saveServerConfiguration(
         _ configuration: SettingsServerConnectionConfiguration,
         reconnect: Bool
     ) {
-        var saved = SavedServerStore.load()
-        if let index = saved.firstIndex(where: { $0.id == configuration.savedServer.id }) {
-            saved[index] = configuration.savedServer
-        } else {
-            saved.append(configuration.savedServer)
+        do {
+            try SavedServerStore.replace(configuration.savedServer)
+        } catch {
+            guard savedServerMutationCommitted(despite: error) else { return }
         }
-        SavedServerStore.save(saved)
+        appModel.reconnectController.allowServerReconnect(
+            serverId: configuration.savedServer.id
+        )
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )
@@ -419,6 +436,15 @@ struct SettingsView: View {
 
         guard reconnect else { return }
         reconnectServer(using: configuration)
+    }
+
+    private func savedServerMutationCommitted(despite error: Error) -> Bool {
+        serverEditError = error.localizedDescription
+        guard let storeError = error as? SavedServerStoreError else { return false }
+        if case .trustCleanupPending = storeError {
+            return true
+        }
+        return false
     }
 
     private func reconnectServer(using configuration: SettingsServerConnectionConfiguration) {
