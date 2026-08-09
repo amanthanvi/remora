@@ -339,6 +339,17 @@ pub(crate) fn remove_first_queued_follow_up(thread: &mut ThreadSnapshot) {
     }
 }
 
+pub(super) fn consume_first_queued_follow_up_for_turn(thread: &mut ThreadSnapshot, turn_id: &str) {
+    let consumed_anchor_turn_id = thread
+        .queued_follow_up_drafts
+        .first()
+        .map(|draft| draft.causal_anchor_turn_id.clone());
+    remove_first_queued_follow_up(thread);
+    if let Some(consumed_anchor_turn_id) = consumed_anchor_turn_id {
+        reanchor_queued_follow_ups(thread, consumed_anchor_turn_id.as_deref(), turn_id);
+    }
+}
+
 pub(super) fn reanchor_queued_follow_ups(
     thread: &mut ThreadSnapshot,
     previous_anchor_turn_id: Option<&str>,

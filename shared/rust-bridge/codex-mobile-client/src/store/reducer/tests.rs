@@ -1603,7 +1603,76 @@ fn upsert_thread_snapshot_dedupes_matching_unbound_local_overlay() {
 }
 
 #[test]
-fn turn_started_consumes_first_queued_follow_up_preview() {
+fn turn_started_consumes_and_selectively_reanchors_queued_follow_up_preview() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    let mut initial = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    initial.active_turn_id = Some("turn-a".to_string());
+    reducer.upsert_thread_snapshot(initial);
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-1".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "repeated".to_string(),
+        },
+    );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-2".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "repeated".to_string(),
+        },
+    );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-3".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "newer".to_string(),
+        },
+    );
+    reducer.mutate_thread_with_result(&key, |thread| {
+        thread.queued_follow_up_drafts[2].causal_anchor_turn_id = Some("turn-c".to_string());
+    });
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key: key.clone(),
+        turn_id: "turn-a".to_string(),
+        error: None,
+    });
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
+
+    reducer.apply_ui_event(&UiEvent::TurnStarted {
+        key: key.clone(),
+        turn_id: "turn-b".to_string(),
+    });
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-b"));
+    assert_eq!(thread.queued_follow_ups.len(), 2);
+    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
+    assert_eq!(thread.queued_follow_ups[1].id, "queued-3");
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-b")
+    );
+    assert_eq!(
+        thread.queued_follow_up_drafts[1]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-c")
+    );
+}
+
+#[test]
+fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
     let reducer = AppStoreReducer::new();
     let key = ThreadKey {
         server_id: "srv".to_string(),
@@ -1626,35 +1695,6 @@ fn turn_started_consumes_first_queued_follow_up_preview() {
             text: "second".to_string(),
         },
     );
-
-    reducer.apply_ui_event(&UiEvent::TurnStarted {
-        key: key.clone(),
-        turn_id: "turn-2".to_string(),
-    });
-
-    let snapshot = reducer.snapshot();
-    let thread = snapshot.threads.get(&key).expect("thread exists");
-    assert_eq!(thread.active_turn_id.as_deref(), Some("turn-2"));
-    assert_eq!(thread.queued_follow_ups.len(), 1);
-    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
-}
-
-#[test]
-fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
-    let reducer = AppStoreReducer::new();
-    let key = ThreadKey {
-        server_id: "srv".to_string(),
-        thread_id: "thread".to_string(),
-    };
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
-    reducer.enqueue_thread_follow_up_preview(
-        &key,
-        AppQueuedFollowUpPreview {
-            id: "queued-1".to_string(),
-            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
-            text: "first".to_string(),
-        },
-    );
     assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
 
     let mut authoritative = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
@@ -1665,7 +1705,13 @@ fn authoritative_active_turn_consumes_claimed_queued_follow_up() {
     let snapshot = reducer.snapshot();
     let thread = snapshot.threads.get(&key).expect("thread exists");
     assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
-    assert!(thread.queued_follow_up_drafts.is_empty());
+    assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-follow-up")
+    );
 }
 
 #[test]
@@ -2009,7 +2055,9 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
     };
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
+    let mut initial = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    initial.active_turn_id = Some("turn-1".to_string());
+    reducer.upsert_thread_snapshot(initial);
     reducer.enqueue_thread_follow_up_preview(
         &key,
         AppQueuedFollowUpPreview {
@@ -2018,6 +2066,20 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
             text: "queued follow-up".to_string(),
         },
     );
+    reducer.enqueue_thread_follow_up_preview(
+        &key,
+        AppQueuedFollowUpPreview {
+            id: "queued-2".to_string(),
+            kind: crate::store::snapshot::AppQueuedFollowUpKind::Message,
+            text: "next follow-up".to_string(),
+        },
+    );
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key: key.clone(),
+        turn_id: "turn-1".to_string(),
+        error: None,
+    });
+    assert!(reducer.try_claim_first_queued_follow_up(&key).is_some());
 
     reducer.apply_item_update(
         &key,
@@ -2038,7 +2100,14 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
 
     let snapshot = reducer.snapshot();
     let thread = snapshot.threads.get(&key).expect("thread exists");
-    assert!(thread.queued_follow_ups.is_empty());
+    assert_eq!(thread.queued_follow_ups.len(), 1);
+    assert_eq!(thread.queued_follow_ups[0].id, "queued-2");
+    assert_eq!(
+        thread.queued_follow_up_drafts[0]
+            .causal_anchor_turn_id
+            .as_deref(),
+        Some("turn-2")
+    );
 }
 
 // ── SW-R3: streaming dynamic tool call argument deltas ───────────

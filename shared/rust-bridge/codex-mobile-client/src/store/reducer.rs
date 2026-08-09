@@ -705,7 +705,11 @@ impl AppStoreReducer {
                 preserve_local_overlay_items(existing, &mut thread);
                 preserve_queued_follow_ups(existing, &mut thread);
                 if consume_claimed_follow_up {
-                    remove_first_queued_follow_up(&mut thread);
+                    let turn_id = thread
+                        .active_turn_id
+                        .clone()
+                        .expect("claimed follow-up requires an active authoritative turn");
+                    consume_first_queued_follow_up_for_turn(&mut thread, &turn_id);
                 }
                 // Preserve existing items when the incoming snapshot has none
                 // (e.g. thread/read with include_turns=false).
@@ -863,20 +867,14 @@ impl AppStoreReducer {
     ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
-                let Some(consumed_anchor_turn_id) = thread
+                if !thread
                     .queued_follow_up_drafts
                     .first()
-                    .filter(|draft| draft.autosend_claimed)
-                    .map(|draft| draft.causal_anchor_turn_id.clone())
-                else {
+                    .is_some_and(|draft| draft.autosend_claimed)
+                {
                     return false;
-                };
-                remove_first_queued_follow_up(thread);
-                reanchor_queued_follow_ups(
-                    thread,
-                    consumed_anchor_turn_id.as_deref(),
-                    replay_turn_id,
-                );
+                }
+                consume_first_queued_follow_up_for_turn(thread, replay_turn_id);
                 true
             })
             .unwrap_or(false);
@@ -1711,7 +1709,7 @@ impl AppStoreReducer {
             UiEvent::TurnStarted { key, turn_id } => {
                 if self
                     .mutate_thread_with_result(key, |thread| {
-                        remove_first_queued_follow_up(thread);
+                        consume_first_queued_follow_up_for_turn(thread, turn_id);
                         thread.active_turn_id = Some(turn_id.clone());
                         thread.active_plan_progress = None;
                         thread.pending_plan_implementation_turn_id = None;
@@ -2458,9 +2456,17 @@ impl AppStoreReducer {
             let mutation = classify_item_mutation(existing.as_ref(), &item);
             let clears_queued_follow_up = item.is_from_user_turn_boundary
                 && matches!(&item.content, HydratedConversationItemContent::User(_));
+            let boundary_turn_id = item
+                .source_turn_id
+                .clone()
+                .or_else(|| thread.active_turn_id.clone());
             upsert_item(thread, item);
             if clears_queued_follow_up {
-                remove_first_queued_follow_up(thread);
+                if let Some(turn_id) = boundary_turn_id {
+                    consume_first_queued_follow_up_for_turn(thread, &turn_id);
+                } else {
+                    remove_first_queued_follow_up(thread);
+                }
             }
             (
                 mutation,
@@ -2976,11 +2982,11 @@ mod realtime;
 mod thread_merge;
 use thread_merge::{
     LOCAL_USER_MESSAGE_ITEM_PREFIX, USER_INPUT_RESPONSE_ITEM_PREFIX, answered_user_input_item,
-    duplicate_local_overlay_item_ids, is_duplicate_overlay_item, is_superseded_overlay_item,
-    local_user_message_overlay_item, preserve_local_overlay_items, preserve_queued_follow_ups,
-    preserve_thread_created_at, preserve_thread_fork_lineage, preserve_thread_preview,
-    preserve_thread_runtime_state, preserve_thread_title, reanchor_queued_follow_ups,
-    sync_thread_follow_up_projection,
+    consume_first_queued_follow_up_for_turn, duplicate_local_overlay_item_ids,
+    is_duplicate_overlay_item, is_superseded_overlay_item, local_user_message_overlay_item,
+    preserve_local_overlay_items, preserve_queued_follow_ups, preserve_thread_created_at,
+    preserve_thread_fork_lineage, preserve_thread_preview, preserve_thread_runtime_state,
+    preserve_thread_title, reanchor_queued_follow_ups, sync_thread_follow_up_projection,
 };
 pub(crate) use thread_merge::{
     remove_duplicate_local_overlay_items, remove_first_queued_follow_up,
