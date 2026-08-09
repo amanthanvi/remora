@@ -139,6 +139,78 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun replacingSshEndpointUnpinsPreviousTrustTarget() {
+        val previous = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "old.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val replacement = previous.copy(hostname = "new.example", sshPort = 2222)
+        val unpinned = mutableListOf<Pair<String, UShort>>()
+
+        val updated = SavedServerStore.replaceServer(listOf(previous), replacement) { host, port ->
+            unpinned += host to port
+        }
+
+        assertEquals(listOf(replacement), updated)
+        assertEquals(listOf("old.example" to 22.toUShort()), unpinned)
+    }
+
+    @Test
+    fun replacingSharedSshEndpointKeepsReferencedPin() {
+        val first = SavedServer(
+            id = "ssh-1",
+            name = "SSH 1",
+            hostname = "HOST.EXAMPLE",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val second = first.copy(id = "ssh-2", hostname = "host.example")
+        val replacement = first.copy(hostname = "new.example")
+        val unpinned = mutableListOf<Pair<String, UShort>>()
+
+        val updated = SavedServerStore.replaceServer(
+            listOf(first, second),
+            replacement,
+        ) { host, port ->
+            unpinned += host to port
+        }
+
+        assertEquals(listOf(replacement, second), updated)
+        assertTrue(unpinned.isEmpty())
+    }
+
+    @Test
+    fun failedEndpointReplacementUnpinRetainsPreviousServer() {
+        val previous = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "old.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val replacement = previous.copy(hostname = "new.example")
+        val existing = listOf(previous)
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.replaceServer(existing, replacement) { _, _ ->
+                throw IllegalStateException("pin replacement failed")
+            }
+        }
+
+        assertEquals("pin replacement failed", error.message)
+        assertEquals(listOf(previous), existing)
+    }
+
+    @Test
     fun currentPersistenceRejectsRetiredAndUnknownFields() {
         val current = baseJson("current").apply {
             put("sshPort", 22)

@@ -261,7 +261,6 @@ pub(crate) struct QueuedFollowUpDraft {
     pub inputs: Vec<upstream::UserInput>,
     pub source_message_json: Option<serde_json::Value>,
     pub autosend_claimed: bool,
-    pub autosend_turn_id: Option<String>,
 }
 
 impl ThreadSnapshot {

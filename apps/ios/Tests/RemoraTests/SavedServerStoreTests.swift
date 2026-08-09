@@ -199,6 +199,99 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertEqual(SavedServerStore.load(from: defaults), [ssh])
     }
 
+    func testReplacingSSHEndpointUnpinsPreviousTrustTarget() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let previous = makeServer(
+            id: "ssh",
+            hostname: "old.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let replacement = makeServer(
+            id: "ssh",
+            hostname: "new.example",
+            port: nil,
+            sshPort: 2_222,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([previous], to: defaults)
+        var unpinned: [(String, UInt16)] = []
+
+        try SavedServerStore.replace(replacement, from: defaults) { host, port in
+            unpinned.append((host, port))
+        }
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [replacement])
+        XCTAssertEqual(unpinned.count, 1)
+        XCTAssertEqual(unpinned.first?.0, "old.example")
+        XCTAssertEqual(unpinned.first?.1, 22)
+    }
+
+    func testReplacingSharedSSHEndpointKeepsReferencedPin() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let first = makeServer(
+            id: "ssh-1",
+            hostname: "HOST.EXAMPLE",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let second = makeServer(
+            id: "ssh-2",
+            hostname: "host.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let replacement = makeServer(
+            id: "ssh-1",
+            hostname: "new.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([first, second], to: defaults)
+        var unpinned: [(String, UInt16)] = []
+
+        try SavedServerStore.replace(replacement, from: defaults) { host, port in
+            unpinned.append((host, port))
+        }
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [replacement, second])
+        XCTAssertTrue(unpinned.isEmpty)
+    }
+
+    func testFailedEndpointReplacementUnpinRetainsPreviousServer() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let previous = makeServer(
+            id: "ssh",
+            hostname: "old.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let replacement = makeServer(
+            id: "ssh",
+            hostname: "new.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([previous], to: defaults)
+
+        XCTAssertThrowsError(
+            try SavedServerStore.replace(replacement, from: defaults) { _, _ in
+                throw NSError(domain: "SavedServerStoreTests", code: 2)
+            }
+        )
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [previous])
+    }
+
     private func makeServer(
         id: String,
         hostname: String,

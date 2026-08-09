@@ -323,15 +323,19 @@ internal fun ServerEditSheet(
         }
     }
 
-    fun persist(saved: SavedServer) {
-        val existing = SavedServerStore.load(context).toMutableList()
-        existing.removeAll { it.id == saved.id }
-        existing.add(saved)
-        SavedServerStore.save(context, existing)
-        appModel.reconnectController.syncSavedServers(
-            existing.filter { it.rememberedByUser }.map { it.toRecord() }
-        )
-        appModel.store.renameServer(saved.id, saved.name)
+    fun persist(saved: SavedServer): Boolean {
+        return try {
+            SavedServerStore.replace(context, saved)
+            val updated = SavedServerStore.load(context)
+            appModel.reconnectController.syncSavedServers(
+                updated.filter { it.rememberedByUser }.map { it.toRecord() }
+            )
+            appModel.store.renameServer(saved.id, saved.name)
+            true
+        } catch (error: Exception) {
+            validationError = error.localizedMessage ?: error.message ?: "Unable to update server."
+            false
+        }
     }
 
     suspend fun reconnect(serverId: String) {
@@ -590,8 +594,7 @@ internal fun ServerEditSheet(
                                 onClick = {
                                     validationError = null
                                     val saved = validateAndBuild()
-                                    if (saved != null) {
-                                        persist(saved)
+                                    if (saved != null && persist(saved)) {
                                         onSave()
                                     }
                                 },
@@ -605,8 +608,7 @@ internal fun ServerEditSheet(
                                     onClick = {
                                         validationError = null
                                         val saved = validateAndBuild()
-                                        if (saved != null) {
-                                            persist(saved)
+                                        if (saved != null && persist(saved)) {
                                             // SSH mode requires interactive credentials, mirroring iOS:
                                             // hand off to the parent which will open SSHLoginDialog.
                                             if (connectionMode == ServerConnectionMode.SSH && !server.isLocal) {

@@ -348,6 +348,34 @@ object SavedServerStore {
         save(context, existing)
     }
 
+    fun replace(context: Context, server: SavedServer) {
+        val updated = replaceServer(load(context), server) { host, port ->
+            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port)
+        }
+        save(context, updated)
+    }
+
+    internal fun replaceServer(
+        existing: List<SavedServer>,
+        server: SavedServer,
+        unpin: (String, UShort) -> Unit,
+    ): List<SavedServer> {
+        val index = existing.indexOfFirst { it.id == server.id }
+        if (index == -1) return existing + server
+
+        val previous = existing[index]
+        val updated = existing.toMutableList().apply { this[index] = server }
+        val target = previous.sshTrustTarget() ?: return updated
+        val identity = sshTrustIdentity(target.first, target.second)
+        val stillReferenced = updated
+            .mapNotNull { it.sshTrustTarget() }
+            .any { sshTrustIdentity(it.first, it.second) == identity }
+        if (!stillReferenced) {
+            unpin(target.first, target.second.toUShort())
+        }
+        return updated
+    }
+
     fun remember(context: Context, server: SavedServer) {
         val existing = load(context).toMutableList()
         existing.removeAll { it.id == server.id || it.deduplicationKey == server.deduplicationKey }

@@ -87,7 +87,6 @@ pub(super) fn queued_follow_up_draft_from_inputs(
         inputs: inputs.to_vec(),
         source_message_json: queued_follow_up_message_json_from_inputs(inputs),
         autosend_claimed: false,
-        autosend_turn_id: None,
     })
 }
 

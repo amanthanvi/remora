@@ -316,7 +316,7 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
         return;
     };
     let result = client
-        .start_turn(
+        .start_turn_with_claim(
             &key.server_id,
             upstream::TurnStartParams {
                 thread_id: key.thread_id.clone(),
@@ -337,6 +337,7 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
                 output_schema: None,
                 collaboration_mode: None,
             },
+            Some(draft.preview.id.clone()),
         )
         .await;
     if let Err(error) = result {
@@ -428,6 +429,31 @@ mod tests {
                 "durationMs": null
             }
         })
+    }
+
+    fn turn_start_params(thread_id: &str, text: &str) -> upstream::TurnStartParams {
+        upstream::TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input: vec![upstream::UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: None,
+            cwd: None,
+            runtime_workspace_roots: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            environments: None,
+            permissions: None,
+            model: None,
+            service_tier: None,
+            effort: None,
+            summary: None,
+            personality: None,
+            output_schema: None,
+            collaboration_mode: None,
+        }
     }
 
     fn upstream_thread_response(thread_id: &str) -> serde_json::Value {
@@ -724,22 +750,74 @@ mod tests {
         assert_eq!(*requests.lock().expect("request count lock"), 1);
         let snapshot = client.app_store.snapshot();
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
-        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
-        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
-        assert_eq!(
-            thread.queued_follow_up_drafts[0]
-                .autosend_turn_id
-                .as_deref(),
-            Some("turn-follow-up")
-        );
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+    }
 
-        client.app_store.apply_ui_event(&UiEvent::TurnStarted {
-            key: key.clone(),
-            turn_id: "turn-follow-up".to_string(),
-        });
+    #[tokio::test]
+    async fn concurrent_manual_turn_starts_serialize_and_queue_second_message() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                let upstream::ClientRequest::TurnStart { params, .. } = request else {
+                    panic!("expected turn/start");
+                };
+                let text = params
+                    .input
+                    .iter()
+                    .find_map(|input| match input {
+                        upstream::UserInput::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .expect("text input");
+                requests.lock().expect("request log lock").push(text);
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let first = client.start_turn(server_id, turn_start_params(thread_id, "first"));
+        let second = client.start_turn(server_id, turn_start_params(thread_id, "second"));
+        let (first_result, second_result) = tokio::join!(first, second);
+        first_result.expect("first start succeeds");
+        second_result.expect("second start queues");
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["first"]
+        );
         let snapshot = client.app_store.snapshot();
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
-        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "second");
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
     }
 
     #[tokio::test]
@@ -985,13 +1063,7 @@ mod tests {
         );
         let snapshot = client.app_store.snapshot();
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
-        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
-        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
-        assert_eq!(
-            thread.queued_follow_up_drafts[0]
-                .autosend_turn_id
-                .as_deref(),
-            Some("turn-follow-up")
-        );
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
     }
 }

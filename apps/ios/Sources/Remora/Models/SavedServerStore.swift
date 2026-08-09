@@ -114,6 +114,41 @@ enum SavedServerStore {
         return saved.map { $0.toRecord() }
     }
 
+    static func replace(_ server: SavedServer) throws {
+        try replace(server, from: .standard) { host, port in
+            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
+                host: host,
+                port: port
+            )
+        }
+    }
+
+    static func replace(
+        _ server: SavedServer,
+        from defaults: UserDefaults,
+        unpin: (String, UInt16) throws -> Void
+    ) throws {
+        var saved = load(from: defaults)
+        guard let index = saved.firstIndex(where: { $0.id == server.id }) else {
+            saved.append(server)
+            save(saved, to: defaults)
+            return
+        }
+
+        let previous = saved[index]
+        saved[index] = server
+        if let target = sshTrustTarget(for: previous) {
+            let identity = sshTrustIdentity(host: target.host, port: target.port)
+            let stillReferenced = saved
+                .compactMap(sshTrustTarget)
+                .contains { sshTrustIdentity(host: $0.host, port: $0.port) == identity }
+            if !stillReferenced {
+                try unpin(target.host, target.port)
+            }
+        }
+        save(saved, to: defaults)
+    }
+
     static func remove(serverId: String) throws {
         try remove(serverId: serverId, from: .standard) { host, port in
             try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(

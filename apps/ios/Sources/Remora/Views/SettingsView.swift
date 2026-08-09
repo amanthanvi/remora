@@ -407,13 +407,12 @@ struct SettingsView: View {
         _ configuration: SettingsServerConnectionConfiguration,
         reconnect: Bool
     ) {
-        var saved = SavedServerStore.load()
-        if let index = saved.firstIndex(where: { $0.id == configuration.savedServer.id }) {
-            saved[index] = configuration.savedServer
-        } else {
-            saved.append(configuration.savedServer)
+        do {
+            try SavedServerStore.replace(configuration.savedServer)
+        } catch {
+            serverEditError = error.localizedDescription
+            return
         }
-        SavedServerStore.save(saved)
         appModel.reconnectController.syncSavedServers(
             servers: SavedServerStore.reconnectRecords()
         )

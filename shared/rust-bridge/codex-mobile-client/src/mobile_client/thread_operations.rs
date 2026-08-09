@@ -584,15 +584,47 @@ impl MobileClient {
         server_id: &str,
         params: upstream::TurnStartParams,
     ) -> Result<(), RpcError> {
+        self.start_turn_with_claim(server_id, params, None).await
+    }
+
+    pub(super) async fn start_turn_with_claim(
+        &self,
+        server_id: &str,
+        params: upstream::TurnStartParams,
+        autosend_claim_id: Option<String>,
+    ) -> Result<(), RpcError> {
         self.get_session(server_id)?;
         let mut params = params;
         let thread_key = ThreadKey {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
         };
+        let turn_start_lock = self.turn_start_lock(&thread_key);
+        let _turn_start_guard = turn_start_lock.lock().await;
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
+        if let Some(claim_id) = autosend_claim_id.as_deref() {
+            let claim_is_current = thread_snapshot.as_ref().is_some_and(|thread| {
+                thread
+                    .queued_follow_up_drafts
+                    .first()
+                    .is_some_and(|draft| draft.preview.id == claim_id && draft.autosend_claimed)
+            });
+            if !claim_is_current {
+                return Ok(());
+            }
+        } else if thread_snapshot.as_ref().is_some_and(|thread| {
+            thread.active_turn_id.is_none() && !thread.queued_follow_up_drafts.is_empty()
+        }) {
+            if let Some(draft) =
+                queued_follow_up_draft_from_inputs(&params.input, AppQueuedFollowUpKind::Message)
+            {
+                self.app_store
+                    .enqueue_thread_follow_up_draft(&thread_key, draft);
+            }
+            return Ok(());
+        }
         if let Some(thread) = thread_snapshot.as_ref()
             && thread.collaboration_mode == AppModeKind::Plan
             && params.collaboration_mode.is_none()
@@ -717,10 +749,10 @@ impl MobileClient {
         };
         self.app_store
             .finish_server_mutating_command_success(server_id, &direct_command_id);
-        self.app_store.bind_first_claimed_follow_up_to_turn(
+        self.app_store.mark_turn_started_from_response(
             &thread_key,
-            &params.input,
             &response.turn.id,
+            autosend_claim_id.as_deref(),
         );
         if let Some(overlay_id) = optimistic_overlay_id.as_ref() {
             self.app_store.bind_local_user_message_overlay_to_turn(

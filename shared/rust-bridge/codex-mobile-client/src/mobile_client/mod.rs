@@ -95,6 +95,7 @@ pub struct MobileClient {
     pub(crate) slingshot_credentials_directory: Arc<StdMutex<Option<String>>>,
     direct_resumed_threads: Arc<StdMutex<HashSet<ThreadKey>>>,
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
+    turn_start_locks: Arc<StdMutex<HashMap<ThreadKey, Weak<Mutex<()>>>>>,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
     /// bootstrap task.
@@ -212,6 +213,7 @@ impl MobileClient {
                 slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
                 direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
                 thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
+                turn_start_locks: Arc::new(StdMutex::new(HashMap::new())),
                 ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
                 background_relay: Arc::new(RwLock::new(None)),
@@ -244,6 +246,20 @@ impl MobileClient {
                 error.into_inner()
             }
         }
+    }
+
+    fn turn_start_lock(&self, key: &ThreadKey) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .turn_start_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key.clone(), Arc::downgrade(&lock));
+        lock
     }
 
     // ── Internal RPC helpers ──────────────────────────────────────────────
