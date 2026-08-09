@@ -993,20 +993,6 @@ impl AppStoreReducer {
         }
     }
 
-    pub(crate) fn remove_thread_follow_up_draft(&self, key: &ThreadKey, preview_id: &str) {
-        if self
-            .mutate_thread_with_result(key, |thread| {
-                thread
-                    .queued_follow_up_drafts
-                    .retain(|draft| draft.preview.id != preview_id);
-                sync_thread_follow_up_projection(thread);
-            })
-            .is_some()
-        {
-            self.emit_thread_metadata_changed(key);
-        }
-    }
-
     /// Atomically transitions a queued follow-up draft from `Message` to
     /// `PendingSteer`. Returns the updated draft and a snapshot of the
     /// thread's drafts in the new state on success. Returns `None` when the

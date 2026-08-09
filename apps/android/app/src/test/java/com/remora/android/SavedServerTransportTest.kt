@@ -89,6 +89,17 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun pendingSshTrustCleanupBlocksAnotherTrustTargetMutation() {
+        SavedServerStore.ensureNoPendingSshTrustCleanup(null)
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.ensureNoPendingSshTrustCleanup("pending-target")
+        }
+
+        assertTrue(error.message.orEmpty().contains("still pending"))
+    }
+
+    @Test
     fun explicitBridgeSelectionAndNonBridgeNullRemainDistinct() {
         val bridge = SavedServer.fromJson(
             baseJson("bridge").apply {

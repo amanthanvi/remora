@@ -444,6 +444,9 @@ object SavedServerStore {
         }
 
         val preferences = prefs(context)
+        ensureNoPendingSshTrustCleanup(
+            preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null),
+        )
         val rollbackJson = encodeServers(existing)
         val updatedJson = encodeServers(mutation.servers)
         val journal = JSONObject()
@@ -512,6 +515,12 @@ object SavedServerStore {
         val port = journal.optInt("port").takeIf { it in 1..UShort.MAX_VALUE.toInt() }
             ?: return null
         return host to port
+    }
+
+    internal fun ensureNoPendingSshTrustCleanup(encoded: String?) {
+        check(encoded == null) {
+            "A previous SSH trust cleanup is still pending; retry after trust storage recovers"
+        }
     }
 
     private fun encodeServers(servers: List<SavedServer>): String =

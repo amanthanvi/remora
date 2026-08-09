@@ -1,6 +1,7 @@
 use super::*;
 
 const SUBAGENT_METADATA_HYDRATE_DELAYS_MS: [u64; 3] = [150, 800, 2500];
+const LAG_STALE_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
 
 #[derive(Default)]
 struct LagReconcileState {
@@ -89,7 +90,7 @@ pub(super) fn spawn_store_listener(
                     let owner = owner.clone();
                     let lag_reconcile_gate = Arc::clone(&lag_reconcile_gate);
                     MobileClient::spawn_detached(async move {
-                        let mut allow_stale_retry = true;
+                        let mut stale_retry_index = 0;
                         loop {
                             let Some(client) = owner.upgrade() else {
                                 warn!(
@@ -98,18 +99,27 @@ pub(super) fn spawn_store_listener(
                                 lag_reconcile_gate.cancel();
                                 return;
                             };
-                            if reconcile_after_store_listener_lag(client).await && allow_stale_retry
-                            {
-                                allow_stale_retry = false;
-                                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                                continue;
+                            if reconcile_after_store_listener_lag(client).await {
+                                if let Some(delay_ms) =
+                                    LAG_STALE_RETRY_DELAYS_MS.get(stale_retry_index)
+                                {
+                                    stale_retry_index += 1;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                                        *delay_ms,
+                                    ))
+                                    .await;
+                                    continue;
+                                }
+                                warn!(
+                                    "MobileClient: lag reconciliation remained stale after bounded retries"
+                                );
                             }
                             if !lag_reconcile_gate.finish_pass() {
                                 break;
                             }
                             // A separately observed lag burst warrants its own
-                            // bounded stale-response retry.
-                            allow_stale_retry = true;
+                            // bounded stale-response backoff sequence.
+                            stale_retry_index = 0;
                         }
                     });
                 }
@@ -382,9 +392,11 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
         )
         .await;
     if let Err(error) = result {
-        client
-            .app_store
-            .release_thread_follow_up_claim(&key, &draft.preview.id);
+        if !matches!(error, RpcError::Timeout) {
+            client
+                .app_store
+                .release_thread_follow_up_claim(&key, &draft.preview.id);
+        }
         warn!(
             "MobileClient: failed to autosend queued follow-up for {} thread {}: {}",
             key.server_id, key.thread_id, error
@@ -410,6 +422,12 @@ mod tests {
         assert!(gate.request_pass(), "idle gate should start a new pass");
         gate.cancel();
         assert!(gate.request_pass(), "cancel should return the gate to idle");
+    }
+
+    #[test]
+    fn lag_reconcile_stale_retries_use_bounded_backoff() {
+        assert_eq!(LAG_STALE_RETRY_DELAYS_MS, [50, 250, 1000]);
+        assert_eq!(LAG_STALE_RETRY_DELAYS_MS.get(3), None);
     }
 
     fn make_server_config(server_id: &str) -> ServerConfig {
@@ -986,7 +1004,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn timed_out_manual_retry_releases_retained_draft_claim() {
+    async fn timed_out_manual_retry_holds_claim_until_exact_response_resolves() {
         let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
@@ -1033,11 +1051,46 @@ mod tests {
         assert_eq!(thread.queued_follow_up_drafts.len(), 2);
         assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "retained");
         assert_eq!(thread.queued_follow_up_drafts[1].preview.text, "new");
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(!thread.queued_follow_up_drafts[1].autosend_claimed);
         assert!(
-            thread
-                .queued_follow_up_drafts
-                .iter()
-                .all(|draft| !draft.autosend_claimed)
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_none()
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let resolved = client
+                    .app_store
+                    .thread_snapshot(&key)
+                    .is_some_and(|thread| {
+                        thread.active_turn_id.as_deref() == Some("turn-follow-up")
+                    });
+                if resolved {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("late turn/start response should resolve the held claim");
+
+        let snapshot = client.app_store.snapshot();
+        let thread = snapshot.threads.get(&key).expect("thread snapshot");
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-follow-up"));
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "new");
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(
+            snapshot
+                .servers
+                .get(server_id)
+                .expect("server snapshot")
+                .transport
+                .pending_mutation
+                .is_none()
         );
     }
 

@@ -896,7 +896,7 @@ impl MobileClient {
         self.app_store.dismiss_plan_implementation_prompt(key);
     }
 
-    pub async fn implement_plan(&self, key: &ThreadKey) -> Result<(), RpcError> {
+    pub async fn implement_plan(self: &Arc<Self>, key: &ThreadKey) -> Result<(), RpcError> {
         self.app_store.dismiss_plan_implementation_prompt(key);
         let thread = self.snapshot_thread(key).ok();
         self.app_store

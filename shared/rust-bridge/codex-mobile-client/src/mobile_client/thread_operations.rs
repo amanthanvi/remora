@@ -408,6 +408,7 @@ impl MobileClient {
                 self.thread_runtime_routes()
                     .insert(key.clone(), runtime_kind.clone());
             }
+            self.mark_direct_resumed_thread(key.clone());
         };
         let applied = if let Some(expected_generation) = expected_ui_generation {
             self.apply_if_lag_refresh_current(
@@ -421,9 +422,6 @@ impl MobileClient {
             apply_response(&self.app_store);
             true
         };
-        if applied {
-            self.mark_direct_resumed_thread(key.clone());
-        }
         Ok(applied)
     }
 
@@ -571,8 +569,12 @@ impl MobileClient {
             // Clear the field on the target so reconcile_active_turn can decide
             // whether to restore it from `existing` based on the turn list.
             target.active_turn_id = None;
+            target.info.status = ThreadSummaryStatus::Idle;
             reconcile_active_turn(Some(&existing), &mut target, &response.data);
             let active_turn_cleared = was_active && target.active_turn_id.is_none();
+            if active_turn_cleared && target.info.parent_thread_id.is_some() {
+                target.info.agent_status = Some("completed".to_string());
+            }
             if target.active_turn_id != existing.active_turn_id
                 || target.info.status != existing.info.status
             {
@@ -808,7 +810,7 @@ impl MobileClient {
     }
 
     pub async fn start_turn(
-        &self,
+        self: &Arc<Self>,
         server_id: &str,
         params: upstream::TurnStartParams,
     ) -> Result<(), RpcError> {
@@ -816,7 +818,7 @@ impl MobileClient {
     }
 
     pub(super) async fn start_turn_with_claim(
-        &self,
+        self: &Arc<Self>,
         server_id: &str,
         params: upstream::TurnStartParams,
         autosend_claim_id: Option<String>,
@@ -824,13 +826,12 @@ impl MobileClient {
         self.get_session(server_id)?;
         let mut params = params;
         let mut autosend_claim_id = autosend_claim_id;
-        let mut manual_retry_claim_id = None;
         let thread_key = ThreadKey {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
         };
         let turn_start_lock = self.turn_start_lock(&thread_key);
-        let _turn_start_guard = turn_start_lock.lock().await;
+        let mut turn_start_guard = turn_start_lock.lock_owned().await;
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
@@ -876,8 +877,7 @@ impl MobileClient {
                 output_schema: None,
                 collaboration_mode: None,
             };
-            manual_retry_claim_id = Some(draft.preview.id.clone());
-            autosend_claim_id = manual_retry_claim_id.clone();
+            autosend_claim_id = Some(draft.preview.id.clone());
         }
         if let Some(thread) = thread_snapshot.as_ref()
             && thread.collaboration_mode == AppModeKind::Plan
@@ -941,32 +941,49 @@ impl MobileClient {
             .as_ref()
             .and_then(|t| t.active_turn_id.clone())
         {
-            let steer_result = tokio::time::timeout(
-                TURN_REQUEST_TIMEOUT,
-                self.request_typed_for_server::<upstream::TurnSteerResponse>(
-                    server_id,
-                    upstream::ClientRequest::TurnSteer {
-                        request_id: upstream::RequestId::Integer(crate::next_request_id()),
-                        params: upstream::TurnSteerParams {
-                            thread_id: params.thread_id.clone(),
-                            input: direct_params.input.clone(),
-                            responsesapi_client_metadata: None,
-                            expected_turn_id: active_turn_id,
+            let steer_thread_id = params.thread_id.clone();
+            let steer_input = direct_params.input.clone();
+            let client = Arc::clone(self);
+            let request_server_id = server_id.to_string();
+            let mut steer_task = tokio::spawn(async move {
+                let result = client
+                    .request_typed_for_server::<upstream::TurnSteerResponse>(
+                        &request_server_id,
+                        upstream::ClientRequest::TurnSteer {
+                            request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                            params: upstream::TurnSteerParams {
+                                thread_id: steer_thread_id,
+                                input: steer_input,
+                                responsesapi_client_metadata: None,
+                                expected_turn_id: active_turn_id,
+                            },
                         },
-                    },
-                ),
-            )
-            .await;
+                    )
+                    .await;
+                (result, turn_start_guard)
+            });
+            let steer_result = tokio::time::timeout(TURN_REQUEST_TIMEOUT, &mut steer_task).await;
             match steer_result {
-                Ok(Ok(_)) => {
+                Ok(Ok((Ok(_), _guard))) => {
                     // Draft cleanup happens via TurnStarted / item upsert;
                     // don't remove here so the user sees the queued preview.
                     return Ok(());
                 }
-                Ok(Err(_)) => {
+                Ok(Ok((Err(_), guard))) => {
                     // Turn not steerable or gone — fall through to turn/start.
+                    turn_start_guard = guard;
                 }
-                Err(_) => return Err(RpcError::Timeout),
+                Ok(Err(error)) => {
+                    return Err(RpcError::Deserialization(format!(
+                        "turn/steer task failed to join: {error}"
+                    )));
+                }
+                Err(_) => {
+                    // Dropping a Tokio JoinHandle detaches rather than cancels
+                    // its task. The task keeps the exact waiter and per-thread
+                    // lock until this ambiguous request resolves definitively.
+                    return Err(RpcError::Timeout);
+                }
             }
         }
 
@@ -979,51 +996,79 @@ impl MobileClient {
             },
             &params.thread_id,
         );
-        let response_result = match tokio::time::timeout(
-            TURN_REQUEST_TIMEOUT,
-            self.request_typed_for_server::<upstream::TurnStartResponse>(
-                server_id,
-                upstream::ClientRequest::TurnStart {
-                    request_id: upstream::RequestId::Integer(crate::next_request_id()),
-                    params: direct_params,
-                },
-            ),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(RpcError::Deserialization),
+        let completion_client = Arc::clone(self);
+        let completion_server_id = server_id.to_string();
+        let completion_thread_key = thread_key.clone();
+        let completion_command_id = direct_command_id.clone();
+        let completion_overlay_id = optimistic_overlay_id.clone();
+        let completion_claim_id = autosend_claim_id.clone();
+        let mut response_task = tokio::spawn(async move {
+            let _turn_start_guard = turn_start_guard;
+            let response_result = completion_client
+                .request_typed_for_server::<upstream::TurnStartResponse>(
+                    &completion_server_id,
+                    upstream::ClientRequest::TurnStart {
+                        request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                        params: direct_params,
+                    },
+                )
+                .await
+                .map_err(RpcError::Deserialization);
+            completion_client.finish_turn_start_request(
+                &completion_server_id,
+                &completion_thread_key,
+                &completion_command_id,
+                completion_overlay_id.as_deref(),
+                completion_claim_id.as_deref(),
+                response_result,
+            )
+        });
+        match tokio::time::timeout(TURN_REQUEST_TIMEOUT, &mut response_task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(RpcError::Deserialization(format!(
+                "turn/start task failed to join: {error}"
+            ))),
+            // The detached task owns finalization and the per-thread lock, so
+            // neither timeout nor caller cancellation can reopen this input.
             Err(_) => Err(RpcError::Timeout),
-        };
+        }
+    }
+
+    fn finish_turn_start_request(
+        &self,
+        server_id: &str,
+        thread_key: &ThreadKey,
+        direct_command_id: &str,
+        optimistic_overlay_id: Option<&str>,
+        consumed_claim_id: Option<&str>,
+        response_result: Result<upstream::TurnStartResponse, RpcError>,
+    ) -> Result<(), RpcError> {
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
                 self.app_store
-                    .finish_server_mutating_command_failure(server_id, &direct_command_id);
-                if let Some(overlay_id) = optimistic_overlay_id.as_ref() {
+                    .finish_server_mutating_command_failure(server_id, direct_command_id);
+                if let Some(overlay_id) = optimistic_overlay_id {
                     self.app_store
-                        .remove_local_overlay_item(&thread_key, overlay_id);
+                        .remove_local_overlay_item(thread_key, overlay_id);
                 }
-                if let Some(draft) = queued_draft.as_ref() {
+                if let Some(claim_id) = consumed_claim_id {
                     self.app_store
-                        .remove_thread_follow_up_draft(&thread_key, &draft.preview.id);
-                }
-                if let Some(claim_id) = manual_retry_claim_id.as_deref() {
-                    self.app_store
-                        .release_thread_follow_up_claim(&thread_key, claim_id);
+                        .release_thread_follow_up_claim(thread_key, claim_id);
                 }
                 return Err(error);
             }
         };
         self.app_store
-            .finish_server_mutating_command_success(server_id, &direct_command_id);
+            .finish_server_mutating_command_success(server_id, direct_command_id);
         self.app_store.mark_turn_started_from_response(
-            &thread_key,
+            thread_key,
             &response.turn.id,
-            autosend_claim_id.as_deref(),
+            consumed_claim_id,
         );
-        if let Some(overlay_id) = optimistic_overlay_id.as_ref() {
+        if let Some(overlay_id) = optimistic_overlay_id {
             self.app_store.bind_local_user_message_overlay_to_turn(
-                &thread_key,
+                thread_key,
                 overlay_id,
                 &response.turn.id,
             );

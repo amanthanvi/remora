@@ -1090,13 +1090,10 @@ mod mobile_client_tests {
         client
             .app_store
             .upsert_server(&config, ServerHealthSnapshot::Connected);
-        client
-            .app_store
-            .upsert_thread_snapshot(thread_snapshot_with_active_turn(
-                server_id,
-                thread_id,
-                "turn-active",
-            ));
+        let mut active = thread_snapshot_with_active_turn(server_id, thread_id, "turn-active");
+        active.info.parent_thread_id = Some("parent-thread".to_string());
+        active.info.agent_status = Some("running".to_string());
+        client.app_store.upsert_thread_snapshot(active);
 
         let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
         let request_handler: TestRequestHandler = {
@@ -1213,6 +1210,8 @@ mod mobile_client_tests {
             .thread_snapshot(&key)
             .expect("thread snapshot");
         assert_eq!(thread.active_turn_id, None);
+        assert_eq!(thread.info.status, ThreadSummaryStatus::Idle);
+        assert_eq!(thread.info.agent_status.as_deref(), Some("completed"));
         assert_eq!(thread.items.len(), 1);
         let crate::conversation_uniffi::HydratedConversationItemContent::User(message) =
             &thread.items[0].content
