@@ -339,9 +339,15 @@ pub(crate) fn remove_first_queued_follow_up(thread: &mut ThreadSnapshot) {
     }
 }
 
-pub(super) fn reanchor_queued_follow_ups(thread: &mut ThreadSnapshot, turn_id: &str) {
+pub(super) fn reanchor_queued_follow_ups(
+    thread: &mut ThreadSnapshot,
+    previous_anchor_turn_id: Option<&str>,
+    turn_id: &str,
+) {
     for draft in &mut thread.queued_follow_up_drafts {
-        draft.causal_anchor_turn_id = Some(turn_id.to_string());
+        if draft.causal_anchor_turn_id.as_deref() == previous_anchor_turn_id {
+            draft.causal_anchor_turn_id = Some(turn_id.to_string());
+        }
     }
 }
 

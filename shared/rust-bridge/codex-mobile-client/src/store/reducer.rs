@@ -806,15 +806,20 @@ impl AppStoreReducer {
         if self
             .mutate_thread_with_result(key, |thread| {
                 if let Some(preview_id) = consumed_follow_up_id {
-                    let removed_first = thread
+                    let consumed_anchor_turn_id = thread
                         .queued_follow_up_drafts
                         .first()
-                        .is_some_and(|draft| draft.preview.id == preview_id);
+                        .filter(|draft| draft.preview.id == preview_id)
+                        .map(|draft| draft.causal_anchor_turn_id.clone());
                     thread
                         .queued_follow_up_drafts
                         .retain(|draft| draft.preview.id != preview_id);
-                    if removed_first {
-                        reanchor_queued_follow_ups(thread, turn_id);
+                    if let Some(consumed_anchor_turn_id) = consumed_anchor_turn_id {
+                        reanchor_queued_follow_ups(
+                            thread,
+                            consumed_anchor_turn_id.as_deref(),
+                            turn_id,
+                        );
                     }
                     sync_thread_follow_up_projection(thread);
                 }
@@ -858,15 +863,20 @@ impl AppStoreReducer {
     ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
-                if !thread
+                let Some(consumed_anchor_turn_id) = thread
                     .queued_follow_up_drafts
                     .first()
-                    .is_some_and(|draft| draft.autosend_claimed)
-                {
+                    .filter(|draft| draft.autosend_claimed)
+                    .map(|draft| draft.causal_anchor_turn_id.clone())
+                else {
                     return false;
-                }
+                };
                 remove_first_queued_follow_up(thread);
-                reanchor_queued_follow_ups(thread, replay_turn_id);
+                reanchor_queued_follow_ups(
+                    thread,
+                    consumed_anchor_turn_id.as_deref(),
+                    replay_turn_id,
+                );
                 true
             })
             .unwrap_or(false);

@@ -1970,6 +1970,9 @@ mod tests {
         )
         .await;
         enqueue_follow_up(&client, &key, "continue");
+        client
+            .app_store
+            .mark_turn_started_from_response(&key, "turn-concurrent", None);
         enqueue_follow_up(&client, &key, "continue");
 
         client
@@ -1987,9 +1990,20 @@ mod tests {
             .thread_snapshot(&key)
             .expect("replay-walk thread");
         assert_eq!(thread.queued_follow_up_drafts.len(), 2);
-        assert!(thread.queued_follow_up_drafts.iter().all(|draft| {
-            !draft.autosend_claimed && draft.causal_anchor_turn_id.as_deref() == Some("turn-replay")
-        }));
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(
+            thread.queued_follow_up_drafts[0]
+                .causal_anchor_turn_id
+                .as_deref(),
+            Some("turn-replay")
+        );
+        assert!(!thread.queued_follow_up_drafts[1].autosend_claimed);
+        assert_eq!(
+            thread.queued_follow_up_drafts[1]
+                .causal_anchor_turn_id
+                .as_deref(),
+            Some("turn-concurrent")
+        );
         let next_claim = client
             .app_store
             .try_claim_first_queued_follow_up(&key)
