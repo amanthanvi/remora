@@ -83,13 +83,18 @@ final class SwiftSshTrustBackend: TerminalSshTrustBackend, @unchecked Sendable {
         }
     }
 
-    func remove(host: String, port: UInt16) {
+    func remove(host: String, port: UInt16) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account(host: host, port: port),
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SshTrustStoreError.Unavailable(
+                detail: "keychain removal failed for \(host):\(port) (OSStatus \(status))"
+            )
+        }
     }
 
     private func account(host: String, port: UInt16) -> String {

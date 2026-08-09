@@ -119,6 +119,7 @@ private fun SettingsTopLevel(
     val collapseTurns = ConversationPrefs.areTurnsCollapsed
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var serverRemovalError by remember { mutableStateOf<String?>(null) }
 
     val currentServer = remember(snapshot) {
         val activeServerId = snapshot?.activeThread?.serverId
@@ -273,10 +274,14 @@ private fun SettingsTopLevel(
                     },
                     onRemove = {
                         scope.launch {
-                            SavedServerStore.remove(context, server.serverId)
-                            appModel.sshSessionStore.close(server.serverId)
-                            appModel.serverBridge.disconnectServer(server.serverId)
-                            appModel.refreshSnapshot()
+                            try {
+                                SavedServerStore.remove(context, server.serverId)
+                                appModel.sshSessionStore.close(server.serverId)
+                                appModel.serverBridge.disconnectServer(server.serverId)
+                                appModel.refreshSnapshot()
+                            } catch (error: Exception) {
+                                serverRemovalError = error.message ?: "Unable to remove SSH trust pin."
+                            }
                         }
                     },
                 )
@@ -284,6 +289,19 @@ private fun SettingsTopLevel(
         }
 
         item { Spacer(Modifier.height(32.dp)) }
+    }
+
+    serverRemovalError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { serverRemovalError = null },
+            confirmButton = {
+                TextButton(onClick = { serverRemovalError = null }) {
+                    Text("OK")
+                }
+            },
+            title = { Text("Server Removal Failed") },
+            text = { Text(message) },
+        )
     }
 
     renameTarget?.let { server ->

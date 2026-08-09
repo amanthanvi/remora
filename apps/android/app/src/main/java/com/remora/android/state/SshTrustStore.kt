@@ -52,16 +52,18 @@ class SshTrustStore private constructor(
     }
 
     override fun remove(host: String, port: UShort) {
-        writablePrefs("remove", host, port).edit().remove(key(host, port)).apply()
-    }
-
-    private fun writablePrefs(operation: String, host: String, port: UShort): SharedPreferences =
-        prefs.getOrElse { error ->
-            throw IllegalStateException(
-                "encrypted trust store $operation failed for $host:$port",
-                error,
-            )
+        val prefs = prefs.getOrElse { error ->
+            throw unavailable("remove", host, port, error)
         }
+        try {
+            val committed = prefs.edit().remove(key(host, port)).commit()
+            if (!committed) {
+                throw IllegalStateException("encrypted preferences commit returned false")
+            }
+        } catch (error: Exception) {
+            throw unavailable("remove", host, port, error)
+        }
+    }
 
     private fun unavailable(
         operation: String,

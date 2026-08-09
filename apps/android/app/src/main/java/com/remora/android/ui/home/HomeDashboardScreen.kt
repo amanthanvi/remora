@@ -1124,10 +1124,16 @@ fun HomeDashboardScreen(
                                 appModel.refreshSnapshot()
                             }
                             is ConfirmAction.DisconnectServer -> {
-                                SavedServerStore.remove(context, action.server.serverId)
-                                appModel.sshSessionStore.close(action.server.serverId)
-                                appModel.serverBridge.disconnectServer(action.server.serverId)
-                                appModel.refreshSnapshot()
+                                try {
+                                    SavedServerStore.remove(context, action.server.serverId)
+                                    appModel.sshSessionStore.close(action.server.serverId)
+                                    appModel.serverBridge.disconnectServer(action.server.serverId)
+                                    appModel.refreshSnapshot()
+                                } catch (error: Exception) {
+                                    confirmAction = ConfirmAction.ReplyError(
+                                        error.message ?: "Unable to remove SSH trust pin.",
+                                    )
+                                }
                             }
                             is ConfirmAction.ReplyError -> {
                                 // Informational dialog only — "Confirm" just dismisses.

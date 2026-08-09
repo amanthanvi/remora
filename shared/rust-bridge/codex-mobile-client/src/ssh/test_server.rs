@@ -102,8 +102,9 @@ impl TerminalSshTrustBackend for InMemoryTrustBackend {
             .insert((host, port), fingerprint);
         Ok(())
     }
-    fn remove(&self, host: String, port: u16) {
+    fn remove(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
         self.entries.lock().unwrap().remove(&(host, port));
+        Ok(())
     }
 }
 
@@ -122,8 +123,8 @@ impl TerminalSshTrustBackend for SharedBackend {
     ) -> Result<(), SshTrustStoreError> {
         self.0.write(host, port, fingerprint)
     }
-    fn remove(&self, host: String, port: u16) {
-        self.0.remove(host, port);
+    fn remove(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
+        self.0.remove(host, port)
     }
 }
 

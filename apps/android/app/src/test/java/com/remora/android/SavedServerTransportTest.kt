@@ -6,6 +6,7 @@ import com.remora.android.state.hasSupportedConnectionPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONArray
@@ -112,6 +113,29 @@ class SavedServerTransportTest {
 
         assertTrue(empty.isEmpty())
         assertEquals(listOf("host.example" to 22.toUShort()), unpinned)
+    }
+
+    @Test
+    fun failedPinRemovalRetainsSavedServerForRetry() {
+        val ssh = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "host.example",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val existing = listOf(ssh)
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.removeServer(existing, ssh.id) { _, _ ->
+                throw IllegalStateException("pin removal failed")
+            }
+        }
+
+        assertEquals("pin removal failed", error.message)
+        assertEquals(listOf(ssh), existing)
     }
 
     @Test

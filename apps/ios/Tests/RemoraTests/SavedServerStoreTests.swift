@@ -131,7 +131,7 @@ final class SavedServerStoreTests: XCTestCase {
         SavedServerStore.save([ssh], to: defaults)
         var unpinned: [(String, UInt16)] = []
 
-        SavedServerStore.remove(serverId: ssh.id, from: defaults) { host, port in
+        try SavedServerStore.remove(serverId: ssh.id, from: defaults) { host, port in
             unpinned.append((host, port))
         }
 
@@ -161,14 +161,14 @@ final class SavedServerStoreTests: XCTestCase {
         SavedServerStore.save([first, second], to: defaults)
         var unpinned: [(String, UInt16)] = []
 
-        SavedServerStore.remove(serverId: first.id, from: defaults) { host, port in
+        try SavedServerStore.remove(serverId: first.id, from: defaults) { host, port in
             unpinned.append((host, port))
         }
 
         XCTAssertEqual(SavedServerStore.load(from: defaults), [second])
         XCTAssertTrue(unpinned.isEmpty)
 
-        SavedServerStore.remove(serverId: second.id, from: defaults) { host, port in
+        try SavedServerStore.remove(serverId: second.id, from: defaults) { host, port in
             unpinned.append((host, port))
         }
 
@@ -176,6 +176,27 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertEqual(unpinned.count, 1)
         XCTAssertEqual(unpinned.first?.0, "host.example")
         XCTAssertEqual(unpinned.first?.1, 22)
+    }
+
+    func testFailedPinRemovalRetainsSavedServerForRetry() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let ssh = makeServer(
+            id: "ssh",
+            hostname: "host.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([ssh], to: defaults)
+
+        XCTAssertThrowsError(
+            try SavedServerStore.remove(serverId: ssh.id, from: defaults) { _, _ in
+                throw NSError(domain: "SavedServerStoreTests", code: 1)
+            }
+        )
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [ssh])
     }
 
     private func makeServer(

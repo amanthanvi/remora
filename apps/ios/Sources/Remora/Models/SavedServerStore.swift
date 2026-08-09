@@ -114,9 +114,9 @@ enum SavedServerStore {
         return saved.map { $0.toRecord() }
     }
 
-    static func remove(serverId: String) {
-        remove(serverId: serverId, from: .standard) { host, port in
-            TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
+    static func remove(serverId: String) throws {
+        try remove(serverId: serverId, from: .standard) { host, port in
+            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
                 host: host,
                 port: port
             )
@@ -126,8 +126,8 @@ enum SavedServerStore {
     static func remove(
         serverId: String,
         from defaults: UserDefaults,
-        unpin: (String, UInt16) -> Void
-    ) {
+        unpin: (String, UInt16) throws -> Void
+    ) throws {
         var saved = load(from: defaults)
         let removed = saved.first { $0.id == serverId }
         saved.removeAll { $0.id == serverId }
@@ -137,7 +137,7 @@ enum SavedServerStore {
                 .compactMap(sshTrustTarget)
                 .contains { sshTrustIdentity(host: $0.host, port: $0.port) == identity }
             if !stillReferenced {
-                unpin(target.host, target.port)
+                try unpin(target.host, target.port)
             }
         }
         save(saved, to: defaults)

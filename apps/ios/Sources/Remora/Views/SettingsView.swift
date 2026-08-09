@@ -393,7 +393,12 @@ struct SettingsView: View {
     }
 
     private func removeServer(_ server: HomeDashboardServer) {
-        SavedServerStore.remove(serverId: server.id)
+        do {
+            try SavedServerStore.remove(serverId: server.id)
+        } catch {
+            serverEditError = error.localizedDescription
+            return
+        }
         Task { await SshSessionStore.shared.close(serverId: server.id, ssh: appModel.ssh) }
         appModel.serverBridge.disconnectServer(serverId: server.id)
     }

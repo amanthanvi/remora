@@ -757,6 +757,25 @@ impl AppStoreReducer {
         Some(draft.clone())
     }
 
+    pub(crate) fn release_thread_follow_up_claim(&self, key: &ThreadKey, preview_id: &str) {
+        if self
+            .mutate_thread_with_result(key, |thread| {
+                let Some(draft) = thread
+                    .queued_follow_up_drafts
+                    .iter_mut()
+                    .find(|draft| draft.preview.id == preview_id && draft.autosend_claimed)
+                else {
+                    return false;
+                };
+                draft.autosend_claimed = false;
+                true
+            })
+            .unwrap_or(false)
+        {
+            self.emit_thread_metadata_changed(key);
+        }
+    }
+
     pub(crate) fn stage_local_user_message_overlay(
         &self,
         key: &ThreadKey,

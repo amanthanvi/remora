@@ -66,8 +66,8 @@ pub trait TerminalSshTrustBackend: Send + Sync {
     /// previously stored fingerprint.
     fn write(&self, host: String, port: u16, fingerprint: String)
     -> Result<(), SshTrustStoreError>;
-    /// Remove any pin for `host:port`. Idempotent.
-    fn remove(&self, host: String, port: u16);
+    /// Durably remove any pin for `host:port`. Idempotent.
+    fn remove(&self, host: String, port: u16) -> Result<(), SshTrustStoreError>;
 }
 
 /// UniFFI object wrapping a platform [`TerminalSshTrustBackend`].
@@ -110,9 +110,9 @@ impl TerminalSshTrustStore {
 
     /// Remove any pin for the given host/port. Safe to call when no pin
     /// exists.
-    pub fn unpin(&self, host: String, port: u16) {
+    pub fn unpin(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
         let host = normalize_host(&host);
-        self.backend.remove(host, port);
+        self.backend.remove(host, port)
     }
 }
 
@@ -165,8 +165,9 @@ mod tests {
             self.store.lock().unwrap().insert((host, port), fingerprint);
             Ok(())
         }
-        fn remove(&self, host: String, port: u16) {
+        fn remove(&self, host: String, port: u16) -> Result<(), SshTrustStoreError> {
             self.store.lock().unwrap().remove(&(host, port));
+            Ok(())
         }
     }
 
@@ -201,7 +202,7 @@ mod tests {
         store
             .pin("other.example".into(), 22, "SHA256:def".into())
             .unwrap();
-        store.unpin("example.com".into(), 22);
+        store.unpin("example.com".into(), 22).unwrap();
         assert_eq!(store.pinned("example.com".into(), 22).unwrap(), None);
         assert_eq!(
             store.pinned("other.example".into(), 22).unwrap(),
@@ -243,7 +244,7 @@ mod tests {
     #[test]
     fn unpin_is_idempotent() {
         let store = make_store();
-        store.unpin("nothing.example".into(), 22);
-        store.unpin("nothing.example".into(), 22);
+        store.unpin("nothing.example".into(), 22).unwrap();
+        store.unpin("nothing.example".into(), 22).unwrap();
     }
 }

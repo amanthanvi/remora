@@ -33,4 +33,18 @@ class SshTrustStoreTest {
         assertTrue(error.detail.contains("write failed for host.example:22"))
         assertTrue(error.detail.contains("encrypted preferences unavailable"))
     }
+
+    @Test
+    fun unremovablePreferencesSurfaceTypedTrustStoreFailure() {
+        val store = SshTrustStore {
+            throw IllegalStateException("encrypted preferences unavailable")
+        }
+
+        val error = assertThrows(SshTrustStoreException.Unavailable::class.java) {
+            store.remove("host.example", 22u)
+        }
+
+        assertTrue(error.detail.contains("remove failed for host.example:22"))
+        assertTrue(error.detail.contains("encrypted preferences unavailable"))
+    }
 }

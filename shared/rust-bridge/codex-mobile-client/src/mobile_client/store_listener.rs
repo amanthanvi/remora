@@ -284,7 +284,7 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
     if let Err(error) = result {
         client
             .app_store
-            .remove_thread_follow_up_draft(&key, &draft.preview.id);
+            .release_thread_follow_up_claim(&key, &draft.preview.id);
         warn!(
             "MobileClient: failed to autosend queued follow-up for {} thread {}: {}",
             key.server_id, key.thread_id, error
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_queued_follow_up_clears_the_draft() {
+    async fn failed_queued_follow_up_releases_the_claim_for_retry() {
         let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
@@ -704,8 +704,15 @@ mod tests {
 
         let snapshot = client.app_store.snapshot();
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
-        assert!(thread.queued_follow_up_drafts.is_empty());
-        assert!(thread.local_overlay_items.is_empty());
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some(),
+            "a transient failure must leave the draft claimable for retry"
+        );
         assert!(
             snapshot
                 .servers
