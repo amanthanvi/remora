@@ -1288,11 +1288,27 @@ struct HomeNavigationView: View {
     }
 
     private func disconnectServer(_ serverId: String) {
-        SavedServerStore.remove(serverId: serverId)
-        Task { await SshSessionStore.shared.close(serverId: serverId, ssh: appModel.ssh) }
-        // Remote transport resources are owned by the Rust `ServerSession` and
-        // dropped automatically inside `serverBridge.disconnectServer`.
-        appModel.serverBridge.disconnectServer(serverId: serverId)
+        Task {
+            guard await appModel.reconnectController.prepareServerRemoval(serverId: serverId) else {
+                actionErrorMessage = "Unable to stop reconnecting to this server. Try again."
+                return
+            }
+            await SshSessionStore.shared.close(serverId: serverId, ssh: appModel.ssh)
+            do {
+                try SavedServerStore.remove(serverId: serverId)
+            } catch {
+                actionErrorMessage = error.localizedDescription
+                guard let storeError = error as? SavedServerStoreError,
+                      case .trustCleanupPending = storeError else {
+                    appModel.reconnectController.allowServerReconnect(serverId: serverId)
+                    return
+                }
+            }
+            appModel.reconnectController.syncSavedServers(
+                servers: SavedServerStore.reconnectRecords()
+            )
+            await appModel.refreshSnapshot()
+        }
     }
 
     private func renameServer(_ serverId: String, newName: String) {

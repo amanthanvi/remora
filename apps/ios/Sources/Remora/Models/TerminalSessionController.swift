@@ -107,11 +107,22 @@ final class TerminalSessionController {
 
     func trustUnknownSshHostAndRetry() async {
         guard let challenge = sshTrustChallenge else { return }
-        SwiftSshTrustBackend.shared.write(
-            host: challenge.host,
-            port: challenge.port,
-            fingerprint: challenge.fingerprint
-        )
+        // Record through the Rust store, not the backend directly: `pin`
+        // applies the same host normalization (case, brackets, IPv6 zone id)
+        // that the connect-time lookup uses. Writing the raw challenge host
+        // straight to the backend would file the approval under a
+        // noncanonical key, leaving the canonical spelling unpinned and still
+        // eligible for trust-on-first-use.
+        do {
+            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).pin(
+                host: challenge.host,
+                port: challenge.port,
+                fingerprint: challenge.fingerprint
+            )
+        } catch {
+            phase = .failed(error.localizedDescription)
+            return
+        }
         sshTrustChallenge = nil
         phase = .idle
         await open(backend: challenge.backend)
@@ -157,9 +168,9 @@ final class TerminalSessionController {
         from error: Error,
         backend: TerminalBackendKind
     ) -> SshHostTrustChallenge? {
-        guard case let .remoteSsh(
-            host: host,
-            port: port,
+        guard case .remoteSsh(
+            host: _,
+            port: _,
             username: _,
             auth: _,
             shell: _,
@@ -168,24 +179,17 @@ final class TerminalSessionController {
         ) = backend else {
             return nil
         }
-        guard let fingerprint = unknownHostFingerprint(from: error.localizedDescription) else {
+        guard let terminalError = error as? TerminalError else {
             return nil
         }
+        guard case let .SshHostKeyVerification(host, port, fingerprint, pinned) = terminalError,
+              pinned == nil else { return nil }
         return SshHostTrustChallenge(
             host: host,
             port: port,
             fingerprint: fingerprint,
             backend: backend
         )
-    }
-
-    private static func unknownHostFingerprint(from description: String) -> String? {
-        guard let range = description.range(of: "unknown-host:") else { return nil }
-        let raw = description[range.upperBound...]
-        let fingerprint = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'()[]"))
-        return fingerprint.isEmpty ? nil : fingerprint
     }
 
     func resize(cols: UInt16, rows: UInt16, notifyBackend: Bool = true) async {

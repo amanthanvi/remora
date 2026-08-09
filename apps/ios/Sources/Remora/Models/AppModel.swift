@@ -40,6 +40,14 @@ final class AppModel {
     }
 
     private nonisolated static let _prewarmResult: RustBridges = {
+        // Every Rust SSH path (app-server connect, SSH bridge, background
+        // reconnect) verifies host keys against this store. The terminal hands
+        // its own store in per session; these paths have no such seam, so
+        // register the same Keychain-backed backend once per process, before
+        // any bridge that can open an SSH connection exists.
+        registerSshHostTrustStore(
+            store: TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
+        )
 
         let rc = ReconnectController()
         rc.setCredentialProvider(provider: SwiftSshCredentialProvider())
