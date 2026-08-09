@@ -5,8 +5,8 @@ pub(super) const AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT: usize = 10;
 
 struct AmbiguousTurnRepairPage {
     page: crate::types::AppListThreadTurnsResponse,
-    causally_eligible_turn_ids: HashSet<String>,
-    undecidable_turn_ids: HashSet<String>,
+    candidate_turn_ids: HashSet<String>,
+    unanchored_turn_ids: HashSet<String>,
 }
 
 struct LagRefreshFence<'a> {
@@ -57,14 +57,16 @@ impl MobileClient {
     }
 
     #[cfg(test)]
-    pub(super) fn mark_turn_start_ambiguous_at(
+    pub(super) fn mark_turn_start_ambiguous_after_turn(
         &self,
         key: ThreadKey,
-        claimed_at_unix_secs: i64,
+        causal_anchor_turn_id: Option<&str>,
     ) -> bool {
         let thread = self.app_store.thread_snapshot(&key);
-        let baseline =
-            PendingTurnReconciliation::from_thread_at(thread.as_ref(), claimed_at_unix_secs);
+        let baseline = PendingTurnReconciliation::from_thread_with_anchor(
+            thread.as_ref(),
+            causal_anchor_turn_id.map(str::to_string),
+        );
         self.mark_turn_start_ambiguous_with_baseline(key, baseline)
     }
 
@@ -155,7 +157,8 @@ impl MobileClient {
         key: &ThreadKey,
         pending_id: i64,
         next_cursor: Option<String>,
-        undecidable_replay_observed: bool,
+        candidate_replay_observed: bool,
+        unanchored_replay_observed: bool,
     ) -> bool {
         let mut pending = self.pending_turn_reconciliation();
         let Some(current) = pending
@@ -165,7 +168,8 @@ impl MobileClient {
             return false;
         };
         current.repair_cursor = next_cursor;
-        current.undecidable_replay_observed |= undecidable_replay_observed;
+        current.candidate_replay_observed |= candidate_replay_observed;
+        current.unanchored_replay_observed |= unanchored_replay_observed;
         true
     }
 
@@ -597,62 +601,68 @@ impl MobileClient {
             self.mark_direct_resumed_thread(key.clone());
             if !server_honored_exclude_turns {
                 let pending = self.pending_turn_reconciliation().get(key).cloned();
-                let causally_eligible_turn_ids = pending
+                let (eligible_turn_ids, unanchored_turn_ids, causal_boundary_found) = pending
                     .as_ref()
                     .map(|pending| {
-                        turns
-                            .iter()
-                            .filter(|turn| pending.turn_could_follow_claim(turn))
-                            .map(|turn| turn.id.clone())
-                            .collect::<HashSet<_>>()
+                        if let Some(anchor_turn_id) = pending.causal_anchor_turn_id.as_deref() {
+                            if let Some(anchor_index) =
+                                turns.iter().position(|turn| turn.id == anchor_turn_id)
+                            {
+                                (
+                                    turns[anchor_index.saturating_add(1)..]
+                                        .iter()
+                                        .map(|turn| turn.id.clone())
+                                        .collect::<HashSet<_>>(),
+                                    HashSet::new(),
+                                    true,
+                                )
+                            } else {
+                                (
+                                    HashSet::new(),
+                                    turns.iter().map(|turn| turn.id.clone()).collect(),
+                                    false,
+                                )
+                            }
+                        } else if pending.baseline_history_known {
+                            (
+                                turns
+                                    .iter()
+                                    .filter(|turn| !pending.baseline_turn_ids.contains(&turn.id))
+                                    .map(|turn| turn.id.clone())
+                                    .collect(),
+                                HashSet::new(),
+                                true,
+                            )
+                        } else {
+                            (
+                                HashSet::new(),
+                                turns.iter().map(|turn| turn.id.clone()).collect(),
+                                false,
+                            )
+                        }
                     })
                     .unwrap_or_default();
-                let undecidable_turn_ids = pending
-                    .as_ref()
-                    .map(|pending| {
-                        turns
-                            .iter()
-                            .filter(|turn| pending.turn_is_undecidable_for_claim(turn))
-                            .map(|turn| turn.id.clone())
-                            .collect::<HashSet<_>>()
-                    })
-                    .unwrap_or_default();
-                let causal_authoritative_match = pending.is_some()
+                let candidate_replay_observed = pending.is_some()
                     && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
                         key,
                         &snapshot.items,
-                        &causally_eligible_turn_ids,
+                        &eligible_turn_ids,
                     );
-                let undecidable_authoritative_match = pending.is_some()
+                let unanchored_replay_observed = pending.is_some()
                     && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
                         key,
                         &snapshot.items,
-                        &undecidable_turn_ids,
+                        &unanchored_turn_ids,
                     );
-                let replayed = pending.as_ref().is_some_and(|pending| {
-                    if pending.baseline_history_known {
-                        app_store.consume_thread_follow_up_claim_if_replayed(
-                            key,
-                            &snapshot.items,
-                            &pending.baseline_turn_ids,
-                        )
-                    } else {
-                        app_store.consume_thread_follow_up_claim_if_replayed_in_turns(
-                            key,
-                            &snapshot.items,
-                            &causally_eligible_turn_ids,
-                        )
-                    }
-                });
+                if causal_boundary_found && candidate_replay_observed {
+                    app_store.consume_thread_follow_up_claim_after_authoritative_replay(key);
+                }
                 let active_turn_observed = snapshot.active_turn_id.is_some();
                 app_store.upsert_thread_snapshot(snapshot);
                 if pending.is_none()
                     || active_turn_observed
-                    || replayed
-                    || pending
-                        .as_ref()
-                        .is_some_and(|pending| pending.baseline_history_known)
-                    || (!causal_authoritative_match && !undecidable_authoritative_match)
+                    || causal_boundary_found
+                    || !unanchored_replay_observed
                 {
                     self.reconcile_ambiguous_turn_claim(key);
                 } else {
@@ -780,6 +790,7 @@ impl MobileClient {
                 reconcile_completed_turn_probe(&existing, &response.data).1
             }) || repair_required_for_ambiguity;
         let mut repair_reached_causal_boundary = false;
+        let mut repair_history_exhausted = false;
         let mut repair_continuation_cursor = None;
         let mut repair_used_resume_cursor = false;
         let repair_pages = if needs_repair_page {
@@ -790,7 +801,6 @@ impl MobileClient {
             let mut rechecking_head = resume_cursor.is_some();
             let mut cursor = None;
             let mut seen_cursors = HashSet::new();
-            let mut causal_floor_reached = false;
             for _ in 0..AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT {
                 if !seen_cursors.insert(cursor.clone()) {
                     warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -827,48 +837,45 @@ impl MobileClient {
                         break;
                     }
                 };
-                let turn_ids = response
-                    .data
-                    .iter()
-                    .map(|turn| turn.id.clone())
-                    .collect::<HashSet<_>>();
-                let mut causally_eligible_turn_ids = HashSet::new();
-                let mut undecidable_turn_ids = HashSet::new();
-                if let Some(pending) = pending_ambiguity.as_ref()
-                    && !pending.baseline_history_known
-                {
+                let mut candidate_turn_ids = HashSet::new();
+                let mut unanchored_turn_ids = HashSet::new();
+                let mut reached_boundary = false;
+                if let Some(pending) = pending_ambiguity.as_ref() {
                     for turn in &response.data {
-                        if !causal_floor_reached && pending.turn_definitely_precedes_claim(turn) {
-                            causal_floor_reached = true;
+                        if pending
+                            .causal_anchor_turn_id
+                            .as_deref()
+                            .is_some_and(|anchor_turn_id| turn.id == anchor_turn_id)
+                            || (pending.causal_anchor_turn_id.is_none()
+                                && pending.baseline_history_known
+                                && pending.baseline_turn_ids.contains(&turn.id))
+                        {
+                            reached_boundary = true;
+                            break;
                         }
-                        if causal_floor_reached {
-                            continue;
-                        }
-                        if pending.turn_could_follow_claim(turn) {
-                            causally_eligible_turn_ids.insert(turn.id.clone());
-                        } else if pending.turn_is_undecidable_for_claim(turn) {
-                            undecidable_turn_ids.insert(turn.id.clone());
+                        if pending.causal_anchor_turn_id.is_some() || pending.baseline_history_known
+                        {
+                            candidate_turn_ids.insert(turn.id.clone());
+                        } else {
+                            unanchored_turn_ids.insert(turn.id.clone());
                         }
                     }
                 }
                 let next_cursor = response.next_cursor.clone();
-                let reached_baseline = pending_ambiguity.as_ref().is_some_and(|pending| {
-                    pending.baseline_history_known
-                        && !pending.baseline_turn_ids.is_empty()
-                        && turn_ids
-                            .iter()
-                            .any(|turn_id| pending.baseline_turn_ids.contains(turn_id))
-                });
                 pages.push(AmbiguousTurnRepairPage {
                     page: response.into(),
-                    causally_eligible_turn_ids,
-                    undecidable_turn_ids,
+                    candidate_turn_ids,
+                    unanchored_turn_ids,
                 });
                 if !repair_required_for_ambiguity {
                     break;
                 }
-                if reached_baseline || causal_floor_reached || next_cursor.is_none() {
+                if reached_boundary {
                     repair_reached_causal_boundary = true;
+                    break;
+                }
+                if next_cursor.is_none() {
+                    repair_history_exhausted = true;
                     break;
                 }
                 if rechecking_head {
@@ -901,20 +908,6 @@ impl MobileClient {
             let Some(existing) = app_store.thread_snapshot(key) else {
                 return false;
             };
-            let known_turn_ids = pending_ambiguity
-                .as_ref()
-                .map(|pending| pending.baseline_turn_ids.clone())
-                .unwrap_or_else(|| {
-                    existing
-                        .items
-                        .iter()
-                        .filter_map(|item| item.source_turn_id.clone())
-                        .collect::<HashSet<_>>()
-                });
-            let history_known = pending_ambiguity
-                .as_ref()
-                .map(|pending| pending.baseline_history_known)
-                .unwrap_or(existing.initial_turns_loaded);
             let (target, active_turn_cleared) =
                 reconcile_completed_turn_probe(&existing, &response.data);
             if target.active_turn_id != existing.active_turn_id
@@ -925,39 +918,45 @@ impl MobileClient {
             }
             if active_turn_cleared || repair_required_for_ambiguity {
                 if repair_required_for_ambiguity {
-                    let replayed = repair_pages.iter().any(|repair_page| {
-                        if history_known {
-                            app_store.consume_thread_follow_up_claim_if_replayed(
-                                key,
-                                &repair_page.page.turns,
-                                &known_turn_ids,
-                            )
-                        } else {
-                            app_store.consume_thread_follow_up_claim_if_replayed_in_turns(
-                                key,
-                                &repair_page.page.turns,
-                                &repair_page.causally_eligible_turn_ids,
-                            )
-                        }
-                    });
-                    let undecidable_replay_observed = pending_ambiguity
+                    let candidate_replay_observed = pending_ambiguity
                         .as_ref()
-                        .is_some_and(|pending| pending.undecidable_replay_observed)
+                        .is_some_and(|pending| pending.candidate_replay_observed)
                         || repair_pages.iter().any(|repair_page| {
                             app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
                                 key,
                                 &repair_page.page.turns,
-                                &repair_page.undecidable_turn_ids,
+                                &repair_page.candidate_turn_ids,
                             )
                         });
-                    if !replayed && (!repair_reached_causal_boundary || undecidable_replay_observed)
-                    {
+                    let unanchored_replay_observed = pending_ambiguity
+                        .as_ref()
+                        .is_some_and(|pending| pending.unanchored_replay_observed)
+                        || repair_pages.iter().any(|repair_page| {
+                            app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
+                                key,
+                                &repair_page.page.turns,
+                                &repair_page.unanchored_turn_ids,
+                            )
+                        });
+                    let baseline_set_is_authoritative =
+                        pending_ambiguity.as_ref().is_some_and(|pending| {
+                            pending.causal_anchor_turn_id.is_none()
+                                && pending.baseline_history_known
+                        });
+                    let replay_classification_trusted =
+                        repair_reached_causal_boundary || baseline_set_is_authoritative;
+                    let repair_scan_complete =
+                        repair_reached_causal_boundary || repair_history_exhausted;
+                    let unresolved_matching_history = !replay_classification_trusted
+                        && (candidate_replay_observed || unanchored_replay_observed);
+                    if !repair_scan_complete || unresolved_matching_history {
                         if let Some(pending) = pending_ambiguity.as_ref() {
                             self.advance_ambiguous_turn_repair_state(
                                 key,
                                 pending.id,
                                 repair_continuation_cursor.clone(),
-                                undecidable_replay_observed,
+                                candidate_replay_observed,
+                                unanchored_replay_observed,
                             );
                         }
                         warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -965,6 +964,9 @@ impl MobileClient {
                             server_id, thread_id
                         );
                         return true;
+                    }
+                    if candidate_replay_observed && replay_classification_trusted {
+                        app_store.consume_thread_follow_up_claim_after_authoritative_replay(key);
                     }
                 }
                 let repair_pages_to_merge = if repair_used_resume_cursor {
@@ -1216,8 +1218,15 @@ impl MobileClient {
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
-        let turn_reconciliation_baseline =
-            PendingTurnReconciliation::from_thread(thread_snapshot.as_ref());
+        let mut causal_anchor_turn_id = autosend_claim_id.as_deref().and_then(|claim_id| {
+            thread_snapshot.as_ref().and_then(|thread| {
+                thread
+                    .queued_follow_up_drafts
+                    .iter()
+                    .find(|draft| draft.preview.id == claim_id && draft.autosend_claimed)
+                    .and_then(|draft| draft.causal_anchor_turn_id.clone())
+            })
+        });
         if let Some(claim_id) = autosend_claim_id.as_deref() {
             let claim_is_current = thread_snapshot.as_ref().is_some_and(|thread| {
                 thread
@@ -1249,6 +1258,7 @@ impl MobileClient {
                 // Another autosend task already owns the retained first draft.
                 return Ok(());
             };
+            causal_anchor_turn_id = draft.causal_anchor_turn_id.clone();
             params = upstream::TurnStartParams {
                 thread_id: thread_key.thread_id.clone(),
                 input: draft.inputs,
@@ -1270,6 +1280,10 @@ impl MobileClient {
             };
             autosend_claim_id = Some(draft.preview.id.clone());
         }
+        let turn_reconciliation_baseline = PendingTurnReconciliation::from_thread_with_anchor(
+            thread_snapshot.as_ref(),
+            causal_anchor_turn_id,
+        );
         if let Some(thread) = thread_snapshot.as_ref()
             && thread.collaboration_mode == AppModeKind::Plan
             && params.collaboration_mode.is_none()

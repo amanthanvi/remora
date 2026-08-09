@@ -750,6 +750,7 @@ impl AppStoreReducer {
                 preview,
                 inputs: Vec::new(),
                 source_message_json: None,
+                causal_anchor_turn_id: None,
                 autosend_claimed: false,
             },
         );
@@ -758,10 +759,18 @@ impl AppStoreReducer {
     pub(crate) fn enqueue_thread_follow_up_draft(
         &self,
         key: &ThreadKey,
-        draft: QueuedFollowUpDraft,
+        mut draft: QueuedFollowUpDraft,
     ) {
         if self
             .mutate_thread_with_result(key, |thread| {
+                if draft.causal_anchor_turn_id.is_none() {
+                    draft.causal_anchor_turn_id = thread.active_turn_id.clone().or_else(|| {
+                        thread
+                            .queued_follow_up_drafts
+                            .last()
+                            .and_then(|queued| queued.causal_anchor_turn_id.clone())
+                    });
+                }
                 thread.queued_follow_up_drafts.push(draft);
                 sync_thread_follow_up_projection(thread);
             })
@@ -835,59 +844,21 @@ impl AppStoreReducer {
         }
     }
 
-    pub(crate) fn consume_thread_follow_up_claim_if_replayed(
+    pub(crate) fn consume_thread_follow_up_claim_after_authoritative_replay(
         &self,
         key: &ThreadKey,
-        authoritative_items: &[HydratedConversationItem],
-        known_turn_ids: &HashSet<String>,
-    ) -> bool {
-        self.consume_thread_follow_up_claim_if_replayed_where(key, authoritative_items, |turn_id| {
-            !known_turn_ids.contains(turn_id)
-        })
-    }
-
-    pub(crate) fn consume_thread_follow_up_claim_if_replayed_in_turns(
-        &self,
-        key: &ThreadKey,
-        authoritative_items: &[HydratedConversationItem],
-        eligible_turn_ids: &HashSet<String>,
-    ) -> bool {
-        self.consume_thread_follow_up_claim_if_replayed_where(key, authoritative_items, |turn_id| {
-            eligible_turn_ids.contains(turn_id)
-        })
-    }
-
-    fn consume_thread_follow_up_claim_if_replayed_where(
-        &self,
-        key: &ThreadKey,
-        authoritative_items: &[HydratedConversationItem],
-        turn_is_eligible: impl Fn(&str) -> bool,
     ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
-                let Some(draft) = thread
+                if !thread
                     .queued_follow_up_drafts
                     .first()
-                    .filter(|draft| draft.autosend_claimed)
-                else {
+                    .is_some_and(|draft| draft.autosend_claimed)
+                {
                     return false;
-                };
-                let Some(local_item) = local_user_message_overlay_item(&draft.inputs) else {
-                    return false;
-                };
-                let replayed = authoritative_items.iter().any(|item| {
-                    item.is_from_user_turn_boundary
-                        && matches!(&item.content, HydratedConversationItemContent::User(_))
-                        && item.content.eq(&local_item.content)
-                        && item
-                            .source_turn_id
-                            .as_ref()
-                            .is_some_and(|turn_id| turn_is_eligible(turn_id))
-                });
-                if replayed {
-                    remove_first_queued_follow_up(thread);
                 }
-                replayed
+                remove_first_queued_follow_up(thread);
+                true
             })
             .unwrap_or(false);
         if consumed {

@@ -260,6 +260,7 @@ pub(crate) struct QueuedFollowUpDraft {
     pub preview: AppQueuedFollowUpPreview,
     pub inputs: Vec<upstream::UserInput>,
     pub source_message_json: Option<serde_json::Value>,
+    pub causal_anchor_turn_id: Option<String>,
     pub autosend_claimed: bool,
 }
 

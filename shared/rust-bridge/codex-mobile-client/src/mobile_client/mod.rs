@@ -64,29 +64,27 @@ use self::user_input::normalize_pending_user_input_answers;
 
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
 const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS: i64 = 10 * 60;
 
 #[derive(Clone, Debug)]
 struct PendingTurnReconciliation {
     id: i64,
     baseline_turn_ids: HashSet<String>,
     baseline_history_known: bool,
-    claimed_at_unix_secs: i64,
+    causal_anchor_turn_id: Option<String>,
     repair_cursor: Option<String>,
-    undecidable_replay_observed: bool,
+    candidate_replay_observed: bool,
+    unanchored_replay_observed: bool,
 }
 
 impl PendingTurnReconciliation {
     fn from_thread(thread: Option<&ThreadSnapshot>) -> Self {
-        let claimed_at_unix_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-            });
-        Self::from_thread_at(thread, claimed_at_unix_secs)
+        Self::from_thread_with_anchor(thread, None)
     }
 
-    fn from_thread_at(thread: Option<&ThreadSnapshot>, claimed_at_unix_secs: i64) -> Self {
+    fn from_thread_with_anchor(
+        thread: Option<&ThreadSnapshot>,
+        causal_anchor_turn_id: Option<String>,
+    ) -> Self {
         thread
             .map(|thread| Self {
                 id: crate::next_request_id(),
@@ -96,36 +94,20 @@ impl PendingTurnReconciliation {
                     .filter_map(|item| item.source_turn_id.clone())
                     .collect(),
                 baseline_history_known: thread.initial_turns_loaded,
-                claimed_at_unix_secs,
+                causal_anchor_turn_id: causal_anchor_turn_id.clone(),
                 repair_cursor: None,
-                undecidable_replay_observed: false,
+                candidate_replay_observed: false,
+                unanchored_replay_observed: false,
             })
             .unwrap_or_else(|| Self {
                 id: crate::next_request_id(),
                 baseline_turn_ids: HashSet::new(),
                 baseline_history_known: false,
-                claimed_at_unix_secs,
+                causal_anchor_turn_id,
                 repair_cursor: None,
-                undecidable_replay_observed: false,
+                candidate_replay_observed: false,
+                unanchored_replay_observed: false,
             })
-    }
-
-    fn turn_could_follow_claim(&self, turn: &upstream::Turn) -> bool {
-        turn.started_at
-            .is_some_and(|started_at| started_at >= self.claimed_at_unix_secs)
-    }
-
-    fn turn_definitely_precedes_claim(&self, turn: &upstream::Turn) -> bool {
-        turn.started_at.is_some_and(|started_at| {
-            started_at
-                < self
-                    .claimed_at_unix_secs
-                    .saturating_sub(AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS)
-        })
-    }
-
-    fn turn_is_undecidable_for_claim(&self, turn: &upstream::Turn) -> bool {
-        !self.turn_could_follow_claim(turn) && !self.turn_definitely_precedes_claim(turn)
     }
 }
 
