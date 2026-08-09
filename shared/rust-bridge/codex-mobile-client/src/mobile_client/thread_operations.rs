@@ -717,6 +717,11 @@ impl MobileClient {
         };
         self.app_store
             .finish_server_mutating_command_success(server_id, &direct_command_id);
+        self.app_store.bind_first_claimed_follow_up_to_turn(
+            &thread_key,
+            &params.input,
+            &response.turn.id,
+        );
         if let Some(overlay_id) = optimistic_overlay_id.as_ref() {
             self.app_store.bind_local_user_message_overlay_to_turn(
                 &thread_key,

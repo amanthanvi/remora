@@ -726,6 +726,12 @@ mod tests {
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(
+            thread.queued_follow_up_drafts[0]
+                .autosend_turn_id
+                .as_deref(),
+            Some("turn-follow-up")
+        );
 
         client.app_store.apply_ui_event(&UiEvent::TurnStarted {
             key: key.clone(),
@@ -981,5 +987,11 @@ mod tests {
         let thread = snapshot.threads.get(&key).expect("thread snapshot");
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(
+            thread.queued_follow_up_drafts[0]
+                .autosend_turn_id
+                .as_deref(),
+            Some("turn-follow-up")
+        );
     }
 }

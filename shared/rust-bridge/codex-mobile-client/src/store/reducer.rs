@@ -617,12 +617,23 @@ impl AppStoreReducer {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
             let existing = snapshot.threads.get(&key).cloned();
             if let Some(existing) = existing.as_ref() {
-                let consume_claimed_follow_up = existing.active_turn_id.is_none()
-                    && thread.active_turn_id.is_some()
-                    && existing
-                        .queued_follow_up_drafts
-                        .first()
-                        .is_some_and(|draft| draft.autosend_claimed);
+                let claimed_follow_up = existing
+                    .queued_follow_up_drafts
+                    .first()
+                    .filter(|draft| draft.autosend_claimed);
+                let consume_claimed_follow_up = claimed_follow_up.is_some_and(|draft| {
+                    (existing.active_turn_id.is_none() && thread.active_turn_id.is_some())
+                        || draft.autosend_turn_id.as_deref().is_some_and(|turn_id| {
+                            thread.items.iter().any(|item| {
+                                item.source_turn_id.as_deref() == Some(turn_id)
+                                    && item.is_from_user_turn_boundary
+                                    && matches!(
+                                        item.content,
+                                        HydratedConversationItemContent::User(_)
+                                    )
+                            })
+                        })
+                });
                 // Diagnostic for the duplicate-user-message bug (task #11):
                 // catch transient overlap where the incoming snapshot's
                 // hydrated User items match an overlay that's already in
@@ -720,6 +731,7 @@ impl AppStoreReducer {
                 inputs: Vec::new(),
                 source_message_json: None,
                 autosend_claimed: false,
+                autosend_turn_id: None,
             },
         );
     }
@@ -754,7 +766,31 @@ impl AppStoreReducer {
             return None;
         }
         draft.autosend_claimed = true;
+        draft.autosend_turn_id = None;
         Some(draft.clone())
+    }
+
+    pub(crate) fn bind_first_claimed_follow_up_to_turn(
+        &self,
+        key: &ThreadKey,
+        inputs: &[upstream::UserInput],
+        turn_id: &str,
+    ) {
+        if self
+            .mutate_thread_with_result(key, |thread| {
+                let Some(draft) = thread.queued_follow_up_drafts.first_mut() else {
+                    return false;
+                };
+                if !draft.autosend_claimed || draft.inputs != inputs {
+                    return false;
+                }
+                draft.autosend_turn_id = Some(turn_id.to_string());
+                true
+            })
+            .unwrap_or(false)
+        {
+            self.emit_thread_metadata_changed(key);
+        }
     }
 
     pub(crate) fn release_thread_follow_up_claim(&self, key: &ThreadKey, preview_id: &str) {
@@ -768,6 +804,7 @@ impl AppStoreReducer {
                     return false;
                 };
                 draft.autosend_claimed = false;
+                draft.autosend_turn_id = None;
                 true
             })
             .unwrap_or(false)
