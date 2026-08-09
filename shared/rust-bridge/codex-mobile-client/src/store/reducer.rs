@@ -874,6 +874,30 @@ impl AppStoreReducer {
         consumed
     }
 
+    pub(crate) fn thread_follow_up_claim_matches_authoritative_items(
+        &self,
+        key: &ThreadKey,
+        authoritative_items: &[HydratedConversationItem],
+    ) -> bool {
+        self.thread_snapshot(key).is_some_and(|thread| {
+            let Some(draft) = thread
+                .queued_follow_up_drafts
+                .first()
+                .filter(|draft| draft.autosend_claimed)
+            else {
+                return false;
+            };
+            let Some(local_item) = local_user_message_overlay_item(&draft.inputs) else {
+                return false;
+            };
+            authoritative_items.iter().any(|item| {
+                item.is_from_user_turn_boundary
+                    && matches!(&item.content, HydratedConversationItemContent::User(_))
+                    && item.content.eq(&local_item.content)
+            })
+        })
+    }
+
     pub(crate) fn stage_local_user_message_overlay(
         &self,
         key: &ThreadKey,

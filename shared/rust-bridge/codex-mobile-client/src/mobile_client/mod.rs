@@ -65,6 +65,30 @@ use self::user_input::normalize_pending_user_input_answers;
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
 const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[derive(Clone, Debug)]
+struct PendingTurnReconciliation {
+    baseline_turn_ids: HashSet<String>,
+    baseline_history_known: bool,
+}
+
+impl PendingTurnReconciliation {
+    fn from_thread(thread: Option<&ThreadSnapshot>) -> Self {
+        thread
+            .map(|thread| Self {
+                baseline_turn_ids: thread
+                    .items
+                    .iter()
+                    .filter_map(|item| item.source_turn_id.clone())
+                    .collect(),
+                baseline_history_known: thread.initial_turns_loaded,
+            })
+            .unwrap_or_else(|| Self {
+                baseline_turn_ids: HashSet::new(),
+                baseline_history_known: false,
+            })
+    }
+}
+
 /// Top-level entry point for platform code (iOS / Android).
 ///
 /// Ties together server sessions, thread management, event processing,
@@ -97,7 +121,7 @@ pub struct MobileClient {
     direct_resumed_threads: Arc<StdMutex<HashSet<ThreadKey>>>,
     thread_runtime_routes: Arc<StdMutex<HashMap<ThreadKey, AgentRuntimeKind>>>,
     turn_start_locks: Arc<StdMutex<HashMap<ThreadKey, Weak<Mutex<()>>>>>,
-    pending_turn_reconciliation: Arc<StdMutex<HashSet<ThreadKey>>>,
+    pending_turn_reconciliation: Arc<StdMutex<HashMap<ThreadKey, PendingTurnReconciliation>>>,
     turn_request_timeout: std::time::Duration,
     /// In-flight guided-SSH-connect flows, keyed by server_id. Held on
     /// `MobileClient` so repeated connect attempts can reuse the same
@@ -223,7 +247,7 @@ impl MobileClient {
                 direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
                 thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
                 turn_start_locks: Arc::new(StdMutex::new(HashMap::new())),
-                pending_turn_reconciliation: Arc::new(StdMutex::new(HashSet::new())),
+                pending_turn_reconciliation: Arc::new(StdMutex::new(HashMap::new())),
                 turn_request_timeout,
                 ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),

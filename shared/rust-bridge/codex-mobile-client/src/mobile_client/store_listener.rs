@@ -612,7 +612,7 @@ mod tests {
 
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -650,7 +650,7 @@ mod tests {
                 .try_claim_first_queued_follow_up(&key)
                 .is_some()
         );
-        client.pending_turn_reconciliation().insert(key.clone());
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
 
         let response_turn_id = response_turn_id.to_string();
         let response_text = response_text.to_string();
@@ -692,6 +692,90 @@ mod tests {
             .await
             .expect("completed ambiguity refresh succeeds");
         (client, key)
+    }
+
+    async fn reconcile_embedded_ambiguous_claim(
+        initial_thread: ThreadSnapshot,
+        supports_pagination: bool,
+        claimed_text: &str,
+        response_turn_id: &str,
+        response_text: &str,
+        refresh_count: usize,
+    ) -> (Arc<MobileClient>, ThreadKey, Arc<StdMutex<Vec<String>>>) {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination(server_id, supports_pagination);
+        client.app_store.upsert_thread_snapshot(initial_thread);
+        enqueue_follow_up(&client, &key, claimed_text);
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
+
+        let response_turn_id = response_turn_id.to_string();
+        let response_text = response_text.to_string();
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { params, .. } => {
+                    requests
+                        .lock()
+                        .expect("request log lock")
+                        .push(format!("thread/resume:{}", params.exclude_turns));
+                    Ok(completed_thread_resume_response(
+                        thread_id,
+                        &response_turn_id,
+                        "item-authoritative",
+                        &response_text,
+                    ))
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    requests
+                        .lock()
+                        .expect("request log lock")
+                        .push("thread/turns/list".to_string());
+                    Ok(successful_thread_turns_list_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected embedded ambiguity request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        for _ in 0..refresh_count {
+            client
+                .force_refresh_thread_authoritative(server_id, thread_id)
+                .await
+                .expect("embedded ambiguity refresh succeeds");
+        }
+        (client, key, requests)
     }
 
     fn successful_turn_start_response() -> serde_json::Value {
@@ -778,6 +862,19 @@ mod tests {
             "sandbox": { "type": "dangerFullAccess" },
             "reasoningEffort": "medium"
         })
+    }
+
+    fn completed_thread_resume_response(
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+    ) -> serde_json::Value {
+        let mut response = successful_thread_resume_response(thread_id);
+        response["thread"]["turns"] =
+            completed_thread_turns_list_response(turn_id, item_id, text, false, None)["data"]
+                .clone();
+        response
     }
 
     fn successful_thread_read_response(thread_id: &str) -> serde_json::Value {
@@ -1155,7 +1252,7 @@ mod tests {
             .await
             .expect("active authoritative hydration succeeds");
 
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1206,7 +1303,7 @@ mod tests {
             .await
             .expect("idle authoritative hydration succeeds");
 
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1252,7 +1349,7 @@ mod tests {
                 .try_claim_first_queued_follow_up(&key)
                 .is_some()
         );
-        client.pending_turn_reconciliation().insert(key.clone());
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
 
         let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
         let handler: TestRequestHandler = {
@@ -1298,7 +1395,7 @@ mod tests {
             requests.lock().expect("request log lock").as_slice(),
             ["thread/resume", "thread/turns/list"]
         );
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1339,7 +1436,7 @@ mod tests {
                 .try_claim_first_queued_follow_up(&key)
                 .is_some()
         );
-        client.pending_turn_reconciliation().insert(key.clone());
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
 
         let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
         let handler: TestRequestHandler = {
@@ -1422,7 +1519,7 @@ mod tests {
                 "thread/turns/list:full"
             ]
         );
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1457,7 +1554,7 @@ mod tests {
         )
         .await;
 
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1479,7 +1576,7 @@ mod tests {
         )
         .await;
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1494,7 +1591,7 @@ mod tests {
             .await
             .expect("second unknown-history refresh succeeds");
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1522,7 +1619,7 @@ mod tests {
         )
         .await;
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1540,7 +1637,7 @@ mod tests {
             .await
             .expect("second unanchored repair refresh succeeds");
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1552,6 +1649,146 @@ mod tests {
             thread.items[0].source_turn_id.as_deref(),
             Some("turn-anchor")
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_replay_consumes_ambiguous_claim_when_pagination_is_disabled() {
+        let mut initial_thread = make_thread_snapshot("srv", "thread-1");
+        initial_thread.initial_turns_loaded = true;
+
+        let (client, key, requests) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "retained",
+            "turn-new",
+            "retained",
+            1,
+        )
+        .await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume:false"]
+        );
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded replay thread");
+        assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_ignored_exclude_turns_consumes_ambiguous_claim() {
+        let mut initial_thread = make_thread_snapshot("srv", "thread-1");
+        initial_thread.initial_turns_loaded = true;
+
+        let (client, key, requests) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            true,
+            "retained",
+            "turn-new",
+            "retained",
+            1,
+        )
+        .await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume:true", "thread/turns/list"]
+        );
+        assert!(!client.app_store.server_supports_turn_pagination("srv"));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        assert!(
+            client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("legacy replay thread")
+                .queued_follow_up_drafts
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_known_repeated_prompt_releases_ambiguous_claim() {
+        let mut initial_thread = make_thread_snapshot("srv", "thread-1");
+        initial_thread.initial_turns_loaded = true;
+        initial_thread.items.push(hydrated_user_item(
+            "turn-old",
+            "item-authoritative",
+            "continue",
+        ));
+
+        let (client, key, _) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "continue",
+            "turn-old",
+            "continue",
+            1,
+        )
+        .await;
+
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded repeated-prompt thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn embedded_no_match_releases_claim_with_unknown_baseline() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key, _) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "retained",
+            "turn-new",
+            "different",
+            1,
+        )
+        .await;
+
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded no-match thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn embedded_match_with_unknown_baseline_remains_pending_across_retries() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key, requests) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "retained",
+            "turn-unknown",
+            "retained",
+            2,
+        )
+        .await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume:false", "thread/resume:false"]
+        );
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded unknown-baseline thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(thread.initial_turns_loaded);
+        assert_eq!(thread.items.len(), 1);
     }
 
     #[tokio::test]
@@ -1577,7 +1814,7 @@ mod tests {
                 .try_claim_first_queued_follow_up(&key)
                 .is_some()
         );
-        client.pending_turn_reconciliation().insert(key.clone());
+        assert!(client.mark_turn_start_ambiguous(key.clone()));
 
         let handler: TestRequestHandler = Arc::new(move |request| match request {
             upstream::ClientRequest::ThreadResume { .. } => {
@@ -1611,7 +1848,7 @@ mod tests {
             .await
             .expect("metadata fallback succeeds");
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1628,7 +1865,7 @@ mod tests {
         .await;
 
         assert_eq!(turn_start_requests.load(Ordering::SeqCst), 1);
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1700,13 +1937,13 @@ mod tests {
         while resume_attempts.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
 
         while resume_attempts.load(Ordering::SeqCst) < 2 {
             tokio::task::yield_now().await;
             tokio::time::advance(tokio::time::Duration::from_millis(250)).await;
         }
-        while client.pending_turn_reconciliation().contains(&key) {
+        while client.pending_turn_reconciliation().contains_key(&key) {
             tokio::task::yield_now().await;
         }
 
@@ -1739,7 +1976,7 @@ mod tests {
 
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
 
-        assert!(client.pending_turn_reconciliation().contains(&key));
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -1782,7 +2019,7 @@ mod tests {
             .external_resume_thread(server_id, thread_id, None)
             .await
             .expect("idle authoritative hydration succeeds");
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)
@@ -2207,7 +2444,7 @@ mod tests {
         maybe_send_next_local_queued_follow_up(Arc::clone(&client), key.clone()).await;
 
         assert_eq!(original_requests.load(Ordering::SeqCst), 1);
-        assert!(!client.pending_turn_reconciliation().contains(&key));
+        assert!(!client.pending_turn_reconciliation().contains_key(&key));
         let thread = client
             .app_store
             .thread_snapshot(&key)

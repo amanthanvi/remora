@@ -36,14 +36,44 @@ pub(super) fn turn_request_error_is_ambiguous(error: &RpcError) -> bool {
 impl MobileClient {
     pub(super) fn pending_turn_reconciliation(
         &self,
-    ) -> std::sync::MutexGuard<'_, HashSet<ThreadKey>> {
+    ) -> std::sync::MutexGuard<'_, HashMap<ThreadKey, PendingTurnReconciliation>> {
         self.pending_turn_reconciliation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    #[cfg(test)]
+    pub(super) fn mark_turn_start_ambiguous(&self, key: ThreadKey) -> bool {
+        let thread = self.app_store.thread_snapshot(&key);
+        let baseline = PendingTurnReconciliation::from_thread(thread.as_ref());
+        self.mark_turn_start_ambiguous_with_baseline(key, baseline)
+    }
+
+    fn mark_turn_start_ambiguous_with_baseline(
+        &self,
+        key: ThreadKey,
+        baseline: PendingTurnReconciliation,
+    ) -> bool {
+        let mut pending = self.pending_turn_reconciliation();
+        if pending.contains_key(&key) {
+            return false;
+        }
+        pending.insert(key, baseline);
+        true
+    }
+
     pub(super) fn schedule_ambiguous_turn_reconciliation(self: &Arc<Self>, key: ThreadKey) {
-        if !self.pending_turn_reconciliation().insert(key.clone()) {
+        let thread = self.app_store.thread_snapshot(&key);
+        let baseline = PendingTurnReconciliation::from_thread(thread.as_ref());
+        self.schedule_ambiguous_turn_reconciliation_with_baseline(key, baseline);
+    }
+
+    fn schedule_ambiguous_turn_reconciliation_with_baseline(
+        self: &Arc<Self>,
+        key: ThreadKey,
+        baseline: PendingTurnReconciliation,
+    ) {
+        if !self.mark_turn_start_ambiguous_with_baseline(key.clone(), baseline) {
             return;
         }
         let owner = Arc::downgrade(self);
@@ -53,13 +83,13 @@ impl MobileClient {
                 let Some(client) = owner.upgrade() else {
                     return;
                 };
-                if !client.pending_turn_reconciliation().contains(&key) {
+                if !client.pending_turn_reconciliation().contains_key(&key) {
                     return;
                 }
                 let result = client
                     .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
                     .await;
-                if !client.pending_turn_reconciliation().contains(&key) {
+                if !client.pending_turn_reconciliation().contains_key(&key) {
                     return;
                 }
                 match result {
@@ -82,7 +112,7 @@ impl MobileClient {
     }
 
     fn reconcile_ambiguous_turn_claim(&self, key: &ThreadKey) {
-        if !self.pending_turn_reconciliation().remove(key) {
+        if self.pending_turn_reconciliation().remove(key).is_none() {
             return;
         }
         let retained_claim = self.app_store.thread_snapshot(key).and_then(|thread| {
@@ -345,7 +375,7 @@ impl MobileClient {
                         return Ok(false);
                     }
                     let ambiguous_reconciliation_pending =
-                        self.pending_turn_reconciliation().contains(&key);
+                        self.pending_turn_reconciliation().contains_key(&key);
                     if supports_pagination
                         && (force_authoritative || ambiguous_reconciliation_pending)
                     {
@@ -524,12 +554,41 @@ impl MobileClient {
             }
             reconcile_active_turn(existing.as_ref(), &mut snapshot, &turns);
             snapshot.is_resumed = true;
-            app_store.upsert_thread_snapshot(snapshot);
             self.thread_runtime_routes()
                 .insert(key.clone(), runtime_kind.clone());
             self.mark_direct_resumed_thread(key.clone());
             if !server_honored_exclude_turns {
-                self.reconcile_ambiguous_turn_claim(key);
+                let pending = self.pending_turn_reconciliation().get(key).cloned();
+                let authoritative_match = pending.is_some()
+                    && app_store
+                        .thread_follow_up_claim_matches_authoritative_items(key, &snapshot.items);
+                let replayed = pending.as_ref().is_some_and(|pending| {
+                    pending.baseline_history_known
+                        && app_store.consume_thread_follow_up_claim_if_replayed(
+                            key,
+                            &snapshot.items,
+                            &pending.baseline_turn_ids,
+                        )
+                });
+                let active_turn_observed = snapshot.active_turn_id.is_some();
+                app_store.upsert_thread_snapshot(snapshot);
+                if pending.is_none()
+                    || active_turn_observed
+                    || replayed
+                    || pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.baseline_history_known)
+                    || !authoritative_match
+                {
+                    self.reconcile_ambiguous_turn_claim(key);
+                } else {
+                    warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "external_resume_thread: embedded history matched an ambiguous claim without a known causal baseline server={} thread={}",
+                        server_id, thread_id
+                    );
+                }
+            } else {
+                app_store.upsert_thread_snapshot(snapshot);
             }
         };
         let applied = self
@@ -558,7 +617,8 @@ impl MobileClient {
         // Only reconcile the ambiguity that existed before this probe. A new
         // turn failure that races the request must retain its fresh token for
         // a later authoritative response.
-        let ambiguous_reconciliation_pending = self.pending_turn_reconciliation().contains(key);
+        let pending_ambiguity = self.pending_turn_reconciliation().get(key).cloned();
+        let ambiguous_reconciliation_pending = pending_ambiguity.is_some();
         let request = upstream::ClientRequest::ThreadTurnsList {
             request_id: upstream::RequestId::Integer(crate::next_request_id()),
             params: upstream::ThreadTurnsListParams {
@@ -684,12 +744,20 @@ impl MobileClient {
             let Some(existing) = app_store.thread_snapshot(key) else {
                 return false;
             };
-            let known_turn_ids = existing
-                .items
-                .iter()
-                .filter_map(|item| item.source_turn_id.clone())
-                .collect::<HashSet<_>>();
-            let history_known = existing.initial_turns_loaded;
+            let known_turn_ids = pending_ambiguity
+                .as_ref()
+                .map(|pending| pending.baseline_turn_ids.clone())
+                .unwrap_or_else(|| {
+                    existing
+                        .items
+                        .iter()
+                        .filter_map(|item| item.source_turn_id.clone())
+                        .collect::<HashSet<_>>()
+                });
+            let history_known = pending_ambiguity
+                .as_ref()
+                .map(|pending| pending.baseline_history_known)
+                .unwrap_or(existing.initial_turns_loaded);
             let (target, active_turn_cleared) =
                 reconcile_completed_turn_probe(&existing, &response.data);
             if target.active_turn_id != existing.active_turn_id
@@ -946,7 +1014,7 @@ impl MobileClient {
             server_id: server_id.to_string(),
             thread_id: params.thread_id.clone(),
         };
-        if self.pending_turn_reconciliation().contains(&thread_key) {
+        if self.pending_turn_reconciliation().contains_key(&thread_key) {
             warn!(
                 "MobileClient: blocked turn start while ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
@@ -958,7 +1026,7 @@ impl MobileClient {
             tokio::time::timeout(self.turn_request_timeout, turn_start_lock.lock_owned())
                 .await
                 .map_err(|_| RpcError::Timeout)?;
-        if self.pending_turn_reconciliation().contains(&thread_key) {
+        if self.pending_turn_reconciliation().contains_key(&thread_key) {
             warn!(
                 "MobileClient: blocked turn start after lock acquisition because ambiguous reconciliation is pending for server {} thread {}",
                 thread_key.server_id, thread_key.thread_id
@@ -968,6 +1036,8 @@ impl MobileClient {
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
+        let turn_reconciliation_baseline =
+            PendingTurnReconciliation::from_thread(thread_snapshot.as_ref());
         if let Some(claim_id) = autosend_claim_id.as_deref() {
             let claim_is_current = thread_snapshot.as_ref().is_some_and(|thread| {
                 thread
@@ -1085,6 +1155,7 @@ impl MobileClient {
             let steer_thread_id = params.thread_id.clone();
             let steer_input = direct_params.input.clone();
             let steer_thread_key = thread_key.clone();
+            let steer_reconciliation_baseline = turn_reconciliation_baseline.clone();
             let client = Arc::clone(self);
             let request_server_id = server_id.to_string();
             let mut steer_task = tokio::spawn(async move {
@@ -1105,7 +1176,10 @@ impl MobileClient {
                 if let Err(error) = &result
                     && turn_request_error_is_ambiguous(error)
                 {
-                    client.schedule_ambiguous_turn_reconciliation(steer_thread_key);
+                    client.schedule_ambiguous_turn_reconciliation_with_baseline(
+                        steer_thread_key,
+                        steer_reconciliation_baseline,
+                    );
                 }
                 (result, turn_start_guard)
             });
@@ -1153,6 +1227,7 @@ impl MobileClient {
         let completion_command_id = direct_command_id.clone();
         let completion_overlay_id = optimistic_overlay_id.clone();
         let completion_claim_id = autosend_claim_id.clone();
+        let completion_reconciliation_baseline = turn_reconciliation_baseline;
         let mut response_task = tokio::spawn(async move {
             let _turn_start_guard = turn_start_guard;
             let response_result = completion_client
@@ -1170,6 +1245,7 @@ impl MobileClient {
                 &completion_command_id,
                 completion_overlay_id.as_deref(),
                 completion_claim_id.as_deref(),
+                completion_reconciliation_baseline,
                 response_result,
             )
         });
@@ -1191,6 +1267,7 @@ impl MobileClient {
         direct_command_id: &str,
         optimistic_overlay_id: Option<&str>,
         consumed_claim_id: Option<&str>,
+        reconciliation_baseline: PendingTurnReconciliation,
         response_result: Result<upstream::TurnStartResponse, RpcError>,
     ) -> Result<(), RpcError> {
         let response = match response_result {
@@ -1204,7 +1281,10 @@ impl MobileClient {
                         .remove_local_overlay_item(thread_key, overlay_id);
                 }
                 if ambiguous {
-                    self.schedule_ambiguous_turn_reconciliation(thread_key.clone());
+                    self.schedule_ambiguous_turn_reconciliation_with_baseline(
+                        thread_key.clone(),
+                        reconciliation_baseline,
+                    );
                 } else if let Some(claim_id) = consumed_claim_id {
                     self.app_store
                         .release_thread_follow_up_claim(thread_key, claim_id);
