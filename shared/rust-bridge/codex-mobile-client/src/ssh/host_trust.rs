@@ -409,8 +409,8 @@ mod tests {
     use super::*;
     use crate::ssh::SshAuth;
     use crate::ssh::test_server::{
-        TEST_HOST_KEY_A, TEST_HOST_KEY_B, TestSshServer, host_key, in_memory_trust_store as store,
-        in_memory_trust_store_with_backend,
+        TestSshServer, host_key_fingerprint, in_memory_trust_store as store,
+        in_memory_trust_store_with_backend, test_host_key,
     };
     use crate::terminal::SshTrustStoreError;
 
@@ -500,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_connect_records_the_presented_fingerprint() {
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         let store = store();
 
         connect(Some(store.clone()), password_credentials(&server), true)
@@ -516,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn matching_pin_proceeds() {
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         let store = store();
         store
             .pin(server.host.clone(), server.port, server.fingerprint.clone())
@@ -531,9 +531,10 @@ mod tests {
     async fn changed_host_key_fails_closed_even_when_first_use_is_allowed() {
         // Pin key A, then have the host present key B — the classic
         // man-in-the-middle / re-provisioned-host case.
-        let server = TestSshServer::start(TEST_HOST_KEY_B).await;
+        let trusted_key = test_host_key();
+        let pinned = host_key_fingerprint(&trusted_key);
+        let server = TestSshServer::start(test_host_key()).await;
         let store = store();
-        let pinned = host_key(TEST_HOST_KEY_A).1;
         store
             .pin(server.host.clone(), server.port, pinned.clone())
             .unwrap();
@@ -566,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_host_without_first_use_trust_is_rejected() {
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         let store = store();
 
         let error = connect(Some(store.clone()), password_credentials(&server), false)
@@ -586,7 +587,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_store_does_not_record_and_still_connects_on_first_use() {
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         connect(None, password_credentials(&server), true)
             .await
             .expect("connect without a registered store keeps working");
@@ -599,10 +600,11 @@ mod tests {
         // serialization both would observe "no pin", both would authenticate,
         // and the loser would overwrite the winner's pin — leaving a trusted
         // fingerprint that belongs to whichever key happened to finish last.
-        let server =
-            TestSshServer::start_with_keys(&[TEST_HOST_KEY_A, TEST_HOST_KEY_B], true).await;
-        let key_a = host_key(TEST_HOST_KEY_A).1;
-        let key_b = host_key(TEST_HOST_KEY_B).1;
+        let key_a = test_host_key();
+        let key_b = test_host_key();
+        let fingerprint_a = host_key_fingerprint(&key_a);
+        let fingerprint_b = host_key_fingerprint(&key_b);
+        let server = TestSshServer::start_with_keys(&[key_a, key_b], true).await;
         let store = store();
 
         let first = connect(Some(store.clone()), password_credentials(&server), true);
@@ -611,7 +613,7 @@ mod tests {
 
         let recorded = pin_for(&store, &server).expect("one connection must record a pin");
         assert!(
-            recorded == key_a || recorded == key_b,
+            recorded == fingerprint_a || recorded == fingerprint_b,
             "recorded pin {recorded} is neither served key"
         );
         // Exactly one may succeed: the winner pins its key, and the other
@@ -635,7 +637,7 @@ mod tests {
         // first-use, but the credential is rejected. Pinning here would let an
         // impostor install a trusted fingerprint without ever proving it is
         // the host the user has an account on.
-        let server = TestSshServer::start_with_keys(&[TEST_HOST_KEY_A], false).await;
+        let server = TestSshServer::start_with_keys(&[test_host_key()], false).await;
         let store = store();
 
         connect(Some(store.clone()), password_credentials(&server), true)
@@ -657,7 +659,7 @@ mod tests {
     async fn unreadable_trust_store_fails_closed_instead_of_trusting_on_first_use() {
         // A locked keychain must not read as "no pin recorded" — that would
         // silently downgrade an already-pinned host back to first-use trust.
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         let (store, backend) = in_memory_trust_store_with_backend();
         backend.set_failing(true);
 
@@ -687,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn unwritable_trust_store_rejects_authenticated_first_use_connection() {
-        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let server = TestSshServer::start(test_host_key()).await;
         let (store, backend) = in_memory_trust_store_with_backend();
         backend.set_write_failing(true);
 

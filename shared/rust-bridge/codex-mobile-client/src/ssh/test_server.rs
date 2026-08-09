@@ -19,38 +19,24 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use russh::keys::{HashAlg, PrivateKey, decode_secret_key};
+use rand_core::{OsRng, RngCore};
+use russh::keys::ssh_key::private::Ed25519Keypair;
+use russh::keys::{HashAlg, PrivateKey};
 use russh::server::{Auth, Config, Handler};
 use tokio::net::TcpListener;
 
 use crate::terminal::{SshTrustStoreError, TerminalSshTrustBackend, TerminalSshTrustStore};
 
-/// Ed25519 host key "A". Test-only; never used outside `cfg(test)`.
-pub(crate) const TEST_HOST_KEY_A: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACDcrxpoNzrXk1wkkshlJIsss1JkaI6kAtflX7SQESrgNwAAAJCl80CKpfNA
-igAAAAtzc2gtZWQyNTUxOQAAACDcrxpoNzrXk1wkkshlJIsss1JkaI6kAtflX7SQESrgNw
-AAAEC/7O8hj0ZMGflgReW4oBc6MdhimIqxjN3QTeA5n8Qk8tyvGmg3OteTXCSSyGUkiyyz
-UmRojqQC1+VftJARKuA3AAAADXJlbW9yYS10ZXN0LWE=
------END OPENSSH PRIVATE KEY-----
-";
+/// Generate an ephemeral Ed25519 host key for one test.
+pub(crate) fn test_host_key() -> PrivateKey {
+    let mut seed = [0_u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    Ed25519Keypair::from_seed(&seed).into()
+}
 
-/// Ed25519 host key "B" — the "host key changed" counterpart to key A.
-pub(crate) const TEST_HOST_KEY_B: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBxH6kRdnvn52ZVkJGBhE89Yub0dHHBHPK5h4rmrDaPUwAAAJCLx89zi8fP
-cwAAAAtzc2gtZWQyNTUxOQAAACBxH6kRdnvn52ZVkJGBhE89Yub0dHHBHPK5h4rmrDaPUw
-AAAECwbgfZFAwk1CZANSWs0dMjtPyZJrINXrUPEL2/+R1qanEfqRF2e+fnZlWQkYGETz1i
-5vR0ccEc8rmHiuasNo9TAAAADXJlbW9yYS10ZXN0LWI=
------END OPENSSH PRIVATE KEY-----
-";
-
-/// Parse a test host key, returning the key and its SHA-256 fingerprint in the
-/// same format the client host-key callback receives.
-pub(crate) fn host_key(pem: &str) -> (PrivateKey, String) {
-    let key = decode_secret_key(pem, None).expect("decode test host key");
-    let fingerprint = format!("{}", key.public_key().fingerprint(HashAlg::Sha256));
-    (key, fingerprint)
+/// Return the SHA-256 fingerprint in the same format the client callback sees.
+pub(crate) fn host_key_fingerprint(key: &PrivateKey) -> String {
+    format!("{}", key.public_key().fingerprint(HashAlg::Sha256))
 }
 
 /// Volatile stand-in for the platform keychain/EncryptedSharedPreferences
@@ -202,22 +188,21 @@ pub(crate) struct TestSshServer {
 }
 
 impl TestSshServer {
-    /// Serve `host_key_pem` to every connection.
-    pub(crate) async fn start(host_key_pem: &str) -> Self {
-        Self::start_with_keys(&[host_key_pem], true).await
+    /// Serve `host_key` to every connection.
+    pub(crate) async fn start(host_key: PrivateKey) -> Self {
+        Self::start_with_keys(&[host_key], true).await
     }
 
-    /// Serve `host_key_pems[i]` to the i-th connection, reusing the last entry
+    /// Serve `host_keys[i]` to the i-th connection, reusing the last entry
     /// once the list is exhausted. `accept_auth` controls whether the server
     /// accepts credentials, so a test can assert nothing is pinned when
     /// authentication fails.
-    pub(crate) async fn start_with_keys(host_key_pems: &[&str], accept_auth: bool) -> Self {
-        let parsed: Vec<(PrivateKey, String)> =
-            host_key_pems.iter().map(|pem| host_key(pem)).collect();
-        let fingerprint = parsed[0].1.clone();
-        let configs: Vec<Arc<Config>> = parsed
+    pub(crate) async fn start_with_keys(host_keys: &[PrivateKey], accept_auth: bool) -> Self {
+        let fingerprint =
+            host_key_fingerprint(host_keys.first().expect("test server requires a host key"));
+        let configs: Vec<Arc<Config>> = host_keys
             .iter()
-            .map(|(key, _)| {
+            .map(|key| {
                 Arc::new(Config {
                     inactivity_timeout: Some(std::time::Duration::from_secs(30)),
                     auth_rejection_time: std::time::Duration::from_millis(50),

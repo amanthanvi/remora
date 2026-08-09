@@ -1051,7 +1051,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = crate::ssh::test_server::in_memory_trust_store();
-        let pinned = crate::ssh::test_server::host_key(crate::ssh::test_server::TEST_HOST_KEY_A).1;
+        let pinned_key = crate::ssh::test_server::test_host_key();
+        let pinned = crate::ssh::test_server::host_key_fingerprint(&pinned_key);
         store.pin(server.host.clone(), server.port, pinned).unwrap();
         crate::ssh::register_host_trust_store(store);
         let result = body().await;
@@ -1062,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn ssh_reconnect_plan_refuses_a_changed_host_key() {
         let server =
-            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::TEST_HOST_KEY_B)
+            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::test_host_key())
                 .await;
         let plan = ReconnectPlan::Ssh {
             server_id: "srv-host-key-ssh".into(),
@@ -1096,7 +1097,7 @@ mod tests {
     #[tokio::test]
     async fn ssh_bridge_reconnect_plan_refuses_a_changed_host_key() {
         let server =
-            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::TEST_HOST_KEY_B)
+            crate::ssh::test_server::TestSshServer::start(crate::ssh::test_server::test_host_key())
                 .await;
         let plan = ReconnectPlan::SshBridge {
             server_id: "srv-host-key-bridge".into(),

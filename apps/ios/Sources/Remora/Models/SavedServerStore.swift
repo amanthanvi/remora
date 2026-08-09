@@ -121,7 +121,7 @@ enum SavedServerStore {
                 pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) }
             )
         } catch {
-            return
+            LLog.error("saved-servers", "save failed", error: error)
         }
     }
 
@@ -155,12 +155,16 @@ enum SavedServerStore {
 
     static func load() -> [SavedServer] {
         let trustStore = TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared)
-        _ = try? resumePendingTrustCleanup(
-            from: .standard,
-            pinned: { try trustStore.pinned(host: $0, port: $1) },
-            pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) },
-            unpin: { try trustStore.unpin(host: $0, port: $1) }
-        )
+        do {
+            try resumePendingTrustCleanup(
+                from: .standard,
+                pinned: { try trustStore.pinned(host: $0, port: $1) },
+                pin: { try trustStore.pin(host: $0, port: $1, fingerprint: $2) },
+                unpin: { try trustStore.unpin(host: $0, port: $1) }
+            )
+        } catch {
+            LLog.error("saved-servers", "pending SSH trust cleanup failed", error: error)
+        }
         return load(from: .standard)
     }
 
