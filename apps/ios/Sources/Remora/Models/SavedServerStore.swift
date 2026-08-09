@@ -115,9 +115,32 @@ enum SavedServerStore {
     }
 
     static func remove(serverId: String) {
-        var saved = load()
+        remove(serverId: serverId, from: .standard) { host, port in
+            TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).unpin(
+                host: host,
+                port: port
+            )
+        }
+    }
+
+    static func remove(
+        serverId: String,
+        from defaults: UserDefaults,
+        unpin: (String, UInt16) -> Void
+    ) {
+        var saved = load(from: defaults)
+        let removed = saved.first { $0.id == serverId }
         saved.removeAll { $0.id == serverId }
-        save(saved)
+        if let target = removed.flatMap(sshTrustTarget) {
+            let identity = sshTrustIdentity(host: target.host, port: target.port)
+            let stillReferenced = saved
+                .compactMap(sshTrustTarget)
+                .contains { sshTrustIdentity(host: $0.host, port: $0.port) == identity }
+            if !stillReferenced {
+                unpin(target.host, target.port)
+            }
+        }
+        save(saved, to: defaults)
     }
 
     @discardableResult
@@ -206,6 +229,19 @@ enum SavedServerStore {
         }
 
         return normalized.lowercased()
+    }
+
+    private static func sshTrustTarget(for server: SavedServer) -> (host: String, port: UInt16)? {
+        let discovered = server.toDiscoveredServer()
+        guard discovered.canConnectViaSSH else { return nil }
+        return (server.hostname, discovered.resolvedSSHPort)
+    }
+
+    private static func sshTrustIdentity(
+        host: String,
+        port: UInt16
+    ) -> String {
+        "\(normalizedHost(host)):\(port)"
     }
 
 }

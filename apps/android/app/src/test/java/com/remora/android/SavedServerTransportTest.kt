@@ -65,6 +65,56 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun removingLastSshServerUnpinsItsExactTrustTarget() {
+        val ssh = SavedServer(
+            id = "ssh",
+            name = "SSH",
+            hostname = "HOST.EXAMPLE",
+            port = 22,
+            sshPort = 2222,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val unpinned = mutableListOf<Pair<String, UShort>>()
+
+        val remaining = SavedServerStore.removeServer(listOf(ssh), ssh.id) { host, port ->
+            unpinned += host to port
+        }
+
+        assertTrue(remaining.isEmpty())
+        assertEquals(listOf("HOST.EXAMPLE" to 2222u.toUShort()), unpinned)
+    }
+
+    @Test
+    fun removingSharedSshTargetKeepsPinUntilLastReferenceIsGone() {
+        val first = SavedServer(
+            id = "ssh-1",
+            name = "SSH 1",
+            hostname = "HOST.EXAMPLE",
+            port = 22,
+            sshPort = 22,
+            source = "ssh",
+            preferredConnectionMode = "ssh",
+        )
+        val second = first.copy(id = "ssh-2", hostname = "host.example")
+        val unpinned = mutableListOf<Pair<String, UShort>>()
+
+        val remaining = SavedServerStore.removeServer(listOf(first, second), first.id) { host, port ->
+            unpinned += host to port
+        }
+
+        assertEquals(listOf(second), remaining)
+        assertTrue(unpinned.isEmpty())
+
+        val empty = SavedServerStore.removeServer(remaining, second.id) { host, port ->
+            unpinned += host to port
+        }
+
+        assertTrue(empty.isEmpty())
+        assertEquals(listOf("host.example" to 22.toUShort()), unpinned)
+    }
+
+    @Test
     fun currentPersistenceRejectsRetiredAndUnknownFields() {
         val current = baseJson("current").apply {
             put("sshPort", 22)

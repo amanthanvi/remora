@@ -10,6 +10,7 @@ import org.json.JSONObject
 import uniffi.codex_mobile_client.AppDiscoveredServer
 import uniffi.codex_mobile_client.AppDiscoverySource
 import uniffi.codex_mobile_client.SavedServerRecord
+import uniffi.codex_mobile_client.TerminalSshTrustStore
 
 /**
  * Persistent server list stored in SharedPreferences.
@@ -358,10 +359,39 @@ object SavedServerStore {
         load(context).filter { it.rememberedByUser }
 
     fun remove(context: Context, serverId: String) {
-        val existing = load(context).toMutableList()
-        existing.removeAll { it.id == serverId }
-        save(context, existing)
+        val remaining = removeServer(load(context), serverId) { host, port ->
+            TerminalSshTrustStore(SshTrustStore(context)).unpin(host, port)
+        }
+        save(context, remaining)
     }
+
+    internal fun removeServer(
+        existing: List<SavedServer>,
+        serverId: String,
+        unpin: (String, UShort) -> Unit,
+    ): List<SavedServer> {
+        val removed = existing.firstOrNull { it.id == serverId }
+        val remaining = existing.filterNot { it.id == serverId }
+        val target = removed?.sshTrustTarget() ?: return remaining
+        val targetIdentity = sshTrustIdentity(target.first, target.second)
+        val stillReferenced = remaining
+            .mapNotNull { it.sshTrustTarget() }
+            .any { sshTrustIdentity(it.first, it.second) == targetIdentity }
+        if (!stillReferenced) {
+            unpin(target.first, target.second.toUShort())
+        }
+        return remaining
+    }
+
+    private fun SavedServer.sshTrustTarget(): Pair<String, Int>? =
+        if (canConnectViaSsh && resolvedSshPort in 1..UShort.MAX_VALUE.toInt()) {
+            hostname to resolvedSshPort
+        } else {
+            null
+        }
+
+    private fun sshTrustIdentity(host: String, port: Int): Pair<String, Int> =
+        normalizedHostKey(host) to port
 
     @SuppressLint("ApplySharedPref", "UseKtx") // Callers require a synchronous durability result before marking cutover complete.
     fun removeAllForSecurityCutover(context: Context): Boolean {

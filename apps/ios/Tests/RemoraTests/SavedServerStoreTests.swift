@@ -118,6 +118,66 @@ final class SavedServerStoreTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: SavedServerStore.retiredSavedServersKey))
     }
 
+    func testRemovingLastSSHServerUnpinsItsExactTrustTarget() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let ssh = makeServer(
+            id: "ssh",
+            hostname: "HOST.EXAMPLE",
+            port: nil,
+            sshPort: 2_222,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([ssh], to: defaults)
+        var unpinned: [(String, UInt16)] = []
+
+        SavedServerStore.remove(serverId: ssh.id, from: defaults) { host, port in
+            unpinned.append((host, port))
+        }
+
+        XCTAssertTrue(SavedServerStore.load(from: defaults).isEmpty)
+        XCTAssertEqual(unpinned.count, 1)
+        XCTAssertEqual(unpinned.first?.0, "HOST.EXAMPLE")
+        XCTAssertEqual(unpinned.first?.1, 2_222)
+    }
+
+    func testRemovingSharedSSHTargetKeepsPinUntilLastReferenceIsGone() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let first = makeServer(
+            id: "ssh-1",
+            hostname: "HOST.EXAMPLE",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        let second = makeServer(
+            id: "ssh-2",
+            hostname: "host.example",
+            port: nil,
+            sshPort: 22,
+            hasCodexServer: false
+        )
+        SavedServerStore.save([first, second], to: defaults)
+        var unpinned: [(String, UInt16)] = []
+
+        SavedServerStore.remove(serverId: first.id, from: defaults) { host, port in
+            unpinned.append((host, port))
+        }
+
+        XCTAssertEqual(SavedServerStore.load(from: defaults), [second])
+        XCTAssertTrue(unpinned.isEmpty)
+
+        SavedServerStore.remove(serverId: second.id, from: defaults) { host, port in
+            unpinned.append((host, port))
+        }
+
+        XCTAssertTrue(SavedServerStore.load(from: defaults).isEmpty)
+        XCTAssertEqual(unpinned.count, 1)
+        XCTAssertEqual(unpinned.first?.0, "host.example")
+        XCTAssertEqual(unpinned.first?.1, 22)
+    }
+
     private func makeServer(
         id: String,
         hostname: String,
