@@ -316,6 +316,61 @@ object SavedServerStore {
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    internal fun commitAdmissionMutation(
+        commit: () -> Boolean,
+        restoreCachedState: () -> Unit,
+        failureMessage: String,
+    ) {
+        if (commit()) return
+        restoreCachedState()
+        throw IllegalStateException(failureMessage)
+    }
+
+    @SuppressLint("ApplySharedPref", "UseKtx")
+    private fun commitServerWrite(
+        preferences: SharedPreferences,
+        servers: List<SavedServer>,
+        clearPendingCleanup: Boolean,
+        failureMessage: String,
+    ): Boolean {
+        val hadServers = preferences.contains(VALUE_KEY)
+        val previousServers = preferences.getString(VALUE_KEY, null)
+        val hadPendingCleanup = clearPendingCleanup &&
+            preferences.contains(PENDING_SSH_TRUST_CLEANUP_KEY)
+        val previousPendingCleanup = if (clearPendingCleanup) {
+            preferences.getString(PENDING_SSH_TRUST_CLEANUP_KEY, null)
+        } else {
+            null
+        }
+        val editor = preferences.edit().putString(VALUE_KEY, encodeServers(servers))
+        if (clearPendingCleanup) {
+            editor.remove(PENDING_SSH_TRUST_CLEANUP_KEY)
+        }
+        commitAdmissionMutation(
+            commit = { editor.commit() },
+            restoreCachedState = {
+                val rollback = preferences.edit()
+                if (hadServers) {
+                    rollback.putString(VALUE_KEY, previousServers)
+                } else {
+                    rollback.remove(VALUE_KEY)
+                }
+                if (clearPendingCleanup) {
+                    if (hadPendingCleanup) {
+                        rollback.putString(PENDING_SSH_TRUST_CLEANUP_KEY, previousPendingCleanup)
+                    } else {
+                        rollback.remove(PENDING_SSH_TRUST_CLEANUP_KEY)
+                    }
+                }
+                // Even if disk remains unavailable, commit() restores the
+                // process-local map before reporting its result.
+                rollback.commit()
+            },
+            failureMessage = failureMessage,
+        )
+        return true
+    }
+
     @Synchronized
     fun load(context: Context): List<SavedServer> = load(context, recoverPendingCleanup = true)
 
@@ -383,11 +438,12 @@ object SavedServerStore {
                 )
             },
         ) { servers, cancelsPendingCleanup ->
-            val editor = preferences.edit().putString(VALUE_KEY, encodeServers(servers))
-            if (cancelsPendingCleanup) {
-                editor.remove(PENDING_SSH_TRUST_CLEANUP_KEY)
-            }
-            editor.commit()
+            commitServerWrite(
+                preferences = preferences,
+                servers = servers,
+                clearPendingCleanup = cancelsPendingCleanup,
+                failureMessage = "Unable to persist the server before reconnect admission",
+            )
         }
     }
 
@@ -513,13 +569,12 @@ object SavedServerStore {
     ): SshTrustCleanupOutcome {
         val targets = mutation.trustTargets
         if (targets.isEmpty()) {
-            check(
-                prefs(context).edit()
-                    .putString(VALUE_KEY, encodeServers(mutation.servers))
-                    .commit(),
-            ) {
-                "Unable to persist the server update before reconnect admission"
-            }
+            commitServerWrite(
+                preferences = prefs(context),
+                servers = mutation.servers,
+                clearPendingCleanup = false,
+                failureMessage = "Unable to persist the server update before reconnect admission",
+            )
             return SshTrustCleanupOutcome.Complete
         }
 

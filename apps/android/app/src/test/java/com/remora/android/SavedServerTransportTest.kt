@@ -43,6 +43,25 @@ class SavedServerTransportTest {
     }
 
     @Test
+    fun failedAdmissionCommitRestoresCachedStateBeforeThrowing() {
+        val steps = mutableListOf<String>()
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            SavedServerStore.commitAdmissionMutation(
+                commit = {
+                    steps += "commit"
+                    false
+                },
+                restoreCachedState = { steps += "restore" },
+                failureMessage = "save failed",
+            )
+        }
+
+        assertEquals("save failed", error.message)
+        assertEquals(listOf("commit", "restore"), steps)
+    }
+
+    @Test
     fun sshTrustCleanupJournalsBeforeUnpinAndFinalizesAfterward() {
         val steps = mutableListOf<String>()
 

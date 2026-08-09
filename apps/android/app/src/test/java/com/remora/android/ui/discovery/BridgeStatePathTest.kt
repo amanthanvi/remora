@@ -14,7 +14,7 @@ class BridgeStatePathTest {
 
         val surfaced = runCatching {
             persistConnectionAdmissionOrCleanup(
-                persist = {
+                persistAndAdmit = { _ ->
                     steps += "persist"
                     throw failure
                 },
@@ -24,6 +24,27 @@ class BridgeStatePathTest {
 
         assertSame(failure, surfaced)
         assertEquals(listOf("persist", "cleanup"), steps)
+    }
+
+    @Test
+    fun `cancellation after admission does not clean the durable connection`() = runBlocking {
+        val cancellation = kotlinx.coroutines.CancellationException("cancelled after admission")
+        val steps = mutableListOf<String>()
+
+        val surfaced = runCatching {
+            persistConnectionAdmissionOrCleanup(
+                persistAndAdmit = { markAdmissionComplete ->
+                    steps += "persist"
+                    markAdmissionComplete()
+                    steps += "admit"
+                    throw cancellation
+                },
+                cleanup = { steps += "cleanup" },
+            )
+        }.exceptionOrNull()
+
+        assertSame(cancellation, surfaced)
+        assertEquals(listOf("persist", "admit"), steps)
     }
 
     @Test

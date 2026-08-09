@@ -90,14 +90,17 @@ private const val SLINGSHOT_BASE_URL = "https://chatgpt.com/backend-api"
 private const val REMOTE_BRIDGE_STATE_DIRECTORY = "remora-bridges"
 
 internal suspend fun persistConnectionAdmissionOrCleanup(
-    persist: suspend () -> Unit,
+    persistAndAdmit: suspend (markAdmissionComplete: () -> Unit) -> Unit,
     cleanup: suspend () -> Unit,
 ) {
+    var admissionComplete = false
     try {
-        persist()
+        persistAndAdmit { admissionComplete = true }
     } catch (error: Exception) {
-        runCatching {
-            withContext(NonCancellable) { cleanup() }
+        if (!admissionComplete) {
+            runCatching {
+                withContext(NonCancellable) { cleanup() }
+            }
         }
         throw error
     }
@@ -142,9 +145,11 @@ fun DiscoveryScreen(
         sshSessionId: String? = null,
     ) {
         persistConnectionAdmissionOrCleanup(
-            persist = {
-                withContext(Dispatchers.IO) {
+            persistAndAdmit = { markAdmissionComplete ->
+                withContext(NonCancellable + Dispatchers.IO) {
                     SavedServerStore.remember(context, server)
+                    appModel.reconnectController.allowServerReconnect(server.id)
+                    markAdmissionComplete()
                 }
             },
             cleanup = {
@@ -245,7 +250,6 @@ fun DiscoveryScreen(
             server = server.normalizedForPersistence(),
             connectedServerId = connectedServerId,
         )
-        appModel.reconnectController.allowServerReconnect(server.id)
         appModel.refreshSnapshot()
     }
 
@@ -470,7 +474,6 @@ fun DiscoveryScreen(
                         server = prepared.normalizedForPersistence(),
                         connectedServerId = connectedServerId,
                     )
-                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -481,7 +484,6 @@ fun DiscoveryScreen(
                         server = prepared.normalizedForPersistence(),
                         connectedServerId = connectedServerId,
                     )
-                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -505,7 +507,6 @@ fun DiscoveryScreen(
                         server = prepared.withPreferredConnection("directCodex", prepared.directCodexPort),
                         connectedServerId = connectedServerId,
                     )
-                    appModel.reconnectController.allowServerReconnect(prepared.id)
                     appModel.refreshSnapshot()
                     onDismiss()
                 }
@@ -653,7 +654,6 @@ fun DiscoveryScreen(
                                             server = server.withPreferredConnection("directCodex", port),
                                             connectedServerId = connectedServerId,
                                         )
-                                        appModel.reconnectController.allowServerReconnect(server.id)
                                         appModel.refreshSnapshot()
                                         onDismiss()
                                     } catch (e: Exception) {
@@ -751,7 +751,6 @@ fun DiscoveryScreen(
                             server = server.withPreferredConnection("ssh"),
                             connectedServerId = connectedServerId,
                         )
-                        appModel.reconnectController.allowServerReconnect(server.id)
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = server.id
                         LLog.t(
@@ -806,7 +805,6 @@ fun DiscoveryScreen(
                             server = agentContext.server.withPreferredConnection("ssh"),
                             connectedServerId = connectedServerId,
                         )
-                        appModel.reconnectController.allowServerReconnect(agentContext.server.id)
                         appModel.refreshSnapshot()
                         pendingAutoNavigateServerId = agentContext.server.id
                         sshAgentContext = null
@@ -854,7 +852,6 @@ fun DiscoveryScreen(
                         sshSessionId = agentContext.sessionId,
                     )
                     appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
-                    appModel.reconnectController.allowServerReconnect(result.serverId)
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = result.serverId
                     sshAgentContext = null

@@ -64,6 +64,7 @@ import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.AppServerSnapshot
@@ -376,14 +377,15 @@ internal fun ServerEditSheet(
 
     suspend fun persist(saved: SavedServer): Boolean {
         return try {
-            val (updated, cleanupOutcome) = withContext(Dispatchers.IO) {
+            val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
                 val outcome = SavedServerStore.replace(context, saved)
-                SavedServerStore.load(context) to outcome
+                val updated = SavedServerStore.load(context)
+                appModel.reconnectController.allowServerReconnect(saved.id)
+                appModel.reconnectController.syncSavedServers(
+                    updated.filter { it.rememberedByUser }.map { it.toRecord() },
+                )
+                outcome
             }
-            appModel.reconnectController.allowServerReconnect(saved.id)
-            appModel.reconnectController.syncSavedServers(
-                updated.filter { it.rememberedByUser }.map { it.toRecord() }
-            )
             appModel.store.renameServer(saved.id, saved.name)
             if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
                 onCleanupPending(
