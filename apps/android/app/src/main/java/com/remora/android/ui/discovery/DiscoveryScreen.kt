@@ -144,12 +144,23 @@ fun DiscoveryScreen(
         connectedServerId: String = server.id,
         sshSessionId: String? = null,
     ) {
+        val previouslyTrackedSessionId = sshSessionId?.let {
+            appModel.sshSessionStore.activeSessionId(connectedServerId)
+        }
+        var displacedSessionId = previouslyTrackedSessionId
+        var sessionRecordChanged = false
         persistConnectionAdmissionOrCleanup(
             persistAndAdmit = { markAdmissionComplete ->
                 withContext(NonCancellable + Dispatchers.IO) {
                     SavedServerStore.remember(context, server)
                     sshSessionId?.let { sessionId ->
-                        appModel.sshSessionStore.record(connectedServerId, sessionId)
+                        displacedSessionId = appModel.sshSessionStore.record(connectedServerId, sessionId)
+                        sessionRecordChanged = true
+                        val displaced = displacedSessionId
+                        if (displaced != null && displaced != sessionId) {
+                            appModel.ssh.sshClose(displaced)
+                            displacedSessionId = null
+                        }
                     }
                     appModel.reconnectController.allowServerReconnect(server.id)
                     markAdmissionComplete()
@@ -158,8 +169,16 @@ fun DiscoveryScreen(
             cleanup = {
                 runCatching { appModel.serverBridge.disconnectServer(connectedServerId) }
                 sshSessionId?.let { sessionId ->
-                    appModel.sshSessionStore.clear(connectedServerId)
-                    runCatching { appModel.ssh.sshClose(sessionId) }
+                    if (sessionRecordChanged) {
+                        appModel.sshSessionStore.rollbackRecord(
+                            connectedServerId,
+                            sessionId,
+                            displacedSessionId,
+                        )
+                    }
+                    if (displacedSessionId != sessionId) {
+                        runCatching { appModel.ssh.sshClose(sessionId) }
+                    }
                 }
             },
         )
