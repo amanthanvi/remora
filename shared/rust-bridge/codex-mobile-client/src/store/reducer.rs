@@ -839,6 +839,7 @@ impl AppStoreReducer {
         &self,
         key: &ThreadKey,
         authoritative_items: &[HydratedConversationItem],
+        known_turn_ids: &HashSet<String>,
     ) -> bool {
         let consumed = self
             .mutate_thread_with_result(key, |thread| {
@@ -856,6 +857,10 @@ impl AppStoreReducer {
                     item.is_from_user_turn_boundary
                         && matches!(&item.content, HydratedConversationItemContent::User(_))
                         && item.content.eq(&local_item.content)
+                        && item
+                            .source_turn_id
+                            .as_ref()
+                            .is_some_and(|turn_id| !known_turn_ids.contains(turn_id))
                 });
                 if replayed {
                     remove_first_queued_follow_up(thread);

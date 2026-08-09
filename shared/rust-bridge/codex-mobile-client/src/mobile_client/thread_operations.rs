@@ -684,6 +684,12 @@ impl MobileClient {
             let Some(existing) = app_store.thread_snapshot(key) else {
                 return false;
             };
+            let known_turn_ids = existing
+                .items
+                .iter()
+                .filter_map(|item| item.source_turn_id.clone())
+                .collect::<HashSet<_>>();
+            let history_known = existing.initial_turns_loaded;
             let (target, active_turn_cleared) =
                 reconcile_completed_turn_probe(&existing, &response.data);
             if target.active_turn_id != existing.active_turn_id
@@ -708,7 +714,29 @@ impl MobileClient {
                     return false;
                 }
                 if repair_required_for_ambiguity {
-                    app_store.consume_thread_follow_up_claim_if_replayed(key, &page.turns);
+                    let replayed = history_known
+                        && app_store.consume_thread_follow_up_claim_if_replayed(
+                            key,
+                            &page.turns,
+                            &known_turn_ids,
+                        );
+                    let page_is_anchored = history_known
+                        && if known_turn_ids.is_empty() {
+                            page.next_cursor.is_none()
+                        } else {
+                            page.turns.iter().any(|item| {
+                                item.source_turn_id
+                                    .as_ref()
+                                    .is_some_and(|turn_id| known_turn_ids.contains(turn_id))
+                            })
+                        };
+                    if !replayed && !page_is_anchored {
+                        warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                            "force_authoritative: ambiguous turn repair lacked a causal history anchor server={} thread={}",
+                            server_id, thread_id
+                        );
+                        return true;
+                    }
                 }
             }
             if ambiguous_reconciliation_pending {
@@ -858,7 +886,6 @@ impl MobileClient {
             self.thread_runtime_routes()
                 .insert(key.clone(), runtime_kind.clone());
             store.set_thread_agent_runtime(&key, runtime_kind);
-            self.reconcile_ambiguous_turn_claim(&key);
             Ok(())
         };
         self.apply_if_refresh_current(server_id, &request_session, lag_fence, apply_response)

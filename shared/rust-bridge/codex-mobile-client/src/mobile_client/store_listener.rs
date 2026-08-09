@@ -433,6 +433,9 @@ pub(super) async fn maybe_send_next_local_queued_follow_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation_uniffi::{
+        HydratedConversationItem, HydratedConversationItemContent, HydratedUserMessageData,
+    };
     use crate::session::connection::TestRequestHandler;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -618,6 +621,79 @@ mod tests {
         (client, key, config, requests)
     }
 
+    async fn reconcile_completed_ambiguous_claim(
+        initial_thread: ThreadSnapshot,
+        claimed_text: &str,
+        response_turn_id: &str,
+        response_text: &str,
+        next_cursor: Option<&str>,
+    ) -> (Arc<MobileClient>, ThreadKey) {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination(server_id, true);
+        client.app_store.upsert_thread_snapshot(initial_thread);
+        enqueue_follow_up(&client, &key, claimed_text);
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+        client.pending_turn_reconciliation().insert(key.clone());
+
+        let response_turn_id = response_turn_id.to_string();
+        let response_text = response_text.to_string();
+        let next_cursor = next_cursor.map(str::to_string);
+        let handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadResume { .. } => {
+                Ok(successful_thread_resume_response(thread_id))
+            }
+            upstream::ClientRequest::ThreadTurnsList { params, .. } => {
+                let skeleton =
+                    matches!(params.items_view, Some(upstream::TurnItemsView::NotLoaded));
+                Ok(completed_thread_turns_list_response(
+                    &response_turn_id,
+                    "item-authoritative",
+                    &response_text,
+                    skeleton,
+                    next_cursor.as_deref(),
+                ))
+            }
+            other => Err(RpcError::Deserialization(format!(
+                "unexpected completed ambiguity request: {}",
+                other.method()
+            ))),
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .force_refresh_thread_authoritative(server_id, thread_id)
+            .await
+            .expect("completed ambiguity refresh succeeds");
+        (client, key)
+    }
+
     fn successful_turn_start_response() -> serde_json::Value {
         serde_json::json!({
             "turn": {
@@ -702,6 +778,63 @@ mod tests {
             "sandbox": { "type": "dangerFullAccess" },
             "reasoningEffort": "medium"
         })
+    }
+
+    fn successful_thread_read_response(thread_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "thread": upstream_thread_response(thread_id),
+            "approvalPolicy": "never",
+            "sandbox": { "type": "dangerFullAccess" }
+        })
+    }
+
+    fn completed_thread_turns_list_response(
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+        skeleton: bool,
+        next_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "data": [{
+                "id": turn_id,
+                "items": if skeleton {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([{
+                        "id": item_id,
+                        "type": "userMessage",
+                        "content": [{
+                            "type": "text",
+                            "text": text,
+                            "textElements": []
+                        }]
+                    }])
+                },
+                "itemsView": if skeleton { "notLoaded" } else { "full" },
+                "status": "completed",
+                "error": null,
+                "startedAt": 1,
+                "completedAt": 2,
+                "durationMs": 1
+            }],
+            "nextCursor": next_cursor,
+            "backwardsCursor": null
+        })
+    }
+
+    fn hydrated_user_item(turn_id: &str, item_id: &str, text: &str) -> HydratedConversationItem {
+        HydratedConversationItem {
+            id: item_id.to_string(),
+            content: HydratedConversationItemContent::User(HydratedUserMessageData {
+                text: text.to_string(),
+                image_data_uris: Vec::new(),
+            }),
+            source_turn_id: Some(turn_id.to_string()),
+            source_turn_index: Some(0),
+            timestamp: None,
+            is_from_user_turn_boundary: true,
+        }
     }
 
     fn successful_active_thread_resume_response(thread_id: &str) -> serde_json::Value {
@@ -1109,9 +1242,9 @@ mod tests {
         client
             .app_store
             .set_server_supports_turn_pagination(server_id, true);
-        client
-            .app_store
-            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        let mut initial_thread = make_thread_snapshot(server_id, thread_id);
+        initial_thread.initial_turns_loaded = true;
+        client.app_store.upsert_thread_snapshot(initial_thread);
         enqueue_follow_up(&client, &key, "retained");
         assert!(
             client
@@ -1196,9 +1329,9 @@ mod tests {
         client
             .app_store
             .set_server_supports_turn_pagination(server_id, true);
-        client
-            .app_store
-            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        let mut initial_thread = make_thread_snapshot(server_id, thread_id);
+        initial_thread.initial_turns_loaded = true;
+        client.app_store.upsert_thread_snapshot(initial_thread);
         enqueue_follow_up(&client, &key, "retained");
         assert!(
             client
@@ -1303,6 +1436,148 @@ mod tests {
                 .try_claim_first_queued_follow_up(&key)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_prompt_in_known_turn_does_not_consume_new_ambiguous_claim() {
+        let mut initial_thread = make_thread_snapshot("srv", "thread-1");
+        initial_thread.initial_turns_loaded = true;
+        initial_thread.items.push(hydrated_user_item(
+            "turn-old",
+            "item-authoritative",
+            "continue",
+        ));
+
+        let (client, key) = reconcile_completed_ambiguous_claim(
+            initial_thread,
+            "continue",
+            "turn-old",
+            "continue",
+            None,
+        )
+        .await;
+
+        assert!(!client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("reconciled repeated-prompt thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn matching_prompt_with_unknown_local_history_retains_ambiguous_claim() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key) = reconcile_completed_ambiguous_claim(
+            initial_thread,
+            "continue",
+            "turn-unknown",
+            "continue",
+            None,
+        )
+        .await;
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("unknown-history thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn repair_page_before_known_history_boundary_retains_ambiguous_claim() {
+        let mut initial_thread = make_thread_snapshot("srv", "thread-1");
+        initial_thread.initial_turns_loaded = true;
+        initial_thread
+            .items
+            .push(hydrated_user_item("turn-anchor", "item-anchor", "earlier"));
+
+        let (client, key) = reconcile_completed_ambiguous_claim(
+            initial_thread,
+            "continue",
+            "turn-newer",
+            "different",
+            Some("older-page"),
+        )
+        .await;
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("unanchored repair thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn metadata_only_fallback_retains_ambiguous_claim() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+        client.pending_turn_reconciliation().insert(key.clone());
+
+        let handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadResume { .. } => {
+                Err(RpcError::Transport(TransportError::SendFailed(
+                    "remote app-server worker channel is closed".to_string(),
+                )))
+            }
+            upstream::ClientRequest::ThreadRead { params, .. } => {
+                assert!(!params.include_turns);
+                Ok(successful_thread_read_response(thread_id))
+            }
+            other => Err(RpcError::Deserialization(format!(
+                "unexpected metadata ambiguity request: {}",
+                other.method()
+            ))),
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .force_refresh_thread_authoritative(server_id, thread_id)
+            .await
+            .expect("metadata fallback succeeds");
+
+        assert!(client.pending_turn_reconciliation().contains(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("metadata-refreshed thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
     }
 
     #[tokio::test]
