@@ -106,6 +106,20 @@ internal suspend fun persistConnectionAdmissionOrCleanup(
     }
 }
 
+internal suspend fun completeConnectionAdmission(
+    allowReconnect: suspend () -> Unit,
+    markAdmissionComplete: () -> Unit,
+    displacedSessionId: String?,
+    currentSessionId: String?,
+    closeSession: suspend (String) -> Unit,
+) {
+    allowReconnect()
+    markAdmissionComplete()
+    if (currentSessionId != null && displacedSessionId != null && displacedSessionId != currentSessionId) {
+        runCatching { closeSession(displacedSessionId) }
+    }
+}
+
 /**
  * Server discovery and connection screen.
  * Presents the supported connection paths and owns their orchestration.
@@ -156,14 +170,14 @@ fun DiscoveryScreen(
                     sshSessionId?.let { sessionId ->
                         displacedSessionId = appModel.sshSessionStore.record(connectedServerId, sessionId)
                         sessionRecordChanged = true
-                        val displaced = displacedSessionId
-                        if (displaced != null && displaced != sessionId) {
-                            appModel.ssh.sshClose(displaced)
-                            displacedSessionId = null
-                        }
                     }
-                    appModel.reconnectController.allowServerReconnect(server.id)
-                    markAdmissionComplete()
+                    completeConnectionAdmission(
+                        allowReconnect = { appModel.reconnectController.allowServerReconnect(server.id) },
+                        markAdmissionComplete = markAdmissionComplete,
+                        displacedSessionId = displacedSessionId,
+                        currentSessionId = sshSessionId,
+                        closeSession = { appModel.ssh.sshClose(it) },
+                    )
                 }
             },
             cleanup = {

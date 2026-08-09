@@ -48,6 +48,28 @@ class BridgeStatePathTest {
     }
 
     @Test
+    fun `failed reconnect admission leaves the displaced SSH session open`() = runBlocking {
+        val failure = IllegalStateException("admission failed")
+        val steps = mutableListOf<String>()
+
+        val surfaced = runCatching {
+            completeConnectionAdmission(
+                allowReconnect = {
+                    steps += "allow"
+                    throw failure
+                },
+                markAdmissionComplete = { steps += "admit" },
+                displacedSessionId = "previous",
+                currentSessionId = "replacement",
+                closeSession = { steps += "close:$it" },
+            )
+        }.exceptionOrNull()
+
+        assertSame(failure, surfaced)
+        assertEquals(listOf("allow"), steps)
+    }
+
+    @Test
     fun `state directory uses neutral root and Rust-compatible host encoding`() {
         val filesDir = File("/data/user/0/com.remora.android/files")
 
