@@ -32,7 +32,12 @@ struct ReconnectCoordinator {
 struct ReconnectCoordinatorState {
     accepting: bool,
     in_flight: HashMap<String, ActiveReconnect>,
-    revoked_servers: HashMap<String, ServerRevocationState>,
+    revoked_servers: HashMap<String, ServerRevocation>,
+}
+
+struct ServerRevocation {
+    state: ServerRevocationState,
+    waiters: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,33 +114,49 @@ impl ReconnectCoordinator {
     }
 
     async fn revoke_server(&self, server_id: &str, deadline: Duration) -> bool {
+        {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let revocation = state
+                .revoked_servers
+                .entry(server_id.to_string())
+                .or_insert(ServerRevocation {
+                    state: ServerRevocationState::Preparing,
+                    waiters: 0,
+                });
+            if revocation.state == ServerRevocationState::Prepared {
+                return true;
+            }
+            revocation.waiters += 1;
+        }
+
         let started = Instant::now();
         loop {
             let changed = self.state_changed.notified();
             let drained = {
-                let mut state = match self.state.lock() {
+                let state = match self.state.lock() {
                     Ok(state) => state,
                     Err(error) => error.into_inner(),
                 };
-                state
-                    .revoked_servers
-                    .entry(server_id.to_string())
-                    .or_insert(ServerRevocationState::Preparing);
+                if !state.revoked_servers.contains_key(server_id) {
+                    return false;
+                }
                 if let Some(active) = state.in_flight.get(server_id) {
                     let _ = active.cancel_tx.send(true);
                     false
                 } else {
-                    state
-                        .revoked_servers
-                        .insert(server_id.to_string(), ServerRevocationState::Prepared);
                     true
                 }
             };
             if drained {
+                self.finish_server_preparation(server_id, true);
                 return true;
             }
             let remaining = deadline.saturating_sub(started.elapsed());
             if remaining.is_zero() || tokio::time::timeout(remaining, changed).await.is_err() {
+                self.finish_server_preparation(server_id, false);
                 return false;
             }
         }
@@ -149,12 +170,21 @@ impl ReconnectCoordinator {
         state.revoked_servers.remove(server_id);
     }
 
-    fn rollback_server_preparation(&self, server_id: &str) {
+    fn finish_server_preparation(&self, server_id: &str, prepared: bool) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(error) => error.into_inner(),
         };
-        if state.revoked_servers.get(server_id) == Some(&ServerRevocationState::Preparing) {
+        let should_remove = if let Some(revocation) = state.revoked_servers.get_mut(server_id) {
+            if prepared {
+                revocation.state = ServerRevocationState::Prepared;
+            }
+            revocation.waiters = revocation.waiters.saturating_sub(1);
+            revocation.waiters == 0 && revocation.state == ServerRevocationState::Preparing
+        } else {
+            false
+        };
+        if should_remove {
             state.revoked_servers.remove(server_id);
         }
     }
@@ -421,9 +451,7 @@ impl ReconnectController {
     ) -> bool {
         let coordinator = Arc::clone(&self.reconnect_coordinator);
         let inner = Arc::clone(&self.inner);
-        let rollback_server_id = server_id.clone();
-        let prepared = self
-            .rt
+        self.rt
             .spawn(async move {
                 if !coordinator.revoke_server(&server_id, deadline).await {
                     return false;
@@ -432,12 +460,7 @@ impl ReconnectController {
                 true
             })
             .await
-            .unwrap_or(false);
-        if !prepared {
-            self.reconnect_coordinator
-                .rollback_server_preparation(&rollback_server_id);
-        }
-        prepared
+            .unwrap_or(false)
     }
 }
 
@@ -1048,25 +1071,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_server_preparation_survives_a_late_timeout_rollback() {
+    async fn overlapping_preparation_timeout_retains_the_other_waiters_fence() {
         let coordinator = std::sync::Arc::new(ReconnectCoordinator::new());
         let BeginReconnect::Started(attempt) = coordinator.try_begin("srv-a") else {
             panic!("expected active reconnect");
         };
+
+        let waiting_coordinator = std::sync::Arc::clone(&coordinator);
+        let waiting = tokio::spawn(async move {
+            waiting_coordinator
+                .revoke_server("srv-a", std::time::Duration::from_secs(1))
+                .await
+        });
+        for _ in 0..100 {
+            let registered = {
+                let state = coordinator.state.lock().expect("coordinator state");
+                state
+                    .revoked_servers
+                    .get("srv-a")
+                    .is_some_and(|revocation| revocation.waiters == 1)
+            };
+            if registered {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            coordinator
+                .state
+                .lock()
+                .expect("coordinator state")
+                .revoked_servers
+                .get("srv-a")
+                .map(|revocation| revocation.waiters),
+            Some(1)
+        );
 
         assert!(
             !coordinator
                 .revoke_server("srv-a", std::time::Duration::ZERO)
                 .await
         );
-        drop(attempt);
-        assert!(
-            coordinator
-                .revoke_server("srv-a", std::time::Duration::ZERO)
-                .await
-        );
+        assert!(matches!(
+            coordinator.try_begin("srv-a"),
+            BeginReconnect::Stopped
+        ));
 
-        coordinator.rollback_server_preparation("srv-a");
+        drop(attempt);
+        assert!(waiting.await.expect("preparation task joined"));
         assert!(matches!(
             coordinator.try_begin("srv-a"),
             BeginReconnect::Stopped
