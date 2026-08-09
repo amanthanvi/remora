@@ -40,9 +40,9 @@ impl VoiceRealtimeState {
             .remove(key);
     }
 
-    /// Handle a typed transcript delta directly (from upstream
-    /// `ThreadRealtimeTranscriptUpdated` notification).
-    pub fn handle_typed_transcript_delta(
+    /// Handle a typed finalized transcript directly (from upstream
+    /// `ThreadRealtimeTranscriptDone` notification).
+    pub fn handle_typed_transcript_final(
         &self,
         key: &ThreadKey,
         role: &str,
@@ -55,7 +55,7 @@ impl VoiceRealtimeState {
         };
         let mut threads = self.threads.lock().expect("voice state lock poisoned");
         let thread = threads.entry(key.clone()).or_default();
-        thread.handle_transcript_delta_str(text, speaker)
+        thread.handle_transcript_final_str(text, speaker)
     }
 
     pub fn handle_item(
@@ -187,6 +187,39 @@ impl VoiceRealtimeThreadState {
             text: merged,
             is_final: false,
         })]
+    }
+
+    fn handle_transcript_final_str(
+        &mut self,
+        text: &str,
+        speaker: AppVoiceSpeaker,
+    ) -> Vec<VoiceDerivedUpdate> {
+        let previous_speaker = match speaker {
+            AppVoiceSpeaker::User => AppVoiceSpeaker::Assistant,
+            AppVoiceSpeaker::Assistant => AppVoiceSpeaker::User,
+        };
+        let mut updates = Vec::new();
+        if let Some(update) = self.flush_live_transcript(previous_speaker) {
+            updates.push(update);
+        }
+        if text.trim().is_empty() {
+            if let Some(update) = self.flush_live_transcript(speaker) {
+                updates.push(update);
+            }
+            return updates;
+        }
+
+        let display_item_id = self.resolve_display_item_id(speaker, None, false);
+        let merged = merge_final_text(self.live_text(speaker), text);
+        self.set_live_text(speaker, String::new());
+        self.set_pending_item_id(speaker, None);
+        updates.push(VoiceDerivedUpdate::Transcript(AppVoiceTranscriptUpdate {
+            item_id: display_item_id,
+            speaker,
+            text: merged,
+            is_final: true,
+        }));
+        updates
     }
 
     fn flush_live_transcript(&mut self, speaker: AppVoiceSpeaker) -> Option<VoiceDerivedUpdate> {
@@ -385,20 +418,57 @@ mod tests {
         };
 
         let repeated_word_state = VoiceRealtimeState::default();
-        repeated_word_state.handle_typed_transcript_delta(&key, "user", "ha");
-        let updates = repeated_word_state.handle_typed_transcript_delta(&key, "user", "ha");
+        repeated_word_state.handle_item(
+            &key,
+            &json!({"type": "input_transcript_delta", "delta": "ha"}),
+        );
+        let updates = repeated_word_state.handle_item(
+            &key,
+            &json!({"type": "input_transcript_delta", "delta": "ha"}),
+        );
         let [VoiceDerivedUpdate::Transcript(repeated_word)] = updates.as_slice() else {
             panic!("expected repeated transcript update");
         };
         assert_eq!(repeated_word.text, "haha");
 
         let repeated_phrase_state = VoiceRealtimeState::default();
-        repeated_phrase_state.handle_typed_transcript_delta(&key, "user", "very");
-        let updates = repeated_phrase_state.handle_typed_transcript_delta(&key, "user", " very");
+        repeated_phrase_state.handle_item(
+            &key,
+            &json!({"type": "input_transcript_delta", "delta": "very"}),
+        );
+        let updates = repeated_phrase_state.handle_item(
+            &key,
+            &json!({"type": "input_transcript_delta", "delta": " very"}),
+        );
         let [VoiceDerivedUpdate::Transcript(repeated_phrase)] = updates.as_slice() else {
             panic!("expected repeated phrase update");
         };
         assert_eq!(repeated_phrase.text, "very very");
+    }
+
+    #[test]
+    fn finalized_typed_transcript_does_not_duplicate_accumulated_delta_text() {
+        let state = VoiceRealtimeState::default();
+        let key = ThreadKey {
+            server_id: "local".into(),
+            thread_id: "voice-thread".into(),
+        };
+
+        let updates = state.handle_item(
+            &key,
+            &json!({"type": "input_transcript_delta", "delta": "Hello"}),
+        );
+        let [VoiceDerivedUpdate::Transcript(delta)] = updates.as_slice() else {
+            panic!("expected transcript delta");
+        };
+
+        let updates = state.handle_typed_transcript_final(&key, "user", "Hello");
+        let [VoiceDerivedUpdate::Transcript(done)] = updates.as_slice() else {
+            panic!("expected finalized transcript");
+        };
+        assert_eq!(done.item_id, delta.item_id);
+        assert_eq!(done.text, "Hello");
+        assert!(done.is_final);
     }
 
     #[test]

@@ -151,11 +151,17 @@ class TerminalSessionController(
         // straight to the backend would file the approval under a
         // noncanonical key, leaving the canonical spelling unpinned and still
         // eligible for trust-on-first-use.
-        TerminalSshTrustStore(SshTrustStore(AppModel.shared.appContext)).pin(
-            host = challenge.host,
-            port = challenge.port,
-            fingerprint = challenge.fingerprint,
-        )
+        try {
+            TerminalSshTrustStore(SshTrustStore(AppModel.shared.appContext)).pin(
+                host = challenge.host,
+                port = challenge.port,
+                fingerprint = challenge.fingerprint,
+            )
+        } catch (error: Exception) {
+            errorMessage = error.message ?: "Unable to save SSH host key"
+            phase = Phase.FAILED
+            return
+        }
         sshTrustChallenge = null
         errorMessage = null
         phase = Phase.IDLE

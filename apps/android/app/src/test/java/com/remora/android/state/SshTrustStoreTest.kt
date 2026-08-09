@@ -19,4 +19,18 @@ class SshTrustStoreTest {
         assertTrue(error.detail.contains("open failed for host.example:22"))
         assertTrue(error.detail.contains("restored ciphertext cannot be decrypted"))
     }
+
+    @Test
+    fun unwritablePreferencesSurfaceTypedTrustStoreFailure() {
+        val store = SshTrustStore {
+            throw IllegalStateException("encrypted preferences unavailable")
+        }
+
+        val error = assertThrows(SshTrustStoreException.Unavailable::class.java) {
+            store.write("host.example", 22u, "SHA256:test")
+        }
+
+        assertTrue(error.detail.contains("write failed for host.example:22"))
+        assertTrue(error.detail.contains("encrypted preferences unavailable"))
+    }
 }

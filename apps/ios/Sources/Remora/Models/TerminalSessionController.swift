@@ -113,11 +113,16 @@ final class TerminalSessionController {
         // straight to the backend would file the approval under a
         // noncanonical key, leaving the canonical spelling unpinned and still
         // eligible for trust-on-first-use.
-        TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).pin(
-            host: challenge.host,
-            port: challenge.port,
-            fingerprint: challenge.fingerprint
-        )
+        do {
+            try TerminalSshTrustStore(backend: SwiftSshTrustBackend.shared).pin(
+                host: challenge.host,
+                port: challenge.port,
+                fingerprint: challenge.fingerprint
+            )
+        } catch {
+            phase = .failed(error.localizedDescription)
+            return
+        }
         sshTrustChallenge = nil
         phase = .idle
         await open(backend: challenge.backend)

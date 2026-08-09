@@ -64,7 +64,8 @@ pub trait TerminalSshTrustBackend: Send + Sync {
     fn read(&self, host: String, port: u16) -> Result<Option<String>, SshTrustStoreError>;
     /// Persist `fingerprint` as the pin for `host:port`, overwriting any
     /// previously stored fingerprint.
-    fn write(&self, host: String, port: u16, fingerprint: String);
+    fn write(&self, host: String, port: u16, fingerprint: String)
+    -> Result<(), SshTrustStoreError>;
     /// Remove any pin for `host:port`. Idempotent.
     fn remove(&self, host: String, port: u16);
 }
@@ -97,9 +98,14 @@ impl TerminalSshTrustStore {
     }
 
     /// Record `fingerprint` as the trusted pin for the given host/port.
-    pub fn pin(&self, host: String, port: u16, fingerprint: String) {
+    pub fn pin(
+        &self,
+        host: String,
+        port: u16,
+        fingerprint: String,
+    ) -> Result<(), SshTrustStoreError> {
         let host = normalize_host(&host);
-        self.backend.write(host, port, fingerprint);
+        self.backend.write(host, port, fingerprint)
     }
 
     /// Remove any pin for the given host/port. Safe to call when no pin
@@ -150,8 +156,14 @@ mod tests {
         fn read(&self, host: String, port: u16) -> Result<Option<String>, SshTrustStoreError> {
             Ok(self.store.lock().unwrap().get(&(host, port)).cloned())
         }
-        fn write(&self, host: String, port: u16, fingerprint: String) {
+        fn write(
+            &self,
+            host: String,
+            port: u16,
+            fingerprint: String,
+        ) -> Result<(), SshTrustStoreError> {
             self.store.lock().unwrap().insert((host, port), fingerprint);
+            Ok(())
         }
         fn remove(&self, host: String, port: u16) {
             self.store.lock().unwrap().remove(&(host, port));
@@ -165,7 +177,9 @@ mod tests {
     #[test]
     fn pin_then_lookup_returns_same_fingerprint() {
         let store = make_store();
-        store.pin("example.com".into(), 22, "SHA256:abc".into());
+        store
+            .pin("example.com".into(), 22, "SHA256:abc".into())
+            .unwrap();
         assert_eq!(
             store.pinned("example.com".into(), 22).unwrap(),
             Some("SHA256:abc".into())
@@ -181,8 +195,12 @@ mod tests {
     #[test]
     fn unpin_clears_only_matching_entry() {
         let store = make_store();
-        store.pin("example.com".into(), 22, "SHA256:abc".into());
-        store.pin("other.example".into(), 22, "SHA256:def".into());
+        store
+            .pin("example.com".into(), 22, "SHA256:abc".into())
+            .unwrap();
+        store
+            .pin("other.example".into(), 22, "SHA256:def".into())
+            .unwrap();
         store.unpin("example.com".into(), 22);
         assert_eq!(store.pinned("example.com".into(), 22).unwrap(), None);
         assert_eq!(
@@ -194,8 +212,12 @@ mod tests {
     #[test]
     fn pin_overwrites_previous_value() {
         let store = make_store();
-        store.pin("example.com".into(), 22, "SHA256:abc".into());
-        store.pin("example.com".into(), 22, "SHA256:xyz".into());
+        store
+            .pin("example.com".into(), 22, "SHA256:abc".into())
+            .unwrap();
+        store
+            .pin("example.com".into(), 22, "SHA256:xyz".into())
+            .unwrap();
         assert_eq!(
             store.pinned("example.com".into(), 22).unwrap(),
             Some("SHA256:xyz".into())
@@ -205,7 +227,9 @@ mod tests {
     #[test]
     fn lookup_normalizes_host_casing_and_brackets() {
         let store = make_store();
-        store.pin("Example.COM".into(), 22, "SHA256:abc".into());
+        store
+            .pin("Example.COM".into(), 22, "SHA256:abc".into())
+            .unwrap();
         assert_eq!(
             store.pinned("[example.com]".into(), 22).unwrap(),
             Some("SHA256:abc".into())

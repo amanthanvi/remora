@@ -1039,7 +1039,10 @@ mod tests {
 
     /// Register a pin for the test server's address, run `body`, then drop
     /// the process-wide store again.
-    async fn with_pinned_mismatch<F, Fut, T>(server: &crate::ssh::test_server::TestSshServer, body: F) -> T
+    async fn with_pinned_mismatch<F, Fut, T>(
+        server: &crate::ssh::test_server::TestSshServer,
+        body: F,
+    ) -> T
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
@@ -1049,7 +1052,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = crate::ssh::test_server::in_memory_trust_store();
         let pinned = crate::ssh::test_server::host_key(crate::ssh::test_server::TEST_HOST_KEY_A).1;
-        store.pin(server.host.clone(), server.port, pinned);
+        store.pin(server.host.clone(), server.port, pinned).unwrap();
         crate::ssh::register_host_trust_store(store);
         let result = body().await;
         crate::ssh::clear_host_trust_store();
@@ -1074,7 +1077,10 @@ mod tests {
         })
         .await;
 
-        assert!(!result.success, "reconnect must not succeed on a changed host key");
+        assert!(
+            !result.success,
+            "reconnect must not succeed on a changed host key"
+        );
         let message = result.error_message.unwrap_or_default();
         assert!(
             message.contains("host-key-changed:"),

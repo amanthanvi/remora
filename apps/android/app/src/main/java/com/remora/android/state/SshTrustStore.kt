@@ -36,7 +36,19 @@ class SshTrustStore private constructor(
     }
 
     override fun write(host: String, port: UShort, fingerprint: String) {
-        writablePrefs("write", host, port).edit().putString(key(host, port), fingerprint).apply()
+        val prefs = prefs.getOrElse { error ->
+            throw unavailable("write", host, port, error)
+        }
+        try {
+            val committed = prefs.edit()
+                .putString(key(host, port), fingerprint)
+                .commit()
+            if (!committed) {
+                throw IllegalStateException("encrypted preferences commit returned false")
+            }
+        } catch (error: Exception) {
+            throw unavailable("write", host, port, error)
+        }
     }
 
     override fun remove(host: String, port: UShort) {

@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
 use url::Url;
@@ -186,37 +186,40 @@ fn is_method_not_found(error: &str) -> bool {
 
 impl MobileClient {
     /// Create a new `MobileClient`.
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Self> {
         crate::logging::install_tracing_subscriber();
         let event_processor = Arc::new(EventProcessor::new());
         let app_store = Arc::new(AppStoreReducer::new());
         let sessions = Arc::new(RwLock::new(HashMap::new()));
-        spawn_store_listener(
-            Arc::clone(&app_store),
-            Arc::clone(&sessions),
-            event_processor.subscribe(),
-        );
-        Self {
-            sessions,
-            event_processor,
-            app_store,
-            agent_metadata: crate::store::AgentMetadataStore::new(),
-            discovery: RwLock::new(DiscoveryService::new(DiscoveryConfig::default())),
-            oauth_callback_tunnels: Arc::new(Mutex::new(HashMap::new())),
-            slingshot_apis: Arc::new(StdMutex::new(HashMap::new())),
-            recorder: Arc::new(crate::recorder::MessageRecorder::new()),
-            widget_waiters: Arc::new(StdMutex::new(HashMap::new())),
-            saved_apps_directory: Arc::new(StdMutex::new(None)),
-            slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
-            direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
-            thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
-            ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
-            background_relay: Arc::new(RwLock::new(None)),
-            background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
-            remora_link: Arc::new(RwLock::new(None)),
-            remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
-        }
+        Arc::new_cyclic(|owner: &Weak<MobileClient>| {
+            spawn_store_listener(
+                owner.clone(),
+                Arc::clone(&app_store),
+                Arc::clone(&sessions),
+                event_processor.subscribe(),
+            );
+            Self {
+                sessions,
+                event_processor,
+                app_store,
+                agent_metadata: crate::store::AgentMetadataStore::new(),
+                discovery: RwLock::new(DiscoveryService::new(DiscoveryConfig::default())),
+                oauth_callback_tunnels: Arc::new(Mutex::new(HashMap::new())),
+                slingshot_apis: Arc::new(StdMutex::new(HashMap::new())),
+                recorder: Arc::new(crate::recorder::MessageRecorder::new()),
+                widget_waiters: Arc::new(StdMutex::new(HashMap::new())),
+                saved_apps_directory: Arc::new(StdMutex::new(None)),
+                slingshot_credentials_directory: Arc::new(StdMutex::new(None)),
+                direct_resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
+                thread_runtime_routes: Arc::new(StdMutex::new(HashMap::new())),
+                ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
+                background_relay: Arc::new(RwLock::new(None)),
+                background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
+                remora_link: Arc::new(RwLock::new(None)),
+                remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
+            }
+        })
     }
 
     fn sessions_write(
@@ -982,12 +985,6 @@ impl TerminalRingListener {
             .lock()
             .expect("terminal_sessions poisoned")
             .remove(&self.id);
-    }
-}
-
-impl Default for MobileClient {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -61,11 +61,18 @@ pub(crate) struct InMemoryTrustBackend {
     /// When set, every read fails instead of answering — models a keychain
     /// that is locked or otherwise unavailable.
     fail_reads: AtomicBool,
+    /// When set, writes fail after authentication — models a keychain or
+    /// encrypted preferences store that cannot durably record a first-use pin.
+    fail_writes: AtomicBool,
 }
 
 impl InMemoryTrustBackend {
     pub(crate) fn set_failing(&self, failing: bool) {
         self.fail_reads.store(failing, Ordering::SeqCst);
+    }
+
+    pub(crate) fn set_write_failing(&self, failing: bool) {
+        self.fail_writes.store(failing, Ordering::SeqCst);
     }
 }
 
@@ -78,11 +85,22 @@ impl TerminalSshTrustBackend for InMemoryTrustBackend {
         }
         Ok(self.entries.lock().unwrap().get(&(host, port)).cloned())
     }
-    fn write(&self, host: String, port: u16, fingerprint: String) {
+    fn write(
+        &self,
+        host: String,
+        port: u16,
+        fingerprint: String,
+    ) -> Result<(), SshTrustStoreError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(SshTrustStoreError::Unavailable {
+                detail: "test backend write failure".to_string(),
+            });
+        }
         self.entries
             .lock()
             .unwrap()
             .insert((host, port), fingerprint);
+        Ok(())
     }
     fn remove(&self, host: String, port: u16) {
         self.entries.lock().unwrap().remove(&(host, port));
@@ -96,8 +114,13 @@ impl TerminalSshTrustBackend for SharedBackend {
     fn read(&self, host: String, port: u16) -> Result<Option<String>, SshTrustStoreError> {
         self.0.read(host, port)
     }
-    fn write(&self, host: String, port: u16, fingerprint: String) {
-        self.0.write(host, port, fingerprint);
+    fn write(
+        &self,
+        host: String,
+        port: u16,
+        fingerprint: String,
+    ) -> Result<(), SshTrustStoreError> {
+        self.0.write(host, port, fingerprint)
     }
     fn remove(&self, host: String, port: u16) {
         self.0.remove(host, port);

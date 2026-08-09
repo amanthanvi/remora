@@ -3,6 +3,7 @@ use super::*;
 const SUBAGENT_METADATA_HYDRATE_DELAYS_MS: [u64; 3] = [150, 800, 2500];
 
 pub(super) fn spawn_store_listener(
+    owner: std::sync::Weak<MobileClient>,
     app_store: Arc<AppStoreReducer>,
     sessions: Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
     mut rx: broadcast::Receiver<UiEvent>,
@@ -18,13 +19,12 @@ pub(super) fn spawn_store_listener(
                         &event,
                     );
                     if let UiEvent::TurnCompleted { key, .. } = &event {
-                        let app_store = Arc::clone(&app_store);
-                        let sessions = Arc::clone(&sessions);
+                        let owner = owner.clone();
                         let key = key.clone();
                         MobileClient::spawn_detached(async move {
-                            let Some(client) = listener_mobile_client(&app_store, &sessions) else {
+                            let Some(client) = owner.upgrade() else {
                                 warn!(
-                                    "MobileClient: queued follow-up skipped because the listener client is unavailable"
+                                    "MobileClient: queued follow-up skipped because the listener owner was dropped"
                                 );
                                 return;
                             };
@@ -35,12 +35,11 @@ pub(super) fn spawn_store_listener(
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!("MobileClient: lagged {skipped} UI events");
-                    let app_store = Arc::clone(&app_store);
-                    let sessions = Arc::clone(&sessions);
+                    let owner = owner.clone();
                     MobileClient::spawn_detached(async move {
-                        let Some(client) = listener_mobile_client(&app_store, &sessions) else {
+                        let Some(client) = owner.upgrade() else {
                             warn!(
-                                "MobileClient: lag reconcile skipped because the listener client is unavailable"
+                                "MobileClient: lag reconcile skipped because the listener owner was dropped"
                             );
                             return;
                         };
@@ -50,15 +49,6 @@ pub(super) fn spawn_store_listener(
             }
         }
     });
-}
-
-fn listener_mobile_client(
-    app_store: &Arc<AppStoreReducer>,
-    sessions: &Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
-) -> Option<Arc<MobileClient>> {
-    crate::ffi::shared::shared_mobile_client_if_initialized().filter(|client| {
-        Arc::ptr_eq(&client.app_store, app_store) && Arc::ptr_eq(&client.sessions, sessions)
-    })
 }
 
 async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) {
@@ -485,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_follow_up_uses_canonical_runtime_routing_and_plan_mode() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
         let key = ThreadKey {
@@ -554,8 +544,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_listener_routes_follow_up_through_its_owning_non_singleton_client() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "continue");
+
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let sent_tx = Arc::new(StdMutex::new(Some(sent_tx)));
+        let handler: TestRequestHandler = {
+            let sent_tx = Arc::clone(&sent_tx);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                if let Some(sender) = sent_tx.lock().expect("send signal lock").take() {
+                    let _ = sender.send(());
+                }
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let (event_tx, event_rx) = broadcast::channel(4);
+        spawn_store_listener(
+            Arc::downgrade(&client),
+            Arc::clone(&client.app_store),
+            Arc::clone(&client.sessions),
+            event_rx,
+        );
+        event_tx
+            .send(UiEvent::TurnCompleted {
+                key,
+                turn_id: "turn-1".to_string(),
+                error: None,
+            })
+            .expect("listener remains subscribed");
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), sent_rx)
+            .await
+            .expect("owning client should dispatch queued follow-up")
+            .expect("send signal should remain open");
+    }
+
+    #[tokio::test]
     async fn concurrent_queued_follow_up_autosend_claims_the_draft_once() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
         let key = ThreadKey {
@@ -613,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_queued_follow_up_clears_the_draft() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
         let key = ThreadKey {
@@ -666,7 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_reconcile_triggers_authoritative_refresh_for_connected_threads() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
         let config = make_server_config(server_id);
@@ -712,7 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_reconcile_refreshes_authoritative_thread_inventory() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let config = make_server_config(server_id);
         client
@@ -778,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_reconcile_autosends_follow_up_after_missed_turn_completed() {
-        let client = Arc::new(MobileClient::new());
+        let client = MobileClient::new();
         let server_id = "srv";
         let thread_id = "thread-1";
         let key = ThreadKey {

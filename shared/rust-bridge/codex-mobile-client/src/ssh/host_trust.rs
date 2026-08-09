@@ -288,7 +288,13 @@ impl HostKeyVerifier {
             "ssh host trust: recording first-use pin host={} port={} fingerprint={}",
             self.host, self.port, fingerprint
         );
-        store.pin(self.host.clone(), self.port, fingerprint);
+        store
+            .pin(self.host.clone(), self.port, fingerprint)
+            .map_err(|error| SshError::HostKeyStoreUnavailable {
+                host: self.host.clone(),
+                port: self.port,
+                message: error.to_string(),
+            })?;
         Ok(())
     }
 
@@ -358,9 +364,8 @@ pub(crate) async fn connect_with_trust_store(
 ) -> Result<SshClient, SshError> {
     let host = normalize_host_key(&credentials.host);
     let port = credentials.port;
-    let may_record = allow_first_use
-        && store.is_some()
-        && lookup_pin(store.as_deref(), &host, port)?.is_none();
+    let may_record =
+        allow_first_use && store.is_some() && lookup_pin(store.as_deref(), &host, port)?.is_none();
     if !may_record {
         return connect_verified(store, credentials, allow_first_use).await;
     }
@@ -378,14 +383,18 @@ async fn connect_verified(
     credentials: SshCredentials,
     allow_first_use: bool,
 ) -> Result<SshClient, SshError> {
-    let verifier =
-        HostKeyVerifier::try_with_store(store, &credentials.host, credentials.port, allow_first_use)?;
+    let verifier = HostKeyVerifier::try_with_store(
+        store,
+        &credentials.host,
+        credentials.port,
+        allow_first_use,
+    )?;
     match SshClient::connect(credentials, verifier.callback()).await {
         Ok(client) => {
             if let Err(error) = verifier.record_trust_on_first_use().await {
-                // We authenticated, but the pin we would have written conflicts
-                // with one recorded meanwhile. Tear the session down rather
-                // than hand back a client for a host we no longer trust.
+                // We authenticated, but could not establish durable trust for
+                // this host. Tear the session down rather than hand back a
+                // client that may silently return to first-use trust later.
                 client.disconnect().await;
                 return Err(error);
             }
@@ -400,8 +409,8 @@ mod tests {
     use super::*;
     use crate::ssh::SshAuth;
     use crate::ssh::test_server::{
-        TEST_HOST_KEY_A, TEST_HOST_KEY_B, TestSshServer, host_key,
-        in_memory_trust_store as store, in_memory_trust_store_with_backend,
+        TEST_HOST_KEY_A, TEST_HOST_KEY_B, TestSshServer, host_key, in_memory_trust_store as store,
+        in_memory_trust_store_with_backend,
     };
 
     /// The pin currently recorded for the server's address.
@@ -437,10 +446,13 @@ mod tests {
     #[test]
     fn decision_table_never_auto_accepts_a_changed_key() {
         let store = store();
-        store.pin("pinned.example".into(), 22, "SHA256:pin".into());
+        store
+            .pin("pinned.example".into(), 22, "SHA256:pin".into())
+            .unwrap();
 
-        let known = HostKeyVerifier::try_with_store(Some(store.clone()), "pinned.example", 22, true)
-            .expect("store reads succeed");
+        let known =
+            HostKeyVerifier::try_with_store(Some(store.clone()), "pinned.example", 22, true)
+                .expect("store reads succeed");
         assert_eq!(known.decide("SHA256:pin"), HostKeyDecision::Matches);
         assert_eq!(known.decide("SHA256:other"), HostKeyDecision::Mismatch);
 
@@ -448,17 +460,22 @@ mod tests {
         let known_strict =
             HostKeyVerifier::try_with_store(Some(store.clone()), "pinned.example", 22, false)
                 .expect("store reads succeed");
-        assert_eq!(known_strict.decide("SHA256:other"), HostKeyDecision::Mismatch);
+        assert_eq!(
+            known_strict.decide("SHA256:other"),
+            HostKeyDecision::Mismatch
+        );
 
-        let unknown = HostKeyVerifier::try_with_store(Some(store.clone()), "fresh.example", 22, true)
-            .expect("store reads succeed");
+        let unknown =
+            HostKeyVerifier::try_with_store(Some(store.clone()), "fresh.example", 22, true)
+                .expect("store reads succeed");
         assert_eq!(
             unknown.decide("SHA256:whatever"),
             HostKeyDecision::TrustOnFirstUse
         );
 
-        let unknown_strict = HostKeyVerifier::try_with_store(Some(store), "fresh.example", 22, false)
-            .expect("store reads succeed");
+        let unknown_strict =
+            HostKeyVerifier::try_with_store(Some(store), "fresh.example", 22, false)
+                .expect("store reads succeed");
         assert_eq!(
             unknown_strict.decide("SHA256:whatever"),
             HostKeyDecision::Untrusted
@@ -500,7 +517,9 @@ mod tests {
     async fn matching_pin_proceeds() {
         let server = TestSshServer::start(TEST_HOST_KEY_A).await;
         let store = store();
-        store.pin(server.host.clone(), server.port, server.fingerprint.clone());
+        store
+            .pin(server.host.clone(), server.port, server.fingerprint.clone())
+            .unwrap();
 
         connect(Some(store.clone()), password_credentials(&server), false)
             .await
@@ -514,7 +533,9 @@ mod tests {
         let server = TestSshServer::start(TEST_HOST_KEY_B).await;
         let store = store();
         let pinned = host_key(TEST_HOST_KEY_A).1;
-        store.pin(server.host.clone(), server.port, pinned.clone());
+        store
+            .pin(server.host.clone(), server.port, pinned.clone())
+            .unwrap();
 
         let error = connect(Some(store.clone()), password_credentials(&server), true)
             .await
@@ -577,7 +598,8 @@ mod tests {
         // serialization both would observe "no pin", both would authenticate,
         // and the loser would overwrite the winner's pin — leaving a trusted
         // fingerprint that belongs to whichever key happened to finish last.
-        let server = TestSshServer::start_with_keys(&[TEST_HOST_KEY_A, TEST_HOST_KEY_B], true).await;
+        let server =
+            TestSshServer::start_with_keys(&[TEST_HOST_KEY_A, TEST_HOST_KEY_B], true).await;
         let key_a = host_key(TEST_HOST_KEY_A).1;
         let key_b = host_key(TEST_HOST_KEY_B).1;
         let store = store();
@@ -660,6 +682,29 @@ mod tests {
             .await
             .expect("connect should succeed once the store is readable");
         assert_eq!(pin_for(&store, &server), Some(server.fingerprint.clone()));
+    }
+
+    #[tokio::test]
+    async fn unwritable_trust_store_rejects_authenticated_first_use_connection() {
+        let server = TestSshServer::start(TEST_HOST_KEY_A).await;
+        let (store, backend) = in_memory_trust_store_with_backend();
+        backend.set_write_failing(true);
+
+        let error = connect(Some(store.clone()), password_credentials(&server), true)
+            .await
+            .expect_err("a first-use connect must fail when its pin cannot be persisted");
+        match error {
+            SshError::HostKeyStoreUnavailable { host, port, .. } => {
+                assert_eq!(host, server.host);
+                assert_eq!(port, server.port);
+            }
+            other => panic!("expected HostKeyStoreUnavailable, got {other:?}"),
+        }
+        assert!(
+            server.auth_attempts() > 0,
+            "write failure should occur only after successful authentication"
+        );
+        assert_eq!(pin_for(&store, &server), None);
     }
 
     #[test]

@@ -46,9 +46,13 @@ final class SwiftSshTrustBackend: TerminalSshTrustBackend, @unchecked Sendable {
         return value
     }
 
-    func write(host: String, port: UInt16, fingerprint: String) {
+    func write(host: String, port: UInt16, fingerprint: String) throws {
         let account = account(host: host, port: port)
-        guard let data = fingerprint.data(using: .utf8) else { return }
+        guard let data = fingerprint.data(using: .utf8) else {
+            throw SshTrustStoreError.Unavailable(
+                detail: "fingerprint for \(host):\(port) is not encodable UTF-8"
+            )
+        }
         let addAttributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -57,6 +61,7 @@ final class SwiftSshTrustBackend: TerminalSshTrustBackend, @unchecked Sendable {
             kSecValueData as String: data,
         ]
         let addStatus = SecItemAdd(addAttributes as CFDictionary, nil)
+        let status: OSStatus
         if addStatus == errSecDuplicateItem {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -67,7 +72,14 @@ final class SwiftSshTrustBackend: TerminalSshTrustBackend, @unchecked Sendable {
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             ]
-            SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+            status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+        } else {
+            status = addStatus
+        }
+        guard status == errSecSuccess else {
+            throw SshTrustStoreError.Unavailable(
+                detail: "keychain write failed for \(host):\(port) (OSStatus \(status))"
+            )
         }
     }
 
