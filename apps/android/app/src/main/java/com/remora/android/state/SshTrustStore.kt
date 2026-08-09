@@ -1,14 +1,19 @@
 package com.remora.android.state
 
 import android.content.Context
+import android.content.SharedPreferences
 import uniffi.codex_mobile_client.SshTrustStoreException
 import uniffi.codex_mobile_client.TerminalSshTrustBackend
 
 /// Persistent host-key fingerprint pinning backed by EncryptedSharedPreferences.
 /// Implements the Rust [`TerminalSshTrustBackend`] callback interface so the
 /// shared terminal SSH backend can consult and update pins on every connect.
-class SshTrustStore(context: Context) : TerminalSshTrustBackend {
-    private val prefs = openEncryptedPrefsOrReset(context, PREFS_NAME)
+class SshTrustStore private constructor(
+    private val prefs: Result<SharedPreferences>,
+) : TerminalSshTrustBackend {
+    constructor(context: Context) : this(loadPrefs(context))
+
+    internal constructor(openPrefs: () -> SharedPreferences) : this(capturePrefs(openPrefs))
 
     /**
      * Look up a pinned fingerprint.
@@ -20,26 +25,50 @@ class SshTrustStore(context: Context) : TerminalSshTrustBackend {
      * trust-on-first-use.
      */
     override fun read(host: String, port: UShort): String? {
+        val prefs = prefs.getOrElse { error ->
+            throw unavailable("open", host, port, error)
+        }
         return try {
             prefs.getString(key(host, port), null)
         } catch (error: Exception) {
-            throw SshTrustStoreException.Unavailable(
-                "encrypted trust store read failed for $host:$port: ${error.message ?: error}",
-            )
+            throw unavailable("read", host, port, error)
         }
     }
 
     override fun write(host: String, port: UShort, fingerprint: String) {
-        prefs.edit().putString(key(host, port), fingerprint).apply()
+        writablePrefs("write", host, port).edit().putString(key(host, port), fingerprint).apply()
     }
 
     override fun remove(host: String, port: UShort) {
-        prefs.edit().remove(key(host, port)).apply()
+        writablePrefs("remove", host, port).edit().remove(key(host, port)).apply()
     }
+
+    private fun writablePrefs(operation: String, host: String, port: UShort): SharedPreferences =
+        prefs.getOrElse { error ->
+            throw IllegalStateException(
+                "encrypted trust store $operation failed for $host:$port",
+                error,
+            )
+        }
+
+    private fun unavailable(
+        operation: String,
+        host: String,
+        port: UShort,
+        error: Throwable,
+    ) = SshTrustStoreException.Unavailable(
+        "encrypted trust store $operation failed for $host:$port: ${error.message ?: error}",
+    )
 
     private fun key(host: String, port: UShort): String = "${host.lowercase()}:$port"
 
     companion object {
         private const val PREFS_NAME = "remora_ssh_trust"
+
+        private fun loadPrefs(context: Context): Result<SharedPreferences> =
+            runCatching { openEncryptedPrefs(context, PREFS_NAME) }
+
+        private fun capturePrefs(openPrefs: () -> SharedPreferences): Result<SharedPreferences> =
+            runCatching(openPrefs)
     }
 }

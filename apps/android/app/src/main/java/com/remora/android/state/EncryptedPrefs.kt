@@ -24,13 +24,14 @@ internal fun openEncryptedPrefsOrReset(
     context: Context,
     name: String,
 ): SharedPreferences {
-    return runCatching { buildEncryptedPrefs(context, name) }.getOrElse {
+    return runCatching { openEncryptedPrefs(context, name) }.getOrElse {
         context.deleteSharedPreferences(name)
-        buildEncryptedPrefs(context, name)
+        openEncryptedPrefs(context, name)
     }
 }
 
-private fun buildEncryptedPrefs(context: Context, name: String): SharedPreferences =
+/** Open encrypted preferences without deleting unreadable ciphertext. */
+internal fun openEncryptedPrefs(context: Context, name: String): SharedPreferences =
     EncryptedSharedPreferences.create(
         context,
         name,

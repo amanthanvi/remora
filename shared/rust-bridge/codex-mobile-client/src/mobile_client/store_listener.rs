@@ -44,7 +44,7 @@ pub(super) fn spawn_store_listener(
                             );
                             return;
                         };
-                        reconcile_after_store_listener_lag(&client).await;
+                        reconcile_after_store_listener_lag(client).await;
                     });
                 }
             }
@@ -61,12 +61,29 @@ fn listener_mobile_client(
     })
 }
 
-async fn reconcile_after_store_listener_lag(client: &MobileClient) {
-    let connected_server_ids = client
+async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) {
+    let sessions = client
         .sessions_read()
-        .keys()
-        .cloned()
+        .iter()
+        .map(|(server_id, session)| (server_id.clone(), Arc::clone(session)))
+        .collect::<Vec<_>>();
+    let connected_server_ids = sessions
+        .iter()
+        .map(|(server_id, _)| server_id.clone())
         .collect::<HashSet<_>>();
+
+    for (server_id, session) in sessions {
+        if let Err(error) =
+            refresh_thread_list_from_app_server(session, Arc::clone(&client.app_store), &server_id)
+                .await
+        {
+            warn!(
+                "MobileClient: lag reconcile thread-list refresh failed for {}: {}",
+                server_id, error
+            );
+        }
+    }
+
     let keys = client
         .app_store
         .snapshot()
@@ -85,7 +102,9 @@ async fn reconcile_after_store_listener_lag(client: &MobileClient) {
                 "MobileClient: lag reconcile failed for {} thread {}: {}",
                 key.server_id, key.thread_id, error
             );
+            continue;
         }
+        maybe_send_next_local_queued_follow_up(Arc::clone(&client), key).await;
     }
 }
 
@@ -349,6 +368,60 @@ mod tests {
         })
     }
 
+    fn upstream_thread_response(thread_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": thread_id,
+            "sessionId": thread_id,
+            "preview": "Thread",
+            "ephemeral": false,
+            "modelProvider": "openai",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "status": { "type": "idle" },
+            "path": "/tmp/thread",
+            "cwd": "/tmp/thread",
+            "cliVersion": "1.0.0",
+            "source": "cli",
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": "Thread",
+            "turns": []
+        })
+    }
+
+    fn successful_thread_list_response(thread_ids: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "data": thread_ids
+                .iter()
+                .map(|thread_id| upstream_thread_response(thread_id))
+                .collect::<Vec<_>>(),
+            "nextCursor": null,
+            "backwardsCursor": null
+        })
+    }
+
+    fn successful_thread_resume_response(thread_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "thread": upstream_thread_response(thread_id),
+            "model": "gpt-5",
+            "modelProvider": "openai",
+            "cwd": "/tmp/thread",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "sandbox": { "type": "dangerFullAccess" },
+            "reasoningEffort": "medium"
+        })
+    }
+
+    fn successful_thread_turns_list_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": [],
+            "nextCursor": null,
+            "backwardsCursor": null
+        })
+    }
+
     #[test]
     fn collab_receiver_thread_ids_extracts_spawn_agent_targets() {
         let event = UiEvent::ItemCompleted {
@@ -593,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_reconcile_triggers_authoritative_refresh_for_connected_threads() {
-        let client = MobileClient::new();
+        let client = Arc::new(MobileClient::new());
         let server_id = "srv";
         let thread_id = "thread-1";
         let config = make_server_config(server_id);
@@ -629,11 +702,152 @@ mod tests {
             .expect("sessions lock")
             .insert(server_id.to_string(), session);
 
-        reconcile_after_store_listener_lag(&client).await;
+        reconcile_after_store_listener_lag(Arc::clone(&client)).await;
 
         assert_eq!(
             requests.lock().expect("request log lock").as_slice(),
-            ["thread/resume"]
+            ["thread/list", "thread/resume"]
         );
+    }
+
+    #[tokio::test]
+    async fn lag_reconcile_refreshes_authoritative_thread_inventory() {
+        let client = Arc::new(MobileClient::new());
+        let server_id = "srv";
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, "archived-thread"));
+
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                requests
+                    .lock()
+                    .expect("request log lock")
+                    .push(request.method().to_string());
+                match request {
+                    upstream::ClientRequest::ThreadList { .. } => {
+                        Ok(successful_thread_list_response(&["new-thread"]))
+                    }
+                    upstream::ClientRequest::ThreadResume { params, .. } => {
+                        Ok(successful_thread_resume_response(&params.thread_id))
+                    }
+                    upstream::ClientRequest::ThreadTurnsList { .. } => {
+                        Ok(successful_thread_turns_list_response())
+                    }
+                    other => Err(RpcError::Deserialization(format!(
+                        "unexpected request: {}",
+                        other.method()
+                    ))),
+                }
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        reconcile_after_store_listener_lag(Arc::clone(&client)).await;
+
+        let snapshot = client.app_store.snapshot();
+        assert!(!snapshot.threads.contains_key(&ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: "archived-thread".to_string(),
+        }));
+        assert!(snapshot.threads.contains_key(&ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: "new-thread".to_string(),
+        }));
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/list", "thread/resume", "thread/turns/list"]
+        );
+    }
+
+    #[tokio::test]
+    async fn lag_reconcile_autosends_follow_up_after_missed_turn_completed() {
+        let client = Arc::new(MobileClient::new());
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "continue after lag");
+
+        let requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                requests
+                    .lock()
+                    .expect("request log lock")
+                    .push(request.method().to_string());
+                match request {
+                    upstream::ClientRequest::ThreadList { .. } => {
+                        Ok(successful_thread_list_response(&[thread_id]))
+                    }
+                    upstream::ClientRequest::ThreadResume { .. } => {
+                        Ok(successful_thread_resume_response(thread_id))
+                    }
+                    upstream::ClientRequest::ThreadTurnsList { .. } => {
+                        Ok(successful_thread_turns_list_response())
+                    }
+                    upstream::ClientRequest::TurnStart { .. } => {
+                        Ok(successful_turn_start_response())
+                    }
+                    other => Err(RpcError::Deserialization(format!(
+                        "unexpected request: {}",
+                        other.method()
+                    ))),
+                }
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        reconcile_after_store_listener_lag(Arc::clone(&client)).await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            [
+                "thread/list",
+                "thread/resume",
+                "thread/turns/list",
+                "turn/start"
+            ]
+        );
+        let snapshot = client.app_store.snapshot();
+        let thread = snapshot.threads.get(&key).expect("thread snapshot");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
     }
 }
