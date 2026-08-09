@@ -1,5 +1,7 @@
 use super::*;
 
+const AMBIGUOUS_TURN_RECONCILIATION_RETRY_DELAYS_MS: [u64; 5] = [250, 1000, 5000, 15_000, 30_000];
+
 struct LagRefreshFence<'a> {
     generation: u64,
     session: &'a Arc<ServerSession>,
@@ -44,16 +46,37 @@ impl MobileClient {
         if !self.pending_turn_reconciliation().insert(key.clone()) {
             return;
         }
-        let client = Arc::clone(self);
+        let owner = Arc::downgrade(self);
         MobileClient::spawn_detached(async move {
-            if let Err(error) = client
-                .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
-                .await
-            {
-                warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
-                    "ambiguous turn reconciliation deferred server={} thread={} error={}",
-                    key.server_id, key.thread_id, error
-                );
+            let mut retry_index = 0usize;
+            loop {
+                let Some(client) = owner.upgrade() else {
+                    return;
+                };
+                if !client.pending_turn_reconciliation().contains(&key) {
+                    return;
+                }
+                let result = client
+                    .force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
+                    .await;
+                if !client.pending_turn_reconciliation().contains(&key) {
+                    return;
+                }
+                match result {
+                    Ok(()) => warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "ambiguous turn reconciliation remained pending after authoritative refresh server={} thread={}",
+                        key.server_id, key.thread_id
+                    ),
+                    Err(error) => warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
+                        "ambiguous turn reconciliation deferred server={} thread={} error={}",
+                        key.server_id, key.thread_id, error
+                    ),
+                }
+                let delay_ms = AMBIGUOUS_TURN_RECONCILIATION_RETRY_DELAYS_MS
+                    [retry_index.min(AMBIGUOUS_TURN_RECONCILIATION_RETRY_DELAYS_MS.len() - 1)];
+                retry_index = retry_index.saturating_add(1);
+                drop(client);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
         });
     }

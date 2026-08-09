@@ -1322,6 +1322,88 @@ mod tests {
         assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_reconciliation_retries_transient_refresh_failure() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination(server_id, true);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+        enqueue_follow_up(&client, &key, "retained");
+        assert!(
+            client
+                .app_store
+                .try_claim_first_queued_follow_up(&key)
+                .is_some()
+        );
+
+        let resume_attempts = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let resume_attempts = Arc::clone(&resume_attempts);
+            Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    if resume_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(RpcError::Transport(TransportError::Disconnected))
+                    } else {
+                        Ok(successful_thread_resume_response(thread_id))
+                    }
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    Ok(successful_thread_turns_list_response())
+                }
+                other => Err(RpcError::Deserialization(format!(
+                    "unexpected ambiguity retry request: {}",
+                    other.method()
+                ))),
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client.schedule_ambiguous_turn_reconciliation(key.clone());
+        while resume_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(client.pending_turn_reconciliation().contains(&key));
+
+        while resume_attempts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(tokio::time::Duration::from_millis(250)).await;
+        }
+        while client.pending_turn_reconciliation().contains(&key) {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(resume_attempts.load(Ordering::SeqCst), 2);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("reconciled thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
     #[tokio::test]
     async fn pre_send_disconnect_hydrates_idle_then_retries_claim_once() {
         let client = MobileClient::new();
