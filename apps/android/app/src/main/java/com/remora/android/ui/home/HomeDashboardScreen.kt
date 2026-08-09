@@ -1130,18 +1130,17 @@ fun HomeDashboardScreen(
                                 appModel.refreshSnapshot()
                             }
                             is ConfirmAction.DisconnectServer -> {
-                                var removalPrepared = false
+                                var removalLease: ULong? = null
                                 var removalCommitted = false
                                 try {
                                     val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
-                                        check(
+                                        val lease =
                                             appModel.reconnectController.prepareServerRemoval(
                                                 action.server.serverId,
-                                            ),
-                                        ) {
+                                            ) ?: error(
                                             "Unable to stop reconnecting to this server. Try again."
-                                        }
-                                        removalPrepared = true
+                                        )
+                                        removalLease = lease
                                         appModel.sshSessionStore.close(action.server.serverId)
                                         val outcome = SavedServerStore.remove(
                                             context,
@@ -1162,17 +1161,23 @@ fun HomeDashboardScreen(
                                         )
                                     }
                                 } catch (cancellation: CancellationException) {
-                                    if (removalPrepared && !removalCommitted) {
-                                        appModel.reconnectController.allowServerReconnect(
-                                            action.server.serverId,
-                                        )
+                                    if (!removalCommitted) {
+                                        removalLease?.let { lease ->
+                                            appModel.reconnectController.rollbackServerRemoval(
+                                                action.server.serverId,
+                                                lease,
+                                            )
+                                        }
                                     }
                                     throw cancellation
                                 } catch (error: Exception) {
-                                    if (removalPrepared && !removalCommitted) {
-                                        appModel.reconnectController.allowServerReconnect(
-                                            action.server.serverId,
-                                        )
+                                    if (!removalCommitted) {
+                                        removalLease?.let { lease ->
+                                            appModel.reconnectController.rollbackServerRemoval(
+                                                action.server.serverId,
+                                                lease,
+                                            )
+                                        }
                                     }
                                     confirmAction = ConfirmAction.ReplyError(
                                         error.message ?: "Unable to disconnect this server.",

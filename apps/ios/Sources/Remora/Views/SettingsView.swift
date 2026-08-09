@@ -394,7 +394,9 @@ struct SettingsView: View {
 
     private func removeServer(_ server: HomeDashboardServer) {
         Task {
-            guard await appModel.reconnectController.prepareServerRemoval(serverId: server.id) else {
+            guard let removalLease = await appModel.reconnectController.prepareServerRemoval(
+                serverId: server.id
+            ) else {
                 serverEditError = "Unable to stop reconnecting to this server. Try again."
                 return
             }
@@ -403,7 +405,10 @@ struct SettingsView: View {
                 try SavedServerStore.remove(serverId: server.id)
             } catch {
                 guard savedServerMutationCommitted(despite: error) else {
-                    appModel.reconnectController.allowServerReconnect(serverId: server.id)
+                    appModel.reconnectController.rollbackServerRemoval(
+                        serverId: server.id,
+                        lease: removalLease
+                    )
                     return
                 }
             }

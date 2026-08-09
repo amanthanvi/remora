@@ -281,14 +281,16 @@ private fun SettingsTopLevel(
                     },
                     onRemove = {
                         scope.launch {
-                            var removalPrepared = false
+                            var removalLease: ULong? = null
                             var removalCommitted = false
                             try {
                                 val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
-                                    check(appModel.reconnectController.prepareServerRemoval(server.serverId)) {
+                                    val lease = appModel.reconnectController
+                                        .prepareServerRemoval(server.serverId)
+                                        ?: error(
                                         "Unable to stop reconnecting to this server. Try again."
-                                    }
-                                    removalPrepared = true
+                                    )
+                                    removalLease = lease
                                     appModel.sshSessionStore.close(server.serverId)
                                     val outcome = SavedServerStore.remove(context, server.serverId)
                                     removalCommitted = true
@@ -305,13 +307,23 @@ private fun SettingsTopLevel(
                                         "Server removed. SSH trust cleanup will finish when secure storage recovers."
                                 }
                             } catch (cancellation: CancellationException) {
-                                if (removalPrepared && !removalCommitted) {
-                                    appModel.reconnectController.allowServerReconnect(server.serverId)
+                                if (!removalCommitted) {
+                                    removalLease?.let { lease ->
+                                        appModel.reconnectController.rollbackServerRemoval(
+                                            server.serverId,
+                                            lease,
+                                        )
+                                    }
                                 }
                                 throw cancellation
                             } catch (error: Exception) {
-                                if (removalPrepared && !removalCommitted) {
-                                    appModel.reconnectController.allowServerReconnect(server.serverId)
+                                if (!removalCommitted) {
+                                    removalLease?.let { lease ->
+                                        appModel.reconnectController.rollbackServerRemoval(
+                                            server.serverId,
+                                            lease,
+                                        )
+                                    }
                                 }
                                 serverRemovalError = error.message ?: "Unable to remove the server."
                             }
