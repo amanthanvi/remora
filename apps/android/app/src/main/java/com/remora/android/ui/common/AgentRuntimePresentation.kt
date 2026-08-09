@@ -81,16 +81,6 @@ val AgentRuntimeKind.supportsThreadPermissionOverrides: Boolean
 val AgentRuntimeKind.reportsEffectiveThreadPermissions: Boolean
     get() = metadata?.capabilities?.reportsEffectiveThreadPermissions ?: true
 
-/** Picker callers that only know `name` / `displayName` from a probe. */
-fun isBetaAgentName(name: String, displayName: String): Boolean {
-    val key = name.trim().lowercase()
-    if (isStableAgentIdentity(key, displayName)) {
-        return false
-    }
-    val cached = AgentRuntimeMetadataProvider.lookup?.invoke(key)
-    return cached?.presentation?.isBeta ?: true
-}
-
 private fun isStableAgentIdentity(name: String, displayName: String): Boolean =
     name.trim().lowercase() == "codex" || displayName.trim().lowercase() == "codex"
 

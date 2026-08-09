@@ -87,12 +87,14 @@ import com.remora.android.state.AppLifecycleController
 import com.remora.android.state.DebugSettings
 import com.remora.android.state.SavedProjectStore
 import com.remora.android.state.SavedServerStore
+import com.remora.android.state.SshTrustCleanupOutcome
 import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.connectionModeLabel
 import com.remora.android.state.displayTitle
 import com.remora.android.state.isConnected
 import com.remora.android.state.statusColor
 import com.remora.android.state.statusLabel
+import com.remora.android.state.toRecord
 import com.remora.android.ui.ExperimentalFeatures
 import com.remora.android.ui.RemoraFeature
 import com.remora.android.ui.RemoraTextStyle
@@ -102,8 +104,12 @@ import com.remora.android.ui.common.DebugBuildLabel
 import com.remora.android.ui.common.runtimeSortIndex
 import com.remora.android.ui.scaled
 import com.remora.android.R
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.remora.android.ui.common.AgentRuntimeKind
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AppServerSnapshot
@@ -208,21 +214,14 @@ fun HomeDashboardScreen(
         }
     }
 
-    // Saved apps by origin thread id. The store's `.apps` StateFlow is kept
-    // fresh by AppModel's handleUpdate on SavedAppsChanged (R3), plus a
-    // best-effort reload on home re-entry to catch any changes that arrived
-    // while we were off-screen.
+    // All saved apps shown by the header Apps action. The store's `.apps`
+    // StateFlow is kept fresh by AppModel's handleUpdate on SavedAppsChanged
+    // (R3), plus a best-effort reload on home re-entry to catch any changes
+    // that arrived while we were off-screen.
     LaunchedEffect(Unit) {
         try { com.remora.android.state.SavedAppsStore.reload(context) } catch (_: Exception) {}
     }
     val savedAppsAll by com.remora.android.state.SavedAppsStore.apps.collectAsState()
-    val savedAppsByThread = remember(savedAppsAll) {
-        savedAppsAll
-            .asSequence()
-            .filter { it.originThreadId != null }
-            .groupBy { it.originThreadId!! }
-            .mapValues { (_, v) -> v.sortedByDescending { it.updatedAtMs } }
-    }
 
     var confirmAction by remember { mutableStateOf<ConfirmAction?>(null) }
     // Hoisted reply-sheet target. Both the row swipe and the long-press
@@ -451,7 +450,6 @@ fun HomeDashboardScreen(
                     // QuickReplySheet. Nesting `SwipeToHideRow` inside
                     // `SessionReplySwipe` would have the two pointer handlers
                     // fighting over the same drag stream.
-                    val sessionApps = savedAppsByThread[session.key.threadId].orEmpty()
                     val sessionPinKey = PinnedThreadKey(
                         serverId = session.key.serverId,
                         threadId = session.key.threadId,
@@ -529,7 +527,8 @@ fun HomeDashboardScreen(
                                 // Head-of-thread fork: duplicates the full
                                 // thread server-side (no rollback) and
                                 // navigates to the new copy. Mirrors iOS
-                                // `forkSessionFromHome` in RemoraApp.swift.
+                                // `forkSessionFromHome` in
+                                // HomeNavigationView.swift.
                                 scope.launch {
                                     try {
                                         val sourceKey = appModel.hydrateThreadPermissions(session.key) ?: session.key
@@ -1131,12 +1130,64 @@ fun HomeDashboardScreen(
                                 appModel.refreshSnapshot()
                             }
                             is ConfirmAction.DisconnectServer -> {
-                                SavedServerStore.remove(context, action.server.serverId)
-                                appModel.sshSessionStore.close(action.server.serverId)
-                                appModel.serverBridge.disconnectServer(action.server.serverId)
-                                appModel.refreshSnapshot()
+                                var removalLease: ULong? = null
+                                var removalCommitted = false
+                                try {
+                                    val cleanupOutcome = withContext(NonCancellable + Dispatchers.IO) {
+                                        val lease =
+                                            appModel.reconnectController.prepareServerRemoval(
+                                                action.server.serverId,
+                                            ) ?: error(
+                                            "Unable to stop reconnecting to this server. Try again."
+                                        )
+                                        removalLease = lease
+                                        appModel.sshSessionStore.close(action.server.serverId)
+                                        val outcome = SavedServerStore.remove(
+                                            context,
+                                            action.server.serverId,
+                                        )
+                                        removalCommitted = true
+                                        appModel.reconnectController.syncSavedServers(
+                                            SavedServerStore.load(context)
+                                                .filter { it.rememberedByUser }
+                                                .map { it.toRecord() },
+                                        )
+                                        outcome
+                                    }
+                                    appModel.refreshSnapshot()
+                                    if (cleanupOutcome == SshTrustCleanupOutcome.Pending) {
+                                        confirmAction = ConfirmAction.TrustCleanupPending(
+                                            "Server disconnected. SSH trust cleanup will finish when secure storage recovers.",
+                                        )
+                                    }
+                                } catch (cancellation: CancellationException) {
+                                    if (!removalCommitted) {
+                                        removalLease?.let { lease ->
+                                            appModel.reconnectController.rollbackServerRemoval(
+                                                action.server.serverId,
+                                                lease,
+                                            )
+                                        }
+                                    }
+                                    throw cancellation
+                                } catch (error: Exception) {
+                                    if (!removalCommitted) {
+                                        removalLease?.let { lease ->
+                                            appModel.reconnectController.rollbackServerRemoval(
+                                                action.server.serverId,
+                                                lease,
+                                            )
+                                        }
+                                    }
+                                    confirmAction = ConfirmAction.ReplyError(
+                                        error.message ?: "Unable to disconnect this server.",
+                                    )
+                                }
                             }
                             is ConfirmAction.ReplyError -> {
+                                // Informational dialog only — "Confirm" just dismisses.
+                            }
+                            is ConfirmAction.TrustCleanupPending -> {
                                 // Informational dialog only — "Confirm" just dismisses.
                             }
                         }
@@ -1293,6 +1344,11 @@ private sealed class ConfirmAction {
         override val title = "Reply Failed"
         override val message = reason
     }
+
+    data class TrustCleanupPending(val reason: String) : ConfirmAction() {
+        override val title = "SSH Trust Cleanup Pending"
+        override val message = reason
+    }
 }
 
 private fun Rect.relativeTo(root: Rect): Rect {
@@ -1302,55 +1358,4 @@ private fun Rect.relativeTo(root: Rect): Rect {
         right = right - root.left,
         bottom = bottom - root.top,
     )
-}
-
-@Composable
-private fun HomeAppTakeoverRow(
-    app: SavedApp,
-    extraCount: Int,
-    onClick: () -> Unit,
-) {
-    val monogram = app.title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-    val subtitle = buildString {
-        append(app.appId.ifBlank { "app" })
-        if (extraCount > 0) append(" · +$extraCount more")
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(RemoraTheme.accent.copy(alpha = 0.18f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = monogram,
-                color = RemoraTheme.accent,
-                fontSize = RemoraTextStyle.headline.scaled,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = app.title.ifBlank { "Saved App" },
-                color = RemoraTheme.textPrimary,
-                fontSize = RemoraTextStyle.callout.scaled,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = subtitle,
-                color = RemoraTheme.textMuted,
-                fontSize = RemoraTextStyle.caption2.scaled,
-                fontFamily = RemoraTheme.monoFont,
-            )
-        }
-    }
 }
