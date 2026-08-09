@@ -5,7 +5,8 @@ pub(super) const AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT: usize = 10;
 
 struct AmbiguousTurnRepairPage {
     page: crate::types::AppListThreadTurnsResponse,
-    recent_or_undated_turn_ids: HashSet<String>,
+    causally_eligible_turn_ids: HashSet<String>,
+    undecidable_undated_turn_ids: HashSet<String>,
 }
 
 struct LagRefreshFence<'a> {
@@ -149,11 +150,12 @@ impl MobileClient {
         }
     }
 
-    fn advance_ambiguous_turn_repair_cursor(
+    fn advance_ambiguous_turn_repair_state(
         &self,
         key: &ThreadKey,
         pending_id: i64,
         next_cursor: Option<String>,
+        undated_replay_observed: bool,
     ) -> bool {
         let mut pending = self.pending_turn_reconciliation();
         let Some(current) = pending
@@ -163,6 +165,7 @@ impl MobileClient {
             return false;
         };
         current.repair_cursor = next_cursor;
+        current.undated_replay_observed |= undated_replay_observed;
         true
     }
 
@@ -594,7 +597,7 @@ impl MobileClient {
             self.mark_direct_resumed_thread(key.clone());
             if !server_honored_exclude_turns {
                 let pending = self.pending_turn_reconciliation().get(key).cloned();
-                let recent_or_undated_turn_ids = pending
+                let causally_eligible_turn_ids = pending
                     .as_ref()
                     .map(|pending| {
                         turns
@@ -604,11 +607,22 @@ impl MobileClient {
                             .collect::<HashSet<_>>()
                     })
                     .unwrap_or_default();
-                let recent_authoritative_match = pending.is_some()
+                let undecidable_undated_turn_ids = turns
+                    .iter()
+                    .filter(|turn| turn.started_at.is_none())
+                    .map(|turn| turn.id.clone())
+                    .collect::<HashSet<_>>();
+                let causal_authoritative_match = pending.is_some()
                     && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
                         key,
                         &snapshot.items,
-                        &recent_or_undated_turn_ids,
+                        &causally_eligible_turn_ids,
+                    );
+                let undated_authoritative_match = pending.is_some()
+                    && app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
+                        key,
+                        &snapshot.items,
+                        &undecidable_undated_turn_ids,
                     );
                 let replayed = pending.as_ref().is_some_and(|pending| {
                     if pending.baseline_history_known {
@@ -621,7 +635,7 @@ impl MobileClient {
                         app_store.consume_thread_follow_up_claim_if_replayed_in_turns(
                             key,
                             &snapshot.items,
-                            &recent_or_undated_turn_ids,
+                            &causally_eligible_turn_ids,
                         )
                     }
                 });
@@ -633,7 +647,7 @@ impl MobileClient {
                     || pending
                         .as_ref()
                         .is_some_and(|pending| pending.baseline_history_known)
-                    || !recent_authoritative_match
+                    || (!causal_authoritative_match && !undated_authoritative_match)
                 {
                     self.reconcile_ambiguous_turn_claim(key);
                 } else {
@@ -762,6 +776,7 @@ impl MobileClient {
             }) || repair_required_for_ambiguity;
         let mut repair_reached_causal_boundary = false;
         let mut repair_continuation_cursor = None;
+        let mut repair_used_resume_cursor = false;
         let repair_pages = if needs_repair_page {
             let mut pages = Vec::new();
             let mut resume_cursor = pending_ambiguity
@@ -770,6 +785,7 @@ impl MobileClient {
             let mut rechecking_head = resume_cursor.is_some();
             let mut cursor = None;
             let mut seen_cursors = HashSet::new();
+            let mut causal_floor_reached = false;
             for _ in 0..AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT {
                 if !seen_cursors.insert(cursor.clone()) {
                     warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -811,17 +827,25 @@ impl MobileClient {
                     .iter()
                     .map(|turn| turn.id.clone())
                     .collect::<HashSet<_>>();
-                let recent_or_undated_turn_ids = pending_ambiguity
-                    .as_ref()
-                    .map(|pending| {
-                        response
-                            .data
-                            .iter()
-                            .filter(|turn| pending.turn_could_follow_claim(turn))
-                            .map(|turn| turn.id.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let mut causally_eligible_turn_ids = HashSet::new();
+                let mut undecidable_undated_turn_ids = HashSet::new();
+                if let Some(pending) = pending_ambiguity.as_ref()
+                    && !pending.baseline_history_known
+                {
+                    for turn in &response.data {
+                        if !causal_floor_reached && pending.turn_definitely_precedes_claim(turn) {
+                            causal_floor_reached = true;
+                        }
+                        if causal_floor_reached {
+                            continue;
+                        }
+                        if pending.turn_could_follow_claim(turn) {
+                            causally_eligible_turn_ids.insert(turn.id.clone());
+                        } else if turn.started_at.is_none() {
+                            undecidable_undated_turn_ids.insert(turn.id.clone());
+                        }
+                    }
+                }
                 let next_cursor = response.next_cursor.clone();
                 let reached_baseline = pending_ambiguity.as_ref().is_some_and(|pending| {
                     pending.baseline_history_known
@@ -832,18 +856,20 @@ impl MobileClient {
                 });
                 pages.push(AmbiguousTurnRepairPage {
                     page: response.into(),
-                    recent_or_undated_turn_ids,
+                    causally_eligible_turn_ids,
+                    undecidable_undated_turn_ids,
                 });
                 if !repair_required_for_ambiguity {
                     break;
                 }
-                if reached_baseline || next_cursor.is_none() {
+                if reached_baseline || causal_floor_reached || next_cursor.is_none() {
                     repair_reached_causal_boundary = true;
                     break;
                 }
                 if rechecking_head {
                     cursor = resume_cursor.take();
                     rechecking_head = false;
+                    repair_used_resume_cursor = true;
                     seen_cursors.clear();
                     continue;
                 }
@@ -905,16 +931,27 @@ impl MobileClient {
                             app_store.consume_thread_follow_up_claim_if_replayed_in_turns(
                                 key,
                                 &repair_page.page.turns,
-                                &repair_page.recent_or_undated_turn_ids,
+                                &repair_page.causally_eligible_turn_ids,
                             )
                         }
                     });
-                    if !replayed && !repair_reached_causal_boundary {
+                    let undated_replay_observed = pending_ambiguity
+                        .as_ref()
+                        .is_some_and(|pending| pending.undated_replay_observed)
+                        || repair_pages.iter().any(|repair_page| {
+                            app_store.thread_follow_up_claim_matches_authoritative_items_in_turns(
+                                key,
+                                &repair_page.page.turns,
+                                &repair_page.undecidable_undated_turn_ids,
+                            )
+                        });
+                    if !replayed && (!repair_reached_causal_boundary || undated_replay_observed) {
                         if let Some(pending) = pending_ambiguity.as_ref() {
-                            self.advance_ambiguous_turn_repair_cursor(
+                            self.advance_ambiguous_turn_repair_state(
                                 key,
                                 pending.id,
                                 repair_continuation_cursor.clone(),
+                                undated_replay_observed,
                             );
                         }
                         warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,
@@ -924,10 +961,17 @@ impl MobileClient {
                         return true;
                     }
                 }
+                let repair_pages_to_merge = if repair_used_resume_cursor {
+                    &repair_pages[..1]
+                } else {
+                    repair_pages.as_slice()
+                };
                 if let Err(error) = self.apply_thread_turns_pages(
                     server_id,
                     thread_id,
-                    repair_pages.iter().map(|repair_page| &repair_page.page),
+                    repair_pages_to_merge
+                        .iter()
+                        .map(|repair_page| &repair_page.page),
                     crate::types::AppTurnsSortDirection::Descending,
                 ) {
                     warn!(target: super::MOBILE_CLIENT_TRACING_TARGET,

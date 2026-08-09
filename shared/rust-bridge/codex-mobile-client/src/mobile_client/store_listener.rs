@@ -629,7 +629,7 @@ mod tests {
         response_text: &str,
         next_cursor: Option<&str>,
         claimed_at_unix_secs: i64,
-        response_started_at: i64,
+        response_started_at: Option<i64>,
     ) -> (Arc<MobileClient>, ThreadKey) {
         let client = MobileClient::new();
         let server_id = "srv";
@@ -672,7 +672,11 @@ mod tests {
                     skeleton,
                     next_cursor.as_deref(),
                 );
-                response["data"][0]["startedAt"] = response_started_at.into();
+                if let Some(started_at) = response_started_at {
+                    response["data"][0]["startedAt"] = started_at.into();
+                } else if let Some(turn) = response["data"][0].as_object_mut() {
+                    turn.remove("startedAt");
+                }
                 Ok(response)
             }
             other => Err(RpcError::Deserialization(format!(
@@ -786,7 +790,7 @@ mod tests {
         response_text: &str,
         refresh_count: usize,
         claimed_at_unix_secs: i64,
-        response_started_at: i64,
+        response_started_at: Option<i64>,
     ) -> (Arc<MobileClient>, ThreadKey, Arc<StdMutex<Vec<String>>>) {
         let client = MobileClient::new();
         let server_id = "srv";
@@ -829,7 +833,11 @@ mod tests {
                         "item-authoritative",
                         &response_text,
                     );
-                    response["thread"]["turns"][0]["startedAt"] = response_started_at.into();
+                    if let Some(started_at) = response_started_at {
+                        response["thread"]["turns"][0]["startedAt"] = started_at.into();
+                    } else if let Some(turn) = response["thread"]["turns"][0].as_object_mut() {
+                        turn.remove("startedAt");
+                    }
                     Ok(response)
                 }
                 upstream::ClientRequest::ThreadTurnsList { .. } => {
@@ -1006,6 +1014,21 @@ mod tests {
             "nextCursor": next_cursor,
             "backwardsCursor": null
         })
+    }
+
+    fn completed_undated_thread_turns_list_response(
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+        next_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        let mut response =
+            completed_thread_turns_list_response(turn_id, item_id, text, false, next_cursor);
+        response["data"][0]
+            .as_object_mut()
+            .expect("turn response object")
+            .remove("startedAt");
+        response
     }
 
     fn hydrated_user_item(turn_id: &str, item_id: &str, text: &str) -> HydratedConversationItem {
@@ -1640,7 +1663,7 @@ mod tests {
             "continue",
             None,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -1664,7 +1687,7 @@ mod tests {
             "continue",
             None,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -1696,7 +1719,7 @@ mod tests {
             "continue",
             None,
             1_000,
-            995,
+            Some(995),
         )
         .await;
 
@@ -1717,6 +1740,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undated_matching_prompt_with_unknown_local_history_retains_ambiguous_claim() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key) = reconcile_completed_ambiguous_claim(
+            initial_thread,
+            "continue",
+            "turn-unknown",
+            "continue",
+            None,
+            1_000,
+            None,
+        )
+        .await;
+
+        for refresh in 0..2 {
+            assert!(client.pending_turn_reconciliation().contains_key(&key));
+            assert!(
+                client
+                    .pending_turn_reconciliation()
+                    .get(&key)
+                    .is_some_and(|pending| pending.undated_replay_observed)
+            );
+            let thread = client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("undated unknown-history thread");
+            assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+            assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+            assert!(thread.items.is_empty());
+            if refresh == 0 {
+                client
+                    .force_refresh_thread_authoritative("srv", "thread-1")
+                    .await
+                    .expect("second undated ambiguity refresh succeeds");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn repair_page_before_known_history_boundary_retains_ambiguous_claim() {
         let mut initial_thread = make_thread_snapshot("srv", "thread-1");
         initial_thread.initial_turns_loaded = true;
@@ -1731,7 +1793,7 @@ mod tests {
             "different",
             Some("older-page"),
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -1811,6 +1873,7 @@ mod tests {
             .expect("anchor-walk thread");
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert_eq!(thread.older_turns_cursor.as_deref(), Some("page-3"));
     }
 
     #[tokio::test]
@@ -1963,6 +2026,131 @@ mod tests {
             .thread_snapshot(&key)
             .expect("continued repair thread");
         assert!(thread.queued_follow_up_drafts.is_empty());
+        assert_eq!(thread.items.len(), 2);
+        assert_eq!(thread.older_turns_cursor.as_deref(), Some("page-1"));
+        assert!(
+            thread
+                .items
+                .iter()
+                .all(|item| !item.id.starts_with("item-newer-"))
+        );
+
+        let outcome = client
+            .load_thread_turns_page("srv", "thread-1", Some("page-1".to_string()), Some(5))
+            .await
+            .expect("load preserved gap page succeeds");
+        assert!(outcome.loaded);
+        assert!(outcome.has_more);
+        assert_eq!(
+            cursors.lock().expect("cursor log lock").last(),
+            Some(&Some("page-1".to_string()))
+        );
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("gap page thread");
+        assert!(thread.items.iter().any(|item| item.id == "item-newer-1"));
+        assert_eq!(thread.older_turns_cursor.as_deref(), Some("page-2"));
+    }
+
+    #[tokio::test]
+    async fn paginated_undated_replay_observation_survives_page_cap() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+        let head_requests = Arc::new(AtomicUsize::new(0));
+        let head_requests_for_pages = Arc::clone(&head_requests);
+        let pages: Arc<dyn Fn(Option<&str>) -> serde_json::Value + Send + Sync> =
+            Arc::new(move |cursor| {
+                if cursor.is_none() {
+                    let head_request = head_requests_for_pages.fetch_add(1, Ordering::SeqCst);
+                    return completed_undated_thread_turns_list_response(
+                        if head_request == 0 {
+                            "turn-undated-match"
+                        } else {
+                            "turn-undated-changed"
+                        },
+                        if head_request == 0 {
+                            "item-undated-match"
+                        } else {
+                            "item-undated-changed"
+                        },
+                        if head_request == 0 {
+                            "continue"
+                        } else {
+                            "different"
+                        },
+                        Some("page-1"),
+                    );
+                }
+                let page_index = cursor
+                    .and_then(|cursor| cursor.strip_prefix("page-"))
+                    .expect("page cursor")
+                    .parse::<usize>()
+                    .expect("numeric cursor");
+                if page_index == AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT {
+                    return completed_thread_turns_list_response(
+                        "turn-old-floor",
+                        "item-old-floor",
+                        "different",
+                        false,
+                        None,
+                    );
+                }
+                let turn_id = format!("turn-undated-{page_index}");
+                let item_id = format!("item-undated-{page_index}");
+                let next_cursor = format!("page-{}", page_index + 1);
+                completed_undated_thread_turns_list_response(
+                    &turn_id,
+                    &item_id,
+                    "different",
+                    Some(&next_cursor),
+                )
+            });
+        let (client, key, cursors) =
+            paginated_ambiguous_client_with_pages(initial_thread, "continue", 1_000, pages).await;
+
+        client
+            .force_refresh_thread_authoritative("srv", "thread-1")
+            .await
+            .expect("capped undated repair succeeds");
+        assert!(
+            client
+                .pending_turn_reconciliation()
+                .get(&key)
+                .is_some_and(|pending| pending.undated_replay_observed
+                    && pending.repair_cursor.as_deref()
+                        == Some(&format!("page-{AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT}")))
+        );
+
+        client
+            .force_refresh_thread_authoritative("srv", "thread-1")
+            .await
+            .expect("resumed undated repair succeeds");
+
+        assert_eq!(
+            cursors.lock().expect("cursor log lock").as_slice(),
+            [
+                None,
+                Some("page-1".to_string()),
+                Some("page-2".to_string()),
+                Some("page-3".to_string()),
+                Some("page-4".to_string()),
+                Some("page-5".to_string()),
+                Some("page-6".to_string()),
+                Some("page-7".to_string()),
+                Some("page-8".to_string()),
+                Some("page-9".to_string()),
+                None,
+                Some(format!("page-{AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT}")),
+            ]
+        );
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("retained undated repair thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
+        assert!(thread.items.is_empty());
     }
 
     #[tokio::test]
@@ -1978,7 +2166,7 @@ mod tests {
             "retained",
             1,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -2008,7 +2196,7 @@ mod tests {
             "retained",
             1,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -2046,7 +2234,7 @@ mod tests {
             "continue",
             1,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -2071,7 +2259,7 @@ mod tests {
             "different",
             1,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -2096,7 +2284,7 @@ mod tests {
             "retained",
             1,
             1_000,
-            995,
+            Some(995),
         )
         .await;
 
@@ -2126,7 +2314,7 @@ mod tests {
             "retained",
             1,
             1_000,
-            1,
+            Some(1),
         )
         .await;
 
@@ -2142,6 +2330,36 @@ mod tests {
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
         assert!(thread.initial_turns_loaded);
+        assert_eq!(thread.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_undated_match_with_unknown_baseline_retains_claim() {
+        let initial_thread = make_thread_snapshot("srv", "thread-1");
+
+        let (client, key, requests) = reconcile_embedded_ambiguous_claim(
+            initial_thread,
+            false,
+            "retained",
+            "turn-unknown",
+            "retained",
+            2,
+            1_000,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            requests.lock().expect("request log lock").as_slice(),
+            ["thread/resume:false", "thread/resume:false"]
+        );
+        assert!(client.pending_turn_reconciliation().contains_key(&key));
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("embedded undated-match thread");
+        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
+        assert!(thread.queued_follow_up_drafts[0].autosend_claimed);
         assert_eq!(thread.items.len(), 1);
     }
 

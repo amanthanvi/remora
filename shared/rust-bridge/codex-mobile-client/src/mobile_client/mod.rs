@@ -73,6 +73,7 @@ struct PendingTurnReconciliation {
     baseline_history_known: bool,
     claimed_at_unix_secs: i64,
     repair_cursor: Option<String>,
+    undated_replay_observed: bool,
 }
 
 impl PendingTurnReconciliation {
@@ -97,6 +98,7 @@ impl PendingTurnReconciliation {
                 baseline_history_known: thread.initial_turns_loaded,
                 claimed_at_unix_secs,
                 repair_cursor: None,
+                undated_replay_observed: false,
             })
             .unwrap_or_else(|| Self {
                 id: crate::next_request_id(),
@@ -104,13 +106,23 @@ impl PendingTurnReconciliation {
                 baseline_history_known: false,
                 claimed_at_unix_secs,
                 repair_cursor: None,
+                undated_replay_observed: false,
             })
     }
 
     fn turn_could_follow_claim(&self, turn: &upstream::Turn) -> bool {
-        turn.started_at.is_none_or(|started_at| {
+        turn.started_at.is_some_and(|started_at| {
             started_at
                 >= self
+                    .claimed_at_unix_secs
+                    .saturating_sub(AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS)
+        })
+    }
+
+    fn turn_definitely_precedes_claim(&self, turn: &upstream::Turn) -> bool {
+        turn.started_at.is_some_and(|started_at| {
+            started_at
+                < self
                     .claimed_at_unix_secs
                     .saturating_sub(AMBIGUOUS_TURN_CLOCK_SKEW_TOLERANCE_SECS)
         })
