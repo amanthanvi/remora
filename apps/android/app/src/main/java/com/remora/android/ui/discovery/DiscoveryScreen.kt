@@ -148,6 +148,9 @@ fun DiscoveryScreen(
             persistAndAdmit = { markAdmissionComplete ->
                 withContext(NonCancellable + Dispatchers.IO) {
                     SavedServerStore.remember(context, server)
+                    sshSessionId?.let { sessionId ->
+                        appModel.sshSessionStore.record(connectedServerId, sessionId)
+                    }
                     appModel.reconnectController.allowServerReconnect(server.id)
                     markAdmissionComplete()
                 }
@@ -155,6 +158,7 @@ fun DiscoveryScreen(
             cleanup = {
                 runCatching { appModel.serverBridge.disconnectServer(connectedServerId) }
                 sshSessionId?.let { sessionId ->
+                    appModel.sshSessionStore.clear(connectedServerId)
                     runCatching { appModel.ssh.sshClose(sessionId) }
                 }
             },
@@ -851,7 +855,6 @@ fun DiscoveryScreen(
                         connectedServerId = result.serverId,
                         sshSessionId = agentContext.sessionId,
                     )
-                    appModel.sshSessionStore.record(result.serverId, agentContext.sessionId)
                     appModel.refreshSnapshot()
                     pendingAutoNavigateServerId = result.serverId
                     sshAgentContext = null
