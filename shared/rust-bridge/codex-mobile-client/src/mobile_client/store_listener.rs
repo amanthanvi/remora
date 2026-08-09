@@ -583,12 +583,13 @@ mod tests {
         idle.active_turn_id = None;
         client.app_store.upsert_thread_snapshot(idle);
         enqueue_follow_up(&client, &key, "repeat");
+        enqueue_follow_up(&client, &key, "repeat");
 
         let thread = client
             .app_store
             .thread_snapshot(&key)
             .expect("queued thread");
-        assert_eq!(thread.queued_follow_up_drafts.len(), 2);
+        assert_eq!(thread.queued_follow_up_drafts.len(), 3);
         assert!(
             thread
                 .queued_follow_up_drafts
@@ -610,14 +611,11 @@ mod tests {
             .app_store
             .thread_snapshot(&key)
             .expect("re-anchored queued thread");
-        assert_eq!(thread.queued_follow_up_drafts.len(), 1);
-        assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "repeat");
-        assert_eq!(
-            thread.queued_follow_up_drafts[0]
-                .causal_anchor_turn_id
-                .as_deref(),
-            Some("turn-first-follow-up")
-        );
+        assert_eq!(thread.queued_follow_up_drafts.len(), 2);
+        assert!(thread.queued_follow_up_drafts.iter().all(|draft| {
+            draft.preview.text == "repeat"
+                && draft.causal_anchor_turn_id.as_deref() == Some("turn-first-follow-up")
+        }));
     }
 
     async fn client_with_ambiguous_autosend(

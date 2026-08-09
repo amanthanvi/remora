@@ -813,10 +813,10 @@ impl AppStoreReducer {
                     thread
                         .queued_follow_up_drafts
                         .retain(|draft| draft.preview.id != preview_id);
-                    if removed_first
-                        && let Some(next_draft) = thread.queued_follow_up_drafts.first_mut()
-                    {
-                        next_draft.causal_anchor_turn_id = Some(turn_id.to_string());
+                    if removed_first {
+                        for queued_draft in &mut thread.queued_follow_up_drafts {
+                            queued_draft.causal_anchor_turn_id = Some(turn_id.to_string());
+                        }
                     }
                     sync_thread_follow_up_projection(thread);
                 }
