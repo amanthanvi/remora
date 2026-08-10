@@ -246,15 +246,29 @@ object ChatGPTOAuth {
             refreshed = exchangeToken(body),
             fallbackRefreshToken = refreshToken,
         )
-        if (!previousAccountId.isNullOrBlank() &&
-            refreshed.accountId != previousAccountId &&
-            stored.accountId != previousAccountId
+        return withContext(Dispatchers.IO) {
+            persistValidatedRefresh(
+                refreshed = refreshed,
+                expectedAccountId = previousAccountId,
+                storedAccountId = stored.accountId,
+                save = { ChatGPTOAuthTokenStore(context).save(it) },
+            )
+        }
+    }
+
+    internal fun persistValidatedRefresh(
+        refreshed: ChatGPTOAuthTokenBundle,
+        expectedAccountId: String?,
+        storedAccountId: String,
+        save: (ChatGPTOAuthTokenBundle) -> Unit,
+    ): ChatGPTOAuthTokenBundle {
+        if (!expectedAccountId.isNullOrBlank() &&
+            (storedAccountId != expectedAccountId ||
+                refreshed.accountId != expectedAccountId)
         ) {
             throw ChatGPTOAuthException("ChatGPT refresh returned a different account than expected.")
         }
-        withContext(Dispatchers.IO) {
-            ChatGPTOAuthTokenStore(context).save(refreshed)
-        }
+        save(refreshed)
         return refreshed
     }
 
