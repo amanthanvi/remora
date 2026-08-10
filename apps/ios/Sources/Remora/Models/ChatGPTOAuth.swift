@@ -148,6 +148,88 @@ enum ChatGPTOAuth {
     static let callbackPort: UInt16 = 1455
     static let callbackPath = "/auth/callback"
     static let callbackTimeout: Duration = .seconds(600)
+    nonisolated static let callbackRequestMaxBytes = 16 * 1024
+    nonisolated static let callbackConnectionLimit = 4
+    nonisolated static let callbackClientTimeout: Duration = .seconds(5)
+
+    nonisolated static func callbackListener(
+        bindHost: String,
+        port: NWEndpoint.Port
+    ) throws -> NWListener {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(
+            host: NWEndpoint.Host(bindHost),
+            port: port
+        )
+        let listener = try NWListener(using: parameters)
+        listener.newConnectionLimit = callbackConnectionLimit
+        return listener
+    }
+
+    nonisolated static func callbackReceiveDecision(
+        buffer: Data,
+        incoming: Data?,
+        isComplete: Bool
+    ) -> CallbackReceiveDecision {
+        let incomingCount = incoming?.count ?? 0
+        guard buffer.count <= callbackRequestMaxBytes,
+              incomingCount <= callbackRequestMaxBytes - buffer.count else {
+            return .reject
+        }
+
+        var nextBuffer = buffer
+        if let incoming {
+            nextBuffer.append(incoming)
+        }
+        if nextBuffer.range(of: CallbackReceiveDecision.headerTerminator) != nil {
+            return .process(nextBuffer)
+        }
+        return isComplete ? .reject : .receive(nextBuffer)
+    }
+
+    nonisolated static func callbackRequestURL(
+        from data: Data,
+        publicHost: String,
+        port: UInt16,
+        path: String
+    ) throws -> URL {
+        guard data.count <= callbackRequestMaxBytes,
+              let terminatorRange = data.range(of: CallbackReceiveDecision.headerTerminator),
+              let headerText = String(data: data[..<terminatorRange.lowerBound], encoding: .utf8),
+              let requestLine = headerText.components(separatedBy: "\r\n").first else {
+            throw ChatGPTOAuthError.invalidCallbackURL
+        }
+
+        let tokens = requestLine.split(separator: " ", omittingEmptySubsequences: false)
+        guard tokens.count == 3,
+              tokens[0] == "GET",
+              tokens[2] == "HTTP/1.1" else {
+            throw ChatGPTOAuthError.invalidCallbackURL
+        }
+
+        let target = String(tokens[1])
+        guard target.hasPrefix("/"), !target.hasPrefix("//"),
+              let targetComponents = URLComponents(string: target),
+              targetComponents.scheme == nil,
+              targetComponents.host == nil,
+              targetComponents.user == nil,
+              targetComponents.password == nil,
+              targetComponents.fragment == nil,
+              targetComponents.path == path else {
+            throw ChatGPTOAuthError.invalidCallbackURL
+        }
+
+        var callbackComponents = URLComponents()
+        callbackComponents.scheme = "http"
+        callbackComponents.host = publicHost
+        callbackComponents.port = Int(port)
+        callbackComponents.percentEncodedPath = targetComponents.percentEncodedPath
+        callbackComponents.percentEncodedQuery = targetComponents.percentEncodedQuery
+        guard let callbackURL = callbackComponents.url else {
+            throw ChatGPTOAuthError.invalidCallbackURL
+        }
+        return callbackURL
+    }
 
     static func login() async throws -> ChatGPTOAuthTokenBundle {
         let state = UUID().uuidString
@@ -938,6 +1020,37 @@ private struct ChatGPTOAuthSessionResult {
     let redirectURI: String
 }
 
+enum CallbackReceiveDecision: Sendable, Equatable {
+    static let headerTerminator = Data("\r\n\r\n".utf8)
+
+    case receive(Data)
+    case process(Data)
+    case reject
+}
+
+final class CallbackConnectionPermit: @unchecked Sendable {
+    private let lock = NSLock()
+    private let terminal: @Sendable () -> Void
+    private var isFinished = false
+
+    init(terminal: @escaping @Sendable () -> Void) {
+        self.terminal = terminal
+    }
+
+    @discardableResult
+    func finish() -> Bool {
+        let shouldRun = lock.withLock {
+            guard !isFinished else { return false }
+            isFinished = true
+            return true
+        }
+        if shouldRun {
+            terminal()
+        }
+        return shouldRun
+    }
+}
+
 private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
     private let bindHost: String
     private let publicHost: String
@@ -953,6 +1066,13 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
     private var pendingCallbackResult: Result<URL, Error>?
     private var timeoutTask: Task<Void, Never>?
     private var didDeliverCallback = false
+    private var clients: [UUID: CallbackClient] = [:]
+
+    private struct CallbackClient {
+        let connection: NWConnection
+        let deadlineTask: Task<Void, Never>
+        let listener: NWListener
+    }
 
     init(bindHost: String, publicHost: String, port: UInt16, path: String, timeout: Duration) throws {
         self.bindHost = bindHost
@@ -966,8 +1086,10 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ChatGPTOAuthError.invalidCallbackURL
         }
-        let listener = try NWListener(using: .tcp, on: nwPort)
-        self.listener = listener
+        let listener = try ChatGPTOAuth.callbackListener(bindHost: bindHost, port: nwPort)
+        withStateLock {
+            self.listener = listener
+        }
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection)
         }
@@ -1053,66 +1175,103 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
         }
         state.0?.cancel()
         state.1?.cancel()
-    }
-
-    private func handle(_ connection: NWConnection) {
-        LLog.info("auth", "ChatGPT auth callback connection accepted")
-        connection.start(queue: queue)
-        receiveRequest(on: connection, buffer: Data())
-    }
-
-    private func receiveRequest(on connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
-            guard let self else {
-                connection.cancel()
-                return
-            }
-            if let error {
-                self.resumeCallback(with: .failure(error))
-                connection.cancel()
-                return
-            }
-
-            var nextBuffer = buffer
-            if let data {
-                nextBuffer.append(data)
-            }
-
-            let hasHeaders = nextBuffer.range(of: Data("\r\n\r\n".utf8)) != nil
-            if hasHeaders || isComplete {
-                self.processRequestData(nextBuffer, on: connection)
-                return
-            }
-
-            self.receiveRequest(on: connection, buffer: nextBuffer)
+        queue.async { [weak self] in
+            self?.finishAllClients()
         }
     }
 
-    private func processRequestData(_ data: Data, on connection: NWConnection) {
-        let requestText = String(decoding: data, as: UTF8.self)
-        let requestLine = requestText.components(separatedBy: "\r\n").first ?? ""
-        let requestParts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
-        let requestMethod = requestParts.first.map(String.init) ?? ""
-        let pathWithQuery = requestParts.dropFirst().first.map(String.init) ?? ""
-        let requestPath = URLComponents(string: pathWithQuery)?.path ?? ""
-        LLog.info("auth", "ChatGPT auth callback request received", fields: [
-            "method": requestMethod,
-            "path": requestPath
-        ])
+    private func handle(_ connection: NWConnection) {
+        guard let acceptingListener = withStateLock({ listener }) else {
+            connection.cancel()
+            return
+        }
+        let clientID = UUID()
+        let permit = CallbackConnectionPermit { [weak self] in
+            self?.queue.async { [weak self] in
+                self?.finishClient(id: clientID)
+            }
+        }
+        let deadlineTask = Task {
+            do {
+                try await Task.sleep(for: ChatGPTOAuth.callbackClientTimeout)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            permit.finish()
+        }
+        clients[clientID] = CallbackClient(
+            connection: connection,
+            deadlineTask: deadlineTask,
+            listener: acceptingListener
+        )
+        LLog.info("auth", "ChatGPT auth callback connection accepted")
+        connection.start(queue: queue)
+        receiveRequest(on: connection, permit: permit, buffer: Data())
+    }
 
-        guard !pathWithQuery.isEmpty,
-              let callbackURL = URL(string: "http://\(publicHost):\(port)\(pathWithQuery)"),
-              let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
-              components.path == path else {
-            LLog.warn("auth", "ChatGPT auth callback rejected", fields: [
-                "method": requestMethod,
-                "path": requestPath
-            ])
+    private func receiveRequest(
+        on connection: NWConnection,
+        permit: CallbackConnectionPermit,
+        buffer: Data
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                permit.finish()
+                return
+            }
+            if let error {
+                LLog.warn(
+                    "auth",
+                    "ChatGPT auth callback client receive failed",
+                    fields: LLog.operationalFailureFields(operation: "callback_receive", error: error)
+                )
+                permit.finish()
+                return
+            }
+
+            switch ChatGPTOAuth.callbackReceiveDecision(
+                buffer: buffer,
+                incoming: data,
+                isComplete: isComplete
+            ) {
+            case .receive(let nextBuffer):
+                self.receiveRequest(
+                    on: connection,
+                    permit: permit,
+                    buffer: nextBuffer
+                )
+            case .process(let requestData):
+                self.processRequestData(
+                    requestData,
+                    on: connection,
+                    permit: permit
+                )
+            case .reject:
+                permit.finish()
+            }
+        }
+    }
+
+    private func processRequestData(
+        _ data: Data,
+        on connection: NWConnection,
+        permit: CallbackConnectionPermit
+    ) {
+        guard let callbackURL = try? ChatGPTOAuth.callbackRequestURL(
+            from: data,
+            publicHost: publicHost,
+            port: port,
+            path: path
+        ) else {
+            LLog.warn("auth", "ChatGPT auth callback rejected")
             sendResponse(
                 statusLine: "HTTP/1.1 404 Not Found",
                 body: "<html><body><h3>Not found</h3></body></html>",
                 on: connection
-            )
+            ) {
+                permit.finish()
+            }
             return
         }
 
@@ -1120,7 +1279,13 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
             statusLine: "HTTP/1.1 200 OK",
             body: "<html><body><h3>Login complete</h3><p>You can return to Remora.</p></body></html>",
             on: connection
-        )
+        ) { [weak self] in
+            if permit.finish() {
+                self?.queue.async { [weak self] in
+                    self?.resumeCallback(with: .success(callbackURL))
+                }
+            }
+        }
         LLog.info("auth", "ChatGPT auth callback accepted", fields: [
             "path": path,
             "hasCode": URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
@@ -1130,10 +1295,14 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
                 .queryItems?
                 .contains(where: { $0.name == "error" }) ?? false
         ])
-        resumeCallback(with: .success(callbackURL))
     }
 
-    private func sendResponse(statusLine: String, body: String, on connection: NWConnection) {
+    private func sendResponse(
+        statusLine: String,
+        body: String,
+        on connection: NWConnection,
+        completion: @escaping @Sendable () -> Void
+    ) {
         let bodyData = Data(body.utf8)
         let header = [
             statusLine,
@@ -1146,8 +1315,24 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
         var response = Data(header.utf8)
         response.append(bodyData)
         connection.send(content: response, completion: .contentProcessed { _ in
-            connection.cancel()
+            completion()
         })
+    }
+
+    private func finishClient(id: UUID) {
+        guard let client = clients.removeValue(forKey: id) else { return }
+        client.deadlineTask.cancel()
+        client.connection.cancel()
+        let activeListener = withStateLock { listener }
+        if activeListener === client.listener {
+            client.listener.newConnectionLimit += 1
+        }
+    }
+
+    private func finishAllClients() {
+        for id in Array(clients.keys) {
+            finishClient(id: id)
+        }
     }
 
     private func resumeStart(with result: Result<String, Error>) {
@@ -1182,6 +1367,9 @@ private final class ChatGPTOAuthLoopbackServer: @unchecked Sendable {
         }
         state.1?.cancel()
         state.2?.cancel()
+        queue.async { [weak self] in
+            self?.finishAllClients()
+        }
         guard let continuation = state.0 else { return }
         switch result {
         case .success(let callbackURL):

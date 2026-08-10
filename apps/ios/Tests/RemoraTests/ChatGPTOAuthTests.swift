@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import Remora
 
@@ -63,6 +64,146 @@ final class ChatGPTOAuthTests: XCTestCase {
         let url = try XCTUnwrap(URL(string: "remoraauth://auth/callback?code=abc&state=xyz"))
 
         XCTAssertThrowsError(try ChatGPTOAuth.validateCallbackURL(url))
+    }
+
+    func testCallbackListenerBindsOnlyConfiguredLoopbackAndStartsWithFourPermits() throws {
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: 1455))
+        let listener = try ChatGPTOAuth.callbackListener(bindHost: "127.0.0.1", port: port)
+        defer { listener.cancel() }
+
+        XCTAssertEqual(
+            listener.parameters.requiredLocalEndpoint,
+            .hostPort(host: "127.0.0.1", port: port)
+        )
+        XCTAssertEqual(listener.newConnectionLimit, 4)
+    }
+
+    func testCallbackConnectionPermitFinishesExactlyOnceAcrossConcurrentCallers() async {
+        let counter = LockedTestCounter()
+        let permit = CallbackConnectionPermit {
+            counter.increment()
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<32 {
+                group.addTask {
+                    permit.finish()
+                }
+            }
+        }
+        permit.finish()
+
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    func testCallbackReceiveDecisionWaitsForCompleteHeaderThenProcessesIt() {
+        let first = Data("GET /auth/callback?code=test HTTP/1.1\r\nHost: local".utf8)
+        XCTAssertEqual(
+            ChatGPTOAuth.callbackReceiveDecision(
+                buffer: Data(),
+                incoming: first,
+                isComplete: false
+            ),
+            .receive(first)
+        )
+
+        let final = Data("host\r\n\r\n".utf8)
+        var complete = first
+        complete.append(final)
+        XCTAssertEqual(
+            ChatGPTOAuth.callbackReceiveDecision(
+                buffer: first,
+                incoming: final,
+                isComplete: false
+            ),
+            .process(complete)
+        )
+    }
+
+    func testCallbackReceiveDecisionAcceptsExactLimitAndRejectsOneByteOver() {
+        let terminator = CallbackReceiveDecision.headerTerminator
+        var exact = Data(repeating: 65, count: ChatGPTOAuth.callbackRequestMaxBytes - terminator.count)
+        exact.append(terminator)
+        XCTAssertEqual(
+            ChatGPTOAuth.callbackReceiveDecision(
+                buffer: Data(),
+                incoming: exact,
+                isComplete: false
+            ),
+            .process(exact)
+        )
+
+        let fullBuffer = Data(repeating: 65, count: ChatGPTOAuth.callbackRequestMaxBytes)
+        XCTAssertEqual(
+            ChatGPTOAuth.callbackReceiveDecision(
+                buffer: fullBuffer,
+                incoming: Data([66]),
+                isComplete: false
+            ),
+            .reject
+        )
+    }
+
+    func testCallbackReceiveDecisionRejectsEOFWithoutHeaderTerminator() {
+        XCTAssertEqual(
+            ChatGPTOAuth.callbackReceiveDecision(
+                buffer: Data(),
+                incoming: Data("GET /auth/callback HTTP/1.1\r\n".utf8),
+                isComplete: true
+            ),
+            .reject
+        )
+    }
+
+    func testCallbackRequestURLAcceptsStrictRequestAndPreservesQuery() throws {
+        let request = Data(
+            "GET /auth/callback?code=test-code&state=test-state HTTP/1.1\r\nHost: localhost\r\n\r\n".utf8
+        )
+
+        let url = try ChatGPTOAuth.callbackRequestURL(
+            from: request,
+            publicHost: "localhost",
+            port: 1455,
+            path: "/auth/callback"
+        )
+
+        XCTAssertEqual(url.scheme, "http")
+        XCTAssertEqual(url.host, "localhost")
+        XCTAssertEqual(url.port, 1455)
+        XCTAssertEqual(url.path, "/auth/callback")
+        XCTAssertEqual(url.query, "code=test-code&state=test-state")
+    }
+
+    func testCallbackRequestURLRejectsInvalidUTF8AndMalformedRequestLines() {
+        var invalidUTF8 = Data("GET /auth/callback HTTP/1.1\r\nX: ".utf8)
+        invalidUTF8.append(0xFF)
+        invalidUTF8.append(Data("\r\n\r\n".utf8))
+
+        let invalidRequests = [
+            invalidUTF8,
+            Data("POST /auth/callback HTTP/1.1\r\n\r\n".utf8),
+            Data("GET https://localhost/auth/callback HTTP/1.1\r\n\r\n".utf8),
+            Data("GET //localhost/auth/callback HTTP/1.1\r\n\r\n".utf8),
+            Data("GET  /auth/callback HTTP/1.1\r\n\r\n".utf8),
+            Data("GET /auth/callback HTTP/2\r\n\r\n".utf8),
+            Data("GET /wrong HTTP/1.1\r\n\r\n".utf8),
+            Data("GET /auth/callback HTTP/1.1\r\n".utf8)
+        ]
+
+        for request in invalidRequests {
+            XCTAssertThrowsError(
+                try ChatGPTOAuth.callbackRequestURL(
+                    from: request,
+                    publicHost: "localhost",
+                    port: 1455,
+                    path: "/auth/callback"
+                )
+            ) { error in
+                guard case ChatGPTOAuthError.invalidCallbackURL = error else {
+                    return XCTFail("Expected invalidCallbackURL")
+                }
+            }
+        }
     }
 
     func testCallbackQueryItemsRejectDuplicateKeysInsteadOfTrapping() throws {
@@ -307,6 +448,21 @@ final class ChatGPTOAuthTests: XCTestCase {
             accountID: accountID,
             planType: nil
         )
+    }
+}
+
+private final class LockedTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.withLock { storage }
+    }
+
+    func increment() {
+        lock.withLock {
+            storage += 1
+        }
     }
 }
 
