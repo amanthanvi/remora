@@ -930,15 +930,18 @@ impl Default for IpcBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     use codex_app_server_protocol::{
-        self as upstream, CommandExecutionStatus, SessionSource, ThreadStatus, Turn, TurnStatus,
+        self as upstream, CommandExecutionStatus, SessionSource, ThreadStatus, Turn, TurnItemsView,
+        TurnStatus,
     };
+    use codex_utils_absolute_path::test_support::{PathBufExt, test_path_buf};
 
     fn make_thread(id: &str, status: ThreadStatus, turns: Vec<Turn>) -> upstream::Thread {
         upstream::Thread {
             id: id.to_string(),
+            session_id: id.to_string(),
+            forked_from_id: None,
             preview: String::new(),
             ephemeral: false,
             model_provider: "test".to_string(),
@@ -946,9 +949,10 @@ mod tests {
             updated_at: 0,
             status,
             path: None,
-            cwd: PathBuf::from("/tmp"),
+            cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -961,8 +965,12 @@ mod tests {
         Turn {
             id: id.to_string(),
             items,
+            items_view: TurnItemsView::Full,
             status,
             error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
         }
     }
 
@@ -972,7 +980,7 @@ mod tests {
         turns: Vec<Turn>,
     ) -> ProjectedConversationState {
         ProjectedConversationState {
-            thread: make_thread(thread_id, ThreadStatus::default(), turns),
+            thread: make_thread(thread_id, ThreadStatus::Idle, turns),
             latest_model: None,
             latest_reasoning_effort: None,
             active_turn_id: active_turn_id.map(|s| s.to_string()),
@@ -1013,7 +1021,7 @@ mod tests {
         upstream::ThreadItem::CommandExecution {
             id: id.to_string(),
             command: "echo test".to_string(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: test_path_buf("/tmp").abs(),
             process_id: None,
             source: Default::default(),
             status,

@@ -1039,6 +1039,7 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_app_server_protocol as upstream;
+    use codex_utils_absolute_path::test_support::{PathBufExt, test_path_buf};
     use serde_json::json;
 
     use super::{
@@ -1118,7 +1119,7 @@ mod tests {
         assert_eq!(thread.preview, "show me the logs");
         assert_eq!(thread.created_at, 1710000000);
         assert_eq!(thread.updated_at, 1710000005);
-        assert_eq!(thread.cwd, PathBuf::from("/repo"));
+        assert_eq!(thread.cwd, test_path_buf("/repo").abs());
         assert_eq!(
             thread.path,
             Some(PathBuf::from("/repo/.codex/session.jsonl"))
@@ -1394,6 +1395,8 @@ mod tests {
     fn seeds_upstream_thread_into_patchable_conversation_state() {
         let thread = upstream::Thread {
             id: "conversation-1".to_string(),
+            session_id: "conversation-1".to_string(),
+            forked_from_id: None,
             preview: "hello".to_string(),
             ephemeral: false,
             model_provider: "openai".to_string(),
@@ -1403,9 +1406,10 @@ mod tests {
                 active_flags: Vec::new(),
             },
             path: Some(PathBuf::from("/repo/.codex/session.jsonl")),
-            cwd: PathBuf::from("/repo"),
+            cwd: test_path_buf("/repo").abs(),
             cli_version: "1.0.0".to_string(),
             source: upstream::SessionSource::default(),
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -1414,6 +1418,10 @@ mod tests {
                 id: "turn-1".to_string(),
                 status: upstream::TurnStatus::InProgress,
                 error: None,
+                items_view: upstream::TurnItemsView::Full,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
                 items: vec![
                     upstream::ThreadItem::UserMessage {
                         id: "user-1".to_string(),
@@ -1472,6 +1480,8 @@ mod tests {
     fn applies_same_protocol_version_patch_bursts() {
         let thread = upstream::Thread {
             id: "thread-1".to_string(),
+            session_id: "thread-1".to_string(),
+            forked_from_id: None,
             preview: "hello".to_string(),
             ephemeral: false,
             model_provider: "openai".to_string(),
@@ -1481,9 +1491,10 @@ mod tests {
                 active_flags: Vec::new(),
             },
             path: Some(PathBuf::from("/tmp/thread.jsonl")),
-            cwd: PathBuf::from("/tmp"),
+            cwd: test_path_buf("/tmp").abs(),
             cli_version: "1.0.0".to_string(),
             source: upstream::SessionSource::default(),
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -1492,6 +1503,10 @@ mod tests {
                 id: "turn-1".to_string(),
                 status: upstream::TurnStatus::InProgress,
                 error: None,
+                items_view: upstream::TurnItemsView::Full,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
                 items: vec![
                     upstream::ThreadItem::UserMessage {
                         id: "user-1".to_string(),
