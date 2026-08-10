@@ -214,3 +214,16 @@ Incremental policy:
 - PRs should include: purpose, key changes, verification steps (commands/device), and screenshots for UI changes.
 - If project structure changes, include updates to `apps/ios/project.yml` and mention whether project regeneration was run.
 - If using XcodeBuildMCP, use the installed XcodeBuildMCP skill before calling XcodeBuildMCP tools.
+
+## Project Skills
+
+- `$remora-improve` selects the pinned Improve workflow through
+  `.agents/skills/remora-improve/`. Its advisor may edit only `plans/`; source
+  changes require its isolated executor/review flow.
+- `$remora-ponytail` selects the pinned Ponytail discipline through
+  `.agents/skills/remora-ponytail/`.
+- Do not rely on the machine-global `$improve` or `$ponytail` names for
+  repository-deterministic work; duplicate skill names are not merged.
+- Keep vendored skill sources pinned and review provenance before updating.
+  Do not install their hooks, MCP servers, or global configuration for normal
+  repository work.
