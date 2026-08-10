@@ -120,10 +120,10 @@ internal fun configureSelectableMarkdownTextView(
     } else {
         textView.textSize = textSize
     }
+    textView.setTextIsSelectable(true)
     textView.linksClickable = true
     textView.movementMethod = LinkMovementMethod.getInstance()
     textView.setLinkTextColor(linkColor)
-    textView.setTextIsSelectable(true)
     textView.customSelectionActionModeCallback = RunInTerminalSelectionMenu(textView)
 }
 

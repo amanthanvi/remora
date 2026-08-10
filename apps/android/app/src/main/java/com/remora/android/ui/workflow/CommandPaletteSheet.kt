@@ -133,9 +133,6 @@ internal fun CommandPaletteSheet(
     }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-    }
     LaunchedEffect(filteredActions.map { it.definition.id to it.enabled }) {
         selectedActionId = selectedPaletteAction(filteredActions, selectedActionId)?.definition?.id
     }
@@ -156,6 +153,9 @@ internal fun CommandPaletteSheet(
         containerColor = RemoraTheme.surface,
         contentColor = RemoraTheme.textPrimary,
     ) {
+        LaunchedEffect(Unit) {
+            focusRequester.requestFocus()
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()

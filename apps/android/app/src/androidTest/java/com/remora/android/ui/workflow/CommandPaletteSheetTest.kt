@@ -4,8 +4,9 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isSelected
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -86,7 +87,7 @@ class CommandPaletteSheetTest {
             pressKey(Key.DirectionUp)
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Settings").assertIsDisplayed()
+        composeRule.onNode(hasText("Settings") and isSelected()).assertIsDisplayed()
         composeRule.onNode(hasSetTextAction()).performKeyInput {
             pressKey(Key.Enter)
         }
