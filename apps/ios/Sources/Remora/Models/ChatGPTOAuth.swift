@@ -240,12 +240,26 @@ enum ChatGPTOAuth {
             refreshToken,
             fallbackRefreshToken: refreshToken
         )
-        if let previousAccountID, !previousAccountID.isEmpty,
-           refreshed.accountID != previousAccountID,
-           stored.accountID != previousAccountID {
+        return try persistValidatedRefresh(
+            refreshed,
+            expectedAccountID: previousAccountID,
+            storedAccountID: stored.accountID
+        ) {
+            try ChatGPTOAuthTokenStore.shared.save($0)
+        }
+    }
+
+    static func persistValidatedRefresh(
+        _ refreshed: ChatGPTOAuthTokenBundle,
+        expectedAccountID: String?,
+        storedAccountID: String,
+        save: (ChatGPTOAuthTokenBundle) throws -> Void
+    ) throws -> ChatGPTOAuthTokenBundle {
+        if let expectedAccountID, !expectedAccountID.isEmpty,
+           (storedAccountID != expectedAccountID || refreshed.accountID != expectedAccountID) {
             throw ChatGPTOAuthError.refreshAccountMismatch
         }
-        try ChatGPTOAuthTokenStore.shared.save(refreshed)
+        try save(refreshed)
         return refreshed
     }
 

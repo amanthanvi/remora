@@ -106,6 +106,88 @@ final class ChatGPTOAuthTests: XCTestCase {
         XCTAssertEqual(bundle.planType, "plus")
     }
 
+    func testPersistValidatedRefreshSavesMatchingAccounts() throws {
+        let refreshed = tokenBundle(accountID: "acct_expected")
+        var saveCount = 0
+
+        let result = try ChatGPTOAuth.persistValidatedRefresh(
+            refreshed,
+            expectedAccountID: "acct_expected",
+            storedAccountID: "acct_expected"
+        ) { saved in
+            XCTAssertEqual(saved, refreshed)
+            saveCount += 1
+        }
+
+        XCTAssertEqual(result, refreshed)
+        XCTAssertEqual(saveCount, 1)
+    }
+
+    func testPersistValidatedRefreshRejectsRefreshedAccountMismatchBeforeSaving() {
+        let refreshed = tokenBundle(accountID: "acct_refreshed")
+        var saveCount = 0
+
+        XCTAssertThrowsError(
+            try ChatGPTOAuth.persistValidatedRefresh(
+                refreshed,
+                expectedAccountID: "acct_expected",
+                storedAccountID: "acct_expected"
+            ) { _ in
+                saveCount += 1
+            }
+        ) { error in
+            guard case ChatGPTOAuthError.refreshAccountMismatch = error else {
+                return XCTFail("Expected refreshAccountMismatch")
+            }
+        }
+        XCTAssertEqual(saveCount, 0)
+    }
+
+    func testPersistValidatedRefreshRejectsStoredAccountMismatchBeforeSaving() {
+        let refreshed = tokenBundle(accountID: "acct_expected")
+        var saveCount = 0
+
+        XCTAssertThrowsError(
+            try ChatGPTOAuth.persistValidatedRefresh(
+                refreshed,
+                expectedAccountID: "acct_expected",
+                storedAccountID: "acct_stored"
+            ) { _ in
+                saveCount += 1
+            }
+        ) { error in
+            guard case ChatGPTOAuthError.refreshAccountMismatch = error else {
+                return XCTFail("Expected refreshAccountMismatch")
+            }
+        }
+        XCTAssertEqual(saveCount, 0)
+    }
+
+    func testPersistValidatedRefreshAllowsMissingExpectedAccount() throws {
+        let refreshed = tokenBundle(accountID: "acct_refreshed")
+        var saveCount = 0
+
+        let nilExpected = try ChatGPTOAuth.persistValidatedRefresh(
+            refreshed,
+            expectedAccountID: nil,
+            storedAccountID: "acct_stored"
+        ) { _ in
+            saveCount += 1
+        }
+        XCTAssertEqual(nilExpected, refreshed)
+        XCTAssertEqual(saveCount, 1)
+
+        let emptyExpected = try ChatGPTOAuth.persistValidatedRefresh(
+            refreshed,
+            expectedAccountID: "",
+            storedAccountID: "acct_stored"
+        ) { _ in
+            saveCount += 1
+        }
+        XCTAssertEqual(emptyExpected, refreshed)
+        XCTAssertEqual(saveCount, 2)
+    }
+
     func testOAuthErrorBodyOmitsNonJSONTokenShapedResponse() {
         let leakedToken = "sk-proj-this-must-never-reach-diagnostics"
 
@@ -215,6 +297,16 @@ final class ChatGPTOAuthTests: XCTestCase {
             payloadData.base64URLEncodedString(),
             ""
         ].joined(separator: ".")
+    }
+
+    private func tokenBundle(accountID: String) -> ChatGPTOAuthTokenBundle {
+        ChatGPTOAuthTokenBundle(
+            accessToken: "access_token",
+            idToken: "id_token",
+            refreshToken: "refresh_token",
+            accountID: accountID,
+            planType: nil
+        )
     }
 }
 
