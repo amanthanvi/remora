@@ -19,18 +19,29 @@ Terminal sessions always run on a remote host.
 The repository includes a self-hostable Remora relay foundation and opaque
 mobile background-awareness clients. Push is a lossy wake hint over durable,
 sequenced Rust-owned state; it never carries prompts, transcripts, credentials,
-or approval actions. A managed hosted deployment and provider credentials are
-operational concerns outside this checkout. Live Activity support remains a
-typed bounded-status projection until its dedicated extension is implemented
-and verified. Watch and complications, CarPlay, store release/distribution
-automation, Fastlane, and store-feedback triage remain excluded.
+or approval actions. The Android active-turn home widget is a separate current
+system surface; on this exact base it projects prompt, model, context, and tool
+details. Sanitization is Planned until isolated Plan 006 commit
+`e774968796139c67370ac098062b58e6f5c3571a` is integrated. A managed hosted
+deployment and provider credentials are not included in this checkout. Provider
+credentials remain operational secrets. Live Activity support remains a typed
+bounded-status projection until its dedicated extension is implemented and
+verified. Managed deployment, the dedicated Live Activity extension, and
+release automation are command-center roadmap work not yet implemented in this
+checkout. Watch and complications, CarPlay, Fastlane, and store-feedback triage
+remain excluded.
 
 ## Architecture and Ownership
 
-- Shared state, protocol shaping, hydration, reconciliation, discovery policy,
-  SSH policy, remote-terminal state, and voice signaling belong in Rust.
-- Swift and Kotlin own UI, permissions, persistence adapters, native
-  audio/session APIs, and render-only projections.
+- The architectural target puts shared state, protocol shaping, hydration,
+  reconciliation, discovery policy, SSH policy, remote-terminal state, and
+  voice signaling in Rust.
+- The current checkout implements the canonical Rust store, reconnect, and
+  reducer, but remains transitional: Swift/Kotlin `AppModel` caches,
+  stream/projection merges, duplicate provider-label inference, and native
+  OAuth flows still exist. Full thin-shell convergence is Planned.
+- At the target boundary, Swift and Kotlin own UI, permissions, persistence
+  adapters, native audio/session APIs, and render-only projections.
 - Shared behavior should cross one handwritten UniFFI boundary rather than be
   reimplemented independently on each platform.
 
@@ -57,7 +68,7 @@ when the direct-upgrade floor advances beyond 1.6.
 | `MobileClient` | Top-level internal Rust facade for mobile runtime operations and event routing. |
 | `AppStore` | Canonical Rust-owned runtime state, snapshots, subscriptions, reducers, and composite actions. |
 | `AppClient` | Public UniFFI client for direct server operations and typed results. |
-| `AppModel` | Thin Swift/Kotlin observation shell that projects Rust snapshots into platform UI. |
+| `AppModel` | Transitional Swift/Kotlin observation shell that currently caches and merges Rust snapshot/stream projections; the render-only thin shell is Planned. |
 | `AppState` | Platform-only UI state; never the canonical session/thread/account store. |
 | `ThreadKey` | Stable `(serverId, threadId)` identity for a conversation. |
 | `DiscoveryBridge` | Rust utility surface for discovery merge, ranking, dedupe, and probing policy. |

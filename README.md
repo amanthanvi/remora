@@ -7,7 +7,8 @@ See [CONTEXT.md](CONTEXT.md) for the product boundary and architecture glossary.
 
 This repository contains the app sources, shared runtime, developer build
 tooling, and the self-hostable Remora relay foundation. Store distribution
-automation and managed service deployment are intentionally not included.
+automation and managed service deployment are roadmap work not yet implemented
+in this checkout.
 
 ## Quick Start
 
@@ -49,8 +50,20 @@ tools/scripts/             Build and maintenance helper scripts
 ## Architecture
 
 Both platforms share `codex-mobile-client` through UniFFI-generated bindings.
-Swift and Kotlin stay thin: UI, permissions, native audio, and platform APIs.
-Session state, streaming, hydration, discovery, and auth logic belong in Rust.
+The architectural target keeps Swift and Kotlin thin and puts session state,
+streaming, hydration, discovery, reconnect, reducer, and shared auth policy in
+Rust. The current checkout has the canonical Rust store/reconnect/reducer but
+remains transitional: native `AppModel` caches and stream/projection merges,
+duplicate provider-label inference, and native OAuth flows remain. Full
+thin-shell convergence is Planned.
+
+## Security
+
+The [command-center threat model](docs/security/remora-threat-model.md)
+distinguishes implemented controls from release requirements for planned
+command-center features. The narrower implemented Remora Link boundary is
+documented in the [Remora Link threat model](docs/research/remora-link-threat-model.md)
+and [pairing v2 security architecture](docs/research/pairing-v2-security.md).
 
 ## Supported Scope
 
@@ -59,8 +72,11 @@ WebRTC voice, and remote terminals over SSH or paired hosts rendered by Ghostty.
 The embedded app-server is not an on-device shell; terminal sessions always run
 on a remote host. Opaque background wakeups are reconciled against durable
 state; notification payloads are never a source of truth or an approval
-surface. Watch, CarPlay, the full Live Activity
-extension, and store-release automation remain out of scope.
+surface. The Android active-turn home widget is a separate current system
+surface; on this base it can display prompt, model, context, and tool details,
+and its sanitization remains Planned. The full Live Activity extension and
+store-release automation are not yet implemented in this checkout. Watch,
+complications, CarPlay, Fastlane, and store-feedback triage remain excluded.
 
 New remote pairing uses Remora Link. During development, build the native host
 from the reviewed source revision recorded in the Rust lockfile:
