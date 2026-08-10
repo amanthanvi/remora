@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, oneshot};
 
 use crate::client::connection::IpcConnection;
 use crate::client::pending::PendingRequests;
@@ -54,6 +54,55 @@ struct Inner {
     connection: IpcConnection,
 }
 
+struct PendingRequestGuard {
+    pending: Arc<PendingRequests>,
+    request_id: String,
+}
+
+impl PendingRequestGuard {
+    fn register(
+        pending: Arc<PendingRequests>,
+        request_id: String,
+    ) -> (Self, oneshot::Receiver<Result<Response, IpcError>>) {
+        let receiver = pending.insert(request_id.clone());
+        (
+            Self {
+                pending,
+                request_id,
+            },
+            receiver,
+        )
+    }
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        self.pending.remove(&self.request_id);
+    }
+}
+
+async fn send_request_envelope(
+    connection: &IpcConnection,
+    request_id: String,
+    envelope: Envelope,
+    request_timeout: Duration,
+) -> Result<Response, IpcError> {
+    let (guard, receiver) =
+        PendingRequestGuard::register(Arc::clone(connection.pending()), request_id);
+    connection
+        .write_tx()
+        .send(envelope)
+        .await
+        .map_err(|_| IpcError::Transport(TransportError::ConnectionClosed))?;
+
+    let response = tokio::time::timeout(request_timeout, receiver)
+        .await
+        .map_err(|_| IpcError::Request(RequestError::Timeout))?
+        .map_err(|_| IpcError::NotConnected)??;
+    drop(guard);
+    Ok(response)
+}
+
 impl IpcClient {
     /// Connect to the IPC bus and perform the initialize handshake.
     pub async fn connect(config: IpcClientConfig) -> Result<Self, IpcError> {
@@ -97,17 +146,9 @@ impl IpcClient {
             target_client_id: None,
         });
 
-        let rx = connection.pending().insert(request_id);
-        connection
-            .write_tx()
-            .send(envelope)
-            .await
-            .map_err(|_| IpcError::Transport(TransportError::ConnectionClosed))?;
-
-        let response = tokio::time::timeout(config.request_timeout, rx)
-            .await
-            .map_err(|_| IpcError::Request(RequestError::Timeout))?
-            .map_err(|_| IpcError::NotConnected)??;
+        let response =
+            send_request_envelope(&connection, request_id, envelope, config.request_timeout)
+                .await?;
 
         let client_id = match response {
             Response::Success { result, .. } => {
@@ -159,18 +200,13 @@ impl IpcClient {
             target_client_id: target.map(String::from),
         });
 
-        let rx = self.inner.connection.pending().insert(request_id);
-        self.inner
-            .connection
-            .write_tx()
-            .send(envelope)
-            .await
-            .map_err(|_| IpcError::Transport(TransportError::ConnectionClosed))?;
-
-        let response = tokio::time::timeout(self.inner.config.request_timeout, rx)
-            .await
-            .map_err(|_| IpcError::Request(RequestError::Timeout))?
-            .map_err(|_| IpcError::NotConnected)??;
+        let response = send_request_envelope(
+            &self.inner.connection,
+            request_id,
+            envelope,
+            self.inner.config.request_timeout,
+        )
+        .await?;
 
         match response {
             Response::Success { result, .. } => Ok(result),
@@ -325,5 +361,205 @@ impl IpcClient {
     ) -> Result<serde_json::Value, IpcError> {
         self.send_request(Method::ThreadFollowerSetQueuedFollowUpsState, &params, None)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::io::{DuplexStream, duplex};
+    use tokio::time::timeout;
+
+    use crate::transport::frame;
+
+    const REQUEST_TIMEOUT: Duration = Duration::from_millis(25);
+    const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
+
+    async fn connected_client() -> (IpcClient, DuplexStream) {
+        let (stream, mut peer) = duplex(4096);
+        let config = IpcClientConfig {
+            socket_path: PathBuf::new(),
+            client_type: "opaque-client-type".to_string(),
+            request_timeout: REQUEST_TIMEOUT,
+        };
+        let connect =
+            tokio::spawn(async move { IpcClient::connect_with_stream(&config, stream).await });
+
+        let raw = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for initialize request")
+            .expect("initialize request frame should be readable");
+        let request = match serde_json::from_str::<Envelope>(&raw)
+            .expect("initialize request should be a valid envelope")
+        {
+            Envelope::Request(request) => request,
+            _ => panic!("expected initialize request envelope"),
+        };
+        assert_eq!(request.method, Method::Initialize.wire_name());
+        assert_eq!(request.source_client_id, "initializing-client");
+        assert!(request.target_client_id.is_none());
+
+        let response = Envelope::Response(Response::Success {
+            request_id: request.request_id,
+            method: Method::Initialize.wire_name().to_string(),
+            handled_by_client_id: "opaque-handler".to_string(),
+            result: serde_json::to_value(InitializeResult {
+                client_id: "opaque-client".to_string(),
+            })
+            .expect("initialize result should serialize"),
+        });
+        let response = serde_json::to_string(&response)
+            .expect("initialize response envelope should serialize");
+        frame::write_frame(&mut peer, &response)
+            .await
+            .expect("initialize response frame should be writable");
+
+        let client = timeout(OBSERVATION_TIMEOUT, connect)
+            .await
+            .expect("timed out waiting for initialize response")
+            .expect("initialize task should not panic")
+            .expect("initialize should succeed");
+        (client, peer)
+    }
+
+    #[tokio::test]
+    async fn request_timeout_removes_pending() {
+        let (client, mut peer) = connected_client().await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .send_request(
+                    Method::ThreadFollowerInterruptTurn,
+                    serde_json::json!({
+                        "threadId": "opaque-thread",
+                        "turnId": "opaque-turn",
+                    }),
+                    None,
+                )
+                .await
+        });
+
+        let raw = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for request")
+            .expect("request frame should be readable");
+        let request_id = match serde_json::from_str::<Envelope>(&raw)
+            .expect("request should be a valid envelope")
+        {
+            Envelope::Request(request) => request.request_id,
+            _ => panic!("expected request envelope"),
+        };
+
+        let result = timeout(OBSERVATION_TIMEOUT, request)
+            .await
+            .expect("timed out waiting for request timeout")
+            .expect("request task should not panic");
+        assert!(matches!(
+            result,
+            Err(IpcError::Request(RequestError::Timeout))
+        ));
+        assert!(!client.inner.connection.pending().resolve(
+            &request_id,
+            Ok(Response::Error {
+                request_id: request_id.clone(),
+                error: "opaque-error".to_string(),
+            }),
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_removes_pending() {
+        let (client, mut peer) = connected_client().await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .send_request(
+                    Method::ThreadFollowerInterruptTurn,
+                    serde_json::json!({
+                        "threadId": "opaque-thread",
+                        "turnId": "opaque-turn",
+                    }),
+                    None,
+                )
+                .await
+        });
+
+        let raw = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for request")
+            .expect("request frame should be readable");
+        let request_id = match serde_json::from_str::<Envelope>(&raw)
+            .expect("request should be a valid envelope")
+        {
+            Envelope::Request(request) => request.request_id,
+            _ => panic!("expected request envelope"),
+        };
+
+        request.abort();
+        let cancellation = timeout(OBSERVATION_TIMEOUT, request)
+            .await
+            .expect("timed out waiting for request cancellation")
+            .expect_err("aborted request task should be cancelled");
+        assert!(cancellation.is_cancelled());
+        assert!(!client.inner.connection.pending().resolve(
+            &request_id,
+            Ok(Response::Error {
+                request_id: request_id.clone(),
+                error: "opaque-error".to_string(),
+            }),
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_initialize_closes_peer() {
+        let (stream, mut peer) = duplex(4096);
+        let config = IpcClientConfig {
+            socket_path: PathBuf::new(),
+            client_type: "opaque-client-type".to_string(),
+            request_timeout: REQUEST_TIMEOUT,
+        };
+        let connect =
+            tokio::spawn(async move { IpcClient::connect_with_stream(&config, stream).await });
+
+        let raw = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for initialize request")
+            .expect("initialize request frame should be readable");
+        let request = match serde_json::from_str::<Envelope>(&raw)
+            .expect("initialize request should be a valid envelope")
+        {
+            Envelope::Request(request) => request,
+            _ => panic!("expected initialize request envelope"),
+        };
+        assert_eq!(request.method, Method::Initialize.wire_name());
+        assert_eq!(request.source_client_id, "initializing-client");
+        assert!(request.target_client_id.is_none());
+
+        let result = timeout(OBSERVATION_TIMEOUT, connect)
+            .await
+            .expect("timed out waiting for initialize failure")
+            .expect("initialize task should not panic");
+        assert!(matches!(
+            result,
+            Err(IpcError::Request(RequestError::Timeout))
+        ));
+
+        let eof = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for failed initialize stream closure");
+        assert!(matches!(eof, Err(TransportError::ConnectionClosed)));
+    }
+
+    #[tokio::test]
+    async fn final_client_drop_closes_peer() {
+        let (client, mut peer) = connected_client().await;
+
+        drop(client);
+
+        let eof = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for final client stream closure");
+        assert!(matches!(eof, Err(TransportError::ConnectionClosed)));
     }
 }

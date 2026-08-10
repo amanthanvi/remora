@@ -89,13 +89,15 @@ impl IpcConnection {
 
     /// Gracefully shut down the connection: abort tasks and clear pending.
     pub async fn shutdown(self) {
-        self.read_task.abort();
-        self.write_task.abort();
-        self.pending.clear();
+        self.cleanup();
     }
 
     /// Shut down the connection through a shared reference.
     pub async fn shutdown_ref(&self) {
+        self.cleanup();
+    }
+
+    fn cleanup(&self) {
         self.read_task.abort();
         self.write_task.abort();
         self.pending.clear();
@@ -251,5 +253,11 @@ impl IpcConnection {
                 break;
             }
         }
+    }
+}
+
+impl Drop for IpcConnection {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
