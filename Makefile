@@ -198,7 +198,7 @@ $(shell mkdir -p $(STAMPS))
 	android android-fast android-emulator-fast android-emulator-run android-device-run android-debug android-install android-emulator-install \
 	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-test rust-host-dev rust-shellcheck \
 	ghostty-ios ghostty-android \
-	update-remora-link bootstrap-remora-link bootstrap-remora-link-test \
+	update-remora-link bootstrap-remora-link bootstrap-remora-link-test sync-codex-test \
 	bindings bindings-swift bindings-kotlin bindings-hardener-test \
 	sync patch unpatch sync-ghostty unpatch-ghostty xcgen \
 	ios-build ios-build-sim ios-build-sim-fast ios-build-device ios-build-device-fast \
@@ -363,6 +363,9 @@ bootstrap-remora-link:
 bootstrap-remora-link-test:
 	@./tools/scripts/test-bootstrap-remora-link.sh
 
+sync-codex-test:
+	@./tools/scripts/test-sync-codex.sh
+
 rust-ios-package: $(STAMP_SYNC) $(STAMP_GHOSTTY_IOS)
 	@echo "==> Packaging Rust for iOS (device + simulator + xcframework)..."
 	@cd $(ROOT) && $(PACKAGE_CARGO_ENV) $(IOS_SCRIPTS)/build-rust.sh --preserve-current $(CARGO_FEATURES)
@@ -462,6 +465,7 @@ help:
 		'make android-device-run    fast Android dev build + install + launch with saved logcat under artifacts/android-device-run (override ANDROID_DEVICE_SERIAL; auto-uninstalls on versionCode downgrade; set ANDROID_REINSTALL_ON_SIGNATURE_MISMATCH=1 to also uninstall on signature mismatch)' \
 		'make rust-check         host cargo check for shared crates' \
 		'make rust-test          host cargo test for shared crates' \
+		'make sync-codex-test    clean Codex submodule bootstrap regression test' \
 		'make bindings-hardener-test  generated secret-binding hardener regression tests'
 
 sync: $(STAMP_SYNC)
@@ -607,7 +611,7 @@ android-emulator-install: android-emulator-fast
 	if [ -z "$$EMU" ]; then echo "ERROR: no emulator found"; exit 1; fi && \
 	adb -s "$$EMU" install -r $(ANDROID_APK)
 
-test: bindings-hardener-test bootstrap-remora-link-test test-rust test-ios test-android
+test: sync-codex-test bindings-hardener-test bootstrap-remora-link-test test-rust test-ios test-android
 
 test-rust: patch rust-shellcheck
 	@echo "==> Running Rust tests..."

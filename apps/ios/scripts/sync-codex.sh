@@ -38,6 +38,10 @@ case "$SYNC_MODE" in
 esac
 
 echo "==> Syncing codex submodule..."
+if [ ! -d "$SUBMODULE_DIR/.git" ] && [ ! -f "$SUBMODULE_DIR/.git" ]; then
+    echo "==> codex submodule missing; initializing..."
+    git -C "$REPO_DIR" submodule update --init --recursive shared/third_party/codex
+fi
 if ! git -C "$SUBMODULE_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
     git -C "$REPO_DIR" submodule update --init --recursive shared/third_party/codex
 elif [ "$SYNC_MODE" = "--recorded-gitlink" ]; then
