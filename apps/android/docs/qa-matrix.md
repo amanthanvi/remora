@@ -28,6 +28,15 @@ Current automated checks:
   - cover payload shaping, snapshot projections, session grouping, Markdown,
     slash commands, response errors, and text sizing
 
+### System-surface privacy
+
+The interim home-screen widget displays only a generic active-turn count and
+status, with visible counts capped at `99+`. It never receives prompts,
+transcript content, paths, commands, credentials, approvals, file content,
+model labels, context metrics, or tool details. `ActiveTurnWidgetProjectionTest`
+enforces the count/status projection boundary, including zero, plural,
+oversized, and negative inputs.
+
 ## Manual Matrix
 
 | Area                                    | Expected Android behavior                                                                                               |
