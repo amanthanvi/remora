@@ -376,8 +376,10 @@ mod tests {
     const REQUEST_TIMEOUT: Duration = Duration::from_millis(25);
     const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
 
-    async fn connected_client() -> (IpcClient, DuplexStream) {
-        let (stream, mut peer) = duplex(4096);
+    async fn connected_client_with_stream<S>(stream: S, mut peer: S) -> (IpcClient, S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let config = IpcClientConfig {
             socket_path: PathBuf::new(),
             client_type: "opaque-client-type".to_string(),
@@ -421,6 +423,11 @@ mod tests {
             .expect("initialize task should not panic")
             .expect("initialize should succeed");
         (client, peer)
+    }
+
+    async fn connected_client() -> (IpcClient, DuplexStream) {
+        let (stream, peer) = duplex(4096);
+        connected_client_with_stream(stream, peer).await
     }
 
     #[tokio::test]
@@ -560,6 +567,21 @@ mod tests {
         let eof = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
             .await
             .expect("timed out waiting for final client stream closure");
+        assert!(matches!(eof, Err(TransportError::ConnectionClosed)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_client_drop_closes_unix_peer() {
+        let (stream, peer) =
+            tokio::net::UnixStream::pair().expect("Unix-domain stream pair should be available");
+        let (client, mut peer) = connected_client_with_stream(stream, peer).await;
+
+        drop(client);
+
+        let eof = timeout(OBSERVATION_TIMEOUT, frame::read_frame(&mut peer))
+            .await
+            .expect("timed out waiting for final client Unix stream closure");
         assert!(matches!(eof, Err(TransportError::ConnectionClosed)));
     }
 }

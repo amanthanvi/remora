@@ -1683,18 +1683,6 @@ mod tests {
         })
     }
 
-    fn make_command_item_json(id: &str, status: &str, output: Option<&str>) -> serde_json::Value {
-        serde_json::json!({
-            "type": "commandExecution",
-            "id": id,
-            "command": "echo test",
-            "cwd": "/tmp",
-            "status": status,
-            "commandActions": [],
-            "aggregatedOutput": output,
-        })
-    }
-
     fn make_snapshot_broadcast(conversation_id: &str, state: serde_json::Value) -> TypedBroadcast {
         use crate::protocol::params::{StreamChange, ThreadStreamStateChangedParams};
 
