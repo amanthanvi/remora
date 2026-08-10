@@ -205,8 +205,6 @@ private struct InlineHandoffEntry: Identifiable {
                 self.text = "Generating image"
                 self.style = .status
             }
-        case .widget:
-            return nil
         case .userInputResponse:
             self.id = item.id
             self.text = "Waiting for user input"

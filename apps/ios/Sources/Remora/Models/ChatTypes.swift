@@ -30,9 +30,6 @@ struct ChatMessage: Identifiable, Equatable {
     var agentRole: String? = nil {
         didSet { refreshRenderDigest() }
     }
-    var widgetState: WidgetState? = nil {
-        didSet { refreshRenderDigest() }
-    }
     var timestamp: Date
     private(set) var renderDigest: Int
 
@@ -46,7 +43,6 @@ struct ChatMessage: Identifiable, Equatable {
         isFromUserTurnBoundary: Bool = false,
         agentNickname: String? = nil,
         agentRole: String? = nil,
-        widgetState: WidgetState? = nil,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -58,7 +54,6 @@ struct ChatMessage: Identifiable, Equatable {
         self.isFromUserTurnBoundary = isFromUserTurnBoundary
         self.agentNickname = agentNickname
         self.agentRole = agentRole
-        self.widgetState = widgetState
         self.timestamp = timestamp
         self.renderDigest = Self.computeRenderDigest(
             role: role,
@@ -68,8 +63,7 @@ struct ChatMessage: Identifiable, Equatable {
             sourceTurnIndex: sourceTurnIndex,
             isFromUserTurnBoundary: isFromUserTurnBoundary,
             agentNickname: agentNickname,
-            agentRole: agentRole,
-            widgetState: widgetState
+            agentRole: agentRole
         )
     }
 
@@ -82,8 +76,7 @@ struct ChatMessage: Identifiable, Equatable {
             sourceTurnIndex: sourceTurnIndex,
             isFromUserTurnBoundary: isFromUserTurnBoundary,
             agentNickname: agentNickname,
-            agentRole: agentRole,
-            widgetState: widgetState
+            agentRole: agentRole
         )
     }
 
@@ -95,8 +88,7 @@ struct ChatMessage: Identifiable, Equatable {
         sourceTurnIndex: Int?,
         isFromUserTurnBoundary: Bool,
         agentNickname: String?,
-        agentRole: String?,
-        widgetState: WidgetState?
+        agentRole: String?
     ) -> Int {
         var hasher = Hasher()
         hasher.combine(String(describing: role))
@@ -110,42 +102,8 @@ struct ChatMessage: Identifiable, Equatable {
         for image in images {
             hasher.combine(image.cacheKey)
         }
-        if let widgetState {
-            hasher.combine(widgetState.callId)
-            hasher.combine(widgetState.title)
-            hasher.combine(widgetState.widgetHTML)
-            hasher.combine(widgetState.width)
-            hasher.combine(widgetState.height)
-            hasher.combine(widgetState.isFinalized)
-        }
         return hasher.finalize()
     }
-}
-
-struct WidgetState: Equatable {
-    let callId: String
-    var title: String
-    var widgetHTML: String
-    var width: CGFloat
-    var height: CGFloat
-    var isFinalized: Bool = false
-    var appId: String? = nil
-
-    static func fromArguments(_ args: [String: Any], callId: String, widgetHTML: String = "", isFinalized: Bool = false) -> WidgetState {
-        WidgetState(
-            callId: callId,
-            title: (args["title"] as? String) ?? "Widget",
-            widgetHTML: (args["widget_code"] as? String) ?? widgetHTML,
-            width: CGFloat((args["width"] as? Double) ?? 800),
-            height: CGFloat((args["height"] as? Double) ?? 600),
-            isFinalized: isFinalized,
-            appId: (args["app_id"] as? String)?.nilIfEmpty
-        )
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 struct ChatImage: Identifiable, Equatable {

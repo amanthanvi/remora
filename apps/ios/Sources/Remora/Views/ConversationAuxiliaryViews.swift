@@ -52,33 +52,6 @@ struct ConversationLoadingIndicator: View {
     }
 }
 
-struct MinigameLaunchButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
-                .frame(
-                    width: RemoraAccessibilityMetrics.minimumHitTarget,
-                    height: RemoraAccessibilityMetrics.minimumHitTarget
-                )
-                .background(
-                    Circle()
-                        .fill(RemoraTheme.surface.opacity(0.9))
-                        .overlay(
-                            Circle()
-                                .stroke(RemoraTheme.accent.opacity(0.3), lineWidth: 0.5)
-                        )
-                )
-                .shadow(color: Color.black.opacity(0.15), radius: 4, x: 0, y: 2)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Play a minigame while waiting")
-    }
-}
-
 struct TypingIndicator: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

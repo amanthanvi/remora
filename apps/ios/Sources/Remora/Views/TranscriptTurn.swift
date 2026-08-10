@@ -10,7 +10,6 @@ struct TranscriptTurn: Identifiable, Equatable {
         let imageCount: Int
         let toolCallCount: Int
         let eventCount: Int
-        let widgetCount: Int
     }
 
     let id: String
@@ -237,8 +236,7 @@ struct TranscriptTurn: Identifiable, Equatable {
             durationText: formattedDuration(from: previewMetrics),
             imageCount: previewMetrics.imageCount,
             toolCallCount: previewMetrics.toolCallCount,
-            eventCount: previewMetrics.eventCount,
-            widgetCount: previewMetrics.widgetCount
+            eventCount: previewMetrics.eventCount
         )
     }
 
@@ -249,7 +247,6 @@ struct TranscriptTurn: Identifiable, Equatable {
         var imageCount = 0
         var toolCallCount = 0
         var eventCount = 0
-        var widgetCount = 0
         var boundaryUserTimestamp: Date?
         var userTimestamp: Date?
         var assistantTimestamp: Date?
@@ -284,10 +281,6 @@ struct TranscriptTurn: Identifiable, Equatable {
             }
 
             metrics.imageCount += item.userImages.count
-            if item.widgetState != nil {
-                metrics.widgetCount += 1
-            }
-
             switch item.content {
             case .commandExecution(let data):
                 metrics.toolCallCount += 1
@@ -426,8 +419,6 @@ struct TranscriptTurn: Identifiable, Equatable {
             case .failed: return "Image generation failed"
             default: return "Generating image"
             }
-        case .widget(let data):
-            return "Widget: \(data.widgetState.title)"
         case .userInputResponse(let data):
             let count = data.questions.count
             return count == 1 ? "Asked 1 question" : "Asked \(count) questions"

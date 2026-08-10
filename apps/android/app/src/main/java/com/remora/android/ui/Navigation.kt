@@ -19,8 +19,6 @@ sealed class Route {
     data class ServerInfo(val serverId: String) : Route()
     data class ServerWallpaperSelection(val serverId: String) : Route()
     data class ServerWallpaperAdjust(val serverId: String) : Route()
-    data object Apps : Route()
-    data class SavedApp(val appId: String) : Route()
     data class Terminal(val preferredRemoraLinkHostId: String? = null) : Route()
 }
 
@@ -69,8 +67,6 @@ internal fun Route.restorationToken(): String = when (this) {
     is Route.ServerInfo -> "server-info:${encodeRouteValue(serverId)}"
     is Route.ServerWallpaperSelection -> "server-wallpaper-select:${encodeRouteValue(serverId)}"
     is Route.ServerWallpaperAdjust -> "server-wallpaper-adjust:${encodeRouteValue(serverId)}"
-    Route.Apps -> "apps"
-    is Route.SavedApp -> "saved-app:${encodeRouteValue(appId)}"
     is Route.Terminal -> "terminal-v2:${preferredRemoraLinkHostId?.let(::encodeRouteValue).orEmpty()}"
 }
 
@@ -98,8 +94,6 @@ internal fun routeFromRestorationToken(token: String): Route? {
         "server-info" -> value(1)?.let(Route::ServerInfo)
         "server-wallpaper-select" -> value(1)?.let(Route::ServerWallpaperSelection)
         "server-wallpaper-adjust" -> value(1)?.let(Route::ServerWallpaperAdjust)
-        "apps" -> Route.Apps
-        "saved-app" -> value(1)?.let(Route::SavedApp)
         "terminal-v2" -> Route.Terminal(parts.getOrNull(1)?.takeIf { it.isNotEmpty() }?.let(::decodeRouteValue))
         else -> null
     }

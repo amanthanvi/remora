@@ -50,9 +50,9 @@ remain transitional. Full thin-shell convergence is Planned.
   delivery metadata and deny service, but must not receive work-state plaintext.
 - The existing opaque wake payload remains content-blind and byte-compatible.
   It is only a reconciliation hint, never a source of truth or approval surface.
-- Opaque wake does not describe every current system surface. On this exact
-  base, the Android active-turn home widget exposes prompt, model, context, and
-  tool details outside the app.
+- Opaque wake does not describe every current system surface. The Android
+  active-turn home widget is limited to bounded status and count data; it does
+  not render prompts, model labels, context metrics, paths, or tool details.
 - Rich awareness is a separate, explicit privacy relaxation. Generic normal
   notifications remain the default.
 - Sensitive decisions, including approvals, grants, recovery, and account
@@ -71,14 +71,14 @@ remain transitional. Full thin-shell convergence is Planned.
 | Mobile to Remora Link Host | Pinned Host identity, scoped grant, fresh P-256 device proof, exact epoch, typed runtime, and bounded pairing frames. | Implemented |
 | Client or Host to public relay | Work-state payloads remain end-to-end encrypted; relay metadata grants no authority. | Implemented |
 | Owner to future admin HTTPS | Passkey verification, short sessions, one-time websocket tickets, CSRF/origin checks, and auditable changes are release requirements. | Planned |
-| Native mobile to ChatGPT OAuth | Implemented: native PKCE, state validation, and platform token custody. Planned: cross-account refresh rejection and bounded loopback callback remediation from Plans 002 and 005. | Implemented / Planned |
+| Native mobile to ChatGPT OAuth | Native PKCE, state validation, platform token custody, cross-account refresh rejection, refresh-token preservation, and a loopback-only bounded iOS callback listener. | Implemented |
 | Mobile to direct remote app-server | Implemented exposure: users can configure direct `ws://` or `wss://` app-server endpoints. Planned: identity, protected-transport, authorization, and account/workspace binding remediation. | Implemented / Planned |
 | Mobile to SSH server | Host-key verification, protected credentials, encrypted transport, and explicit terminal forwarding policy. | Implemented |
 | Native WebRTC peer to signaling and transcript state | Platform microphone consent and native media processing are current; signaling-identity and transcript-retention release controls are future requirements. | Implemented / Planned |
-| Generated content in `WidgetWebView` / Android WebView to native bridges | Current generated HTML can execute scripts and invoke native prompt/link or structured-response bridges. User-mediated actions, in-app confirmation, origin/resource/navigation policy, and bounded bridge inputs are remediation requirements. | Implemented / Planned |
+| Retired generated-HTML actions and native WebView bridges | Generated-HTML actions, Saved Apps, their WebViews, script bridges, structured-response bridge, dynamic registration, persistence, and navigation routes are removed from Rust, iOS, and Android. | Implemented |
 | Command center to repository, Git, tools, providers, and browser | Untrusted content never becomes authority; paths, argv, origins, and provider capabilities are constrained before use. | Planned |
 | Build and release systems to installed clients and Hosts | Reviewed source, signed artifacts and manifests, protocol compatibility, promotion evidence, and rollback preserve provenance. | Planned |
-| Mobile to system surfaces | Implemented: opaque wake hints trigger reconciliation, while the current Android home widget displays prompt/model/context/tool detail. Planned: home-widget sanitization, expiring route handles, and a separate consented rich-awareness schema. | Implemented / Planned |
+| Mobile to system surfaces | Implemented: opaque wake hints trigger reconciliation and the Android widget exposes only bounded status/count data. Planned command-center surfaces require expiring route handles and a separate consented rich-awareness schema. | Implemented / Planned |
 
 Trust is directional. A valid transport does not make remote content safe, a
 valid route does not authorize an action, and a signed artifact does not prove
@@ -89,7 +89,7 @@ that its behavior satisfies this model.
 | Class | Examples | Handling requirement |
 | --- | --- | --- |
 | Authority | Device signing keys, pairing material, credential IDs, authorization epochs, passkeys, recovery keys, sessions, websocket tickets | Platform-backed custody where available; never in URLs, logs, notification text, or support bundles. |
-| Work content | Repositories, diffs, prompts, responses, generated widget HTML, files, terminal streams, commands, tool output, transcripts | End-to-end protection in transit; encrypted device records are Planned and must not be implied by secure credential storage. |
+| Work content | Repositories, diffs, prompts, responses, files, terminal streams, commands, tool output, transcripts | End-to-end protection in transit; encrypted device records are Planned and must not be implied by secure credential storage. |
 | Identity and account | ChatGPT OAuth tokens, account binding, provider identity, saved server and Host identity | Explicit audience/account binding, least retention, revocation, and in-app changes. |
 | Routing and metadata | Relay route IDs, opaque route handles, cursors, timestamps, online status, device and Host labels | Minimize, expire, and never treat as authorization; metadata leakage remains a residual risk. |
 | Operational evidence | Audit records, validation reports, update manifests, crash and support bundles | Redact by default, bound retention, preview before export, and preserve provenance. |
@@ -103,7 +103,7 @@ In scope:
 - mobile device compromise short of complete control, stolen pairing material,
   copied invitations, backups, logs, and notification observations;
 - a malicious or compromised Host, harness, provider, repository, tool result,
-  browser page, generated WidgetWebView content, or dependency;
+  future browser-preview page, or dependency;
 - replay, reordering, duplication, response loss, stale UI work, protocol skew,
   artifact substitution, revocation races, and interrupted recovery;
 - command and argument injection, path traversal, symlink escape, origin
@@ -154,9 +154,8 @@ lifecycle, passkey/recovery administration, signed Link updates, and release
 promotion are not Implemented.
 
 Current feature exposure is also not a completed control: direct remote
-app-server supports `ws://` and `wss://`; generated `WidgetWebView`/Android
-WebView content executes scripts with native bridges; and the exact-base Android
-home widget renders prompt/model/context/tool details.
+app-server supports `ws://` and `wss://`. Generated-HTML/WebView surfaces are
+removed, and the Android widget is constrained to status/count projection data.
 
 ### Planned controls
 
@@ -174,18 +173,10 @@ home widget renders prompt/model/context/tool details.
 - Support-bundle preview/redaction before any diagnostic export.
 - Deterministic payload/storage/query budgets across public, relay, device,
   provider, transcript, terminal, and administrative surfaces.
-- ChatGPT OAuth cross-account refresh rejection and bounded loopback callback
-  binding required by remediation Plans 002 and 005.
 - Full thin-shell convergence: remove native canonical-state caches and
   stream/projection reconciliation, centralize provider inference, and move
   shared OAuth policy behind the Rust boundary while retaining native browser
   and secure-storage adapters.
-- Generated-content WebView remediation: explicit user-mediated in-app actions,
-  strict origin/resource/navigation policy, and deterministic bounds on bridge
-  messages, prompts, links, schemas, state, and rendered content.
-- Android active-turn home-widget sanitization from isolated Plan 006 commit
-  `e774968796139c67370ac098062b58e6f5c3571a`; it remains Planned until that
-  commit is integrated into this line.
 - Direct remote app-server identity, protected-transport, authorization, and
   account/workspace binding for the existing `ws://` / `wss://` feature.
 
@@ -208,15 +199,15 @@ home widget renders prompt/model/context/tool details.
 | Future admin HTTPS compromise | Owner authority and managed Hosts; unauthorized administration | Planned | Require passkey verification, short sessions, one-time websocket tickets, origin checks, and auditable admin changes before admin launch. | Authentication, origin, expiry, replay, revocation, and authorization negative tests. | Admin controls do not repair compromised owner devices or Hosts. |
 | Mobile device compromise and stolen pairing material | Device authority and saved work; impersonation or disclosure | Implemented / Planned | Implemented: non-exportable P-256 signing authority, scoped grants, epochs, and platform credential storage. Planned: encrypted work records, recovery enrollment, and broader revocation administration. | Key-provider tests, copied-invitation/replay tests, revoke/forget tests, encrypted-record migration, recovery, and locked-device tests. | A fully compromised unlocked device can invoke available authority and read displayed data. |
 | Malicious or compromised Host | Source, terminal, prompts, credentials, runtime authority; exfiltration or false results | Implemented / Planned | Implemented: pinned Link identity, scoped grants/runtime set, and stream closure on epoch change. Planned: workspace confinement and constrained command/provider/browser delegation. | Wrong-Host, narrowed-grant, revoke-stream, workspace escape, and capability-boundary tests. | A Host-account attacker able to replace Link controls that Host's data and behavior. |
-| ChatGPT OAuth redirect, token, account-binding, and credential custody failures | Account tokens and identity; account confusion or takeover | Implemented / Planned | Implemented: native PKCE, state validation, and platform token custody. Planned next-release blocker: reject cross-account refresh results and bind/bound loopback callbacks per Plans 002 and 005. | Wrong-account refresh, state/PKCE, callback interface/port/path, timeout, duplicate-callback, cancellation, and secure-store tests. | Current PKCE/state/account custody reduces interception and replay risk but does not erase the known refresh and callback gaps. |
+| ChatGPT OAuth redirect, token, account-binding, and credential custody failures | Account tokens and identity; account confusion or takeover | Implemented | Native PKCE, state validation, platform token custody, cross-account refresh rejection on both platforms, refresh-token preservation, and loopback-only bounded iOS callbacks. | Wrong-account refresh, state/PKCE, callback interface/port/path, timeout, duplicate-callback, cancellation, refresh omission, and secure-store tests. | A compromised device or provider endpoint can still misuse tokens legitimately available to it. |
 | WebRTC signaling, transcript, microphone, and audio privacy | Live audio, transcripts, presence; covert capture or unintended retention | Implemented / Planned | Implemented: platform microphone permission and native media session. Planned: explicit signaling-identity gates, bounded transcript retention, and separation from awareness/export. | Permission-denied, background/end-session, wrong-peer signaling, transcript deletion, log-redaction, and support-bundle tests. | Peers and a compromised endpoint can observe media they legitimately receive; network metadata remains visible. |
 | Direct remote app-server identity, transport, and authorization confusion | Sessions, prompts, approvals, account state; wrong-server action | Implemented / Planned | Implemented exposure: direct endpoints accept `ws://` and `wss://`. Planned next-release blocker: authenticate server identity, require protected transport for non-loopback remote use, bind authorization/account/workspace, and fail closed on changes. | Plain-transport rejection outside allowed local/tunnel cases, wrong-certificate/identity, unauthorized RPC, saved-endpoint substitution, reconnect, and account/workspace mismatch tests. | `wss://` transport alone does not establish application authorization; a correctly authenticated malicious server controls returned content. |
 | SSH server identity, host key, credential, forwarding, and terminal stream attacks | SSH credentials and terminal contents; interception or wrong-host execution | Implemented | Verify pinned host keys before authentication, protect credentials, use encrypted SSH, restrict forwarding, and close streams on lifecycle changes. | Unknown/changed/unavailable host-key tests, reconnect tests, credential-store tests, forwarding-policy tests, and terminal cleanup tests. | A trusted SSH account or server can observe commands and terminal data on that server. |
-| Generated-content `WidgetWebView` scripts and native bridges | Prompts, external navigation, structured requests, app state, and owner intent; generated content exercises native authority | Implemented / Planned | Current exposure: finalized generated content can execute scripts and call native bridges. Planned next-release blocker: explicit user-mediated in-app action, origin/resource/navigation allow policy, scheme validation, and bounded typed bridge inputs/results. | Script/no-script fixtures, no-gesture prompt/link denial, origin/resource/navigation/scheme negatives, bridge type/size/count/time limits, teardown, and cross-platform parity tests. | Even constrained generated content can mislead the owner; confirmation cannot make hostile content trustworthy. |
+| Retired generated-content WebViews and native bridges | Prompts, navigation, structured requests, app state, and owner intent; generated content formerly exercised native authority | Implemented | Remove generated-HTML tool registration, hydration, WebViews, native bridges, Saved Apps persistence, navigation, and platform routes on both clients. | Cross-repository stale-symbol gate, Rust tests, generated-binding check, native builds, and Android/iOS test suites. | A future browser-preview feature creates a separate Host-side boundary and may not reuse these removed mobile bridges. |
 | Hostile repository contents and provider prompt/tool attacks | Owner intent, source, credentials, tool authority; indirect instruction execution | Planned | Treat repository/provider output as untrusted data; enforce typed capability boundaries, explicit approvals, secret redaction, and no provider fallback/emulation. | Adversarial fixture tests for instructions in files/tool output, capability-denial tests, approval tests, and secret-canary scans. | Approved tools may intentionally expose workspace data within their declared capability. |
 | Command and argument injection, path traversal, and symlink escape | Filesystem, Git state, Host execution; execution outside intended workspace | Planned | Canonical workspace roots, component-wise path checks, symlink containment, argv allowlists, typed operations, and no shell-string construction. | Metacharacter/argument-boundary, traversal, absolute-path, symlink-race, workspace-root, and denied-operation tests. | Approved commands can still modify data within their allowed workspace and capability. |
 | Browser-origin confusion and CDP abuse | Browser sessions, cookies, page data, local services; cross-origin control | Planned | Sandbox browser automation, pin the intended origin/target, separate profiles, minimize CDP methods, and require explicit in-app initiation. | Wrong-origin/target, navigation race, profile isolation, forbidden-method, local-network target, and teardown tests. | Browser controller/CDP access deliberately exposes the selected page to constrained automation. |
-| System-surface privacy, Android home-widget disclosure, and opaque route handles | Prompt/model/context/tool detail, notification metadata, work status, navigation intent; lock-screen or launcher disclosure/action | Implemented / Planned | Implemented: byte-compatible opaque wake and authenticated reconciliation; current debt: the exact-base Android home widget renders prompt/model/context/tool details. Planned next-release blocker: integrate Plan 006 commit `e774968796139c67370ac098062b58e6f5c3571a`; use expiring non-authoritative route handles and a separate consented rich-awareness schema. Sensitive decisions remain in-app. | Exact-base disclosure fixture, sanitized projection unit tests, device lock-screen/launcher inspection, payload byte-shape, route expiry/staleness, generic-notification-default, and no-action tests. | Until Plan 006 is integrated, launcher/widget observers can read work detail; push providers still infer timing and delivery metadata. |
+| System-surface privacy, Android home-widget disclosure, and opaque route handles | Notification metadata, bounded work status/counts, navigation intent; lock-screen or launcher disclosure/action | Implemented / Planned | Implemented: byte-compatible opaque wake, authenticated reconciliation, and a sanitized Android widget projection. Planned command-center surfaces use expiring non-authoritative route handles and a separate consented rich-awareness schema. Sensitive decisions remain in-app. | Sanitized projection unit tests, device lock-screen/launcher inspection, payload byte-shape, route expiry/staleness, generic-notification-default, and no-action tests. | Launcher observers can infer bounded activity counts/status; push providers still infer timing and delivery metadata. |
 | Release artifact substitution and protocol skew | Installed app/Host integrity and pairing compatibility; malicious binary or unsafe upgrade | Planned | Reproducible reviewed inputs, signed manifests, artifact verification, compatibility gates, side-by-side Link update/rollback, and staged promotion. | Signature/provenance, wrong-artifact, downgrade, skew matrix, interrupted-update, rollback, and clean-install tests. | Signing infrastructure compromise can authorize malicious artifacts until detected and revoked. |
 | Managed-cloud control-plane compromise | Host lifecycle, relay/admin authority, provider credentials; fleet takeover or destructive operation | Planned | Least-privilege service identities, outbound-only Hosts, separated secrets, approval/audit gates, bounded lifecycle operations, and recovery drills. | Role-denial, credential rotation, audit integrity, tenant-absence assumptions, failed-provision, and disaster-recovery tests. | The single owner remains a concentration of authority; a control-plane outage can deny service. |
 | Recovery-key theft and passkey revocation gaps | Account recovery and device enrollment; durable unauthorized access or lockout | Planned | User-verified passkeys, offline recovery enrollment, protected recovery material, explicit revocation, device inventory, and short-lived sessions. | Stolen/reused recovery-key, revoked-passkey, lost-device, offline restore, concurrent recovery, and session-expiry tests. | Loss of all enrolled authenticators and recovery material may be irrecoverable by design. |
@@ -230,11 +221,10 @@ reconciliation. Any Planned opaque route handles must expire, confer no
 authority, and contain no source, prompt, transcript, command, credential,
 approval, or account data. Generic normal notifications are the default.
 
-Opaque wake is not the whole current system-surface story. On this exact base,
-the Android active-turn home widget displays prompt, model, context percentage,
-and tool-count/phase information. Its sanitized projection exists only in
-isolated Plan 006 commit `e774968796139c67370ac098062b58e6f5c3571a` and is
-Planned here until integrated and device-verified.
+Opaque wake is not the whole current system-surface story. The Android
+active-turn home widget uses the integrated sanitized projection and displays
+only bounded status/count data. Prompts, model labels, context metrics, paths,
+and tool details are forbidden on that surface.
 
 Rich awareness is Planned as a distinct schema, permission, retention, and UI
 surface. It may not reuse a protocol change to silently add content to existing
@@ -274,11 +264,11 @@ and unsigned fallback artifacts are Prohibited.
 
 A new roadmap feature cannot ship while any control required for that feature
 remains Planned. Existing feature exposure labeled Planned does not mean the
-feature is absent. The matrix explicitly marks the current OAuth, direct remote
-app-server, generated-content WebView, and Android home-widget debt as
-next-release blockers. Promotion to Implemented requires integrated code
-evidence, deterministic tests, platform validation, and an updated residual-risk
-statement; an isolated commit is not integrated evidence.
+feature is absent. The matrix explicitly marks direct remote app-server
+authorization and protected transport as a next-release blocker for that
+optional transport. Promotion to Implemented requires integrated code evidence,
+deterministic tests, platform validation, and an updated residual-risk statement;
+an isolated commit is not integrated evidence.
 
 Minimum security gates:
 
@@ -286,8 +276,8 @@ Minimum security gates:
   frame tests, grant narrowing, revocation, reconnect, and terminal cleanup;
 - Rust tests and binding regeneration plus iOS and Android unit/build gates for
   every shared boundary change;
-- OAuth account-binding and bounded loopback remediation before relying on the
-  affected account flow;
+- OAuth account-binding, refresh-token preservation, and bounded loopback
+  regression coverage before relying on the affected account flow;
 - negative authorization, wrong-identity, replay, origin, path, argv, symlink,
   provider-capability, and sensitive-system-surface tests as those features land;
 - encrypted-record migration/recovery tests before persistent work records are
@@ -353,12 +343,11 @@ does not include operational exploit procedures.
   stream/projection merges, duplicated provider-label inference, and native
   ChatGPT OAuth implementations alongside the canonical Rust store/reconnect/
   reducer.
-- Current generated-content evidence includes iOS `WidgetWebView` and Android
-  timeline WebView script execution plus native prompt/link/structured-response
-  bridges. These are current authority exposures, not completed browser controls.
-- The exact-base Android `ActiveTurnWidget` projects prompt/model/context/tool
-  detail. Isolated commit `e774968796139c67370ac098062b58e6f5c3571a` is
-  remediation evidence only until integrated.
+- Generated-HTML actions, mobile WebViews, native bridges, Saved Apps state,
+  and their routes are removed across Rust, iOS, and Android. Future Host-side
+  browser preview remains a separate Planned boundary.
+- The Android `ActiveTurnWidget` uses an integrated status/count-only
+  projection with focused disclosure regression tests.
 - Current direct remote configuration and transport code accepts both `ws://`
   and `wss://`; support is not evidence of identity, authorization, or protected
   transport for every configured endpoint.

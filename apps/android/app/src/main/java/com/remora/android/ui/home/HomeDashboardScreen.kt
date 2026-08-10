@@ -37,7 +37,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.automirrored.outlined.ViewQuilt
-import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.ViewAgenda
@@ -115,7 +114,6 @@ import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AppServerSnapshot
 import uniffi.codex_mobile_client.AppSessionSummary
 import uniffi.codex_mobile_client.PinnedThreadKey
-import uniffi.codex_mobile_client.SavedApp
 import uniffi.codex_mobile_client.ThreadKey
 import uniffi.codex_mobile_client.deriveProjects
 import uniffi.codex_mobile_client.projectIdFor
@@ -126,7 +124,6 @@ fun HomeDashboardScreen(
     onOpenConversation: (ThreadKey) -> Unit,
     onShowDiscovery: () -> Unit,
     onShowSettings: () -> Unit,
-    onShowApps: () -> Unit,
     onOpenProjectPicker: () -> Unit,
     onOpenAccount: (String) -> Unit,
     selectedProject: AppProject?,
@@ -134,7 +131,6 @@ fun HomeDashboardScreen(
     onSelectServer: (AppServerSnapshot) -> Unit,
     onThreadCreated: (ThreadKey) -> Unit,
     onStartVoice: (() -> Unit)? = null,
-    onOpenSavedApp: ((String) -> Unit)? = null,
     onOpenTerminal: (() -> Unit)? = null,
     focusSearchRequest: Int = 0,
     onInputFocusChanged: (Boolean) -> Unit = {},
@@ -149,7 +145,6 @@ fun HomeDashboardScreen(
     val lifecycleController = remember { AppLifecycleController() }
 
     var showTipJar by remember { mutableStateOf(false) }
-    var showHeaderActionsMenu by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<AppServerSnapshot?>(null) }
     var renameText by remember { mutableStateOf("") }
     val appVersionLabel = remember { "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})" }
@@ -213,15 +208,6 @@ fun HomeDashboardScreen(
             }
         }
     }
-
-    // All saved apps shown by the header Apps action. The store's `.apps`
-    // StateFlow is kept fresh by AppModel's handleUpdate on SavedAppsChanged
-    // (R3), plus a best-effort reload on home re-entry to catch any changes
-    // that arrived while we were off-screen.
-    LaunchedEffect(Unit) {
-        try { com.remora.android.state.SavedAppsStore.reload(context) } catch (_: Exception) {}
-    }
-    val savedAppsAll by com.remora.android.state.SavedAppsStore.apps.collectAsState()
 
     var confirmAction by remember { mutableStateOf<ConfirmAction?>(null) }
     // Hoisted reply-sheet target. Both the row swipe and the long-press
@@ -604,61 +590,17 @@ fun HomeDashboardScreen(
                     )
                 }
                 if (usesCompactHeader) {
-                    if (savedAppsAll.isNotEmpty() || onOpenTerminal != null) {
-                        Box {
-                            IconButton(
-                                onClick = { showHeaderActionsMenu = true },
-                                modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
-                            ) {
-                                Icon(
-                                    Icons.Default.MoreVert,
-                                    contentDescription = "More home actions",
-                                    tint = RemoraTheme.textSecondary,
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showHeaderActionsMenu,
-                                onDismissRequest = { showHeaderActionsMenu = false },
-                            ) {
-                                if (savedAppsAll.isNotEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("Apps") },
-                                        onClick = {
-                                            showHeaderActionsMenu = false
-                                            onShowApps()
-                                        },
-                                        leadingIcon = {
-                                            Icon(Icons.Outlined.GridView, contentDescription = null)
-                                        },
-                                    )
-                                }
-                                if (onOpenTerminal != null) {
-                                    DropdownMenuItem(
-                                        text = { Text("Terminal") },
-                                        onClick = {
-                                            showHeaderActionsMenu = false
-                                            onOpenTerminal?.invoke()
-                                        },
-                                        leadingIcon = {
-                                            Icon(Icons.Outlined.Terminal, contentDescription = null)
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (savedAppsAll.isNotEmpty()) {
-                        IconButton(onClick = onShowApps, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
+                    if (onOpenTerminal != null) {
+                        IconButton(onClick = onOpenTerminal, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                             Icon(
-                                Icons.Outlined.GridView,
-                                contentDescription = "Apps",
+                                Icons.Outlined.Terminal,
+                                contentDescription = "Terminal",
                                 tint = RemoraTheme.textSecondary,
                                 modifier = Modifier.size(20.dp),
                             )
                         }
                     }
+                } else {
                     if (onOpenTerminal != null) {
                         IconButton(onClick = onOpenTerminal, modifier = Modifier.size(RemoraTheme.minimumTouchTarget)) {
                             Icon(

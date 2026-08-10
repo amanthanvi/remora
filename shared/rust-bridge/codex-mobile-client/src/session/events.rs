@@ -118,23 +118,6 @@ pub(crate) enum UiEvent {
         item_id: String,
         delta: String,
     },
-    /// Streaming chunk of a `show_widget` (or other client-dynamic-tool)
-    /// call's argument JSON. The reducer accumulates deltas in a
-    /// per-`(thread, call_id)` buffer, synthesizes a partial
-    /// `show_widget` arguments object, re-hydrates it as an in-flight
-    /// `DynamicToolCall` item, and emits the update through the existing
-    /// `AppStoreUpdateRecord::ThreadItemChanged` path — same shape as
-    /// the finalized render, no new variant required.
-    DynamicToolCallArgumentsDelta {
-        key: ThreadKey,
-        item_id: String,
-        /// Provider-assigned call id. May be absent on very early deltas
-        /// before the provider has confirmed the call id. In that case
-        /// the reducer falls back to the item_id as the buffer key.
-        call_id: Option<String>,
-        delta: String,
-    },
-
     // ── Approvals ──────────────────────────────────────────────────────
     ApprovalRequested {
         key: ThreadKey,
@@ -236,7 +219,6 @@ impl UiEvent {
             | Self::ReasoningDelta { key, .. }
             | Self::PlanDelta { key, .. }
             | Self::CommandOutputDelta { key, .. }
-            | Self::DynamicToolCallArgumentsDelta { key, .. }
             | Self::ApprovalRequested { key, .. }
             | Self::RealtimeStarted { key, .. }
             | Self::RealtimeSdp { key, .. }
@@ -472,15 +454,7 @@ impl EventProcessor {
                     delta: n.delta.clone(),
                 });
             }
-            ServerNotification::DynamicToolCallArgumentsDelta(n) => {
-                let key = Self::make_key(server_id, &n.thread_id);
-                self.emit(UiEvent::DynamicToolCallArgumentsDelta {
-                    key,
-                    item_id: n.item_id.clone(),
-                    call_id: n.call_id.clone(),
-                    delta: n.delta.clone(),
-                });
-            }
+            ServerNotification::DynamicToolCallArgumentsDelta(_) => {}
             ServerNotification::FileChangeOutputDelta(n) => {
                 let key = Self::make_key(server_id, &n.thread_id);
                 self.emit(UiEvent::CommandOutputDelta {
@@ -2311,7 +2285,7 @@ mod tests {
                 thread_id: "thr_1".to_string(),
                 turn_id: "turn_1".to_string(),
                 call_id: "call_1".to_string(),
-                tool: "show_widget".to_string(),
+                tool: "custom_report".to_string(),
                 namespace: None,
                 arguments: json!({"title": "Hello"}),
             },
@@ -2321,7 +2295,7 @@ mod tests {
             UiEvent::RawNotification { method, params, .. } => {
                 assert_eq!(method, "item/tool/call");
                 assert_eq!(params["requestId"], json!("14"));
-                assert_eq!(params["params"]["tool"], json!("show_widget"));
+                assert_eq!(params["params"]["tool"], json!("custom_report"));
             }
             other => panic!("expected RawNotification, got {other:?}"),
         }

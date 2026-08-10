@@ -8,7 +8,6 @@ struct ConversationTurnRow: View, Equatable {
     let viewportHeight: CGFloat
     let showTypingIndicator: Bool
     let serverId: String
-    let originThreadId: String?
     let agentDirectoryVersion: UInt64
     @Environment(\.textScale) private var textScale
     let messageActionsDisabled: Bool
@@ -16,7 +15,6 @@ struct ConversationTurnRow: View, Equatable {
     let onStreamingSnapshotRendered: (() -> Void)?
     let onLiveContentLayoutChanged: (() -> Void)?
     let resolveTargetLabel: (String) -> String?
-    let onWidgetPrompt: (String) -> Void
     let onEditUserItem: (ConversationItem) -> Void
     let onForkFromUserItem: (ConversationItem) -> Void
     var onOpenConversation: ((ThreadKey) -> Void)? = nil
@@ -31,7 +29,6 @@ struct ConversationTurnRow: View, Equatable {
             lhs.viewportHeight == rhs.viewportHeight &&
             lhs.showTypingIndicator == rhs.showTypingIndicator &&
             lhs.serverId == rhs.serverId &&
-            lhs.originThreadId == rhs.originThreadId &&
             lhs.agentDirectoryVersion == rhs.agentDirectoryVersion &&
             lhs.messageActionsDisabled == rhs.messageActionsDisabled
     }
@@ -50,13 +47,11 @@ struct ConversationTurnRow: View, Equatable {
                 items: turn.items,
                 isLive: turn.isLive,
                 serverId: serverId,
-                originThreadId: originThreadId,
                 agentDirectoryVersion: agentDirectoryVersion,
                 messageActionsDisabled: messageActionsDisabled,
                 onStreamingSnapshotRendered: onStreamingSnapshotRendered,
                 onLiveContentLayoutChanged: onLiveContentLayoutChanged,
                 resolveTargetLabel: resolveTargetLabel,
-                onWidgetPrompt: onWidgetPrompt,
                 onEditUserItem: onEditUserItem,
                 onForkFromUserItem: onForkFromUserItem,
                 onOpenConversation: onOpenConversation
@@ -176,9 +171,6 @@ struct ConversationTurnRow: View, Equatable {
         if turn.preview.eventCount > 0 {
             items.append(CollapsedTurnMeta(id: "events", systemImage: "sparkles", text: "\(turn.preview.eventCount)"))
         }
-        if turn.preview.widgetCount > 0 {
-            items.append(CollapsedTurnMeta(id: "widgets", systemImage: "rectangle.3.group", text: "\(turn.preview.widgetCount)"))
-        }
         if turn.preview.imageCount > 0 {
             items.append(CollapsedTurnMeta(id: "images", systemImage: "photo", text: "\(turn.preview.imageCount)"))
         }
@@ -197,7 +189,6 @@ struct ConversationTurnRow: View, Equatable {
         if let secondaryPreviewText { parts.append(secondaryPreviewText) }
         if let durationText = turn.preview.durationText { parts.append("Duration \(durationText)") }
         if turn.preview.toolCallCount > 0 { parts.append("\(turn.preview.toolCallCount) tool \(turn.preview.toolCallCount == 1 ? "call" : "calls")") }
-        if turn.preview.widgetCount > 0 { parts.append("\(turn.preview.widgetCount) \(turn.preview.widgetCount == 1 ? "widget" : "widgets")") }
         if turn.preview.eventCount > 0 { parts.append("\(turn.preview.eventCount) \(turn.preview.eventCount == 1 ? "event" : "events")") }
         if turn.preview.imageCount > 0 { parts.append("\(turn.preview.imageCount) \(turn.preview.imageCount == 1 ? "image" : "images")") }
         return parts.joined(separator: ". ")

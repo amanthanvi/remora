@@ -83,7 +83,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.remora.android.state.SavedAppsStore
 import com.remora.android.ui.BerkeleyMono
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTextStyle
@@ -123,8 +122,6 @@ fun ConversationTimelineItem(
     onStreamingSnapshotRendered: (() -> Unit)? = null,
     onEditMessage: ((String) -> Unit)? = null,
     onForkFromMessage: ((String) -> Unit)? = null,
-    onOpenSavedApp: ((String) -> Unit)? = null,
-    onWidgetPrompt: ((String) -> Unit)? = null,
 ) {
     val shouldNotifyLiveContentRendered = remember(item.content, isLiveTurn) {
         isLiveTurn && item.content.shouldAutoFollowRenderedContent()
@@ -214,13 +211,6 @@ fun ConversationTimelineItem(
             data = content.v1,
         )
 
-        is HydratedConversationItemContent.Widget -> WidgetRow(
-            data = content.v1,
-            originThreadId = threadId,
-            onOpenSavedApp = onOpenSavedApp,
-            onWidgetPrompt = onWidgetPrompt,
-        )
-
         is HydratedConversationItemContent.UserInputResponse -> UserInputResponseRow(
             data = content.v1,
         )
@@ -251,8 +241,7 @@ private fun HydratedConversationItemContent.shouldAutoFollowRenderedContent(): B
         is HydratedConversationItemContent.MultiAgentAction,
         is HydratedConversationItemContent.WebSearch,
         is HydratedConversationItemContent.ImageView,
-        is HydratedConversationItemContent.ImageGeneration,
-        is HydratedConversationItemContent.Widget -> true
+        is HydratedConversationItemContent.ImageGeneration -> true
         else -> false
     }
 }

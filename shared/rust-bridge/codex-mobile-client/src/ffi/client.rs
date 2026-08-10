@@ -8,16 +8,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 mod catalog;
-mod generative_apps;
 
 use catalog::{
     append_cached_models_for_failed_runtimes, append_missing_amp_mode_models,
     is_mobile_hidden_skill, normalize_model_info_for_runtime, runtime_exposes_model_choices,
     shape_plugin_list,
-};
-use generative_apps::{
-    is_stale_thread_error, perform_structured_response, perform_update_saved_app,
-    splice_generative_ui_preamble, splice_saved_apps_context,
 };
 
 async fn rpc<T: serde::de::DeserializeOwned>(
@@ -50,6 +45,14 @@ where
     params
         .try_into()
         .map_err(|error| ClientError::Serialization(error.to_string()))
+}
+
+fn is_stale_thread_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("thread not found")
+        || lower.contains("conversation not found")
+        || lower.contains("unknown thread")
+        || lower.contains("no such thread")
 }
 
 macro_rules! req {
@@ -162,20 +165,11 @@ impl AppClient {
         params: types::AppStartThreadRequest,
     ) -> Result<types::ThreadKey, ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            // New thread: no `thread_id` yet, so no saved apps to
-            // reference. `saved_apps_context_for_thread` returns None
-            // for an unknown thread; `splice_saved_apps_context` is a
-            // no-op in that case, preserving existing behavior.
-            let mut params = params;
             let runtime_kind = c.runtime_for_thread_start(
                 &server_id,
                 params.agent_runtime_kind.clone(),
                 params.model.as_deref(),
             );
-            params.developer_instructions =
-                splice_saved_apps_context(c.as_ref(), None, params.developer_instructions);
-            params.developer_instructions =
-                splice_generative_ui_preamble(&params.dynamic_tools, params.developer_instructions);
             let params = convert_params::<_, upstream::ThreadStartParams>(params)?;
             let response: upstream::ThreadStartResponse = rpc_runtime(
                 c.as_ref(),
@@ -198,20 +192,6 @@ impl AppClient {
         params: types::AppResumeThreadRequest,
     ) -> Result<types::ThreadKey, ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            // Prepend "Apps saved in this thread so far: …" to the
-            // developer_instructions so the model knows which slugs are
-            // already in use.
-            let mut params = params;
-            let thread_id = params.thread_id.clone();
-            params.developer_instructions = splice_saved_apps_context(
-                c.as_ref(),
-                Some(thread_id.as_str()),
-                params.developer_instructions,
-            );
-            // Resume requests don't carry `dynamic_tools` (the server
-            // remembers them from start). The preamble was injected at
-            // start_thread; developer_instructions persist server-side
-            // across turns, so no re-injection needed here.
             let params = convert_params::<_, upstream::ThreadResumeParams>(params)?;
             let response: upstream::ThreadResumeResponse = rpc(
                 c.as_ref(),
@@ -225,24 +205,6 @@ impl AppClient {
             hydrate_thread_goal_if_available(c.as_ref(), &server_id, &key).await;
             Ok(key)
         })
-    }
-
-    /// Register the directory where `saved_apps.rs` persists the app
-    /// index + per-app files. Platforms (iOS/Android) call this once at
-    /// process start with the same path they pass to `saved_apps_list`.
-    /// When set, the `show_widget` auto-upsert hook in the dynamic-tool
-    /// handler uses this directory to persist finalized widgets.
-    pub fn set_saved_apps_directory(&self, directory: String) {
-        let mut guard = self
-            .inner
-            .saved_apps_directory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = if directory.is_empty() {
-            None
-        } else {
-            Some(directory)
-        };
     }
 
     /// Register the directory where Slingshot controller enrollment
@@ -1259,113 +1221,6 @@ impl AppClient {
             handle,
         })
     }
-
-    // ── Saved apps update ────────────────────────────────────────────────
-
-    /// Spin a short-lived hidden thread on `server_id`, seed it with the
-    /// saved app's current HTML + abbreviated state shape, send
-    /// `user_prompt`, and wait for the first finalized `show_widget`
-    /// call. On success, replace the saved app's HTML on disk. On
-    /// failure or cancellation, the saved app is left untouched. The
-    /// hidden thread is cleaned up either way (archived on the server;
-    /// also removed from the local hidden-threads list).
-    pub async fn update_saved_app(
-        &self,
-        server_id: String,
-        directory: String,
-        app_id: String,
-        user_prompt: String,
-    ) -> SavedAppUpdateResult {
-        let inner = Arc::clone(&self.inner);
-        let rt = Arc::clone(&self.rt);
-        let task = rt.spawn_blocking(move || {
-            let inner = Arc::clone(&inner);
-            let rt_for_block = Arc::clone(&crate::ffi::shared::shared_runtime());
-            rt_for_block.block_on(async move {
-                perform_update_saved_app(inner.as_ref(), server_id, directory, app_id, user_prompt)
-                    .await
-            })
-        });
-        match task.await {
-            Ok(result) => result,
-            Err(error) => SavedAppUpdateResult::Error {
-                message: format!("update_saved_app task join failed: {error}"),
-            },
-        }
-    }
-
-    // ── Minigame ─────────────────────────────────────────────────────────
-
-    /// Spin an ephemeral thread, generate a minigame via `show_widget`,
-    /// persist it under `parent_thread_id`, and return the result.
-    /// Times out after 30 seconds. Errors are returned as
-    /// `ClientError::MinigameGenerationFailed`.
-    pub async fn start_minigame(
-        &self,
-        request: AppMinigameRequest,
-    ) -> Result<AppMinigameResult, crate::ffi::ClientError> {
-        let inner = Arc::clone(&self.inner);
-        let mg_request = crate::mobile_client::minigame::MinigameRequest {
-            server_id: request.server_id,
-            parent_thread_id: request.parent_thread_id,
-            last_user_message: request.last_user_message,
-            last_assistant_message: request.last_assistant_message,
-        };
-        crate::mobile_client::minigame::run_minigame(inner.as_ref(), mg_request)
-            .await
-            .map(|result| AppMinigameResult {
-                ephemeral_thread_id: result.ephemeral_thread_id,
-                widget_html: result.widget_html,
-                title: result.title,
-                width: result.width,
-                height: result.height,
-            })
-            .map_err(crate::ffi::ClientError::MinigameGenerationFailed)
-    }
-
-    // ── Structured response (for app-mode `window.structuredResponse`) ───
-
-    /// One-shot schema-constrained query against an ephemeral hidden
-    /// thread. `cached_thread_id` is `None` on the first call from a saved
-    /// app view; the helper starts an ephemeral thread, sends the turn with
-    /// `output_schema` set, waits for the final assistant message, and
-    /// returns the (JSON-string) response plus the resolved thread id so
-    /// the host can cache it for subsequent calls in the same view.
-    ///
-    /// On a stale cached thread id (server reconnect, ephemeral thread
-    /// gone), the helper transparently creates a fresh ephemeral thread
-    /// and retries once. The caller should always overwrite its cache
-    /// with the returned `thread_id`.
-    pub async fn structured_response(
-        &self,
-        server_id: String,
-        cached_thread_id: Option<String>,
-        prompt: String,
-        output_schema_json: String,
-    ) -> StructuredResponseResult {
-        let inner = Arc::clone(&self.inner);
-        let rt = Arc::clone(&self.rt);
-        let task = rt.spawn_blocking(move || {
-            let inner = Arc::clone(&inner);
-            let rt_for_block = Arc::clone(&crate::ffi::shared::shared_runtime());
-            rt_for_block.block_on(async move {
-                perform_structured_response(
-                    inner.as_ref(),
-                    server_id,
-                    cached_thread_id,
-                    prompt,
-                    output_schema_json,
-                )
-                .await
-            })
-        });
-        match task.await {
-            Ok(result) => result,
-            Err(error) => StructuredResponseResult::Error {
-                message: format!("structured_response task join failed: {error}"),
-            },
-        }
-    }
 }
 
 /// Owning wrapper around a spawned `codex app-server` process. Exposed
@@ -1417,52 +1272,4 @@ pub struct LocalServerConnection {
     /// The caller must hold this (e.g. in the AppDelegate) and invoke
     /// `stop()` during `applicationWillTerminate`.
     pub handle: Option<Arc<LocalServerProcessHandle>>,
-}
-
-// ── Saved apps update helpers ────────────────────────────────────────────
-
-/// Typed result of `AppClient::update_saved_app`.
-#[derive(uniffi::Enum)]
-pub enum SavedAppUpdateResult {
-    Success { app: crate::saved_apps::SavedApp },
-    Error { message: String },
-}
-
-/// Typed result of `AppClient::structured_response`.
-#[derive(uniffi::Enum)]
-pub enum StructuredResponseResult {
-    Success {
-        /// The ephemeral thread id the call landed on. The caller MUST
-        /// overwrite its cache from this value on every success — on
-        /// stale-thread recovery this differs from the `cached_thread_id`
-        /// passed in.
-        thread_id: String,
-        /// Raw JSON string matching the caller's `output_schema`. The
-        /// caller is expected to `JSON.parse` it.
-        response_json: String,
-    },
-    Error {
-        message: String,
-    },
-}
-
-// ── Minigame types ───────────────────────────────────────────────────────
-
-/// Request to `AppClient::start_minigame`.
-#[derive(uniffi::Record)]
-pub struct AppMinigameRequest {
-    pub server_id: String,
-    pub parent_thread_id: String,
-    pub last_user_message: Option<String>,
-    pub last_assistant_message: Option<String>,
-}
-
-/// Successful result of `AppClient::start_minigame`.
-#[derive(uniffi::Record)]
-pub struct AppMinigameResult {
-    pub ephemeral_thread_id: String,
-    pub widget_html: String,
-    pub title: String,
-    pub width: f64,
-    pub height: f64,
 }

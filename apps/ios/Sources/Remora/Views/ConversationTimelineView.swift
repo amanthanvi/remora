@@ -29,13 +29,11 @@ struct ConversationTurnTimeline: View {
     let items: [ConversationItem]
     let isLive: Bool
     let serverId: String
-    let originThreadId: String?
     let agentDirectoryVersion: UInt64
     let messageActionsDisabled: Bool
     let onStreamingSnapshotRendered: (() -> Void)?
     let onLiveContentLayoutChanged: (() -> Void)?
     let resolveTargetLabel: (String) -> String?
-    let onWidgetPrompt: (String) -> Void
     let onEditUserItem: (ConversationItem) -> Void
     let onForkFromUserItem: (ConversationItem) -> Void
     var onOpenConversation: ((ThreadKey) -> Void)? = nil
@@ -125,7 +123,6 @@ struct ConversationTurnTimeline: View {
                 ConversationTimelineItemRow(
                     item: item,
                     serverId: serverId,
-                    originThreadId: originThreadId,
                     agentDirectoryVersion: agentDirectoryVersion,
                     isPreferredExpandedCommandRow: isPreferredExpandedCommandRow,
                     isLiveTurn: isLive,
@@ -138,7 +135,6 @@ struct ConversationTurnTimeline: View {
                     onStreamingSnapshotRendered: item.id == streamingAssistantItemId ? onStreamingSnapshotRendered : nil,
                     onLiveContentLayoutChanged: onLiveContentLayoutChanged,
                     resolveTargetLabel: resolveTargetLabel,
-                    onWidgetPrompt: onWidgetPrompt,
                     onEditUserItem: onEditUserItem,
                     onForkFromUserItem: onForkFromUserItem,
                     onOpenConversation: onOpenConversation
@@ -425,7 +421,6 @@ private struct ConversationTimelineItemRow: View, Equatable {
 
     let item: ConversationItem
     let serverId: String
-    let originThreadId: String?
     let agentDirectoryVersion: UInt64
     let isPreferredExpandedCommandRow: Bool
     let isLiveTurn: Bool
@@ -438,7 +433,6 @@ private struct ConversationTimelineItemRow: View, Equatable {
     let onStreamingSnapshotRendered: (() -> Void)?
     let onLiveContentLayoutChanged: (() -> Void)?
     let resolveTargetLabel: (String) -> String?
-    let onWidgetPrompt: (String) -> Void
     let onEditUserItem: (ConversationItem) -> Void
     let onForkFromUserItem: (ConversationItem) -> Void
     var onOpenConversation: ((ThreadKey) -> Void)? = nil
@@ -456,7 +450,6 @@ private struct ConversationTimelineItemRow: View, Equatable {
             (isAssistant || lhs.shouldPreserveRichDetail == rhs.shouldPreserveRichDetail) &&
             (isAssistant || lhs.isStreamingMessage == rhs.isStreamingMessage) &&
             lhs.serverId == rhs.serverId &&
-            lhs.originThreadId == rhs.originThreadId &&
             lhs.agentDirectoryVersion == rhs.agentDirectoryVersion &&
             lhs.isPreferredExpandedCommandRow == rhs.isPreferredExpandedCommandRow &&
             lhs.isLiveTurn == rhs.isLiveTurn &&
@@ -535,14 +528,6 @@ private struct ConversationTimelineItemRow: View, Equatable {
                 ImageGenerationToolCallView(
                     data: data,
                     externalExpanded: toolDefaultExpanded(isFailed: data.status == .failed)
-                )
-            )
-        case .widget(let data):
-            return AnyView(
-                WidgetContainerView(
-                    widget: data.widgetState,
-                    originThreadId: originThreadId,
-                    onMessage: handleWidgetMessage
                 )
             )
         case .userInputResponse(let data):
@@ -646,23 +631,6 @@ private struct ConversationTimelineItemRow: View, Equatable {
             themeVersion: themeManager.themeVersion,
             onSnapshotRendered: isStreamingMessage ? onStreamingSnapshotRendered : nil
         )
-    }
-
-    private func handleWidgetMessage(_ body: Any) {
-        guard let dict = body as? [String: Any],
-              let type = dict["_type"] as? String else { return }
-        switch type {
-        case "sendPrompt":
-            if let text = dict["text"] as? String, !text.isEmpty {
-                onWidgetPrompt(text)
-            }
-        case "openLink":
-            if let urlString = dict["url"] as? String, let url = URL(string: urlString) {
-                UIApplication.shared.open(url)
-            }
-        default:
-            break
-        }
     }
 
     private func makeFileChangeModel(_ data: ConversationFileChangeData) -> ToolCallCardModel {

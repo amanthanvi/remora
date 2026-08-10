@@ -41,9 +41,6 @@ struct HomeDashboardView: View {
     let onThreadCreated: (ThreadKey) -> Void
     let onShowSettings: () -> Void
     let onShowCommandPalette: () -> Void
-    /// Optional: surface an "Apps" button alongside Settings. Wired by the
-    /// hosting navigation when a "Saved Apps" launcher should be exposed.
-    var onShowApps: (() -> Void)? = nil
     var onShowTerminal: (() -> Void)? = nil
     let onPinThread: (ThreadKey) -> Void
     let onUnpinThread: (ThreadKey) -> Void
@@ -334,13 +331,6 @@ struct HomeDashboardView: View {
                 }
                 .accessibilityLabel("Commands")
                 .accessibilityIdentifier("home.commandsButton")
-                if let onShowApps {
-                    Button(action: onShowApps) {
-                        Image(systemName: "square.grid.2x2")
-                            .foregroundColor(RemoraTheme.textSecondary)
-                    }
-                    .accessibilityLabel("Apps")
-                }
                 if let onShowTerminal {
                     Button(action: onShowTerminal) {
                         Image(systemName: "terminal")

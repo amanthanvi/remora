@@ -74,19 +74,13 @@ import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.LocalTextScale
 import com.remora.android.ui.scaled
 import kotlinx.coroutines.launch
-import uniffi.codex_mobile_client.AppActivityByDayEntry
 import uniffi.codex_mobile_client.AppConversationStats
-import uniffi.codex_mobile_client.AppModelUsageEntry
 import uniffi.codex_mobile_client.AppServerHealth
 import uniffi.codex_mobile_client.AppServerSnapshot
-import uniffi.codex_mobile_client.AppServerUsageStats
 import uniffi.codex_mobile_client.AppThreadSnapshot
-import uniffi.codex_mobile_client.AppTokensByThreadEntry
 import uniffi.codex_mobile_client.ThreadKey
 import uniffi.codex_mobile_client.AppRenameThreadRequest
 import java.text.SimpleDateFormat
-import java.time.Instant
-import java.time.ZoneId
 import java.util.Date
 import java.util.Locale
 
@@ -116,7 +110,6 @@ fun ConversationInfoScreen(
     }
 
     val stats = remember(thread) { thread?.stats }
-    val serverUsage = remember(server) { server?.usageStats }
     val rateLimits = remember(server) { server?.rateLimits }
 
     Column(
@@ -231,31 +224,6 @@ fun ConversationInfoScreen(
             if (!isServerOnly && stats != null) {
                 item {
                     StatsGrid(stats = stats)
-                }
-            }
-
-            // Section B: Server-Wide Charts
-            if (serverUsage != null) {
-                item {
-                    SectionHeader("Server Usage")
-                }
-
-                if (serverUsage.tokensByThread.isNotEmpty()) {
-                    item {
-                        TokenUsageChart(data = serverUsage.tokensByThread)
-                    }
-                }
-
-                if (serverUsage.activityByDay.isNotEmpty()) {
-                    item {
-                        ActivityChart(data = serverUsage.activityByDay)
-                    }
-                }
-
-                if (serverUsage.modelUsage.isNotEmpty()) {
-                    item {
-                        ModelBreakdownChart(data = serverUsage.modelUsage)
-                    }
                 }
             }
 
@@ -504,229 +472,6 @@ private fun StatCard(title: String, value: String, subtitle: String?, modifier: 
         )
         if (subtitle != null) {
             Text(text = subtitle, color = RemoraTheme.textSecondary, fontSize = 10f.scaled)
-        }
-    }
-}
-
-// --- Charts ---
-
-@Composable
-private fun TokenUsageChart(data: List<AppTokensByThreadEntry>) {
-    val textMeasurer = rememberTextMeasurer()
-    val textScale = LocalTextScale.current
-    var animProgress by remember { mutableFloatStateOf(0f) }
-    val animatedProgress by animateFloatAsState(
-        targetValue = animProgress,
-        animationSpec = tween(800),
-        label = "tokenChartAnim",
-    )
-    LaunchedEffect(Unit) { animProgress = 1f }
-
-    val maxTokens = data.maxOfOrNull { it.tokens.toLong() } ?: 1L
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(12.dp))
-            .padding(16.dp),
-    ) {
-        Text("Token Usage by Thread", color = RemoraTheme.textSecondary, fontSize = RemoraTextStyle.caption.scaled, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(12.dp))
-
-        val accent = RemoraTheme.accent
-        val border = RemoraTheme.border
-        val labelColor = RemoraTheme.textMuted
-
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height((data.size * 36 + 20).dp),
-        ) {
-            val barHeight = 20f
-            val barSpacing = 36f
-            val labelWidth = size.width * 0.3f
-            val chartWidth = size.width - labelWidth - 16f
-
-            data.forEachIndexed { index, entry ->
-                val y = index * barSpacing + 10f
-                val tokens = entry.tokens.toLong()
-                val barWidth = (tokens.toFloat() / maxTokens * chartWidth * animatedProgress).coerceAtLeast(2f)
-
-                // Bar
-                drawRoundRect(
-                    color = accent.copy(alpha = 0.7f),
-                    topLeft = Offset(labelWidth + 8f, y),
-                    size = Size(barWidth, barHeight),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4f),
-                )
-
-                // Label
-                val title = entry.threadTitle
-                val labelText = if (title.length > 18) title.take(18) + "\u2026" else title
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = labelText,
-                    topLeft = Offset(0f, y + 2f),
-                    style = TextStyle(color = labelColor, fontSize = (10f * textScale).sp),
-                )
-
-                // Value
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = formatTokenCount(tokens),
-                    topLeft = Offset(labelWidth + barWidth + 12f, y + 2f),
-                    style = TextStyle(color = labelColor, fontSize = (9f * textScale).sp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActivityChart(data: List<AppActivityByDayEntry>) {
-    val textMeasurer = rememberTextMeasurer()
-    val textScale = LocalTextScale.current
-    var animProgress by remember { mutableFloatStateOf(0f) }
-    val animatedProgress by animateFloatAsState(
-        targetValue = animProgress,
-        animationSpec = tween(800),
-        label = "activityChartAnim",
-    )
-    LaunchedEffect(Unit) { animProgress = 1f }
-
-    val maxCount = data.maxOfOrNull { it.turnCount.toInt() } ?: 1
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(12.dp))
-            .padding(16.dp),
-    ) {
-        Text("Activity Timeline", color = RemoraTheme.textSecondary, fontSize = RemoraTextStyle.caption.scaled, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(12.dp))
-
-        val accent = RemoraTheme.accent
-        val border = RemoraTheme.border
-        val labelColor = RemoraTheme.textMuted
-
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(120.dp),
-        ) {
-            val chartHeight = size.height - 20f
-            val barWidth = (size.width / data.size.coerceAtLeast(1)).coerceAtMost(40f)
-            val gap = 4f
-
-            // Grid lines
-            for (i in 0..3) {
-                val y = chartHeight * (1f - i / 4f)
-                drawLine(border, Offset(0f, y), Offset(size.width, y), strokeWidth = 0.5f)
-            }
-
-            data.forEachIndexed { index, entry ->
-                val x = index * barWidth + gap
-                val count = entry.turnCount.toInt()
-                val barH = (count.toFloat() / maxCount * chartHeight * animatedProgress).coerceAtLeast(2f)
-                val y = chartHeight - barH
-
-                drawRoundRect(
-                    color = accent,
-                    topLeft = Offset(x, y),
-                    size = Size(barWidth - gap * 2, barH),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f),
-                )
-            }
-
-            // X-axis labels (first and last)
-            if (data.isNotEmpty()) {
-                val fmt = java.time.format.DateTimeFormatter.ofPattern("M/d")
-                val firstDate = Instant.ofEpochSecond(data.first().dateEpoch)
-                    .atZone(ZoneId.systemDefault()).toLocalDate()
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = firstDate.format(fmt),
-                    topLeft = Offset(0f, chartHeight + 4f),
-                    style = TextStyle(color = labelColor, fontSize = (9f * textScale).sp),
-                )
-                if (data.size > 1) {
-                    val lastDate = Instant.ofEpochSecond(data.last().dateEpoch)
-                        .atZone(ZoneId.systemDefault()).toLocalDate()
-                    val lastLabel = lastDate.format(fmt)
-                    val measured = textMeasurer.measure(lastLabel, TextStyle(fontSize = (9f * textScale).sp))
-                    drawText(
-                        textMeasurer = textMeasurer,
-                        text = lastLabel,
-                        topLeft = Offset(size.width - measured.size.width, chartHeight + 4f),
-                        style = TextStyle(color = labelColor, fontSize = (9f * textScale).sp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ModelBreakdownChart(data: List<AppModelUsageEntry>) {
-    val textMeasurer = rememberTextMeasurer()
-    val textScale = LocalTextScale.current
-    var animProgress by remember { mutableFloatStateOf(0f) }
-    val animatedProgress by animateFloatAsState(
-        targetValue = animProgress,
-        animationSpec = tween(800),
-        label = "modelChartAnim",
-    )
-    LaunchedEffect(Unit) { animProgress = 1f }
-
-    val total = data.sumOf { it.threadCount.toInt() }.coerceAtLeast(1)
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RemoraTheme.surface, RoundedCornerShape(12.dp))
-            .padding(16.dp),
-    ) {
-        Text("Model Breakdown", color = RemoraTheme.textSecondary, fontSize = RemoraTextStyle.caption.scaled, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(12.dp))
-
-        val accent = RemoraTheme.accent
-        val labelColor = RemoraTheme.textMuted
-        val colors = listOf(
-            RemoraTheme.accent,
-            RemoraTheme.info,
-            RemoraTheme.violet,
-            RemoraTheme.amber,
-            RemoraTheme.teal,
-            RemoraTheme.olive,
-        )
-
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height((data.size * 32 + 8).dp),
-        ) {
-            data.forEachIndexed { index, entry ->
-                val y = index * 32f + 4f
-                val count = entry.threadCount.toInt()
-                val ratio = count.toFloat() / total
-                val barWidth = size.width * 0.6f * ratio * animatedProgress
-                val color = colors[index % colors.size]
-
-                drawRoundRect(
-                    color = color.copy(alpha = 0.7f),
-                    topLeft = Offset(0f, y),
-                    size = Size(barWidth.coerceAtLeast(4f), 20f),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4f),
-                )
-
-                val label = "${entry.model} ($count)"
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = label,
-                    topLeft = Offset(barWidth + 8f, y + 2f),
-                    style = TextStyle(color = labelColor, fontSize = (10f * textScale).sp),
-                )
-            }
         }
     }
 }

@@ -206,11 +206,6 @@ struct ConversationImageGenerationData: Equatable {
     }
 }
 
-struct ConversationWidgetData: Equatable {
-    var widgetState: WidgetState
-    var status: String
-}
-
 struct ConversationUserInputOptionData: Equatable {
     var label: String
     var description: String?
@@ -264,7 +259,6 @@ enum ConversationItemContent: Equatable {
     case webSearch(ConversationWebSearchData)
     case imageView(ConversationImageViewData)
     case imageGeneration(ConversationImageGenerationData)
-    case widget(ConversationWidgetData)
     case userInputResponse(ConversationUserInputResponseData)
     case divider(ConversationDividerKind)
     case error(ConversationSystemErrorData)
@@ -380,13 +374,6 @@ struct ConversationItem: Identifiable, Equatable {
         default:
             return false
         }
-    }
-
-    var widgetState: WidgetState? {
-        if case .widget(let data) = content {
-            return data.widgetState
-        }
-        return nil
     }
 
     func isVisible(
@@ -559,15 +546,6 @@ struct ConversationItem: Identifiable, Equatable {
             hasher.combine(data.revisedPrompt)
             hasher.combine(data.imagePNG?.count)
             hasher.combine(data.savedPath)
-        case .widget(let data):
-            hasher.combine("widget")
-            hasher.combine(data.status)
-            hasher.combine(data.widgetState.callId)
-            hasher.combine(data.widgetState.title)
-            hasher.combine(data.widgetState.widgetHTML)
-            hasher.combine(data.widgetState.width)
-            hasher.combine(data.widgetState.height)
-            hasher.combine(data.widgetState.isFinalized)
         case .userInputResponse(let data):
             hasher.combine("userInputResponse")
             for question in data.questions {
@@ -809,21 +787,6 @@ private extension HydratedConversationItemContent {
                     revisedPrompt: data.revisedPrompt,
                     imagePNG: data.imagePng,
                     savedPath: data.savedPath
-                )
-            )
-        case .widget(let data):
-            return .widget(
-                ConversationWidgetData(
-                    widgetState: WidgetState(
-                        callId: itemId,
-                        title: data.title,
-                        widgetHTML: data.widgetHtml,
-                        width: CGFloat(data.width),
-                        height: CGFloat(data.height),
-                        isFinalized: data.isFinalized,
-                        appId: data.appId.flatMap { $0.isEmpty ? nil : $0 }
-                    ),
-                    status: data.status
                 )
             )
         case .userInputResponse(let data):

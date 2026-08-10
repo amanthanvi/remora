@@ -81,7 +81,6 @@ import uniffi.codex_mobile_client.AppServerSnapshot
 fun SettingsSheet(
     onDismiss: () -> Unit,
     onOpenAccount: (serverId: String) -> Unit,
-    onOpenApps: (() -> Unit)? = null,
 ) {
     // Sub-screen navigation
     var subScreen by remember { mutableStateOf<SettingsSubScreen?>(null) }
@@ -100,7 +99,6 @@ fun SettingsSheet(
             onOpenDebug = { subScreen = SettingsSubScreen.Debug },
             onOpenRemoraLinkHosts = { subScreen = SettingsSubScreen.RemoraLinkHosts },
             onOpenAccount = onOpenAccount,
-            onOpenApps = onOpenApps,
         )
     }
 }
@@ -116,7 +114,6 @@ private fun SettingsTopLevel(
     onOpenDebug: () -> Unit,
     onOpenRemoraLinkHosts: () -> Unit,
     onOpenAccount: (serverId: String) -> Unit,
-    onOpenApps: (() -> Unit)?,
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
@@ -194,21 +191,6 @@ private fun SettingsTopLevel(
                     )
                 },
             )
-        }
-
-        // ── Apps ──
-        if (onOpenApps != null) {
-            item { SectionHeader("Apps") }
-            item {
-                NavRow(
-                    icon = Icons.Default.Widgets,
-                    label = "Saved Apps",
-                    onClick = {
-                        onDismiss()
-                        onOpenApps()
-                    },
-                )
-            }
         }
 
         // ── Experimental ──

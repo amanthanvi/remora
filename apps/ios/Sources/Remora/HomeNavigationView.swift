@@ -17,7 +17,6 @@ struct HomeNavigationView: View {
     @State private var experimentalFeatures = ExperimentalFeatures.shared
     @State private var actionCenter = RemoraActionCenter.shared
     @State private var homeDashboardModel = HomeDashboardModel()
-    @State private var savedAppsStore = SavedAppsStore.shared
     @State private var navigationPath: [HomeNavigationRoute] = []
     @State private var directoryPickerSheet: SessionLaunchSupport.DirectoryPickerSheetModel?
     @State private var showProjectPicker = false
@@ -274,10 +273,6 @@ struct HomeNavigationView: View {
                     )
                     .toolbar(.hidden, for: .navigationBar)
                     .background(RemoraTheme.backgroundGradient.ignoresSafeArea())
-                case .appsList:
-                    AppsListView()
-                case .savedApp(let appId):
-                    SavedAppDetailView(appId: appId)
                 case let .terminal(preferredRemoraLinkHostId):
                     TerminalScreen(
                         cwd: preferredTerminalWorkingDirectory(),
@@ -341,18 +336,6 @@ struct HomeNavigationView: View {
                 appState.pendingThreadNavigation = nil
                 replaceTopConversation(with: newKey)
             }
-        }
-        .onChange(of: SavedAppsNavigation.shared.pendingConversationThreadId) { _, newThreadId in
-            guard let newThreadId else { return }
-            _ = SavedAppsNavigation.shared.consumeConversationRequest()
-            guard let key = navigationObservation.threadKey(threadId: newThreadId) else {
-                return
-            }
-            // Pop the saved-app detail off the stack, then push the conversation.
-            if case .savedApp = navigationPath.last {
-                navigationPath.removeLast()
-            }
-            openConversation(key)
         }
         .onReceive(NotificationCenter.default.publisher(for: .remoraActionRequested)) { notification in
             guard let request = notification.object as? RemoraActionRequest else { return }
@@ -932,7 +915,6 @@ struct HomeNavigationView: View {
             onShowCommandPalette: {
                 _ = actionCenter.perform(.showCommandPalette, source: .toolbar)
             },
-            onShowApps: savedAppsStore.apps.isEmpty ? nil : { navigationPath.append(.appsList) },
             onShowTerminal: terminalLauncher,
             onPinThread: pinThread,
             onUnpinThread: unpinThread,
@@ -979,7 +961,6 @@ struct HomeNavigationView: View {
             onShowCommandPalette: {
                 _ = actionCenter.perform(.showCommandPalette, source: .toolbar)
             },
-            onShowApps: savedAppsStore.apps.isEmpty ? nil : { navigationPath.append(.appsList) },
             onShowTerminal: terminalLauncher,
             onPinThread: pinThread,
             onUnpinThread: unpinThread,

@@ -12,6 +12,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
         LLog.info("lifecycle", "application did finish launching")
         CurrentKeychainNamespaceCleanup.shared.start {
+            _ = CurrentWorkspaceRebuild.apply()
             NotificationCenter.default.post(name: .remoraSecurityCutoverDidComplete, object: nil)
             // Pre-initialize Rust bridges (tokio runtime) on a background
             // thread only after the 1.6 authority cutover is durable.

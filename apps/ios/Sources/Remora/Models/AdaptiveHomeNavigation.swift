@@ -107,8 +107,6 @@ enum HomeNavigationRoute: Hashable {
     case serverWallpaperAdjust(serverId: String)
     case replayRecording(URL)
     case newThread
-    case appsList
-    case savedApp(appId: String)
     case terminal(preferredRemoraLinkHostId: String?)
 
     var conversationKey: ThreadKey? {

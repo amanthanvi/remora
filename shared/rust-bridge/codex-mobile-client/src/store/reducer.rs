@@ -110,25 +110,8 @@ pub struct AppStoreReducer {
     /// item in memory — on a 5k-item streaming thread that doubled the
     /// canonical `ThreadSnapshot.items` heap footprint.
     last_thread_item_upserts: RwLock<HashMap<(ThreadKey, String), u64>>,
-    /// Per-call-id running buffer of streaming `dynamic_tool_call` argument
-    /// JSON. Keyed by `(thread_key, call_id)`. Entries are cleared when the
-    /// call completes or fails (via `ItemCompleted` on the matching
-    /// item). The partial buffer is parsed tolerantly so platforms can
-    /// render widgets as the model streams the HTML body.
-    dynamic_tool_arg_buffers: RwLock<HashMap<(ThreadKey, String), DynamicToolCallArgBuffer>>,
     updates_tx: broadcast::Sender<AppStoreUpdateRecord>,
     voice_state: VoiceRealtimeState,
-}
-
-/// State we carry per (thread, call_id) while streaming argument deltas.
-/// Holds the concatenated JSON so far plus the item_id the call was
-/// announced with — we need it to clear on `ItemCompleted`, and to fill
-/// the `item_id` field of the broadcast even when the server later omits
-/// it on a particular delta.
-#[derive(Debug, Clone)]
-pub(crate) struct DynamicToolCallArgBuffer {
-    pub(crate) item_id: String,
-    pub(crate) buffer: String,
 }
 
 enum ItemMutationUpdate {
@@ -145,7 +128,6 @@ impl AppStoreReducer {
             ui_event_generations: Mutex::new(HashMap::new()),
             last_thread_state_updates: RwLock::new(HashMap::new()),
             last_thread_item_upserts: RwLock::new(HashMap::new()),
-            dynamic_tool_arg_buffers: RwLock::new(HashMap::new()),
             updates_tx,
             voice_state: VoiceRealtimeState::default(),
         }
@@ -1737,7 +1719,6 @@ impl AppStoreReducer {
                 }
             }
             UiEvent::TurnCompleted { key, turn_id, .. } => {
-                self.clear_dynamic_tool_arg_buffers_for_thread(key);
                 if self
                     .mutate_thread_with_result(key, |thread| {
                         thread.active_turn_id = None;
@@ -1805,17 +1786,6 @@ impl AppStoreReducer {
                 }
             }
             UiEvent::ItemCompleted { key, notification } => {
-                // Clear any streaming dynamic-tool-call argument buffers
-                // that were accumulating for this item — the call has
-                // finalized (or failed) and further partial-parse work
-                // is wasted.
-                if matches!(
-                    notification.item,
-                    codex_app_server_protocol::ThreadItem::DynamicToolCall { .. }
-                ) {
-                    let item_id = notification.item.id().to_string();
-                    self.clear_dynamic_tool_arg_buffers_for_item(key, &item_id);
-                }
                 if let Some(item) = conversation_item_from_upstream_with_turn(
                     notification.item.clone(),
                     Some(&notification.turn_id),
@@ -1950,80 +1920,6 @@ impl AppStoreReducer {
                         "falling back to ThreadUpserted after live delta repair failed"
                     );
                     self.emit_thread_upsert(key);
-                }
-            }
-            UiEvent::DynamicToolCallArgumentsDelta {
-                key,
-                item_id,
-                call_id,
-                delta,
-            } => {
-                // `item_id` may be empty before the provider confirms
-                // the item id; key on `call_id` as primary, fall back
-                // to `item_id` only when `call_id` is absent. Track the
-                // latest non-empty item_id in the buffer so follow-up
-                // deltas that do carry one don't lose it.
-                let buffer_key = call_id.clone().unwrap_or_else(|| item_id.clone());
-                // Hard cap on per-call buffer growth. Widget HTML well past
-                // this size is either a runaway stream or pathological; the
-                // saved-apps state cap is 256 KB so we match it. Once hit,
-                // further deltas are silently dropped for this call; the
-                // final ItemCompleted still delivers the full payload.
-                const MAX_BUFFER_BYTES: usize = 256 * 1024;
-                let (partial, known_item_id) = {
-                    let mut guard = self
-                        .dynamic_tool_arg_buffers
-                        .write()
-                        .expect("app store dynamic_tool_arg_buffers poisoned");
-                    let entry = guard
-                        .entry((key.clone(), buffer_key.clone()))
-                        .or_insert_with(|| DynamicToolCallArgBuffer {
-                            item_id: item_id.clone(),
-                            buffer: String::new(),
-                        });
-                    if !item_id.is_empty() && entry.item_id.is_empty() {
-                        entry.item_id = item_id.clone();
-                    }
-                    if entry.buffer.len() < MAX_BUFFER_BYTES {
-                        let remaining = MAX_BUFFER_BYTES - entry.buffer.len();
-                        if delta.len() <= remaining {
-                            entry.buffer.push_str(delta);
-                        } else {
-                            // UTF-8-safe prefix; splitting mid
-                            // code-point would poison the buffer.
-                            let mut cut = remaining;
-                            while cut > 0 && !delta.is_char_boundary(cut) {
-                                cut -= 1;
-                            }
-                            entry.buffer.push_str(&delta[..cut]);
-                        }
-                    }
-                    (entry.buffer.clone(), entry.item_id.clone())
-                };
-
-                // Tolerantly extract widget fields from the accumulated
-                // buffer and broadcast via `DynamicWidgetStreaming` so
-                // platforms can progressively render the widget bubble.
-                // Platforms already consume this variant (shipped with
-                // SW-I1/SW-A1). `known_item_id` may still be empty on
-                // the very first delta; in that case use the buffer_key
-                // so platforms have a stable correlation id.
-                let streaming_item_id = if !item_id.is_empty() {
-                    item_id.clone()
-                } else if !known_item_id.is_empty() {
-                    known_item_id
-                } else {
-                    buffer_key.clone()
-                };
-                if let Some(widget) =
-                    crate::conversation::streaming_widget_data_from_partial_arguments(&partial)
-                {
-                    self.emit(AppStoreUpdateRecord::DynamicWidgetStreaming {
-                        key: key.clone(),
-                        item_id: streaming_item_id,
-                        call_id: buffer_key,
-                        widget,
-                    });
                 }
             }
             UiEvent::TurnDiffUpdated { key, notification } => {
@@ -2335,7 +2231,6 @@ impl AppStoreReducer {
 
     fn clear_removed_thread_caches(&self, key: &ThreadKey) {
         self.clear_thread_update_caches(key);
-        self.clear_dynamic_tool_arg_buffers_for_thread(key);
     }
 
     pub(crate) fn emit_thread_upsert(&self, key: &ThreadKey) {
@@ -2606,61 +2501,11 @@ impl AppStoreReducer {
             AppStoreUpdateRecord::RealtimeClosed { key, .. } => {
                 tracing::debug!(target: "store", server_id = key.server_id, thread_id = key.thread_id, "emit RealtimeClosed")
             }
-            AppStoreUpdateRecord::SavedAppsChanged => {
-                tracing::debug!(target: "store", "emit SavedAppsChanged")
-            }
-            AppStoreUpdateRecord::DynamicWidgetStreaming {
-                key,
-                item_id,
-                call_id,
-                widget,
-            } => {
-                tracing::trace!(
-                    target: "store",
-                    server_id = key.server_id,
-                    thread_id = key.thread_id,
-                    item_id,
-                    call_id,
-                    html_len = widget.widget_html.len(),
-                    "emit DynamicWidgetStreaming"
-                )
-            }
             AppStoreUpdateRecord::TerminalSessionsChanged => {
                 tracing::debug!(target: "store", "emit TerminalSessionsChanged")
             }
         }
         let _ = self.updates_tx.send(update);
-    }
-
-    /// Broadcast that the `saved_apps.rs` on-disk index mutated.
-    /// Called by every saved-apps UniFFI mutation and by the
-    /// finalize-time auto-upsert hook in `dynamic_tools.rs`. Platforms
-    /// respond by re-reading via `saved_apps_list`.
-    pub(crate) fn emit_saved_apps_changed(&self) {
-        self.emit(AppStoreUpdateRecord::SavedAppsChanged);
-    }
-
-    /// Drop any streaming `DynamicToolCallArgumentsDelta` buffers that
-    /// were accumulating for the given `(thread_key, item_id)`. Called
-    /// from `ItemCompleted` for `DynamicToolCall` items, when the
-    /// call has finalized on the server. Keyed by the buffer map's
-    /// inner value (stored item_id), so we drop every buffer whose
-    /// item_id matches — regardless of call_id.
-    fn clear_dynamic_tool_arg_buffers_for_item(&self, thread_key: &ThreadKey, item_id: &str) {
-        let mut guard = self
-            .dynamic_tool_arg_buffers
-            .write()
-            .expect("app store dynamic_tool_arg_buffers poisoned");
-        guard.retain(|(existing_key, _), buffer| {
-            !(existing_key == thread_key && buffer.item_id == item_id)
-        });
-    }
-
-    fn clear_dynamic_tool_arg_buffers_for_thread(&self, thread_key: &ThreadKey) {
-        self.dynamic_tool_arg_buffers
-            .write()
-            .expect("app store dynamic_tool_arg_buffers poisoned")
-            .retain(|(existing_key, _), _| existing_key != thread_key);
     }
 }
 

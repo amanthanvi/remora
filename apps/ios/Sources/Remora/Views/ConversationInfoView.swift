@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 struct ConversationInfoView: View {
     @Environment(AppModel.self) private var appModel
@@ -25,7 +24,6 @@ struct ConversationInfoView: View {
     @State private var renameText = ""
     @State private var isRenaming = false
     @State private var stats: AppConversationStats?
-    @State private var serverUsage: AppServerUsageStats?
 
     private var thread: AppThreadSnapshot? {
         guard let threadKey else { return nil }
@@ -74,7 +72,9 @@ struct ConversationInfoView: View {
                         contextWindowSection
                         conversationStatsSection
                     }
-                    serverChartsSection
+                    if let rateLimits = server?.rateLimits {
+                        rateLimitSection(rateLimits)
+                    }
                     serverInfoSection
                 }
                 .padding(.horizontal, 16)
@@ -387,143 +387,15 @@ struct ConversationInfoView: View {
         return "\(mins)m \(remainSecs)s"
     }
 
-    // MARK: - Section B: Server-Wide Charts
-
-    private var serverChartsSection: some View {
+    private func rateLimitSection(_ rateLimits: RateLimitSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Server Usage")
+            Text("Rate Limits")
                 .remoraFont(size: 14, weight: .semibold)
                 .foregroundStyle(RemoraTheme.textPrimary)
-
-            if let usage = serverUsage {
-                if !usage.tokensByThread.isEmpty {
-                    tokenUsageChart(usage)
-                }
-
-                if !usage.activityByDay.isEmpty {
-                    activityChart(usage)
-                }
-
-                if !usage.modelUsage.isEmpty {
-                    modelBreakdownChart(usage)
-                }
-            }
-
-            if let rateLimits = server?.rateLimits {
-                rateLimitGauge(rateLimits)
-            }
+            rateLimitGauge(rateLimits)
         }
         .padding(16)
         .modifier(GlassRectModifier(cornerRadius: 12))
-    }
-
-    private func tokenUsageChart(_ usage: AppServerUsageStats) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Token Usage by Conversation")
-                .remoraFont(size: 12, weight: .medium)
-                .foregroundStyle(RemoraTheme.textSecondary)
-
-            Chart(Array(usage.tokensByThread.enumerated()), id: \.offset) { _, entry in
-                AreaMark(
-                    x: .value("Thread", entry.threadTitle),
-                    y: .value("Tokens", entry.tokens)
-                )
-                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.3))
-                .interpolationMethod(.catmullRom)
-
-                LineMark(
-                    x: .value("Thread", entry.threadTitle),
-                    y: .value("Tokens", entry.tokens)
-                )
-                .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
-                .interpolationMethod(.catmullRom)
-            }
-            .chartXAxis {
-                AxisMarks { _ in
-                    AxisValueLabel()
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textMuted)
-                }
-            }
-            .chartYAxis {
-                AxisMarks { _ in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(RemoraTheme.border)
-                    AxisValueLabel()
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textMuted)
-                }
-            }
-            .frame(height: 160)
-        }
-    }
-
-    private func activityChart(_ usage: AppServerUsageStats) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Activity Timeline")
-                .remoraFont(size: 12, weight: .medium)
-                .foregroundStyle(RemoraTheme.textSecondary)
-
-            Chart(Array(usage.activityByDay.enumerated()), id: \.offset) { _, entry in
-                BarMark(
-                    x: .value("Date", Date(timeIntervalSince1970: TimeInterval(entry.dateEpoch)), unit: .day),
-                    y: .value("Activity", entry.turnCount)
-                )
-                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.7))
-                .cornerRadius(2)
-            }
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textMuted)
-                }
-            }
-            .chartYAxis {
-                AxisMarks { _ in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(RemoraTheme.border)
-                    AxisValueLabel()
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textMuted)
-                }
-            }
-            .frame(height: 140)
-        }
-    }
-
-    private func modelBreakdownChart(_ usage: AppServerUsageStats) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Model Usage")
-                .remoraFont(size: 12, weight: .medium)
-                .foregroundStyle(RemoraTheme.textSecondary)
-
-            Chart(Array(usage.modelUsage.enumerated()), id: \.offset) { _, entry in
-                BarMark(
-                    x: .value("Count", entry.threadCount),
-                    y: .value("Model", entry.model)
-                )
-                .foregroundStyle(RemoraTheme.accentForegroundOnSurface.opacity(0.7))
-                .cornerRadius(2)
-            }
-            .chartXAxis {
-                AxisMarks { _ in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(RemoraTheme.border)
-                    AxisValueLabel()
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textMuted)
-                }
-            }
-            .chartYAxis {
-                AxisMarks { _ in
-                    AxisValueLabel()
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(RemoraTheme.textSecondary)
-                }
-            }
-            .frame(height: CGFloat(max(usage.modelUsage.count * 32, 60)))
-        }
     }
 
     private func rateLimitGauge(_ rateLimits: RateLimitSnapshot) -> some View {
@@ -741,9 +613,6 @@ struct ConversationInfoView: View {
     private func computeData() {
         if let thread {
             stats = thread.stats
-        }
-        if let server {
-            serverUsage = server.usageStats
         }
     }
 }

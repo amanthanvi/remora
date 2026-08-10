@@ -125,7 +125,6 @@ private extension AppToolCallKind {
         case .webSearch: return .webSearch
         case .collaboration: return .collaboration
         case .imageView: return .imageView
-        case .widget: return .widget
         case .unknown: return nil
         }
     }

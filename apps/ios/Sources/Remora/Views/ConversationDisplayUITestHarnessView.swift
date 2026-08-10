@@ -31,13 +31,11 @@ struct ConversationDisplayUITestHarnessView: View {
                         items: Self.seedItems,
                         isLive: false,
                         serverId: "ui-test-server",
-                        originThreadId: nil,
                         agentDirectoryVersion: 0,
                         messageActionsDisabled: true,
                         onStreamingSnapshotRendered: nil,
                         onLiveContentLayoutChanged: nil,
                         resolveTargetLabel: { _ in nil },
-                        onWidgetPrompt: { _ in },
                         onEditUserItem: { _ in },
                         onForkFromUserItem: { _ in }
                     )

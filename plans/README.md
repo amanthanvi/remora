@@ -36,6 +36,7 @@ evidence.
 | 010 | Reject Android cross-account OAuth refresh results ([#14](https://github.com/amanthanvi/remora/issues/14)) | P0 | S | 004 | DONE |
 | 011 | Clean IPC request and task lifecycle ([#21](https://github.com/amanthanvi/remora/issues/21)) | P1 | M | 012 | DONE |
 | 012 | Migrate stale codex-ipc test fixtures ([#22](https://github.com/amanthanvi/remora/issues/22)) | P0 | S | 010 | DONE |
+| 013 | Complete the greenfield obsolete-state cutover ([#23](https://github.com/amanthanvi/remora/issues/23)) | P0 | L | 009, 011 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 
@@ -57,6 +58,10 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   active deep audit is vetted. The user's accepted product plan is the locked
   direction; the audit exists to give each executor exact live paths, excerpts,
   tests, and STOP conditions rather than to reopen settled product choices.
+- Plan 013 closes the untracked M0 deletion gap. Generated-HTML actions, Saved
+  Apps, minigames, their WebViews/native bridges, and dedicated aggregate usage
+  UI are gone across Rust, iOS, and Android. A one-time product-state rebuild
+  preserves current security stores and reports completion non-modally.
 
 ## Findings considered and rejected
 

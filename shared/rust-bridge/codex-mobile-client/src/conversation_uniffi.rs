@@ -32,7 +32,6 @@ pub enum HydratedConversationItemContent {
     MultiAgentAction(HydratedMultiAgentActionData),
     WebSearch(HydratedWebSearchData),
     ImageView(HydratedImageViewData),
-    Widget(HydratedWidgetData),
     UserInputResponse(HydratedUserInputResponseData),
     Divider(HydratedDividerData),
     Error(HydratedErrorData),
@@ -293,21 +292,6 @@ pub struct HydratedWebSearchData {
 #[derive(Debug, Clone, PartialEq, Serialize, uniffi::Record)]
 pub struct HydratedImageViewData {
     pub path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, uniffi::Record)]
-pub struct HydratedWidgetData {
-    pub title: String,
-    pub widget_html: String,
-    pub width: f64,
-    pub height: f64,
-    pub status: String,
-    pub is_finalized: bool,
-    /// Model-chosen slug identifying this app across regenerations in
-    /// the origin thread. `None` when the `show_widget` call omitted it
-    /// (pre-R2 widgets still in the timeline). Platforms use this to
-    /// surface the "Saved as <slug>" chip on finalized bubbles.
-    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, uniffi::Record)]

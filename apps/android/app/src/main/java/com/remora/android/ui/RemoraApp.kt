@@ -6,9 +6,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -23,6 +26,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -34,7 +38,9 @@ import com.remora.android.state.SavedThreadsStore
 import com.remora.android.state.VoiceRuntimeController
 import com.remora.android.state.connectionModeLabel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.ui.unit.dp
 import com.remora.android.ui.conversation.ApprovalOverlay
 import com.remora.android.ui.conversation.ConversationInfoScreen
 import com.remora.android.ui.conversation.ConversationScreen
@@ -150,6 +156,16 @@ fun RemoraApp(
         var directoryPickerForProject by remember { mutableStateOf(false) }
         var showProjectPicker by remember { mutableStateOf(false) }
         var showCommandPalette by remember { mutableStateOf(false) }
+        var showWorkspaceRebuildNotice by remember {
+            mutableStateOf(appModel.consumeWorkspaceRebuildNotice())
+        }
+
+        LaunchedEffect(showWorkspaceRebuildNotice) {
+            if (showWorkspaceRebuildNotice) {
+                delay(4_000)
+                showWorkspaceRebuildNotice = false
+            }
+        }
 
         // Home selection state
         var selectedServerId by remember {
@@ -332,7 +348,6 @@ fun RemoraApp(
             conversationWorkflowBlocked ||
             navigationPaneInputFocused ||
             currentRoute is Route.Terminal ||
-            currentRoute is Route.SavedApp ||
             visibleApprovals.isNotEmpty() ||
             visibleUserInputs.isNotEmpty() ||
             showCommandPalette ||
@@ -439,7 +454,6 @@ fun RemoraApp(
                         onOpenConversation = navigateToConversation,
                         onShowDiscovery = { showDiscovery = true },
                         onShowSettings = { showSettings = true },
-                        onShowApps = { navigate(Route.Apps) },
                         onOpenProjectPicker = { showProjectPicker = true },
                         onOpenAccount = { serverId -> showAccountForServer = serverId },
                         selectedProject = selectedProject,
@@ -472,7 +486,6 @@ fun RemoraApp(
                                 }
                             }
                         },
-                        onOpenSavedApp = { appId -> navigate(Route.SavedApp(appId)) },
                         onOpenTerminal = if (ExperimentalFeatures.isEnabled(RemoraFeature.TERMINAL)) {
                             { navigate(Route.Terminal()) }
                         } else {
@@ -501,7 +514,6 @@ fun RemoraApp(
                         onBack = navigateBack,
                         onInfo = { navigate(Route.ConversationInfo(route.key)) },
                         onShowDirectoryPicker = { openDirectoryPicker(route.key.serverId) },
-                        onOpenSavedApp = { appId -> navigate(Route.SavedApp(appId)) },
                         onComposerFocusChanged = { conversationWorkflowBlocked = it },
                     )
                 }
@@ -597,21 +609,6 @@ fun RemoraApp(
                     )
                 }
 
-                is Route.Apps -> {
-                    com.remora.android.ui.apps.AppsListScreen(
-                        onBack = navigateBack,
-                        onOpenApp = { appId -> navigate(Route.SavedApp(appId)) },
-                    )
-                }
-
-                is Route.SavedApp -> {
-                    com.remora.android.ui.apps.SavedAppScreen(
-                        appId = route.appId,
-                        onBack = navigateBack,
-                        onOpenConversation = { key -> navigate(Route.Conversation(key)) },
-                    )
-                }
-
                 is Route.Terminal -> {
                     TerminalScreen(
                         preferredRemoraLinkHostId = route.preferredRemoraLinkHostId,
@@ -619,6 +616,18 @@ fun RemoraApp(
                     )
                 }
                 }
+            }
+
+            if (showWorkspaceRebuildNotice) {
+                Text(
+                    text = "Local workspace rebuilt",
+                    color = RemoraTheme.textPrimary,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp)
+                        .background(RemoraTheme.surface, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                )
             }
 
             // Global approval overlay
@@ -689,10 +698,6 @@ fun RemoraApp(
                     onOpenAccount = { serverId ->
                         showSettings = false
                         showAccountForServer = serverId
-                    },
-                    onOpenApps = {
-                        showSettings = false
-                        navigate(Route.Apps)
                     },
                 )
             }

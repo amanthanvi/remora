@@ -603,7 +603,6 @@ private func makeServer(
         availableModels: nil,
         agentRuntimes: [],
         connectionProgress: nil,
-        usageStats: nil,
         codexVersion: nil
     )
 }

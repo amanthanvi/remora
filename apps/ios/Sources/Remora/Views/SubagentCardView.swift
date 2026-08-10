@@ -360,13 +360,11 @@ private struct SubagentDetailSheet: View {
                                 items: items,
                                 isLive: threadSnapshot.activeTurnId != nil || threadSnapshot.info.status == .active,
                                 serverId: threadKey.serverId,
-                                originThreadId: threadKey.threadId,
                                 agentDirectoryVersion: 0,
                                 messageActionsDisabled: true,
                                 onStreamingSnapshotRendered: nil,
                                 onLiveContentLayoutChanged: nil,
                                 resolveTargetLabel: { _ in nil },
-                                onWidgetPrompt: { _ in },
                                 onEditUserItem: { _ in },
                                 onForkFromUserItem: { _ in }
                             )

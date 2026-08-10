@@ -10,8 +10,6 @@ pub enum ClientError {
     Serialization(String),
     #[error("Event stream closed: {0}")]
     EventClosed(String),
-    #[error("Minigame generation failed: {0}")]
-    MinigameGenerationFailed(String),
 }
 
 impl From<crate::RpcClientError> for ClientError {

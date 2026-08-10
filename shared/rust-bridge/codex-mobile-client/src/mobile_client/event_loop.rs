@@ -37,8 +37,6 @@ impl MobileClient {
         let oauth_session = Arc::clone(&session);
         let sessions = Arc::clone(&self.sessions);
         let app_store = Arc::clone(&self.app_store);
-        let widget_waiters = Arc::clone(&self.widget_waiters);
-        let saved_apps_directory = Arc::clone(&self.saved_apps_directory);
         Self::spawn_detached(async move {
             loop {
                 let event = events.recv().await;
@@ -125,15 +123,11 @@ impl MobileClient {
                             let session = Arc::clone(&oauth_session);
                             let sessions = Arc::clone(&sessions);
                             let app_store = Arc::clone(&app_store);
-                            let widget_waiters = Arc::clone(&widget_waiters);
-                            let saved_apps_directory = Arc::clone(&saved_apps_directory);
                             MobileClient::spawn_detached(async move {
                                 if let Err(error) = handle_dynamic_tool_call_request(
                                     session,
                                     sessions,
                                     app_store,
-                                    widget_waiters,
-                                    saved_apps_directory,
                                     request_id,
                                     params,
                                     runtime_kind,

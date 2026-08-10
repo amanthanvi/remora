@@ -3,7 +3,6 @@ import Observation
 
 enum RemoraFeature: String, CaseIterable, Identifiable {
     case realtimeVoice = "realtime_voice"
-    case thinkingMinigame = "thinking_minigame"
     case terminal = "terminal"
 
     var id: String { rawValue }
@@ -11,7 +10,6 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .realtimeVoice: return "Realtime"
-        case .thinkingMinigame: return "Thinking minigame"
         case .terminal: return "Terminal"
         }
     }
@@ -19,7 +17,6 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .realtimeVoice: return "Show the realtime voice launcher on the home screen."
-        case .thinkingMinigame: return "Tap the Thinking shimmer while the assistant generates to play a tiny generated minigame."
         case .terminal: return "Show the remote terminal launcher on the home screen."
         }
     }
@@ -27,7 +24,6 @@ enum RemoraFeature: String, CaseIterable, Identifiable {
     var defaultEnabled: Bool {
         switch self {
         case .realtimeVoice: return true
-        case .thinkingMinigame: return false
         case .terminal: return false
         }
     }

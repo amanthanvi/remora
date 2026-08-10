@@ -19,10 +19,6 @@ struct ConversationView: View {
     var bottomInset: CGFloat = 0
     var onOpenConversation: ((ThreadKey) -> Void)? = nil
     var onResumeSessions: ((String) -> Void)? = nil
-    var minigameOverlay: MinigameOverlayState = .idle
-    var onTypingTap: (() -> Void)? = nil
-    var onMinigameDismiss: (() -> Void)? = nil
-    var onMinigameRetry: (() -> Void)? = nil
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @AppStorage("conversationTextSizeStep") private var conversationTextSizeStep = ConversationTextSize.large.rawValue
     @AppStorage("fastMode") private var fastMode = false
@@ -81,7 +77,6 @@ struct ConversationView: View {
             initialTurnsLoaded: thread.initialTurnsLoaded || !supportsTurnPagination,
             textSizeStep: $conversationTextSizeStep,
             resolveTargetLabel: resolveTargetLabel,
-            onWidgetPrompt: sendWidgetPrompt,
             onEditUserItem: editMessage,
             onForkFromUserItem: forkFromMessage,
             onOpenConversation: onOpenConversation,
@@ -89,16 +84,6 @@ struct ConversationView: View {
                 Task { await appModel.loadOlderTurns(threadId: key) }
             }
         )
-        .overlay(alignment: .bottomLeading) {
-            if let onTypingTap,
-               minigameOverlay == .idle,
-               ExperimentalFeatures.shared.isEnabled(.thinkingMinigame) {
-                MinigameLaunchButton(action: onTypingTap)
-                    .padding(.leading, 12)
-                    .padding(.bottom, 8)
-                    .transition(.scale.combined(with: .opacity))
-            }
-        }
         .activeThreadKey(activeThreadKey)
         .background { ChatWallpaperBackground(threadKey: activeThreadKey) }
         .overlay(alignment: .top) {
@@ -120,29 +105,17 @@ struct ConversationView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if minigameOverlay == .idle {
-                ConversationBottomChrome(
-                    pinnedContextItems: pinnedContextItems,
-                    composer: composer,
-                    composerInputText: $composerInputText,
-                    composerAttachedImage: $composerAttachedImage,
-                    onSend: sendMessage,
-                    onFileSearch: searchComposerFiles,
-                    bottomInset: bottomInset,
-                    onOpenConversation: onOpenConversation,
-                    onResumeSessions: onResumeSessions
-                )
-            } else {
-                MinigameOverlayView(
-                    state: minigameOverlay,
-                    onClose: { onMinigameDismiss?() },
-                    onRetry: { onMinigameRetry?() }
-                )
-                .frame(height: UIScreen.main.bounds.height * 0.4)
-                .padding(.horizontal, 8)
-                .padding(.bottom, max(bottomInset, 8))
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            ConversationBottomChrome(
+                pinnedContextItems: pinnedContextItems,
+                composer: composer,
+                composerInputText: $composerInputText,
+                composerAttachedImage: $composerAttachedImage,
+                onSend: sendMessage,
+                onFileSearch: searchComposerFiles,
+                bottomInset: bottomInset,
+                onOpenConversation: onOpenConversation,
+                onResumeSessions: onResumeSessions
+            )
         }
         .alert("Conversation Action Error", isPresented: Binding(
             get: { messageActionError != nil },
@@ -206,25 +179,6 @@ struct ConversationView: View {
                     "server_id": activeThreadKey.serverId,
                     "thread_id": activeThreadKey.threadId
                 ])
-                messageActionError = error.localizedDescription
-            }
-        }
-    }
-
-    private func sendWidgetPrompt(_ text: String) {
-        guard !text.isEmpty else { return }
-        localSendScrollToken &+= 1
-        Task {
-            do {
-                let payload = try makeComposerPayload(
-                    text: text,
-                    attachmentImage: nil,
-                    fileAttachments: [],
-                    skillMentions: [],
-                    pluginMentions: []
-                )
-                try await appModel.startTurn(key: activeThreadKey, payload: payload)
-            } catch {
                 messageActionError = error.localizedDescription
             }
         }

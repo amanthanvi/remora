@@ -36,7 +36,6 @@ pub mod reconnect;
 pub mod recorder;
 pub(crate) mod remote_host_pairing;
 pub mod remote_path;
-pub mod saved_apps;
 pub mod session;
 pub(crate) mod slingshot_url;
 pub mod source_review;
@@ -48,7 +47,6 @@ pub mod store;
 pub mod terminal;
 pub mod transport;
 pub mod types;
-pub mod widget_guidelines;
 
 pub use mobile_client::*;
 

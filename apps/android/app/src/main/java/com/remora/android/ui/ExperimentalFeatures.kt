@@ -17,12 +17,6 @@ enum class RemoraFeature(
         description = "Show the realtime voice launcher on the home screen.",
         defaultEnabled = true,
     ),
-    THINKING_MINIGAME(
-        id = "thinking_minigame",
-        displayName = "Thinking minigame",
-        description = "Tap the Thinking shimmer while the assistant generates to play a tiny generated minigame.",
-        defaultEnabled = false,
-    ),
     TERMINAL(
         id = "terminal",
         displayName = "Terminal",

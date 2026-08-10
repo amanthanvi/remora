@@ -36,7 +36,6 @@ pub struct AppServerSnapshot {
     pub available_models: Option<Vec<crate::types::ModelInfo>>,
     pub agent_runtimes: Vec<crate::types::AgentRuntimeInfo>,
     pub connection_progress: Option<AppConnectionProgressSnapshot>,
-    pub usage_stats: Option<AppServerUsageStats>,
     /// Semver version string parsed from the server's `initialize.user_agent`,
     /// or `None` when the user-agent did not match a recognised codex
     /// originator format.
@@ -346,7 +345,6 @@ pub struct AppConversationStats {
     // Media
     pub image_count: u32,
     pub code_review_count: u32,
-    pub widget_count: u32,
     // Timing
     pub session_duration_ms: Option<i64>,
 }
@@ -361,37 +359,6 @@ pub struct AppTokenUsage {
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub context_window: Option<i64>,
-}
-
-// ── Server usage statistics (per-server, computed from thread snapshots) ─
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct AppServerUsageStats {
-    pub total_threads: u32,
-    pub active_threads: u32,
-    pub total_tokens: u64,
-    pub tokens_by_thread: Vec<AppTokensByThreadEntry>,
-    pub activity_by_day: Vec<AppActivityByDayEntry>,
-    pub model_usage: Vec<AppModelUsageEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct AppTokensByThreadEntry {
-    pub thread_title: String,
-    pub thread_id: String,
-    pub tokens: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct AppActivityByDayEntry {
-    pub date_epoch: i64,
-    pub turn_count: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct AppModelUsageEntry {
-    pub model: String,
-    pub thread_count: u32,
 }
 
 // ── Session summary ──────────────────────────────────────────────────────
@@ -486,8 +453,6 @@ impl TryFrom<AppSnapshot> for AppSnapshotRecord {
                 let can_use_transport_actions =
                     transport_state == AppServerTransportState::Connected;
 
-                let usage_stats = compute_server_usage_stats(&snapshot, &server.server_id);
-
                 AppServerSnapshot {
                     server_id: server.server_id,
                     display_name: server.display_name,
@@ -522,7 +487,6 @@ impl TryFrom<AppSnapshot> for AppSnapshotRecord {
                     available_models: server.available_models,
                     agent_runtimes: server.agent_runtimes,
                     connection_progress: server.connection_progress,
-                    usage_stats,
                     codex_version: server.codex_version,
                 }
             })
@@ -829,95 +793,6 @@ fn thread_token_usage(thread: &ThreadSnapshot) -> Option<AppTokenUsage> {
     })
 }
 
-fn compute_server_usage_stats(
-    snapshot: &AppSnapshot,
-    server_id: &str,
-) -> Option<AppServerUsageStats> {
-    let server_threads: Vec<&ThreadSnapshot> = snapshot
-        .threads
-        .values()
-        .filter(|t| t.key.server_id == server_id)
-        .collect();
-
-    if server_threads.is_empty() {
-        return None;
-    }
-
-    let total_threads = server_threads.len() as u32;
-    let active_threads = server_threads
-        .iter()
-        .filter(|t| thread_has_active_turn(t))
-        .count() as u32;
-
-    let mut total_tokens: u64 = 0;
-    let mut tokens_by_thread = Vec::new();
-    let mut day_buckets: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
-    let mut model_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-
-    for thread in &server_threads {
-        // Token usage per thread
-        if let Some(tokens) = thread.context_tokens_used {
-            total_tokens += tokens;
-            let title = thread
-                .info
-                .title
-                .as_deref()
-                .or(thread.info.preview.as_deref())
-                .unwrap_or("Untitled")
-                .to_string();
-            tokens_by_thread.push(AppTokensByThreadEntry {
-                thread_title: title,
-                thread_id: thread.key.thread_id.clone(),
-                tokens,
-            });
-        }
-
-        // Activity by day (bucket by updated_at date, midnight UTC)
-        if let Some(ts) = thread.info.updated_at {
-            let day_epoch = (ts / 86400) * 86400; // floor to midnight
-            *day_buckets.entry(day_epoch).or_insert(0) += 1;
-        }
-
-        // Model usage
-        let model = thread
-            .info
-            .model
-            .clone()
-            .or_else(|| thread.model.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        *model_counts.entry(model).or_insert(0) += 1;
-    }
-
-    tokens_by_thread.sort_by(|a, b| b.tokens.cmp(&a.tokens));
-
-    let mut activity_by_day: Vec<AppActivityByDayEntry> = day_buckets
-        .into_iter()
-        .map(|(date_epoch, turn_count)| AppActivityByDayEntry {
-            date_epoch,
-            turn_count,
-        })
-        .collect();
-    activity_by_day.sort_by_key(|e| e.date_epoch);
-
-    let mut model_usage: Vec<AppModelUsageEntry> = model_counts
-        .into_iter()
-        .map(|(model, thread_count)| AppModelUsageEntry {
-            model,
-            thread_count,
-        })
-        .collect();
-    model_usage.sort_by(|a, b| b.thread_count.cmp(&a.thread_count));
-
-    Some(AppServerUsageStats {
-        total_threads,
-        active_threads,
-        total_tokens,
-        tokens_by_thread,
-        activity_by_day,
-        model_usage,
-    })
-}
-
 struct ConversationActivity {
     last_response: Option<String>,
     last_response_turn_id: Option<String>,
@@ -956,7 +831,6 @@ fn extract_conversation_activity(items: &[HydratedConversationItem]) -> Conversa
     let mut web_search_count: u32 = 0;
     let mut image_count: u32 = 0;
     let mut code_review_count: u32 = 0;
-    let mut widget_count: u32 = 0;
     let mut seen_turn_ids = std::collections::HashSet::new();
     let mut first_ts: Option<f64> = None;
     let mut last_ts: Option<f64> = None;
@@ -1231,9 +1105,6 @@ fn extract_conversation_activity(items: &[HydratedConversationItem]) -> Conversa
             HydratedConversationItemContent::ImageView(_) => {
                 image_count += 1;
             }
-            HydratedConversationItemContent::Widget(_) => {
-                widget_count += 1;
-            }
             _ => {}
         }
     }
@@ -1328,7 +1199,6 @@ fn extract_conversation_activity(items: &[HydratedConversationItem]) -> Conversa
             web_search_count,
             image_count,
             code_review_count,
-            widget_count,
             session_duration_ms,
         },
         log,

@@ -322,30 +322,6 @@ final class ThemeDefinitionTests: XCTestCase {
         XCTAssertNotNil(RemoraMotionPolicy.animation(.easeInOut(duration: 0.2), reduceMotion: false))
     }
 
-    func testSavedAppToolbarStacksForCompactWidthOrAccessibilityText() {
-        XCTAssertEqual(
-            SavedAppDetailView.toolbarLayout(
-                dynamicTypeSize: .large,
-                horizontalSizeClass: .regular
-            ),
-            .inline
-        )
-        XCTAssertEqual(
-            SavedAppDetailView.toolbarLayout(
-                dynamicTypeSize: .large,
-                horizontalSizeClass: .compact
-            ),
-            .stacked
-        )
-        XCTAssertEqual(
-            SavedAppDetailView.toolbarLayout(
-                dynamicTypeSize: .accessibility1,
-                horizontalSizeClass: .regular
-            ),
-            .stacked
-        )
-    }
-
     func testConversationHeaderUsesCompactToolbarLayoutAtAccessibilitySizes() {
         XCTAssertEqual(
             HeaderView.toolbarLayout(dynamicTypeSize: .large, textScale: 1),

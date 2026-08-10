@@ -83,7 +83,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.remora.android.state.SavedAppsStore
 import com.remora.android.ui.BerkeleyMono
 import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTextStyle
@@ -106,6 +105,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private const val ToolCallTextPreviewLimit = 2_000
+
+internal fun timelineWorkspaceTitle(path: String): String =
+    path.trimEnd('/').substringAfterLast('/').ifBlank { path }
 
 // ── Command Execution ────────────────────────────────────────────────────────
 

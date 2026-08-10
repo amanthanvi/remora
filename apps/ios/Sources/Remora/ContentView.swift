@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var actionCenter = RemoraActionCenter.shared
     @State private var composerBottomInset: CGFloat = 0
     @State private var splashDismissed = false
+    @State private var showWorkspaceRebuildNotice = CurrentWorkspaceRebuild.consumeNotice()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("conversationTextSizeStep") private var textSizeStep = ConversationTextSize.large.rawValue
@@ -53,6 +54,24 @@ struct ContentView: View {
                 #else
                 standardOverlays
                 #endif
+
+                if showWorkspaceRebuildNotice {
+                    Text("Local workspace rebuilt")
+                        .remoraFont(.caption, weight: .semibold)
+                        .foregroundStyle(RemoraTheme.textPrimary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .modifier(GlassRectModifier(cornerRadius: 12))
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .padding(.top, geometry.safeAreaInsets.top + 12)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .task {
+                            try? await Task.sleep(for: .seconds(4))
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                showWorkspaceRebuildNotice = false
+                            }
+                        }
+                }
 
             }
             .ignoresSafeArea(.container)

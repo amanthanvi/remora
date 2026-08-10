@@ -6,25 +6,14 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.SportsEsports
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import com.remora.android.state.contextPercent
 import com.remora.android.ui.RemoraTextStyle
 import com.remora.android.ui.RemoraTheme
@@ -82,22 +71,6 @@ internal fun loadedUserItemIndex(
     return null
 }
 
-internal fun lastUserAndAssistantText(
-    items: List<HydratedConversationItem>,
-): Pair<String?, String?> {
-    var lastUser: String? = null
-    var lastAssistant: String? = null
-    for (item in items.reversed()) {
-        when (val content = item.content) {
-            is HydratedConversationItemContent.User -> if (lastUser == null) lastUser = content.v1.text
-            is HydratedConversationItemContent.Assistant -> if (lastAssistant == null) lastAssistant = content.v1.text
-            else -> {}
-        }
-        if (lastUser != null && lastAssistant != null) break
-    }
-    return lastUser to lastAssistant
-}
-
 /** Shimmering "Thinking..." text shown while the assistant is working. */
 @Composable
 internal fun StreamingCursor() {
@@ -126,25 +99,4 @@ internal fun StreamingCursor() {
         fontWeight = FontWeight.Medium,
         style = TextStyle(brush = shimmerBrush),
     )
-}
-
-@Composable
-internal fun MinigameLaunchButton(onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = CircleShape,
-        color = RemoraTheme.surface.copy(alpha = 0.9f),
-        border = BorderStroke(0.5.dp, RemoraTheme.accent.copy(alpha = 0.3f)),
-        shadowElevation = 2.dp,
-        modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
-    ) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Filled.SportsEsports,
-                contentDescription = "Play a minigame while waiting",
-                tint = RemoraTheme.accent,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-    }
 }

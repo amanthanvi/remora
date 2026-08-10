@@ -21,7 +21,6 @@ struct ConversationMessageList: View {
     let initialTurnsLoaded: Bool
     @Binding var textSizeStep: Int
     let resolveTargetLabel: (String) -> String?
-    let onWidgetPrompt: (String) -> Void
     let onEditUserItem: (ConversationItem) -> Void
     let onForkFromUserItem: (ConversationItem) -> Void
     var onOpenConversation: ((ThreadKey) -> Void)? = nil
@@ -148,7 +147,6 @@ struct ConversationMessageList: View {
                                         return false
                                     }(),
                                     serverId: activeThreadKey.serverId,
-                                    originThreadId: activeThreadKey.threadId,
                                     agentDirectoryVersion: agentDirectoryVersion,
                                     messageActionsDisabled: messageActionsDisabled,
                                     onToggleExpansion: {
@@ -161,7 +159,6 @@ struct ConversationMessageList: View {
                                         requestFollowScrollAfterLayout(proxy)
                                     },
                                     resolveTargetLabel: resolveTargetLabel,
-                                    onWidgetPrompt: onWidgetPrompt,
                                     onEditUserItem: onEditUserItem,
                                     onForkFromUserItem: onForkFromUserItem,
                                     onOpenConversation: onOpenConversation

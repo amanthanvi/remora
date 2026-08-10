@@ -60,14 +60,7 @@ struct ConversationDestinationScreen: View {
                     topInset: 0,
                     bottomInset: bottomInset,
                     onOpenConversation: onOpenConversation,
-                    onResumeSessions: onResumeSessions,
-                    minigameOverlay: screenModel.minigameOverlay,
-                    onTypingTap: { screenModel.requestMinigame() },
-                    onMinigameDismiss: { screenModel.dismissMinigame() },
-                    onMinigameRetry: {
-                        screenModel.dismissMinigame()
-                        screenModel.requestMinigame()
-                    }
+                    onResumeSessions: onResumeSessions
                 )
                 .onAppear {
                     bindScreenModel(for: conversationThread)

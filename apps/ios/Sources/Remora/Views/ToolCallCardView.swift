@@ -166,7 +166,7 @@ struct ToolCallCardView: View {
             return RemoraTheme.warning
         case .fileChange, .fileDiff, .webSearch:
             return RemoraTheme.accent
-        case .mcpToolCall, .widget:
+        case .mcpToolCall:
             return RemoraTheme.accentStrong
         case .mcpToolProgress, .imageView:
             return RemoraTheme.warning
@@ -179,7 +179,7 @@ struct ToolCallCardView: View {
         switch model.kind {
         case .commandExecution, .commandOutput:
             return RemoraTheme.warning
-        case .fileChange, .fileDiff, .webSearch, .mcpToolCall, .widget:
+        case .fileChange, .fileDiff, .webSearch, .mcpToolCall:
             return RemoraTheme.accentForegroundOnSurface
         case .mcpToolProgress, .imageView:
             return RemoraTheme.warning

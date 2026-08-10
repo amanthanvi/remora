@@ -13,7 +13,6 @@ import uniffi.codex_mobile_client.AppSandboxMode
 import uniffi.codex_mobile_client.AppSandboxPolicy
 import com.remora.android.ui.common.AgentRuntimeKind
 import uniffi.codex_mobile_client.ThreadKey
-import uniffi.codex_mobile_client.generativeUiDynamicToolSpecs
 
 data class ThreadPermissionOverride(
     val approvalPolicy: String,
@@ -194,7 +193,7 @@ class AppLaunchState(context: Context) {
             cwd = cwd.normalizedOrFallback(
                 if (serverIsLocal) HomeAnchor.path(appContext) else "/",
             ),
-            dynamicTools = if (serverIsLocal) generativeUiDynamicToolSpecs() else null,
+            dynamicTools = null,
         ).also { updateCurrentCwd(it.cwd) }
 
     fun threadResumeRequest(

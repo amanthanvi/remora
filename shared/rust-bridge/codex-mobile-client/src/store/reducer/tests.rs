@@ -2181,150 +2181,11 @@ fn user_turn_boundary_item_consumes_stale_queued_follow_up_preview() {
     );
 }
 
-// ── SW-R3: streaming dynamic tool call argument deltas ───────────
-
 fn key_thread(thread_id: &str) -> ThreadKey {
     ThreadKey {
         server_id: "srv".to_string(),
         thread_id: thread_id.to_string(),
     }
-}
-
-#[test]
-fn dynamic_tool_arg_delta_emits_streaming_update_with_growing_prefix() {
-    let reducer = AppStoreReducer::new();
-    let key = key_thread("thread-1");
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
-        "srv",
-        make_thread_info("thread-1"),
-    ));
-    let mut receiver = reducer.subscribe();
-    let _ = drain_updates(&mut receiver);
-
-    for chunk in [
-        r#"{"app_id":"fit","title":"Fit","widget_code":"<di"#,
-        r#"v>hi"#,
-        r#"</div>"}"#,
-    ] {
-        reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-            key: key.clone(),
-            item_id: "item-1".to_string(),
-            call_id: Some("call-1".to_string()),
-            delta: chunk.to_string(),
-        });
-    }
-
-    let updates = drain_updates(&mut receiver);
-    let widgets: Vec<_> = updates
-        .iter()
-        .filter_map(|update| match update {
-            AppStoreUpdateRecord::DynamicWidgetStreaming { widget, .. } => Some(widget),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        widgets.len() >= 2,
-        "expected multiple streaming updates, got {widgets:?}"
-    );
-    for w in &widgets {
-        assert!(
-            !w.is_finalized,
-            "streaming widget must report is_finalized=false"
-        );
-    }
-    // The first streaming update's widget_html must be a prefix of
-    // the last update's widget_html.
-    let first = &widgets[0].widget_html;
-    let last = &widgets.last().unwrap().widget_html;
-    assert!(last.starts_with(first), "first={first:?} last={last:?}");
-    // Final is the fully-parsed object (complete JSON) — closed tags.
-    assert_eq!(last, "<div>hi</div>");
-}
-
-#[test]
-fn dynamic_tool_arg_delta_reuses_known_item_id_when_later_delta_omits_it() {
-    let reducer = AppStoreReducer::new();
-    let key = key_thread("thread-omit-item-id");
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
-        "srv",
-        make_thread_info("thread-omit-item-id"),
-    ));
-    let mut receiver = reducer.subscribe();
-    let _ = drain_updates(&mut receiver);
-
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-1".to_string(),
-        call_id: Some("call-1".to_string()),
-        delta: r#"{"app_id":"fit","title":"Fit","widget_code":"<div"#.to_string(),
-    });
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key,
-        item_id: String::new(),
-        call_id: Some("call-1".to_string()),
-        delta: r#">hi</div>"}"#.to_string(),
-    });
-
-    let item_ids: Vec<_> = drain_updates(&mut receiver)
-        .into_iter()
-        .filter_map(|update| match update {
-            AppStoreUpdateRecord::DynamicWidgetStreaming { item_id, .. } => Some(item_id),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !item_ids.is_empty(),
-        "expected at least one DynamicWidgetStreaming update"
-    );
-    assert!(
-        item_ids.iter().all(|item_id| item_id == "item-1"),
-        "streaming widget updates should keep the known item id, got {item_ids:?}"
-    );
-}
-
-#[test]
-fn dynamic_tool_arg_delta_buffer_clears_on_item_completed() {
-    use codex_app_server_protocol::{DynamicToolCallStatus, ItemCompletedNotification, ThreadItem};
-    let reducer = AppStoreReducer::new();
-    let key = key_thread("thread-2");
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
-        "srv",
-        make_thread_info("thread-2"),
-    ));
-
-    // Seed a running buffer.
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-99".to_string(),
-        call_id: Some("call-99".to_string()),
-        delta: r#"{"widget_code":"<svg"#.to_string(),
-    });
-    assert_eq!(reducer.dynamic_tool_arg_buffers.read().unwrap().len(), 1);
-
-    // ItemCompleted for the same (thread, item) drops the buffer.
-    reducer.apply_ui_event(&UiEvent::ItemCompleted {
-        key: key.clone(),
-        notification: ItemCompletedNotification {
-            thread_id: key.thread_id.clone(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: ThreadItem::DynamicToolCall {
-                id: "item-99".to_string(),
-                tool: "show_widget".to_string(),
-                namespace: None,
-                arguments: serde_json::json!({}),
-                status: DynamicToolCallStatus::Completed,
-                content_items: None,
-                success: Some(true),
-                duration_ms: None,
-            },
-        },
-    });
-
-    assert!(
-        reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty(),
-        "buffer should be cleared after item completion"
-    );
 }
 
 #[test]
@@ -2337,12 +2198,6 @@ fn remove_server_clears_all_thread_update_caches() {
         "srv",
         make_thread_info("thread-cache-cleanup"),
     ));
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-1".to_string(),
-        call_id: Some("call-1".to_string()),
-        delta: r#"{"app_id":"fit","title":"Fit","widget_code":"<div>hi"#.to_string(),
-    });
     reducer.emit_thread_metadata_changed(&key);
     reducer.emit_thread_item_changed(
         &key,
@@ -2374,20 +2229,10 @@ fn remove_server_clears_all_thread_update_caches() {
             .keys()
             .any(|(thread_key, _)| thread_key == &key)
     );
-    assert!(
-        reducer
-            .dynamic_tool_arg_buffers
-            .read()
-            .unwrap()
-            .keys()
-            .any(|(thread_key, _)| thread_key == &key)
-    );
-
     reducer.remove_server("srv");
 
     assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
     assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
-    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
 }
 
 #[test]
@@ -2400,12 +2245,6 @@ fn authoritative_thread_removal_clears_all_thread_update_caches() {
         "srv",
         make_thread_info("thread-list-cleanup"),
     ));
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-1".to_string(),
-        call_id: Some("call-1".to_string()),
-        delta: r#"{"widget_code":"<div>hi"#.to_string(),
-    });
     reducer.emit_thread_metadata_changed(&key);
     reducer.emit_thread_item_changed(
         &key,
@@ -2427,67 +2266,4 @@ fn authoritative_thread_removal_clears_all_thread_update_caches() {
     assert!(!reducer.snapshot().threads.contains_key(&key));
     assert!(reducer.last_thread_state_updates.read().unwrap().is_empty());
     assert!(reducer.last_thread_item_upserts.read().unwrap().is_empty());
-    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
-}
-
-#[test]
-fn dynamic_tool_arg_delta_buffers_clear_on_turn_completed() {
-    let reducer = AppStoreReducer::new();
-    let key = key_thread("thread-turn-completed");
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
-        "srv",
-        make_thread_info("thread-turn-completed"),
-    ));
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-1".to_string(),
-        call_id: Some("call-1".to_string()),
-        delta: r#"{"widget_code":"<svg"#.to_string(),
-    });
-    assert_eq!(reducer.dynamic_tool_arg_buffers.read().unwrap().len(), 1);
-
-    reducer.apply_ui_event(&UiEvent::TurnCompleted {
-        key,
-        turn_id: "turn-1".to_string(),
-        error: Some("interrupted".to_string()),
-    });
-
-    assert!(reducer.dynamic_tool_arg_buffers.read().unwrap().is_empty());
-}
-
-#[test]
-fn dynamic_tool_arg_delta_buffers_are_scoped_per_call() {
-    let reducer = AppStoreReducer::new();
-    let key = key_thread("thread-3");
-    reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
-        "srv",
-        make_thread_info("thread-3"),
-    ));
-
-    // Two separate calls in the same thread shouldn't cross-pollute.
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-A".to_string(),
-        call_id: Some("call-A".to_string()),
-        delta: r#"{"widget_code":"AAA"#.to_string(),
-    });
-    reducer.apply_ui_event(&UiEvent::DynamicToolCallArgumentsDelta {
-        key: key.clone(),
-        item_id: "item-B".to_string(),
-        call_id: Some("call-B".to_string()),
-        delta: r#"{"widget_code":"BBB"#.to_string(),
-    });
-
-    let buffers = reducer.dynamic_tool_arg_buffers.read().unwrap();
-    assert_eq!(buffers.len(), 2);
-    let entry_a = buffers
-        .get(&(key.clone(), "call-A".to_string()))
-        .expect("A buffer");
-    let entry_b = buffers
-        .get(&(key.clone(), "call-B".to_string()))
-        .expect("B buffer");
-    assert!(entry_a.buffer.contains("AAA"));
-    assert!(entry_b.buffer.contains("BBB"));
-    assert_eq!(entry_a.item_id, "item-A");
-    assert_eq!(entry_b.item_id, "item-B");
 }

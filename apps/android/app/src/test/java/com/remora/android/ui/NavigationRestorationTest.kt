@@ -25,8 +25,6 @@ class NavigationRestorationTest {
             Route.ServerInfo("server:one"),
             Route.ServerWallpaperSelection("server:one"),
             Route.ServerWallpaperAdjust("server:one"),
-            Route.Apps,
-            Route.SavedApp("app:one/two"),
             Route.Terminal(preferredRemoraLinkHostId = "remora-link:host:one/two"),
             Route.Terminal(null),
         )
@@ -71,7 +69,7 @@ class NavigationRestorationTest {
 
     @Test
     fun onlyRestoredNavigationSuppressesInitialActiveThreadHydration() {
-        val detailRoute = Route.Apps
+        val detailRoute = Route.ServerInfo("server-one")
 
         assertTrue(
             shouldPreserveRestoredRoute(

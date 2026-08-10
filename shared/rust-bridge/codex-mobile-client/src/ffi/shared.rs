@@ -25,12 +25,8 @@ pub(crate) fn shared_mobile_client() -> Arc<MobileClient> {
     SHARED_MOBILE_CLIENT.get_or_init(MobileClient::new).clone()
 }
 
-/// Non-initializing peek at the singleton. Returns `None` when
-/// `MobileClient` hasn't been constructed yet — used by side-channel
-/// emitters (e.g. `saved_apps::notify_saved_apps_changed`) that need
-/// to broadcast on the reducer but must NOT force a full client
-/// bootstrap when called from a `#[cfg(test)]` context that never
-/// went through `AppClient::new`.
+/// Non-initializing peek used by background reconciliation paths that must not
+/// bootstrap a second client while reacting to an existing store transition.
 pub(crate) fn shared_mobile_client_if_initialized() -> Option<Arc<MobileClient>> {
     SHARED_MOBILE_CLIENT.get().cloned()
 }

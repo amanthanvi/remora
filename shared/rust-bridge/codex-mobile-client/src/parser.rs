@@ -47,7 +47,6 @@ pub enum ToolCallKind {
     WebSearch,
     Collaboration,
     ImageView,
-    Widget,
     Unknown(String),
 }
 
@@ -105,7 +104,6 @@ pub enum AppToolCallKind {
     WebSearch,
     Collaboration,
     ImageView,
-    Widget,
     Unknown { raw: String },
 }
 
@@ -255,7 +253,6 @@ impl From<&ToolCallKind> for AppToolCallKind {
             ToolCallKind::WebSearch => Self::WebSearch,
             ToolCallKind::Collaboration => Self::Collaboration,
             ToolCallKind::ImageView => Self::ImageView,
-            ToolCallKind::Widget => Self::Widget,
             ToolCallKind::Unknown(raw) => Self::Unknown { raw: raw.clone() },
         }
     }
@@ -792,9 +789,6 @@ impl ToolCallKind {
         }
         if n.contains("image view") || n == "image" {
             return Self::ImageView;
-        }
-        if n.contains("widget") || n.contains("show widget") {
-            return Self::Widget;
         }
         if n.contains("dynamic tool call") {
             return Self::McpToolCall;
@@ -1817,7 +1811,6 @@ fn summary_for(
                 }
             }
         }
-        ToolCallKind::Widget => {}
         ToolCallKind::Unknown(_) => {}
     }
 
@@ -2135,7 +2128,6 @@ mod tests {
             ToolCallKind::from_title("Image View"),
             ToolCallKind::ImageView
         );
-        assert_eq!(ToolCallKind::from_title("Widget"), ToolCallKind::Widget);
     }
 
     #[test]
@@ -2715,21 +2707,6 @@ Details: something happened";
     }
 
     #[test]
-    fn test_widget() {
-        let text = "\
-### Widget
-Status: Completed
-
-Action:
-```json
-{\"type\": \"chart\", \"data\": [1,2,3]}
-```";
-        let cards = parse_tool_call_message(text);
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].kind, ToolCallKind::Widget);
-    }
-
-    #[test]
     fn test_malformed_no_body() {
         let text = "### Command Execution";
         let cards = parse_tool_call_message(text);
@@ -3059,14 +3036,6 @@ Status: Completed
             .iter()
             .any(|s| matches!(&s.content, SectionContent::Diff(_)));
         assert!(has_diff);
-    }
-
-    #[test]
-    fn test_show_widget_title() {
-        assert_eq!(
-            ToolCallKind::from_title("Show Widget"),
-            ToolCallKind::Widget
-        );
     }
 
     #[test]

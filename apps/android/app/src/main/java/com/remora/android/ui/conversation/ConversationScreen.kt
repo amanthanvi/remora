@@ -85,7 +85,6 @@ fun ConversationScreen(
     onInfo: (() -> Unit)? = null,
     onNavigateToSessions: (() -> Unit)? = null,
     onShowDirectoryPicker: (() -> Unit)? = null,
-    onOpenSavedApp: ((String) -> Unit)? = null,
     onComposerFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
@@ -121,8 +120,6 @@ fun ConversationScreen(
     val items = thread?.hydratedConversationItems ?: emptyList()
     val normalizedActiveTurnId = thread?.activeTurnId?.trim()?.takeIf { it.isNotEmpty() }
     val isThinking = thread?.info?.status?.isActiveStatus == true
-    val minigameOverlay by appModel.minigameOverlay.collectAsState()
-    val isMinigameActive = minigameOverlay !is com.remora.android.state.MinigameOverlayState.Idle
     val collapseTurns = ConversationPrefs.areTurnsCollapsed
     val agentDirectoryVersion = snapshot?.agentDirectoryVersion ?: 0uL
     val transcriptTurns = remember(items, thread?.info?.status, isThinking, collapseTurns) {
@@ -186,7 +183,6 @@ fun ConversationScreen(
     // Reuse already-loaded thread content on re-entry, and only fall back to
     // resume/read flows when the conversation isn't available locally yet.
     LaunchedEffect(threadKey) {
-        appModel.dismissMinigame()
         try {
             val resolvedThreadKey = appModel.hydrateThreadPermissions(threadKey) ?: threadKey
             appModel.activateThread(resolvedThreadKey)
@@ -263,7 +259,6 @@ fun ConversationScreen(
         slashErrorMessage,
         reloadErrorMessage,
         thread?.pendingPlanImplementationPrompt,
-        isMinigameActive,
     ) {
         onComposerFocusChanged(
             composerInteractionActive ||
@@ -276,8 +271,7 @@ fun ConversationScreen(
                 showSessionDiffSheet ||
                 slashErrorMessage != null ||
                 reloadErrorMessage != null ||
-                thread?.pendingPlanImplementationPrompt != null ||
-                isMinigameActive,
+                thread?.pendingPlanImplementationPrompt != null,
         )
     }
     DisposableEffect(Unit) {
@@ -622,23 +616,6 @@ fun ConversationScreen(
                                                             }
                                                         }
                                                     },
-                                                    onOpenSavedApp = onOpenSavedApp,
-                                                    onWidgetPrompt = { text ->
-                                                        scope.launch {
-                                                            try {
-                                                                val payload = com.remora.android.state.AppComposerPayload(
-                                                                    text = text,
-                                                                    additionalInputs = emptyList(),
-                                                                    approvalPolicy = appModel.launchState.approvalPolicyValue(threadKey),
-                                                                    sandboxPolicy = appModel.launchState.turnSandboxPolicy(threadKey),
-                                                                    model = launchSnapshot.selectedModel.trim().ifEmpty { null },
-                                                                    reasoningEffort = null,
-                                                                    serviceTier = null,
-                                                                )
-                                                                appModel.startTurn(threadKey, payload)
-                                                            } catch (_: Exception) {}
-                                                        }
-                                                    },
                                                 )
                                             }
 
@@ -727,32 +704,7 @@ fun ConversationScreen(
             }
 
             // Bottom area: gradient fade + pinned context + composer + nav bar inset
-            // Hidden while the thinking-minigame overlay is up.
-            if (!isMinigameActive) Column(modifier = Modifier.fillMaxWidth()) {
-                // Floating minigame launcher — visible only while thinking,
-                // gated by the experimental flag.
-                val minigameFeatureOn = com.remora.android.ui.ExperimentalFeatures.isEnabled(
-                    com.remora.android.ui.RemoraFeature.THINKING_MINIGAME,
-                )
-                if (minigameFeatureOn) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.Start,
-                    ) {
-                        MinigameLaunchButton(onClick = {
-                            val (lastUser, lastAssistant) = lastUserAndAssistantText(items)
-                            appModel.requestMinigame(
-                                parentThreadId = threadKey.threadId,
-                                serverId = threadKey.serverId,
-                                lastUserMessage = lastUser,
-                                lastAssistantMessage = lastAssistant,
-                            )
-                        })
-                    }
-                }
-
+            Column(modifier = Modifier.fillMaxWidth()) {
                 // Gradient fade from transparent to scrim
                 if (hasWallpaper) {
                     Box(
@@ -873,38 +825,6 @@ fun ConversationScreen(
                     Spacer(Modifier.navigationBarsPadding())
                 }
             }
-        }
-
-        // Thinking-indicator minigame overlay: bottom 40% of the screen.
-        // Slides up from the bottom when appearing and slides back out on
-        // dismiss, mirroring iOS ConversationView.swift:148
-        // `.transition(.move(edge: .bottom).combined(with: .opacity))`.
-        AnimatedVisibility(
-            visible = isMinigameActive,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .fillMaxHeight(0.4f)
-                .padding(horizontal = 8.dp, vertical = 8.dp)
-                .navigationBarsPadding(),
-        ) {
-            MinigameOverlay(
-                state = minigameOverlay,
-                onClose = { appModel.dismissMinigame() },
-                onRetry = {
-                    val (lastUser, lastAssistant) = lastUserAndAssistantText(items)
-                    appModel.dismissMinigame()
-                    appModel.requestMinigame(
-                        parentThreadId = threadKey.threadId,
-                        serverId = threadKey.serverId,
-                        lastUserMessage = lastUser,
-                        lastAssistantMessage = lastAssistant,
-                    )
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
         }
 
         if (showPermissionsSheet) {
