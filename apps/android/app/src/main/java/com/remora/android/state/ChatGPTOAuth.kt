@@ -242,7 +242,10 @@ object ChatGPTOAuth {
             "refresh_token=${Uri.encode(refreshToken)}",
             "client_id=${Uri.encode(clientId)}",
         ).joinToString("&")
-        val refreshed = exchangeToken(body)
+        val refreshed = withRefreshTokenFallback(
+            refreshed = exchangeToken(body),
+            fallbackRefreshToken = refreshToken,
+        )
         if (!previousAccountId.isNullOrBlank() &&
             refreshed.accountId != previousAccountId &&
             stored.accountId != previousAccountId
@@ -254,6 +257,16 @@ object ChatGPTOAuth {
         }
         return refreshed
     }
+
+    internal fun withRefreshTokenFallback(
+        refreshed: ChatGPTOAuthTokenBundle,
+        fallbackRefreshToken: String,
+    ): ChatGPTOAuthTokenBundle =
+        if (refreshed.refreshToken != null) {
+            refreshed
+        } else {
+            refreshed.copy(refreshToken = fallbackRefreshToken)
+        }
 
     private suspend fun exchangeToken(body: String): ChatGPTOAuthTokenBundle = withContext(Dispatchers.IO) {
         tokenBundleFromPayload(exchangeTokenPayloadWithRetries(body))
