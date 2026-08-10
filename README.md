@@ -61,9 +61,13 @@ thin-shell convergence is Planned.
 
 The [command-center threat model](docs/security/remora-threat-model.md)
 distinguishes implemented controls from release requirements for planned
-command-center features. The narrower implemented Remora Link boundary is
-documented in the [Remora Link threat model](docs/research/remora-link-threat-model.md)
-and [pairing v2 security architecture](docs/research/pairing-v2-security.md).
+command-center features. The
+[command-center performance budgets](docs/performance/budgets.md) define the
+deterministic limits and informational device targets for that work.
+Most command-center performance gates are planned, not current measurements.
+The narrower implemented Remora Link boundary is documented in the
+[Remora Link threat model](docs/research/remora-link-threat-model.md) and
+[pairing v2 security architecture](docs/research/pairing-v2-security.md).
 
 ## Supported Scope
 
