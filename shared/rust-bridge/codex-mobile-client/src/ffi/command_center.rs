@@ -3,6 +3,13 @@
 use crate::store::boundary::session_summaries_from_snapshot;
 use crate::store::{AppSessionSummary, AppSnapshot};
 use crate::types::{ThreadKey, ThreadSummaryStatus};
+use remora_bridge_core::command_center::{
+    AvailabilityState as LinkAvailabilityState, FeatureAvailability as LinkFeatureAvailability,
+    HostCapabilitiesV1 as LinkHostCapabilitiesV1,
+    HostCommandCenterStatusV1 as LinkHostCommandCenterStatusV1,
+    ProviderInstance as LinkProviderInstance, ProviderReadiness as LinkProviderReadiness,
+    RuntimeCapabilitiesV1 as LinkRuntimeCapabilitiesV1,
+};
 
 const MAX_REASON_BYTES: usize = 256;
 const MAX_SESSION_PAGE_ROWS: usize = 100;
@@ -26,6 +33,13 @@ pub struct FeatureAvailability {
 }
 
 impl FeatureAvailability {
+    fn available() -> Self {
+        Self {
+            state: AvailabilityState::Available,
+            reason: None,
+        }
+    }
+
     fn unknown(reason: &str) -> Self {
         Self {
             state: AvailabilityState::Unknown,
@@ -159,6 +173,8 @@ pub struct HostCapabilitiesV1 {
 pub struct HostCommandCenterStatus {
     /// Transitional store key only. It is not a durable Host ID.
     pub legacy_server_id: String,
+    pub host_id: Option<String>,
+    pub catalog_generation: Option<u64>,
     pub availability: FeatureAvailability,
     pub capabilities: HostCapabilitiesV1,
     pub provider_instances: Vec<ProviderInstance>,
@@ -237,6 +253,8 @@ pub(crate) fn project_command_center_status(snapshot: &AppSnapshot) -> CommandCe
             let feature = || availability.clone();
             HostCommandCenterStatus {
                 legacy_server_id: bound_utf8(&server.server_id, MAX_REASON_BYTES),
+                host_id: None,
+                catalog_generation: None,
                 availability: availability.clone(),
                 capabilities: HostCapabilitiesV1 {
                     version: 1,
@@ -266,6 +284,171 @@ pub(crate) fn project_command_center_status(snapshot: &AppSnapshot) -> CommandCe
     CommandCenterStatusV1 {
         schema_version: 1,
         hosts,
+    }
+}
+
+pub(crate) fn project_link_command_center_status(
+    legacy_server_id: &str,
+    status: LinkHostCommandCenterStatusV1,
+) -> HostCommandCenterStatus {
+    HostCommandCenterStatus {
+        legacy_server_id: bound_utf8(legacy_server_id, MAX_REASON_BYTES),
+        host_id: Some(status.host_id.as_str().to_string()),
+        catalog_generation: Some(status.catalog_generation),
+        availability: FeatureAvailability::available(),
+        capabilities: project_link_host_capabilities(status.host_capabilities),
+        provider_instances: status
+            .provider_instances
+            .into_iter()
+            .map(project_link_provider_instance)
+            .collect(),
+    }
+}
+
+pub(crate) fn project_unknown_link_command_center_status(
+    legacy_server_id: &str,
+) -> HostCommandCenterStatus {
+    let availability =
+        FeatureAvailability::unknown("Connected Link protocol has not declared command-center v1");
+    let feature = || availability.clone();
+    HostCommandCenterStatus {
+        legacy_server_id: bound_utf8(legacy_server_id, MAX_REASON_BYTES),
+        host_id: None,
+        catalog_generation: None,
+        availability: availability.clone(),
+        capabilities: HostCapabilitiesV1 {
+            version: 1,
+            project_registration: feature(),
+            project_clone: feature(),
+            confined_file_reads: feature(),
+            terminal_sessions: feature(),
+            curated_git: feature(),
+            worktrees: feature(),
+            checkpoints: feature(),
+            safe_rewind: feature(),
+            trusted_provisioning_scripts: feature(),
+            browser_preview: feature(),
+            browser_automation: feature(),
+            managed_power: feature(),
+            signed_link_updates: feature(),
+            diagnostics: feature(),
+            protocol_version: 0,
+            minimum_client_version: String::new(),
+        },
+        provider_instances: Vec::new(),
+    }
+}
+
+fn project_link_feature(value: LinkFeatureAvailability) -> FeatureAvailability {
+    FeatureAvailability {
+        state: match value.state {
+            LinkAvailabilityState::Available => AvailabilityState::Available,
+            LinkAvailabilityState::Unknown => AvailabilityState::Unknown,
+            LinkAvailabilityState::Unavailable => AvailabilityState::Unavailable,
+        },
+        reason: value
+            .reason
+            .map(|reason| bound_utf8(&reason, MAX_REASON_BYTES)),
+    }
+}
+
+fn project_link_host_capabilities(value: LinkHostCapabilitiesV1) -> HostCapabilitiesV1 {
+    HostCapabilitiesV1 {
+        version: value.version,
+        project_registration: project_link_feature(value.project_registration),
+        project_clone: project_link_feature(value.project_clone),
+        confined_file_reads: project_link_feature(value.confined_file_reads),
+        terminal_sessions: project_link_feature(value.terminal_sessions),
+        curated_git: project_link_feature(value.curated_git),
+        worktrees: project_link_feature(value.worktrees),
+        checkpoints: project_link_feature(value.checkpoints),
+        safe_rewind: project_link_feature(value.safe_rewind),
+        trusted_provisioning_scripts: project_link_feature(value.trusted_provisioning_scripts),
+        browser_preview: project_link_feature(value.browser_preview),
+        browser_automation: project_link_feature(value.browser_automation),
+        managed_power: project_link_feature(value.managed_power),
+        signed_link_updates: project_link_feature(value.signed_link_updates),
+        diagnostics: project_link_feature(value.diagnostics),
+        protocol_version: value.protocol_version,
+        minimum_client_version: bound_utf8(&value.minimum_client_version, MAX_REASON_BYTES),
+    }
+}
+
+fn project_link_provider_instance(value: LinkProviderInstance) -> ProviderInstance {
+    ProviderInstance {
+        instance_id: value.instance_id.as_str().to_string(),
+        runtime_id: bound_utf8(&value.runtime_id, MAX_RUNTIME_BYTES),
+        display_name: bound_utf8(&value.display_name, MAX_TITLE_BYTES),
+        readiness: match value.readiness {
+            LinkProviderReadiness::Ready => ProviderReadiness::Ready,
+            LinkProviderReadiness::AuthenticationRequired => {
+                ProviderReadiness::AuthenticationRequired
+            }
+            LinkProviderReadiness::InstallationRequired => ProviderReadiness::InstallationRequired,
+            LinkProviderReadiness::ConfigurationRequired => {
+                ProviderReadiness::ConfigurationRequired
+            }
+            LinkProviderReadiness::Starting => ProviderReadiness::Starting,
+            LinkProviderReadiness::Unavailable => ProviderReadiness::Unavailable,
+        },
+        readiness_reason: value
+            .readiness_reason
+            .map(|reason| bound_utf8(&reason, MAX_REASON_BYTES)),
+        continuation_group_id: bound_utf8(&value.continuation_group_id, MAX_TITLE_BYTES),
+        models: value
+            .models
+            .into_iter()
+            .map(|model| ModelDescriptor {
+                model_id: bound_utf8(&model.model_id, MAX_TITLE_BYTES),
+                display_name: bound_utf8(&model.display_name, MAX_TITLE_BYTES),
+                is_default: model.is_default,
+            })
+            .collect(),
+        capabilities: project_link_runtime_capabilities(value.capabilities),
+    }
+}
+
+fn project_link_runtime_capabilities(value: LinkRuntimeCapabilitiesV1) -> RuntimeCapabilitiesV1 {
+    RuntimeCapabilitiesV1 {
+        version: value.version,
+        thread_lifecycle: ThreadLifecycleCapabilitiesV1 {
+            create: project_link_feature(value.thread_lifecycle.create),
+            resume: project_link_feature(value.thread_lifecycle.resume),
+            linked_child: project_link_feature(value.thread_lifecycle.linked_child),
+            archive: project_link_feature(value.thread_lifecycle.archive),
+        },
+        turns: TurnCapabilitiesV1 {
+            text: project_link_feature(value.turns.text),
+            images: project_link_feature(value.turns.images),
+            file_references: project_link_feature(value.turns.file_references),
+            interrupt: project_link_feature(value.turns.interrupt),
+            queued_follow_up: project_link_feature(value.turns.queued_follow_up),
+        },
+        interaction: InteractionCapabilitiesV1 {
+            approvals: project_link_feature(value.interaction.approvals),
+            structured_input: project_link_feature(value.interaction.structured_input),
+            ask_question: project_link_feature(value.interaction.ask_question),
+            plans: project_link_feature(value.interaction.plans),
+            todos: project_link_feature(value.interaction.todos),
+        },
+        models: ModelCapabilitiesV1 {
+            list: project_link_feature(value.models.list),
+            select_before_first_send: project_link_feature(value.models.select_before_first_send),
+            reasoning_configuration: project_link_feature(value.models.reasoning_configuration),
+        },
+        permissions: PermissionCapabilitiesV1 {
+            sandbox_modes: project_link_feature(value.permissions.sandbox_modes),
+            declared_controls: project_link_feature(value.permissions.declared_controls),
+        },
+        history: HistoryCapabilitiesV1 {
+            pagination: project_link_feature(value.history.pagination),
+            hydration: project_link_feature(value.history.hydration),
+            context_window_metrics: project_link_feature(value.history.context_window_metrics),
+        },
+        voice: VoiceCapabilitiesV1 {
+            realtime_voice: project_link_feature(value.voice.realtime_voice),
+            transcript_handoff: project_link_feature(value.voice.transcript_handoff),
+        },
     }
 }
 

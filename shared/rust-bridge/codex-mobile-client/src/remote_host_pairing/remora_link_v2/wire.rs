@@ -7,6 +7,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(test)]
 use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature, VerifyingKey};
+use remora_bridge_core::command_center::{
+    FeatureAvailability as LinkFeatureAvailability, HostCapabilitiesV1 as LinkHostCapabilitiesV1,
+    HostCommandCenterStatusV1, MAX_DISPLAY_LABEL_BYTES, MAX_MODELS_PER_PROVIDER,
+    MAX_PROVIDER_INSTANCES, RuntimeCapabilitiesV1 as LinkRuntimeCapabilitiesV1,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -76,6 +81,11 @@ pub(crate) enum RequestV2 {
         client_nonce: String,
     },
     ListAgents {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+    },
+    CommandCenterStatus {
         v: u32,
         credential_id: String,
         client_nonce: String,
@@ -151,6 +161,9 @@ pub(crate) enum RequestCorrelationV2 {
     ListAgents {
         credential_id: String,
     },
+    CommandCenterStatus {
+        credential_id: String,
+    },
     RestartAgent {
         credential_id: String,
         agent: String,
@@ -185,6 +198,7 @@ impl RequestV2 {
             Self::InspectInvitation { .. } => "inspect_invitation",
             Self::Enroll { .. } => "enroll",
             Self::ListAgents { .. } => "list_agents",
+            Self::CommandCenterStatus { .. } => "command_center_status",
             Self::RestartAgent { .. } => "restart_agent",
             Self::Connect { .. } => "connect",
             Self::RevokeSelf { .. } => "revoke_self",
@@ -196,6 +210,7 @@ impl RequestV2 {
             Self::InspectInvitation { v, .. }
             | Self::Enroll { v, .. }
             | Self::ListAgents { v, .. }
+            | Self::CommandCenterStatus { v, .. }
             | Self::RestartAgent { v, .. }
             | Self::Connect { v, .. }
             | Self::RevokeSelf { v, .. }
@@ -207,6 +222,7 @@ impl RequestV2 {
             Self::InspectInvitation { client_nonce, .. }
             | Self::Enroll { client_nonce, .. }
             | Self::ListAgents { client_nonce, .. }
+            | Self::CommandCenterStatus { client_nonce, .. }
             | Self::RestartAgent { client_nonce, .. }
             | Self::Connect { client_nonce, .. }
             | Self::RevokeSelf { client_nonce, .. }
@@ -217,6 +233,7 @@ impl RequestV2 {
         match self {
             Self::InspectInvitation { .. } | Self::Enroll { .. } => None,
             Self::ListAgents { credential_id, .. }
+            | Self::CommandCenterStatus { credential_id, .. }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -249,6 +266,11 @@ impl RequestV2 {
             Self::ListAgents { credential_id, .. } => RequestCorrelationV2::ListAgents {
                 credential_id: credential_id.clone(),
             },
+            Self::CommandCenterStatus { credential_id, .. } => {
+                RequestCorrelationV2::CommandCenterStatus {
+                    credential_id: credential_id.clone(),
+                }
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -318,6 +340,7 @@ impl RequestV2 {
                 idempotency_key,
             ]),
             Self::ListAgents { .. } => operation_payload_hash(&[]),
+            Self::CommandCenterStatus { .. } => operation_payload_hash(&[]),
             Self::RestartAgent {
                 agent,
                 idempotency_key,
@@ -373,7 +396,10 @@ impl RequestV2 {
                 validate_grant(selected_runtime_ids, requested_scopes)?;
                 valid_idempotency(idempotency_key)?;
             }
-            Self::ListAgents { credential_id, .. } => valid_opaque(credential_id, OPAQUE_ID_BYTES)?,
+            Self::ListAgents { credential_id, .. }
+            | Self::CommandCenterStatus { credential_id, .. } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -440,6 +466,9 @@ impl RequestCorrelationV2 {
             Self::ListAgents { credential_id } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
             }
+            Self::CommandCenterStatus { credential_id } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -503,6 +532,7 @@ impl RequestCorrelationV2 {
                 true,
             ),
             Self::ListAgents { credential_id }
+            | Self::CommandCenterStatus { credential_id }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -946,6 +976,8 @@ pub(crate) struct ResponseV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agents: Option<Vec<AgentInfoV2>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_center_status: Option<HostCommandCenterStatusV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<SessionV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<ErrorCodeV2>,
@@ -997,6 +1029,9 @@ impl ResponseV2 {
                 }
             }
         }
+        if let Some(value) = &self.command_center_status {
+            validate_command_center_status(value)?;
+        }
         if let Some(value) = &self.session {
             value.validate()?;
         }
@@ -1008,6 +1043,7 @@ impl ResponseV2 {
             self.revocation.is_some(),
             self.restart.is_some(),
             self.agents.is_some(),
+            self.command_center_status.is_some(),
             self.session.is_some(),
         ]
         .into_iter()
@@ -1170,6 +1206,11 @@ impl ResponseV2 {
             },
             RequestCorrelationV2::ListAgents { .. } => {
                 if self.agents.is_none() {
+                    return Err(WireError::InvalidResponse);
+                }
+            }
+            RequestCorrelationV2::CommandCenterStatus { .. } => {
+                if self.command_center_status.is_none() {
                     return Err(WireError::InvalidResponse);
                 }
             }
@@ -1547,6 +1588,7 @@ fn is_operation(value: &str) -> bool {
         "inspect_invitation"
             | "enroll"
             | "list_agents"
+            | "command_center_status"
             | "restart_agent"
             | "connect"
             | "revoke_self"
@@ -1609,6 +1651,126 @@ fn valid_idempotency(value: &str) -> Result<(), WireError> {
 pub(crate) fn valid_device_name(value: &str) -> Result<(), WireError> {
     if value.len() > MAX_DEVICE_NAME_BYTES || value.chars().any(char::is_control) {
         return Err(WireError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_command_center_status(status: &HostCommandCenterStatusV1) -> Result<(), WireError> {
+    if status.version != 1 || status.provider_instances.len() > MAX_PROVIDER_INSTANCES {
+        return Err(WireError::InvalidResponse);
+    }
+    valid_opaque(status.host_id.as_str(), OPAQUE_ID_BYTES)
+        .map_err(|_| WireError::InvalidResponse)?;
+    validate_link_host_capabilities(&status.host_capabilities)?;
+
+    let mut provider_ids =
+        std::collections::HashSet::with_capacity(status.provider_instances.len());
+    for provider in &status.provider_instances {
+        valid_opaque(provider.instance_id.as_str(), OPAQUE_ID_BYTES)
+            .map_err(|_| WireError::InvalidResponse)?;
+        if !provider_ids.insert(provider.instance_id.as_str())
+            || valid_runtime_id(&provider.runtime_id).is_err()
+            || provider.models.len() > MAX_MODELS_PER_PROVIDER
+        {
+            return Err(WireError::InvalidResponse);
+        }
+        valid_command_center_label(&provider.display_name)?;
+        valid_command_center_label(&provider.continuation_group_id)?;
+        validate_optional_command_center_label(provider.readiness_reason.as_deref())?;
+        validate_link_runtime_capabilities(&provider.capabilities)?;
+
+        let mut model_ids = std::collections::HashSet::with_capacity(provider.models.len());
+        for model in &provider.models {
+            valid_command_center_label(&model.model_id)?;
+            valid_command_center_label(&model.display_name)?;
+            if !model_ids.insert(model.model_id.as_str()) {
+                return Err(WireError::InvalidResponse);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_link_host_capabilities(capabilities: &LinkHostCapabilitiesV1) -> Result<(), WireError> {
+    if capabilities.version != 1 {
+        return Err(WireError::InvalidResponse);
+    }
+    valid_command_center_label(&capabilities.minimum_client_version)?;
+    for availability in [
+        &capabilities.project_registration,
+        &capabilities.project_clone,
+        &capabilities.confined_file_reads,
+        &capabilities.terminal_sessions,
+        &capabilities.curated_git,
+        &capabilities.worktrees,
+        &capabilities.checkpoints,
+        &capabilities.safe_rewind,
+        &capabilities.trusted_provisioning_scripts,
+        &capabilities.browser_preview,
+        &capabilities.browser_automation,
+        &capabilities.managed_power,
+        &capabilities.signed_link_updates,
+        &capabilities.diagnostics,
+    ] {
+        validate_link_availability(availability)?;
+    }
+    Ok(())
+}
+
+fn validate_link_runtime_capabilities(
+    capabilities: &LinkRuntimeCapabilitiesV1,
+) -> Result<(), WireError> {
+    if capabilities.version != 1 {
+        return Err(WireError::InvalidResponse);
+    }
+    for availability in [
+        &capabilities.thread_lifecycle.create,
+        &capabilities.thread_lifecycle.resume,
+        &capabilities.thread_lifecycle.linked_child,
+        &capabilities.thread_lifecycle.archive,
+        &capabilities.turns.text,
+        &capabilities.turns.images,
+        &capabilities.turns.file_references,
+        &capabilities.turns.interrupt,
+        &capabilities.turns.queued_follow_up,
+        &capabilities.interaction.approvals,
+        &capabilities.interaction.structured_input,
+        &capabilities.interaction.ask_question,
+        &capabilities.interaction.plans,
+        &capabilities.interaction.todos,
+        &capabilities.models.list,
+        &capabilities.models.select_before_first_send,
+        &capabilities.models.reasoning_configuration,
+        &capabilities.permissions.sandbox_modes,
+        &capabilities.permissions.declared_controls,
+        &capabilities.history.pagination,
+        &capabilities.history.hydration,
+        &capabilities.history.context_window_metrics,
+        &capabilities.voice.realtime_voice,
+        &capabilities.voice.transcript_handoff,
+    ] {
+        validate_link_availability(availability)?;
+    }
+    Ok(())
+}
+
+fn validate_link_availability(value: &LinkFeatureAvailability) -> Result<(), WireError> {
+    validate_optional_command_center_label(value.reason.as_deref())
+}
+
+fn validate_optional_command_center_label(value: Option<&str>) -> Result<(), WireError> {
+    if let Some(value) = value {
+        valid_command_center_label(value)?;
+    }
+    Ok(())
+}
+
+fn valid_command_center_label(value: &str) -> Result<(), WireError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_DISPLAY_LABEL_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(WireError::InvalidResponse);
     }
     Ok(())
 }

@@ -3,7 +3,7 @@
 Status: **IN PROGRESS**
 Tracker: [#25](https://github.com/amanthanvi/remora/issues/25)
 Baselines: Remora `f9dbfc7a4453e14cb508211046ba6835bdc4a5c0`; Link `42e27678cda63bda440a8f6620344f10baefea4f`
-Pinned foundation: Link `6442c135bfe52f3a6f7ab9b548a911ddc707061a`
+Pinned implementation: Link `99811347aecdc87f2555dbb511c31b35d40c3272`
 Depends on: Plan 014
 
 ## Scope and ownership
@@ -27,7 +27,9 @@ or a strict v2 wire incompatibility.
 
 ## Progress evidence
 
-The pinned foundation implements the catalog, recovery journal, owner-only
-files, crash replay, corruption recovery, and immutable Thread runtime. Link
-command-center lifecycle and protocol exposure remain in progress; this plan is
-not complete merely because the persistence layer is green.
+The pinned implementation includes the catalog, recovery journal, owner-only
+files, crash replay, corruption recovery, immutable Thread runtime, bounded Host
+and provider capability status, and the authenticated status wire operation.
+The endpoint requires `InspectRuntimes`, discloses only provider instances whose
+runtime IDs are authorized by the grant, and excludes workspace content. Full
+Project/Working Copy/Thread lifecycle mutation exposure remains before closure.

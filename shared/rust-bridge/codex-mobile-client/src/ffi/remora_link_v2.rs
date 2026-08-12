@@ -30,6 +30,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::ffi::AppClient;
 use crate::ffi::background_relay::AppRelaySecretValue;
+use crate::ffi::command_center::{
+    HostCommandCenterStatus, project_link_command_center_status,
+    project_unknown_link_command_center_status,
+};
 use crate::remote_host_pairing::identity::{V2Invite, decode_pairing_code};
 use crate::remote_host_pairing::remora_link_v2::{
     ALPN, AgentInfoV2, AgentWireV2, AttachKindV2, AttachmentCustodyErrorV2, ConfirmationModeV2,
@@ -39,7 +43,8 @@ use crate::remote_host_pairing::remora_link_v2::{
     JournalPortErrorV2, JournalPortV2, LifecycleErrorV2, MutationOutcomeV2, PairingJournalEntryV2,
     PairingLifecycleV2, ReconnectOutcomeV2, RequestCorrelationV2, RequestV2, ResponseV2,
     RestartDispositionV2, RestartOutcomeV2, RetainedAttachmentRegistryV2, StartedExchangeV2,
-    connect_runtime_client_v2, read_response_frame, write_proof_frame, write_request_frame,
+    connect_runtime_client_v2, read_response_frame, read_response_frame_bounded, write_proof_frame,
+    write_request_frame,
 };
 use crate::session::connection::{
     RemoteSessionExtras, RuntimeRemoteSessionResource, ServerConfig, ServerSession,
@@ -69,6 +74,8 @@ const MAX_RETAINED_ATTACHMENT_AGE: Duration = Duration::from_secs(2 * 60);
 const ATTACHMENT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
 const BATCH_CONCURRENCY: usize = 8;
 const BATCH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const MAX_COMMAND_CENTER_RESPONSE_FRAME_BYTES: usize =
+    remora_bridge_core::command_center::MAX_COMMAND_CENTER_STATUS_BYTES + 1_024;
 const JOURNAL_ENVELOPE_SCHEMA: u32 = 1;
 const CLOSE_CODE: u32 = 0x22;
 const DEFAULT_HOST_DISPLAY_NAME: &str = "Remote Host";
@@ -867,6 +874,20 @@ impl AppClient {
         }
     }
 
+    /// Fetch typed, bounded Host/provider capabilities over the authenticated
+    /// Link control channel. A pre-capability Link remains explicit Unknown.
+    pub async fn remora_link_command_center_status(
+        &self,
+        host_id: String,
+    ) -> Result<HostCommandCenterStatus, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        project_command_center_status_result(
+            &host_id,
+            configured.lifecycle.command_center_status(&host_id).await,
+        )
+    }
+
     /// Decode, authenticate, and inspect a QR/paste value through one path.
     pub async fn inspect_remora_link_code(
         &self,
@@ -1242,6 +1263,20 @@ impl AppClient {
         remora_link_read(&self.inner.remora_link)
             .clone()
             .ok_or(RemoraLinkError::NotConfigured)
+    }
+}
+
+fn project_command_center_status_result(
+    legacy_server_id: &str,
+    result: Result<
+        Option<remora_bridge_core::command_center::HostCommandCenterStatusV1>,
+        LifecycleErrorV2,
+    >,
+) -> Result<HostCommandCenterStatus, RemoraLinkError> {
+    match result {
+        Ok(Some(status)) => Ok(project_link_command_center_status(legacy_server_id, status)),
+        Ok(None) => Ok(project_unknown_link_command_center_status(legacy_server_id)),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -2585,8 +2620,13 @@ impl HostPortV2 for IrohRemoraLinkHost {
             write_proof_frame(&mut send, proof)
                 .await
                 .map_err(map_control_error)?;
-            let terminal = read_response_frame(&mut recv)
-                .await
+            let terminal =
+                if matches!(&request, RequestCorrelationV2::CommandCenterStatus { .. }) {
+                    read_response_frame_bounded(&mut recv, MAX_COMMAND_CENTER_RESPONSE_FRAME_BYTES)
+                        .await
+                } else {
+                    read_response_frame(&mut recv).await
+                }
                 .map_err(map_control_error)?;
             let challenge = challenge
                 .challenge
@@ -4725,5 +4765,48 @@ mod tests {
         ] {
             assert!(key_assurance_is_allowed(assurance, false));
         }
+    }
+
+    #[test]
+    fn command_center_status_projects_durable_identity_and_old_link_unknown() {
+        let legacy_server_id = "remora-link:transport-node";
+        let status = remora_bridge_core::command_center::HostCommandCenterStatusV1 {
+            version: 1,
+            host_id: remora_bridge_core::command_center::HostId(URL_SAFE_NO_PAD.encode([1_u8; 16])),
+            catalog_generation: 7,
+            host_capabilities: remora_bridge_core::command_center::HostCapabilitiesV1::all_unknown(
+                2, "0.1.0",
+            ),
+            provider_instances: Vec::new(),
+        };
+
+        let projected =
+            project_command_center_status_result(legacy_server_id, Ok(Some(status))).unwrap();
+        assert_eq!(projected.legacy_server_id, legacy_server_id);
+        assert_eq!(
+            projected.host_id.as_deref(),
+            Some(URL_SAFE_NO_PAD.encode([1_u8; 16]).as_str())
+        );
+        assert_eq!(projected.catalog_generation, Some(7));
+        assert_eq!(
+            projected.availability.state,
+            crate::ffi::command_center::AvailabilityState::Available
+        );
+
+        let legacy = project_command_center_status_result(legacy_server_id, Ok(None)).unwrap();
+        assert_eq!(legacy.host_id, None);
+        assert_eq!(legacy.catalog_generation, None);
+        assert_eq!(
+            legacy.availability.state,
+            crate::ffi::command_center::AvailabilityState::Unknown
+        );
+        assert!(legacy.provider_instances.is_empty());
+        assert_eq!(
+            project_command_center_status_result(
+                legacy_server_id,
+                Err(LifecycleErrorV2::ProtocolViolation),
+            ),
+            Err(RemoraLinkError::ProtocolViolation)
+        );
     }
 }

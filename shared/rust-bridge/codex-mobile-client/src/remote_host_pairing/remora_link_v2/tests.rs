@@ -1,5 +1,10 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use remora_bridge_core::command_center::{
+    HostCapabilitiesV1, HostCommandCenterStatusV1, HostId, MAX_COMMAND_CENTER_STATUS_BYTES,
+    ModelDescriptor, ProviderInstance, ProviderInstanceId, ProviderReadiness,
+    RuntimeCapabilitiesV1,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -115,6 +120,27 @@ fn list_agents_request() -> RequestV2 {
     .expect("published list-agents request is valid")
 }
 
+fn command_center_status_request() -> RequestV2 {
+    RequestV2::decode_json(
+        format!(
+            r#"{{"op":"command_center_status","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}"}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("published command-center status request is valid")
+}
+
+fn command_center_status_json() -> serde_json::Value {
+    serde_json::to_value(HostCommandCenterStatusV1 {
+        version: 1,
+        host_id: HostId(URL_SAFE_NO_PAD.encode([1_u8; 16])),
+        catalog_generation: 7,
+        host_capabilities: HostCapabilitiesV1::all_unknown(2, "0.1.0"),
+        provider_instances: Vec::new(),
+    })
+    .unwrap()
+}
+
 fn published_challenge() -> ProofChallengeV2 {
     ProofChallengeV2 {
         challenge_id: CHALLENGE_ID.to_string(),
@@ -177,6 +203,20 @@ fn published_proof_vector_matches_and_verifies() {
 }
 
 #[test]
+fn command_center_status_uses_a_distinct_signed_operation_with_no_payload_fields() {
+    let request = command_center_status_request();
+    assert_eq!(request.operation(), "command_center_status");
+    assert_eq!(
+        request.operation_payload_hash().unwrap(),
+        list_agents_request().operation_payload_hash().unwrap()
+    );
+    assert!(matches!(
+        request.terminal_correlation().unwrap(),
+        RequestCorrelationV2::CommandCenterStatus { .. }
+    ));
+}
+
+#[test]
 fn published_sas_vectors_match() {
     let transcript_hash = [0x55; 32];
     assert_eq!(
@@ -206,6 +246,32 @@ fn strict_parsers_reject_unknown_fields() {
     let response = br#"{"v":2,"ok":false,"error_code":"invalid_request","error":"invalid request","legacy":true}"#;
     assert_eq!(
         ResponseV2::decode_json(response),
+        Err(WireError::InvalidResponse)
+    );
+}
+
+#[test]
+fn command_center_status_rejects_workspace_fields_and_oversized_reasons() {
+    let mut workspace_status = command_center_status_json();
+    workspace_status["projects"] = serde_json::json!([]);
+    assert_eq!(
+        decode_response(serde_json::json!({
+            "v": 2,
+            "ok": true,
+            "command_center_status": workspace_status
+        })),
+        Err(WireError::InvalidResponse)
+    );
+
+    let mut oversized_status = command_center_status_json();
+    oversized_status["host_capabilities"]["project_registration"]["reason"] =
+        serde_json::json!("x".repeat(257));
+    assert_eq!(
+        decode_response(serde_json::json!({
+            "v": 2,
+            "ok": true,
+            "command_center_status": oversized_status
+        })),
         Err(WireError::InvalidResponse)
     );
 }
@@ -260,7 +326,7 @@ fn pinned_fixture_declares_the_exact_v2_domains_and_encoding() {
 }
 
 #[test]
-fn all_seven_requests_have_exact_canonical_json_shapes() {
+fn all_eight_requests_have_exact_canonical_json_shapes() {
     let fixture = golden_vectors();
     let requests = [
         format!(
@@ -270,6 +336,9 @@ fn all_seven_requests_have_exact_canonical_json_shapes() {
             r#"{{"op":"enroll","v":2,"invitation_id":"{INVITATION_ID}","secret":"{INVITATION_SECRET}","device_name":"Remora Phone","device_public_key":"{DEVICE_PUBLIC_KEY}","selected_runtime_ids":["codex"],"requested_scopes":["inspect_runtimes","connect_runtime","self_revoke"],"idempotency_key":"enroll-operation-0001","client_nonce":"{CLIENT_NONCE}"}}"#
         ),
         fixture.vector.list_agents_request_json,
+        format!(
+            r#"{{"op":"command_center_status","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}"}}"#
+        ),
         fixture.vector.restart_request_json,
         format!(
             r#"{{"op":"connect","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","agent":"codex","resume":{{"last_seq":42}}}}"#
@@ -286,6 +355,7 @@ fn all_seven_requests_have_exact_canonical_json_shapes() {
         "inspect_invitation",
         "enroll",
         "list_agents",
+        "command_center_status",
         "restart_agent",
         "connect",
         "revoke_self",
@@ -378,13 +448,26 @@ fn typed_responses_accept_every_terminal_result_shape() {
             "capabilities": {"supports_ssh_bridge": true}
         }]
     });
+    let command_center_status = serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "command_center_status": command_center_status_json()
+    });
     let session = serde_json::json!({
         "v": 2,
         "ok": true,
         "session": {"attached": "resumed", "current_seq": 42, "floor_seq": 1}
     });
 
-    for response in [inspection, pending, enrolled, revocation, agents, session] {
+    for response in [
+        inspection,
+        pending,
+        enrolled,
+        revocation,
+        agents,
+        command_center_status,
+        session,
+    ] {
         decode_response(response).unwrap();
     }
 
@@ -475,7 +558,7 @@ fn assert_correlated_exchange(
 }
 
 #[test]
-fn challenge_and_terminal_results_correlate_to_all_seven_operations() {
+fn challenge_and_terminal_results_correlate_to_all_eight_operations() {
     let inspect = RequestV2::decode_json(
         format!(
             r#"{{"op":"inspect_invitation","v":2,"invitation_id":"{INVITATION_ID}","secret":"{INVITATION_SECRET}","device_public_key":"{DEVICE_PUBLIC_KEY}","client_nonce":"{CLIENT_NONCE}"}}"#
@@ -529,6 +612,16 @@ fn challenge_and_terminal_results_correlate_to_all_seven_operations() {
         list_agents_request(),
         published_challenge(),
         serde_json::json!({"v": 2, "ok": true, "agents": []}),
+    );
+
+    assert_correlated_exchange(
+        command_center_status_request(),
+        published_challenge(),
+        serde_json::json!({
+            "v": 2,
+            "ok": true,
+            "command_center_status": command_center_status_json()
+        }),
     );
 
     let fixture = golden_vectors();
@@ -1155,6 +1248,57 @@ async fn control_frames_use_u32be_and_enforce_the_exact_65536_byte_limit() {
         super::client::write_json_frame(&mut sink, &"x".repeat(MAX_CONTROL_FRAME_BYTES)).await,
         Err(super::client::ControlExchangeError::FrameTooLarge)
     );
+}
+
+#[tokio::test]
+async fn larger_frame_ceiling_is_opt_in_for_command_center_terminal_only() {
+    let models = (0..256)
+        .map(|index| ModelDescriptor {
+            model_id: format!("{index:03}{}", "x".repeat(197)),
+            display_name: format!("Model {index:03} {}", "y".repeat(190)),
+            is_default: index == 0,
+        })
+        .collect();
+    let status = HostCommandCenterStatusV1 {
+        version: 1,
+        host_id: HostId(URL_SAFE_NO_PAD.encode([1_u8; 16])),
+        catalog_generation: 7,
+        host_capabilities: HostCapabilitiesV1::all_unknown(2, "0.1.0"),
+        provider_instances: vec![ProviderInstance {
+            instance_id: ProviderInstanceId(URL_SAFE_NO_PAD.encode([2_u8; 16])),
+            runtime_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            readiness: ProviderReadiness::Ready,
+            readiness_reason: None,
+            continuation_group_id: "codex".to_string(),
+            models,
+            capabilities: RuntimeCapabilitiesV1::all_unknown(),
+        }],
+    };
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "command_center_status": status
+    }))
+    .unwrap();
+    assert!(payload.len() > MAX_CONTROL_FRAME_BYTES);
+    assert!(payload.len() <= MAX_COMMAND_CENTER_STATUS_BYTES + 1_024);
+    let mut frame = Vec::with_capacity(payload.len() + 4);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+
+    let mut default_reader = frame.as_slice();
+    assert_eq!(
+        super::client::read_response_frame(&mut default_reader).await,
+        Err(super::client::ControlExchangeError::FrameTooLarge)
+    );
+    let mut status_reader = frame.as_slice();
+    super::client::read_response_frame_bounded(
+        &mut status_reader,
+        MAX_COMMAND_CENTER_STATUS_BYTES + 1_024,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

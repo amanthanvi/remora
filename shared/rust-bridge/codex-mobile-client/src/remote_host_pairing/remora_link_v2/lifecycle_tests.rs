@@ -8,6 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
+use remora_bridge_core::command_center::{HostCapabilitiesV1, HostCommandCenterStatusV1, HostId};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
@@ -237,6 +238,8 @@ struct ScriptedHostV2 {
     connect_resume_cursors: StdMutex<Vec<Option<u64>>>,
     fail_connect: AtomicBool,
     include_out_of_grant_agent: AtomicBool,
+    command_center_unsupported: AtomicBool,
+    malformed_command_center_terminal: AtomicBool,
 }
 
 impl ScriptedHostV2 {
@@ -275,6 +278,8 @@ impl ScriptedHostV2 {
             connect_resume_cursors: StdMutex::new(Vec::new()),
             fail_connect: AtomicBool::new(false),
             include_out_of_grant_agent: AtomicBool::new(false),
+            command_center_unsupported: AtomicBool::new(false),
+            malformed_command_center_terminal: AtomicBool::new(false),
         }
     }
 
@@ -289,6 +294,7 @@ impl ScriptedHostV2 {
             revocation: None,
             restart: None,
             agents: None,
+            command_center_status: None,
             session: None,
             error_code: None,
             error: None,
@@ -596,6 +602,38 @@ impl HostPortV2 for ScriptedHostV2 {
                     });
                 }
                 response.agents = Some(agents);
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::CommandCenterStatus { .. } => {
+                if self.command_center_unsupported.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::InvalidRequest);
+                    response.error = Some(ErrorCodeV2::InvalidRequest.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                if self
+                    .malformed_command_center_terminal
+                    .load(Ordering::SeqCst)
+                {
+                    return Ok(FinishedExchangeV2 {
+                        response: Self::terminal(true),
+                        attachment_id: None,
+                    });
+                }
+                let mut response = Self::terminal(true);
+                response.command_center_status = Some(HostCommandCenterStatusV1 {
+                    version: 1,
+                    host_id: HostId(URL_SAFE_NO_PAD.encode([1_u8; 16])),
+                    catalog_generation: 7,
+                    host_capabilities: HostCapabilitiesV1::all_unknown(2, "0.1.0"),
+                    provider_instances: Vec::new(),
+                });
                 Ok(FinishedExchangeV2 {
                     response,
                     attachment_id: None,
@@ -1541,6 +1579,50 @@ async fn list_agents_rejects_host_results_outside_the_grant_allowlist() {
         .store(true, Ordering::SeqCst);
     assert_eq!(
         harness.lifecycle.list_agents(&harness.host_id).await,
+        Err(LifecycleErrorV2::ProtocolViolation)
+    );
+}
+
+#[tokio::test]
+async fn command_center_status_uses_the_enrolled_inspection_grant() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+
+    let status = harness
+        .lifecycle
+        .command_center_status(&harness.host_id)
+        .await
+        .unwrap()
+        .expect("new Link status");
+
+    assert_eq!(status.host_id.as_str(), URL_SAFE_NO_PAD.encode([1_u8; 16]));
+    assert_eq!(status.catalog_generation, 7);
+    assert!(status.provider_instances.is_empty());
+
+    harness
+        .host
+        .command_center_unsupported
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .lifecycle
+            .command_center_status(&harness.host_id)
+            .await,
+        Ok(None)
+    );
+    harness
+        .host
+        .command_center_unsupported
+        .store(false, Ordering::SeqCst);
+    harness
+        .host
+        .malformed_command_center_terminal
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .lifecycle
+            .command_center_status(&harness.host_id)
+            .await,
         Err(LifecycleErrorV2::ProtocolViolation)
     );
 }

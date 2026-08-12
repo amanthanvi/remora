@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use remora_bridge_core::command_center::HostCommandCenterStatusV1;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
@@ -440,6 +441,51 @@ impl PairingLifecycleV2 {
             return Err(LifecycleErrorV2::ProtocolViolation);
         }
         Ok(agents)
+    }
+
+    pub(crate) async fn command_center_status(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<HostCommandCenterStatusV1>, LifecycleErrorV2> {
+        let host_lock = self.host_lock(host_id).await;
+        let _operation = host_lock.lock().await;
+        let mut entry = self
+            .load(host_id)
+            .await?
+            .ok_or(LifecycleErrorV2::NotEnrolled)?;
+        if !matches!(entry.phase, JournalPhaseV2::Enrolled) {
+            return Err(LifecycleErrorV2::NotEnrolled);
+        }
+        let credential = entry
+            .credential
+            .clone()
+            .ok_or(LifecycleErrorV2::JournalCorrupt)?;
+        if !credential
+            .granted_scopes
+            .contains(&DeviceScopeV2::InspectRuntimes)
+        {
+            return Err(LifecycleErrorV2::InvalidSelection);
+        }
+        let request = RequestV2::CommandCenterStatus {
+            v: super::wire::PROTOCOL_VERSION,
+            credential_id: credential.credential_id,
+            client_nonce: self.fresh_nonce(),
+        };
+        let started = self.begin_round(&mut entry, &request, false).await?;
+        let terminal = self
+            .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
+            .await?
+            .response;
+        if !terminal.ok {
+            if terminal.error_code == Some(super::wire::ErrorCodeV2::InvalidRequest) {
+                return Ok(None);
+            }
+            return Err(map_terminal_error(&terminal));
+        }
+        terminal
+            .command_center_status
+            .map(Some)
+            .ok_or(LifecycleErrorV2::ProtocolViolation)
     }
 
     /// Restart one granted runtime with a lifetime-monotonic, at-most-once

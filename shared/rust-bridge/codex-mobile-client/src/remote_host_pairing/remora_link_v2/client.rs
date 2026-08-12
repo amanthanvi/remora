@@ -49,7 +49,19 @@ pub(crate) async fn read_response_frame<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let bytes = read_frame_bytes(reader).await?;
+    read_response_frame_bounded(reader, MAX_CONTROL_FRAME_BYTES).await
+}
+
+/// Read a response with an operation-specific ceiling. Callers must select
+/// the larger ceiling only after retaining the correlated request.
+pub(crate) async fn read_response_frame_bounded<R>(
+    reader: &mut R,
+    maximum: usize,
+) -> Result<ResponseV2, ControlExchangeError>
+where
+    R: AsyncRead + Unpin,
+{
+    let bytes = read_frame_bytes_bounded(reader, maximum).await?;
     ResponseV2::decode_json(&bytes).map_err(|_| ControlExchangeError::InvalidMessage)
 }
 
@@ -79,7 +91,18 @@ where
     write_json_frame(writer, proof).await
 }
 
+#[cfg(test)]
 async fn read_frame_bytes<R>(reader: &mut R) -> Result<Zeroizing<Vec<u8>>, ControlExchangeError>
+where
+    R: AsyncRead + Unpin,
+{
+    read_frame_bytes_bounded(reader, MAX_CONTROL_FRAME_BYTES).await
+}
+
+async fn read_frame_bytes_bounded<R>(
+    reader: &mut R,
+    maximum: usize,
+) -> Result<Zeroizing<Vec<u8>>, ControlExchangeError>
 where
     R: AsyncRead + Unpin,
 {
@@ -87,7 +110,7 @@ where
         .read_u32()
         .await
         .map_err(|_| ControlExchangeError::Io)? as usize;
-    if length > MAX_CONTROL_FRAME_BYTES {
+    if length > maximum {
         return Err(ControlExchangeError::FrameTooLarge);
     }
     let mut bytes = Zeroizing::new(vec![0_u8; length]);

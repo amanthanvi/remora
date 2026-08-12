@@ -24,3 +24,17 @@ adapters, generated bindings, threat model, and performance budgets.
 
 Rollback is the single contract/policy commit. STOP on a breaking v2 Link wire
 change, an unbounded field, platform-side policy, or a non-loopback bypass.
+
+## Progress evidence
+
+Remora now pins Link `99811347aecdc87f2555dbb511c31b35d40c3272` and exposes
+its authenticated, `InspectRuntimes`-scoped `command_center_status` operation as
+one handwritten UniFFI result. The client preserves `Unknown` for an older Link
+that returns the authenticated `invalid_request` terminal response, rejects
+malformed or oversized responses, and opts into the 512 KiB status bound only
+after correlating that exact request. Provider instances are already filtered
+by the Host grant before serialization.
+
+Focused Link/Rust protocol tests, binding generation, the iOS simulator build,
+the Android arm64 debug build, and Android unit tests pass. Native journey
+consumption and the final shared-store hydration seam remain before closure.
