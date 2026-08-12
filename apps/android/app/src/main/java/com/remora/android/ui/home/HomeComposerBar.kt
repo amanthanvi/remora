@@ -105,6 +105,9 @@ fun HomeComposerBar(
     val appModel = LocalAppModel.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val launchState by appModel.launchState.snapshot.collectAsState()
+    val commandCenterStatus by appModel.commandCenterStatus.collectAsState()
+    val snapshot by appModel.snapshot.collectAsState()
 
     var textFieldValue by remember { mutableStateOf(TextFieldValue("")) }
     val text = textFieldValue.text
@@ -164,8 +167,24 @@ fun HomeComposerBar(
         }
     }
 
+    val selectedRuntimeId = launchState.selectedAgentRuntimeKind
+        ?.takeIf { launchState.selectedModel.isNotBlank() }
+    val launchAvailability = remember(
+        commandCenterStatus,
+        snapshot,
+        project?.serverId,
+        selectedRuntimeId,
+    ) {
+        project?.let {
+            appModel.store.newTaskLaunchAvailability(it.serverId, selectedRuntimeId)
+        }
+    }
+    val launchGuidance = launchAvailability
+        ?.takeUnless { it.canLaunch }
+        ?.availability
+        ?.reason
     val hasSendContent = text.isNotBlank() || attachedImage != null || attachedFiles.isNotEmpty()
-    val canSend = !isSubmitting && hasSendContent
+    val canSend = !isSubmitting && hasSendContent && launchAvailability?.canLaunch != false
 
     // IME visibility is authoritative for "the user is interacting with the
     // composer". `isFocused` alone is unreliable because dismissing the
@@ -200,6 +219,8 @@ fun HomeComposerBar(
         val currentProject = project
         if (currentProject == null) {
             errorMessage = "Pick a project before sending."
+        } else if (launchAvailability?.canLaunch == false) {
+            errorMessage = null
         } else {
             val payloadText = text.trim()
             val attachmentToSend = attachedImage
@@ -211,11 +232,11 @@ fun HomeComposerBar(
             errorMessage = null
             scope.launch {
                 try {
-                    val serverIsLocal = appModel.snapshot.value
+                    val serverIsLocal = snapshot
                         ?.servers
                         ?.firstOrNull { it.serverId == currentProject.serverId }
                         ?.isLocal == true
-                    val launchSnapshot = appModel.launchState.snapshot.value
+                    val launchSnapshot = launchState
                     val selectedModel = launchSnapshot.selectedModel.trim().ifEmpty { null }
                     val selectedEffort = launchSnapshot.reasoningEffort.trim().ifEmpty { null }
                         ?.let(::reasoningEffortFromServerValue)
@@ -265,7 +286,8 @@ fun HomeComposerBar(
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (errorMessage != null) {
+        val statusMessage = errorMessage ?: launchGuidance
+        if (statusMessage != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -273,18 +295,20 @@ fun HomeComposerBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = errorMessage ?: "",
+                    text = statusMessage,
                     color = RemoraTheme.warning,
                     fontSize = RemoraTextStyle.caption.scaled,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = { errorMessage = null }) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Dismiss",
-                        tint = RemoraTheme.textMuted,
-                        modifier = Modifier.size(14.dp),
-                    )
+                if (errorMessage != null) {
+                    IconButton(onClick = { errorMessage = null }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            tint = RemoraTheme.textMuted,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
                 }
             }
         }
@@ -492,7 +516,7 @@ fun HomeComposerBar(
                         runCatching { focusRequester.requestFocus() }
                     }
                 },
-                canSend = hasSendContent,
+                canSend = canSend,
             )
         }
 

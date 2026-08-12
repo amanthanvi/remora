@@ -11,6 +11,7 @@ struct ConversationComposerEntryRowView: View {
     let isTurnActive: Bool
     let hasAttachment: Bool
     let allowsVoiceInput: Bool
+    let allowsSend: Bool
     let onPasteImage: (UIImage) -> Void
     let onSendText: () -> Void
     let onStopRecording: () -> Void
@@ -34,6 +35,7 @@ struct ConversationComposerEntryRowView: View {
         isTurnActive: Bool,
         hasAttachment: Bool,
         allowsVoiceInput: Bool = true,
+        allowsSend: Bool = true,
         onPasteImage: @escaping (UIImage) -> Void,
         onSendText: @escaping () -> Void,
         onStopRecording: @escaping () -> Void,
@@ -48,6 +50,7 @@ struct ConversationComposerEntryRowView: View {
         self.isTurnActive = isTurnActive
         self.hasAttachment = hasAttachment
         self.allowsVoiceInput = allowsVoiceInput
+        self.allowsSend = allowsSend
         self.onPasteImage = onPasteImage
         self.onSendText = onSendText
         self.onStopRecording = onStopRecording
@@ -62,7 +65,7 @@ struct ConversationComposerEntryRowView: View {
     }
 
     private var canSend: Bool {
-        hasText || hasAttachment
+        allowsSend && (hasText || hasAttachment)
     }
 
     /// Show the expand affordance once the composer is multi-line or starts to
@@ -229,7 +232,8 @@ struct ConversationComposerEntryRowView: View {
                 isPresented: $showExpanded,
                 onPasteImage: onPasteImage,
                 onSend: onSendText,
-                hasAttachment: hasAttachment
+                hasAttachment: hasAttachment,
+                allowsSend: allowsSend
             )
         }
     }

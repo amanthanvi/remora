@@ -7,6 +7,7 @@ struct ConversationComposerExpandedView: View {
     let onPasteImage: (UIImage) -> Void
     let onSend: () -> Void
     let hasAttachment: Bool
+    var allowsSend: Bool = true
 
     // Start unfocused so the `.task` below forces a false→true transition,
     // which is what drives `ConversationComposerTextView`'s coordinator to
@@ -16,7 +17,7 @@ struct ConversationComposerExpandedView: View {
     @State private var isFocused = false
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespaces).isEmpty || hasAttachment
+        allowsSend && (!inputText.trimmingCharacters(in: .whitespaces).isEmpty || hasAttachment)
     }
 
     var body: some View {

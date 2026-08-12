@@ -50,6 +50,7 @@ oversized, and negative inputs.
 | Thread start/resume fallback sandbox    | `workspace-write` with `danger-full-access` fallback when Linux sandboxing is unavailable                               |
 | Thread turn pagination (newer remotes)  | Conversation opens with last 5 turns; "Load earlier messages" fetches older 5-turn pages via `thread/turns/list`        |
 | Thread turn pagination fallback         | Capability flips off via response inspection; embedded turns load fully; "Load earlier messages" is hidden             |
+| New-Thread provider readiness           | Home composer uses the shared Rust launch projection; known-unready Hosts disable inline, expanded, keyboard, and hardware send, show bounded Host guidance, and preserve the draft. Older Links remain usable only when the typed runtime directory declares the selected runtime available. |
 
 ## Remote Terminal UX Matrix
 

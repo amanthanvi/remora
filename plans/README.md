@@ -40,7 +40,7 @@ evidence.
 | 014 | Shared command-center contracts and projections ([#24](https://github.com/amanthanvi/remora/issues/24)) | P0 | L | 013 | IN PROGRESS |
 | 015 | Durable Host domain ([#25](https://github.com/amanthanvi/remora/issues/25)) | P0 | L | 014 | IN PROGRESS |
 | 016 | Encrypted device state ([#26](https://github.com/amanthanvi/remora/issues/26)) | P0 | L | 014, 015 | IN PROGRESS |
-| 017 | Command-center mobile journeys ([#27](https://github.com/amanthanvi/remora/issues/27)) | P0 | L | 014–016 | TODO |
+| 017 | Command-center mobile journeys ([#27](https://github.com/amanthanvi/remora/issues/27)) | P0 | L | 014–016 | IN PROGRESS |
 | 018 | Trusted workspace suite ([#28](https://github.com/amanthanvi/remora/issues/28)) | P0 | XL | 015–017 | TODO |
 | 019 | Provider parity and Cursor ([#29](https://github.com/amanthanvi/remora/issues/29)) | P1 | L | 015, 017, 018 | TODO |
 | 020 | Browser preview and automation ([#30](https://github.com/amanthanvi/remora/issues/30)) | P1 | XL | 018 | TODO |
@@ -88,6 +88,11 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   search primitives, native Keychain/Keystore handoff, backup exclusion,
   corruption recovery, and focused Rust/iOS/Android tests. Organization and
   review APIs plus authoritative delivery orchestration remain before closure.
+- Plan 017 has its first parity journey: both Home composers derive new-Thread
+  launch availability from the same Rust projection, disable every send path
+  for a known-unready provider, show the bounded Host guidance inline, and
+  preserve the draft. Mission Control, exhaustive Sessions, Host Scratch, and
+  Needs You remain before closure.
 
 ## Findings considered and rejected
 

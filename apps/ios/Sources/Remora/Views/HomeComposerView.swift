@@ -49,6 +49,31 @@ struct HomeComposerView: View {
     @State private var composerSelectionRange = NSRange(location: 0, length: 0)
 
     private var isDisabled: Bool { project == nil }
+    private var launchAvailability: NewTaskLaunchAvailabilityV1? {
+        guard let project else { return nil }
+        _ = appModel.commandCenterStatus
+        _ = appModel.snapshotRevision
+        let model = appState.preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let runtimeId = model.isEmpty ? nil : appState.preferredAgentRuntimeKind
+        return appModel.store.newTaskLaunchAvailability(
+            serverId: project.serverId,
+            runtimeId: runtimeId
+        )
+    }
+
+    private var launchGuidance: String? {
+        guard let launchAvailability, !launchAvailability.canLaunch else { return nil }
+        return launchAvailability.availability.reason
+    }
+
+    private var statusMessage: String? {
+        errorMessage ?? launchGuidance
+    }
+
+    private var allowsSend: Bool {
+        launchAvailability?.canLaunch ?? true
+    }
+
     private var resolvedTranscriptionServerId: String? {
         project?.serverId ?? transcriptionServerId
     }
@@ -70,23 +95,25 @@ struct HomeComposerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let errorMessage {
+            if let statusMessage {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(RemoraTheme.warning)
-                    Text(errorMessage)
+                    Text(statusMessage)
                         .remoraFont(.caption)
                         .foregroundStyle(RemoraTheme.textSecondary)
                     Spacer(minLength: 0)
-                    Button {
-                        self.errorMessage = nil
-                        isComposerFocused = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(RemoraTheme.textMuted)
+                    if errorMessage != nil {
+                        Button {
+                            self.errorMessage = nil
+                            isComposerFocused = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(RemoraTheme.textMuted)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
@@ -108,6 +135,7 @@ struct HomeComposerView: View {
                 showModeChip: false,
                 voiceManager: voiceManager,
                 allowsVoiceInput: project != nil,
+                allowsSend: allowsSend,
                 showAttachMenu: $showAttachMenu,
                 onClearAttachment: { attachedImage = nil },
                 onRemoveFileAttachment: { file in
@@ -224,6 +252,7 @@ struct HomeComposerView: View {
             errorMessage = "Pick a project before sending."
             return
         }
+        guard launchAvailability?.canLaunch != false else { return }
 
         isSubmitting = true
         errorMessage = nil

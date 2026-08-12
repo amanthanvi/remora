@@ -4,8 +4,9 @@ use crate::MobileClient;
 use crate::conversation_uniffi::{HydratedConversationItem, HydratedConversationItemContent};
 use crate::ffi::ClientError;
 use crate::ffi::command_center::{
-    CommandCenterStatusV1, MissionControlProjectionV1, SessionPageV1,
-    project_command_center_status, project_mission_control, project_sessions_page,
+    CommandCenterStatusV1, MissionControlProjectionV1, NewTaskLaunchAvailabilityV1, SessionPageV1,
+    project_command_center_status, project_mission_control, project_new_task_launch_availability,
+    project_sessions_page,
 };
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
@@ -33,8 +34,8 @@ const MAX_COALESCED_STREAMING_TEXT_BYTES: usize = 8 * 1024;
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_app_update, should_preserve_thread_item_update_boundary};
     use super::{AppStoreSubscription, AppStoreSubscriptionState};
+    use super::{merge_app_update, should_preserve_thread_item_update_boundary};
     use crate::conversation_uniffi::{
         HydratedAssistantMessageData, HydratedConversationItem, HydratedConversationItemContent,
         HydratedFileChangeData, HydratedFileChangeEntryData, HydratedMcpToolCallData,
@@ -407,6 +408,23 @@ impl AppStore {
             .app_store
             .project_command_center(|snapshot, statuses| {
                 project_command_center_status(snapshot, statuses)
+            })
+    }
+
+    pub fn new_task_launch_availability(
+        &self,
+        server_id: String,
+        runtime_id: Option<String>,
+    ) -> NewTaskLaunchAvailabilityV1 {
+        self.inner
+            .app_store
+            .project_command_center(|snapshot, statuses| {
+                project_new_task_launch_availability(
+                    snapshot,
+                    statuses,
+                    &server_id,
+                    runtime_id.as_deref(),
+                )
             })
     }
 

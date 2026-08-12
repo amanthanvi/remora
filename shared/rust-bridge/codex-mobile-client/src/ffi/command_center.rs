@@ -190,6 +190,12 @@ pub struct CommandCenterStatusV1 {
     pub overflow_count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NewTaskLaunchAvailabilityV1 {
+    pub can_launch: bool,
+    pub availability: FeatureAvailability,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
 pub enum SessionStatusV1 {
     Idle,
@@ -297,6 +303,99 @@ pub(crate) fn project_command_center_status(
         schema_version: 1,
         hosts,
         overflow_count,
+    }
+}
+
+pub(crate) fn project_new_task_launch_availability(
+    snapshot: &AppSnapshot,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+    server_id: &str,
+    runtime_id: Option<&str>,
+) -> NewTaskLaunchAvailabilityV1 {
+    let Some(server) = snapshot.servers.get(server_id) else {
+        return launch_unavailable("This Host is no longer available");
+    };
+    if !matches!(server.health, crate::store::ServerHealthSnapshot::Connected) {
+        return launch_unavailable("Reconnect this Host before starting work");
+    }
+
+    let runtime_id = runtime_id.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(status) = link_statuses.get(server_id) {
+        let mut providers = status
+            .provider_instances
+            .iter()
+            .filter(|provider| runtime_id.is_none_or(|selected| provider.runtime_id == selected))
+            .collect::<Vec<_>>();
+        providers.sort_by(|left, right| left.instance_id.as_str().cmp(right.instance_id.as_str()));
+
+        if providers
+            .iter()
+            .any(|provider| matches!(provider.readiness, LinkProviderReadiness::Ready))
+        {
+            return launch_available();
+        }
+        if providers.is_empty() {
+            return launch_unavailable(if runtime_id.is_some() {
+                "The selected provider is not available on this Host"
+            } else {
+                "No coding provider is available on this Host"
+            });
+        }
+        let provider = providers[0];
+        let reason = provider
+            .readiness_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or_else(|| provider_readiness_reason(provider.readiness));
+        return launch_unavailable(reason);
+    }
+
+    let matching_runtimes = server
+        .agent_runtimes
+        .iter()
+        .filter(|runtime| runtime_id.is_none_or(|selected| runtime.kind == selected))
+        .collect::<Vec<_>>();
+    if matching_runtimes.iter().any(|runtime| runtime.available) {
+        launch_available()
+    } else if matching_runtimes.is_empty() {
+        launch_unavailable(if runtime_id.is_some() {
+            "The selected provider is not connected to this Host"
+        } else {
+            "No coding provider is connected to this Host"
+        })
+    } else {
+        launch_unavailable("The selected provider is unavailable on this Host")
+    }
+}
+
+fn launch_available() -> NewTaskLaunchAvailabilityV1 {
+    NewTaskLaunchAvailabilityV1 {
+        can_launch: true,
+        availability: FeatureAvailability::available(),
+    }
+}
+
+fn launch_unavailable(reason: &str) -> NewTaskLaunchAvailabilityV1 {
+    NewTaskLaunchAvailabilityV1 {
+        can_launch: false,
+        availability: FeatureAvailability::unavailable(reason),
+    }
+}
+
+fn provider_readiness_reason(readiness: LinkProviderReadiness) -> &'static str {
+    match readiness {
+        LinkProviderReadiness::Ready => "Provider is ready",
+        LinkProviderReadiness::AuthenticationRequired => {
+            "Authenticate this provider on the Host before starting work"
+        }
+        LinkProviderReadiness::InstallationRequired => {
+            "Install this provider on the Host before starting work"
+        }
+        LinkProviderReadiness::ConfigurationRequired => {
+            "Configure this provider on the Host before starting work"
+        }
+        LinkProviderReadiness::Starting => "This provider is still starting on the Host",
+        LinkProviderReadiness::Unavailable => "This provider is unavailable on the Host",
     }
 }
 
@@ -630,6 +729,50 @@ mod tests {
     use crate::store::{AppStoreReducer, ServerHealthSnapshot};
     use crate::types::ThreadInfo;
 
+    fn server_config(server_id: &str) -> ServerConfig {
+        ServerConfig {
+            server_id: server_id.to_string(),
+            display_name: "Host".to_string(),
+            host: server_id.to_string(),
+            port: 0,
+            websocket_url: None,
+            is_local: false,
+            tls: false,
+        }
+    }
+
+    fn link_provider(
+        instance_id: &str,
+        runtime_id: &str,
+        readiness: LinkProviderReadiness,
+        readiness_reason: Option<String>,
+    ) -> LinkProviderInstance {
+        LinkProviderInstance {
+            instance_id: remora_bridge_core::command_center::ProviderInstanceId(
+                instance_id.to_string(),
+            ),
+            runtime_id: runtime_id.to_string(),
+            display_name: runtime_id.to_string(),
+            readiness,
+            readiness_reason,
+            continuation_group_id: runtime_id.to_string(),
+            models: Vec::new(),
+            capabilities: LinkRuntimeCapabilitiesV1::all_unknown(),
+        }
+    }
+
+    fn link_status(providers: Vec<LinkProviderInstance>) -> LinkHostCommandCenterStatusV1 {
+        LinkHostCommandCenterStatusV1 {
+            version: 1,
+            host_id: remora_bridge_core::command_center::HostId(
+                "AQEBAQEBAQEBAQEBAQEBAQ".to_string(),
+            ),
+            catalog_generation: 7,
+            host_capabilities: LinkHostCapabilitiesV1::all_unknown(2, "0.1.0"),
+            provider_instances: providers,
+        }
+    }
+
     fn thread_info(index: usize) -> ThreadInfo {
         ThreadInfo {
             id: format!("thread-{index:03}"),
@@ -770,6 +913,169 @@ mod tests {
         assert_eq!(projection.overflow_count, 8);
         assert_eq!(projection.hosts[0].legacy_server_id, "remora-link:node-00");
         assert_eq!(projection.hosts[31].legacy_server_id, "remora-link:node-31");
+    }
+
+    #[test]
+    fn new_task_launch_uses_connected_runtime_directory_for_legacy_hosts() {
+        let server_id = "remora-link:legacy-node";
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config(server_id), ServerHealthSnapshot::Connected);
+
+        let available = project_new_task_launch_availability(
+            &store.snapshot(),
+            &HashMap::new(),
+            server_id,
+            Some("codex"),
+        );
+        assert!(available.can_launch);
+        assert_eq!(available.availability.state, AvailabilityState::Available);
+
+        let missing = project_new_task_launch_availability(
+            &store.snapshot(),
+            &HashMap::new(),
+            server_id,
+            Some("claude"),
+        );
+        assert!(!missing.can_launch);
+        assert_eq!(missing.availability.state, AvailabilityState::Unavailable);
+    }
+
+    #[test]
+    fn new_task_launch_requires_a_connected_known_host() {
+        let server_id = "remora-link:offline-node";
+        let store = AppStoreReducer::new();
+        store.upsert_server(
+            &server_config(server_id),
+            ServerHealthSnapshot::Disconnected,
+        );
+
+        let offline = project_new_task_launch_availability(
+            &store.snapshot(),
+            &HashMap::new(),
+            server_id,
+            None,
+        );
+        assert!(!offline.can_launch);
+        assert_eq!(
+            offline.availability.reason.as_deref(),
+            Some("Reconnect this Host before starting work")
+        );
+
+        let removed = project_new_task_launch_availability(
+            &store.snapshot(),
+            &HashMap::new(),
+            "missing",
+            None,
+        );
+        assert!(!removed.can_launch);
+        assert_eq!(
+            removed.availability.reason.as_deref(),
+            Some("This Host is no longer available")
+        );
+    }
+
+    #[test]
+    fn new_task_launch_obeys_authoritative_provider_readiness_and_reason() {
+        let server_id = "remora-link:node";
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config(server_id), ServerHealthSnapshot::Connected);
+        let statuses = HashMap::from([(
+            server_id.to_string(),
+            link_status(vec![
+                link_provider(
+                    "provider-b",
+                    "codex",
+                    LinkProviderReadiness::AuthenticationRequired,
+                    Some("Sign in on the Host".to_string()),
+                ),
+                link_provider(
+                    "provider-a",
+                    "codex",
+                    LinkProviderReadiness::Starting,
+                    Some("Host runtime is warming up".to_string()),
+                ),
+                link_provider("provider-c", "claude", LinkProviderReadiness::Ready, None),
+            ]),
+        )]);
+
+        let blocked = project_new_task_launch_availability(
+            &store.snapshot(),
+            &statuses,
+            server_id,
+            Some("codex"),
+        );
+        assert!(!blocked.can_launch);
+        assert_eq!(
+            blocked.availability.reason.as_deref(),
+            Some("Host runtime is warming up")
+        );
+
+        let ready = project_new_task_launch_availability(
+            &store.snapshot(),
+            &statuses,
+            server_id,
+            Some("claude"),
+        );
+        assert!(ready.can_launch);
+
+        let missing = project_new_task_launch_availability(
+            &store.snapshot(),
+            &statuses,
+            server_id,
+            Some("cursor"),
+        );
+        assert!(!missing.can_launch);
+        assert_eq!(
+            missing.availability.reason.as_deref(),
+            Some("The selected provider is not available on this Host")
+        );
+    }
+
+    #[test]
+    fn new_task_launch_bounds_host_guidance_and_has_readiness_fallbacks() {
+        let server_id = "remora-link:node";
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config(server_id), ServerHealthSnapshot::Connected);
+        let statuses = HashMap::from([(
+            server_id.to_string(),
+            link_status(vec![link_provider(
+                "provider-a",
+                "codex",
+                LinkProviderReadiness::ConfigurationRequired,
+                Some("🦀".repeat(100)),
+            )]),
+        )]);
+
+        let bounded = project_new_task_launch_availability(
+            &store.snapshot(),
+            &statuses,
+            server_id,
+            Some("codex"),
+        );
+        let reason = bounded.availability.reason.expect("reason");
+        assert!(!bounded.can_launch);
+        assert!(reason.len() <= MAX_REASON_BYTES);
+        assert!(reason.is_char_boundary(reason.len()));
+
+        let starting_statuses = HashMap::from([(
+            server_id.to_string(),
+            link_status(vec![link_provider(
+                "provider-a",
+                "codex",
+                LinkProviderReadiness::Starting,
+                None,
+            )]),
+        )]);
+        let starting = project_new_task_launch_availability(
+            &store.snapshot(),
+            &starting_statuses,
+            server_id,
+            Some("codex"),
+        );
+        assert_eq!(
+            starting.availability.reason.as_deref(),
+            Some("This provider is still starting on the Host")
+        );
     }
 
     #[test]

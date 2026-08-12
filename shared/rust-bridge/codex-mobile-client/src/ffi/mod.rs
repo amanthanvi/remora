@@ -36,10 +36,10 @@ pub use client::AppClient;
 pub use command_center::{
     AvailabilityState, CommandCenterStatusV1, FeatureAvailability, HistoryCapabilitiesV1,
     HostCapabilitiesV1, HostCommandCenterStatus, InteractionCapabilitiesV1,
-    MissionControlProjectionV1, ModelCapabilitiesV1, ModelDescriptor, PermissionCapabilitiesV1,
-    ProviderInstance, ProviderReadiness, RuntimeCapabilitiesV1, SessionAttentionV1,
-    SessionListRowV1, SessionPageV1, SessionStatusV1, ThreadLifecycleCapabilitiesV1,
-    TurnCapabilitiesV1, VoiceCapabilitiesV1,
+    MissionControlProjectionV1, ModelCapabilitiesV1, ModelDescriptor, NewTaskLaunchAvailabilityV1,
+    PermissionCapabilitiesV1, ProviderInstance, ProviderReadiness, RuntimeCapabilitiesV1,
+    SessionAttentionV1, SessionListRowV1, SessionPageV1, SessionStatusV1,
+    ThreadLifecycleCapabilitiesV1, TurnCapabilitiesV1, VoiceCapabilitiesV1,
 };
 pub use device_database::{
     AppOutboxIntent, AppOutboxIntentKind, AppOutboxState, AppReviewNote, AppReviewNoteState,

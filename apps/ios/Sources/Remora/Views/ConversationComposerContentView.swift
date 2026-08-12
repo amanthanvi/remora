@@ -20,6 +20,7 @@ struct ConversationComposerContentView: View {
     let showModeChip: Bool
     let voiceManager: VoiceTranscriptionManager
     let allowsVoiceInput: Bool
+    let allowsSend: Bool
     @Binding var showAttachMenu: Bool
     let onClearAttachment: () -> Void
     let onRemoveFileAttachment: (ComposerFileAttachment) -> Void
@@ -58,6 +59,7 @@ struct ConversationComposerContentView: View {
         showModeChip: Bool = true,
         voiceManager: VoiceTranscriptionManager,
         allowsVoiceInput: Bool = true,
+        allowsSend: Bool = true,
         showAttachMenu: Binding<Bool>,
         onClearAttachment: @escaping () -> Void,
         onRemoveFileAttachment: @escaping (ComposerFileAttachment) -> Void = { _ in },
@@ -95,6 +97,7 @@ struct ConversationComposerContentView: View {
         self.showModeChip = showModeChip
         self.voiceManager = voiceManager
         self.allowsVoiceInput = allowsVoiceInput
+        self.allowsSend = allowsSend
         _showAttachMenu = showAttachMenu
         self.onClearAttachment = onClearAttachment
         self.onRemoveFileAttachment = onRemoveFileAttachment
@@ -225,6 +228,7 @@ struct ConversationComposerContentView: View {
                     isTurnActive: isTurnActive,
                     hasAttachment: attachedImage != nil || !attachedFiles.isEmpty,
                     allowsVoiceInput: allowsVoiceInput,
+                    allowsSend: allowsSend,
                     onPasteImage: onPasteImage,
                     onSendText: onSendText,
                     onStopRecording: onStopRecording,
