@@ -1654,6 +1654,8 @@ pub(crate) fn remote_connect_args(config: &ServerConfig) -> (String, RemoteAppSe
 pub(crate) async fn connect_remote_client(
     args: &RemoteAppServerConnectArgs,
 ) -> Result<AppServerClient, TransportError> {
+    validate_direct_remote_endpoint(args)?;
+
     #[cfg(all(target_os = "ios", not(target_abi = "macabi")))]
     {
         let home_dir = std::env::var_os("HOME").map(PathBuf::from);
@@ -1666,6 +1668,47 @@ pub(crate) async fn connect_remote_client(
             .await
             .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?,
     ))
+}
+
+fn validate_direct_remote_endpoint(
+    args: &RemoteAppServerConnectArgs,
+) -> Result<(), TransportError> {
+    let RemoteAppServerEndpoint::WebSocket { websocket_url, .. } = &args.endpoint else {
+        return Ok(());
+    };
+    let parsed = url::Url::parse(websocket_url).map_err(|_| {
+        TransportError::ConnectionFailed("invalid direct app-server URL".to_string())
+    })?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(TransportError::ConnectionFailed(
+            "direct app-server URLs cannot contain credentials, query parameters, or fragments"
+                .to_string(),
+        ));
+    }
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return Err(TransportError::ConnectionFailed(
+            "direct app-server URL must use ws:// or wss://".to_string(),
+        ));
+    }
+
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(host)) => host.is_loopback(),
+        Some(url::Host::Ipv6(host)) => host.is_loopback(),
+        None => false,
+    };
+    if !is_loopback {
+        return Err(TransportError::ConnectionFailed(
+            "unauthenticated direct remote app-server access is disabled; use Remora Link or SSH"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn connect_remote_client_over_app_server_proxy(
@@ -3905,6 +3948,77 @@ mod tests {
         let scheme = if config.tls { "wss" } else { "ws" };
         let url = format!("{scheme}://{}:{}", config.host, config.port);
         assert_eq!(url, "wss://codex.example.com:443");
+    }
+
+    #[test]
+    fn direct_remote_policy_allows_only_secret_free_loopback_websockets() {
+        for websocket_url in [
+            "ws://localhost:8080/rpc",
+            "ws://127.0.0.1:8080/rpc",
+            "wss://[::1]:8443/rpc",
+        ] {
+            let args = RemoteAppServerConnectArgs {
+                endpoint: RemoteAppServerEndpoint::WebSocket {
+                    websocket_url: websocket_url.to_string(),
+                    auth_token: None,
+                },
+                client_name: "RemoraTest".to_string(),
+                client_version: "0".to_string(),
+                experimental_api: true,
+                opt_out_notification_methods: Vec::new(),
+                channel_capacity: 16,
+            };
+
+            assert!(
+                validate_direct_remote_endpoint(&args).is_ok(),
+                "{websocket_url} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_remote_policy_rejects_non_loopback_even_with_tls_and_bearer_auth() {
+        let args = RemoteAppServerConnectArgs {
+            endpoint: RemoteAppServerEndpoint::WebSocket {
+                websocket_url: "wss://agent.example.com/rpc".to_string(),
+                auth_token: Some("secret".to_string()),
+            },
+            client_name: "RemoraTest".to_string(),
+            client_version: "0".to_string(),
+            experimental_api: true,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 16,
+        };
+
+        let error = validate_direct_remote_endpoint(&args)
+            .expect_err("raw remote endpoints must remain disabled");
+        assert!(error.to_string().contains("use Remora Link or SSH"));
+    }
+
+    #[test]
+    fn direct_remote_policy_rejects_url_credentials_queries_and_fragments() {
+        for websocket_url in [
+            "ws://user:password@localhost:8080/rpc",
+            "ws://localhost:8080/rpc?token=secret",
+            "ws://localhost:8080/rpc#secret",
+        ] {
+            let args = RemoteAppServerConnectArgs {
+                endpoint: RemoteAppServerEndpoint::WebSocket {
+                    websocket_url: websocket_url.to_string(),
+                    auth_token: None,
+                },
+                client_name: "RemoraTest".to_string(),
+                client_version: "0".to_string(),
+                experimental_api: true,
+                opt_out_notification_methods: Vec::new(),
+                channel_capacity: 16,
+            };
+
+            assert!(
+                validate_direct_remote_endpoint(&args).is_err(),
+                "{websocket_url} should be rejected"
+            );
+        }
     }
 
     #[test]

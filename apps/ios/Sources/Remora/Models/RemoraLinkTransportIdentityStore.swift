@@ -11,6 +11,13 @@ struct RemoraLinkTransportIdentityKey: Equatable, Hashable, Sendable {
         service: "com.remora.app.remora-link.v2.transport-identity",
         account: "application-transport-secret"
     )
+
+    /// Separate namespace for the encrypted device-cache master key. The
+    /// custody implementation is shared, but key material never is.
+    static let deviceDatabaseV1 = Self(
+        service: "com.remora.app.device-database.v1",
+        account: "master-key"
+    )
 }
 
 struct RemoraLinkTransportIdentityStoragePolicy: Equatable, Sendable {
@@ -123,13 +130,16 @@ final class RemoraLinkTransportIdentityStore: Sendable {
 
     static let shared = RemoraLinkTransportIdentityStore()
 
+    private let key: RemoraLinkTransportIdentityKey
     private let security: any RemoraLinkTransportIdentitySecurity
     private let entropy: EntropySource
 
     init(
+        key: RemoraLinkTransportIdentityKey = .applicationV2,
         security: any RemoraLinkTransportIdentitySecurity = SystemRemoraLinkTransportIdentitySecurity(),
         entropy: @escaping EntropySource = RemoraLinkTransportIdentityStore.systemEntropy
     ) {
+        self.key = key
         self.security = security
         self.entropy = entropy
     }
@@ -138,7 +148,7 @@ final class RemoraLinkTransportIdentityStore: Sendable {
     /// instead use `loadOrCreate(candidate:)` so its entropy remains the source
     /// of the proposed bytes.
     func loadOrCreate() throws -> RemoraLinkTransportIdentity {
-        switch security.load(key: .applicationV2) {
+        switch security.load(key: key) {
         case .found(let item):
             return try validated(item)
         case .unavailable(let status):
@@ -183,7 +193,7 @@ final class RemoraLinkTransportIdentityStore: Sendable {
         guard candidate.count == RemoraLinkTransportIdentity.byteCount else {
             throw RemoraLinkTransportIdentityStoreError.invalidCandidateLength
         }
-        switch security.load(key: .applicationV2) {
+        switch security.load(key: key) {
         case .found(let item):
             return try validated(item)
         case .unavailable(let status):
@@ -200,14 +210,14 @@ final class RemoraLinkTransportIdentityStore: Sendable {
             throw RemoraLinkTransportIdentityStoreError.invalidCandidateLength
         }
         switch security.createIfAbsent(
-            key: .applicationV2,
+            key: key,
             candidate: candidate,
             policy: .backgroundCapableDeviceOnly
         ) {
         case .created:
             return try reloadCreatedCandidate(candidate)
         case .duplicate:
-            switch security.load(key: .applicationV2) {
+            switch security.load(key: key) {
             case .found(let winner):
                 return try validated(winner)
             case .missing:
@@ -226,7 +236,7 @@ final class RemoraLinkTransportIdentityStore: Sendable {
     private func reloadCreatedCandidate(
         _ candidate: UnsafeRawBufferPointer
     ) throws -> RemoraLinkTransportIdentity {
-        switch security.load(key: .applicationV2) {
+        switch security.load(key: key) {
         case .found(let item):
             guard candidate.elementsEqual(item.bytes) else {
                 throw RemoraLinkTransportIdentityStoreError.corruptStoredIdentity

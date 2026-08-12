@@ -77,10 +77,18 @@ The embedded app-server is not an on-device shell; terminal sessions always run
 on a remote host. Opaque background wakeups are reconciled against durable
 state; notification payloads are never a source of truth or an approval
 surface. The Android active-turn home widget is a separate current system
-surface; on this base it can display prompt, model, context, and tool details,
-and its sanitization remains Planned. The full Live Activity extension and
+surface with bounded status/count-only data; it never renders prompt, model,
+context, path, or tool details. The full Live Activity extension and
 store-release automation are not yet implemented in this checkout. Watch,
 complications, CarPlay, Fastlane, and store-feedback triage remain excluded.
+
+Raw app-server WebSocket connections are development-only and restricted to
+secret-free loopback endpoints. Remote computers must use Remora Link or SSH.
+
+Device-local command-center cache data uses a Rust-owned SQLite store. Outbox
+payloads and search documents are encrypted per record with a device-only
+Keychain/Keystore key; live Host/provider state remains authoritative on the
+Host.
 
 New remote pairing uses Remora Link. During development, build the native host
 from the reviewed source revision recorded in the Rust lockfile:

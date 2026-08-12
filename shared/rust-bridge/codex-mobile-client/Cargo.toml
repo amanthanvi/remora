@@ -51,6 +51,8 @@ reqwest = { workspace = true }
 tracing-subscriber = { workspace = true }
 shlex = { workspace = true }
 zeroize = { workspace = true }
+rusqlite = { workspace = true }
+chacha20poly1305 = { workspace = true }
 rand_core = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

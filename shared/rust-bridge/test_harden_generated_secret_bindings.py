@@ -622,6 +622,35 @@ def swift_app_client_method(source: str, method: str) -> str:
 
 
 class SecretBindingHardeningTests(unittest.TestCase):
+    def test_device_database_master_key_must_use_zeroizing_carrier(self) -> None:
+        swift = """public protocol DeviceDatabaseBridgeProtocol: AnyObject, Sendable
+public static func `open`(path: String, masterKey: AppRelaySecretValue)throws -> DeviceDatabaseBridge {
+    FfiConverterTypeAppRelaySecretValue_lower(masterKey)
+}
+"""
+        kotlin = """public interface DeviceDatabaseBridgeInterface
+fun `open`(`path`: kotlin.String, `masterKey`: AppRelaySecretValue): DeviceDatabaseBridge {
+    FfiConverterTypeAppRelaySecretValue.lower(`masterKey`)
+}
+"""
+        HARDENER.verify_swift_device_database_key_hardening(swift)
+        HARDENER.verify_kotlin_device_database_key_hardening(kotlin)
+
+        with self.assertRaises(SystemExit):
+            HARDENER.verify_swift_device_database_key_hardening(
+                swift.replace(
+                    "FfiConverterTypeAppRelaySecretValue_lower(masterKey)",
+                    "FfiConverterByteArray.lower(masterKey)",
+                )
+            )
+        with self.assertRaises(SystemExit):
+            HARDENER.verify_kotlin_device_database_key_hardening(
+                kotlin.replace(
+                    "FfiConverterTypeAppRelaySecretValue.lower(`masterKey`)",
+                    "FfiConverterByteArray.lower(`masterKey`)",
+                )
+            )
+
     def test_idempotent_replace_accepts_hardened_prefix_transform(self) -> None:
         raw = "import Foundation\n"
         hardened = raw + "import Darwin\n"

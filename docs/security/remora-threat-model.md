@@ -72,7 +72,7 @@ remain transitional. Full thin-shell convergence is Planned.
 | Client or Host to public relay | Work-state payloads remain end-to-end encrypted; relay metadata grants no authority. | Implemented |
 | Owner to future admin HTTPS | Passkey verification, short sessions, one-time websocket tickets, CSRF/origin checks, and auditable changes are release requirements. | Planned |
 | Native mobile to ChatGPT OAuth | Native PKCE, state validation, platform token custody, cross-account refresh rejection, refresh-token preservation, and a loopback-only bounded iOS callback listener. | Implemented |
-| Mobile to direct remote app-server | Implemented exposure: users can configure direct `ws://` or `wss://` app-server endpoints. Planned: identity, protected-transport, authorization, and account/workspace binding remediation. | Implemented / Planned |
+| Mobile to direct remote app-server | Raw direct sockets are fail-closed to secret-free loopback `ws://`/`wss://` endpoints. Non-loopback work must use authenticated Remora Link or host-key-verified SSH. URL credentials, queries, and fragments are rejected. | Implemented |
 | Mobile to SSH server | Host-key verification, protected credentials, encrypted transport, and explicit terminal forwarding policy. | Implemented |
 | Native WebRTC peer to signaling and transcript state | Platform microphone consent and native media processing are current; signaling-identity and transcript-retention release controls are future requirements. | Implemented / Planned |
 | Retired generated-HTML actions and native WebView bridges | Generated-HTML actions, Saved Apps, their WebViews, script bridges, structured-response bridge, dynamic registration, persistence, and navigation routes are removed from Rust, iOS, and Android. | Implemented |
@@ -146,16 +146,20 @@ cross-boundary validation or recovery.
   surfaces cannot decide them.
 - Native ChatGPT OAuth currently implements PKCE, state validation, and
   platform-backed token custody.
+- Raw direct app-server sockets accept only secret-free loopback WebSocket
+  endpoints. Non-loopback endpoints fail closed with guidance to use Remora
+  Link or SSH; credentials, query strings, and fragments are rejected.
 
-Implemented credential protection does **not** mean the device SQLite database
-or general work records are encrypted. Rich awareness APIs, browser
-controller/CDP integration, worktrees/checkpoints, managed DigitalOcean
-lifecycle, passkey/recovery administration, signed Link updates, and release
-promotion are not Implemented.
+The new device SQLite foundation encrypts outbox payloads, search documents,
+and review-note bodies per record with a device-only Keychain/Keystore master
+key. It is a cache, not authority for live Host/provider state. Delivered
+organization/review workflows, rich awareness APIs, browser controller/CDP
+integration, worktrees/checkpoints, managed DigitalOcean lifecycle,
+passkey/recovery administration, signed Link updates, and release promotion are
+not yet Implemented.
 
-Current feature exposure is also not a completed control: direct remote
-app-server supports `ws://` and `wss://`. Generated-HTML/WebView surfaces are
-removed, and the Android widget is constrained to status/count projection data.
+Generated-HTML/WebView surfaces are removed, and the Android widget is
+constrained to status/count projection data.
 
 ### Planned controls
 
@@ -177,9 +181,6 @@ removed, and the Android widget is constrained to status/count projection data.
   stream/projection reconciliation, centralize provider inference, and move
   shared OAuth policy behind the Rust boundary while retaining native browser
   and secure-storage adapters.
-- Direct remote app-server identity, protected-transport, authorization, and
-  account/workspace binding for the existing `ws://` / `wss://` feature.
-
 ### Prohibited controls and behaviors
 
 - Arbitrary Host proxying or mobile-selected executable paths and arguments.
@@ -201,7 +202,7 @@ removed, and the Android widget is constrained to status/count projection data.
 | Malicious or compromised Host | Source, terminal, prompts, credentials, runtime authority; exfiltration or false results | Implemented / Planned | Implemented: pinned Link identity, scoped grants/runtime set, and stream closure on epoch change. Planned: workspace confinement and constrained command/provider/browser delegation. | Wrong-Host, narrowed-grant, revoke-stream, workspace escape, and capability-boundary tests. | A Host-account attacker able to replace Link controls that Host's data and behavior. |
 | ChatGPT OAuth redirect, token, account-binding, and credential custody failures | Account tokens and identity; account confusion or takeover | Implemented | Native PKCE, state validation, platform token custody, cross-account refresh rejection on both platforms, refresh-token preservation, and loopback-only bounded iOS callbacks. | Wrong-account refresh, state/PKCE, callback interface/port/path, timeout, duplicate-callback, cancellation, refresh omission, and secure-store tests. | A compromised device or provider endpoint can still misuse tokens legitimately available to it. |
 | WebRTC signaling, transcript, microphone, and audio privacy | Live audio, transcripts, presence; covert capture or unintended retention | Implemented / Planned | Implemented: platform microphone permission and native media session. Planned: explicit signaling-identity gates, bounded transcript retention, and separation from awareness/export. | Permission-denied, background/end-session, wrong-peer signaling, transcript deletion, log-redaction, and support-bundle tests. | Peers and a compromised endpoint can observe media they legitimately receive; network metadata remains visible. |
-| Direct remote app-server identity, transport, and authorization confusion | Sessions, prompts, approvals, account state; wrong-server action | Implemented / Planned | Implemented exposure: direct endpoints accept `ws://` and `wss://`. Planned next-release blocker: authenticate server identity, require protected transport for non-loopback remote use, bind authorization/account/workspace, and fail closed on changes. | Plain-transport rejection outside allowed local/tunnel cases, wrong-certificate/identity, unauthorized RPC, saved-endpoint substitution, reconnect, and account/workspace mismatch tests. | `wss://` transport alone does not establish application authorization; a correctly authenticated malicious server controls returned content. |
+| Direct remote app-server identity, transport, and authorization confusion | Sessions, prompts, approvals, account state; wrong-server action | Implemented | Permit raw direct sockets only to secret-free loopback `ws://`/`wss://`; reject URL credentials, queries, fragments, unsupported schemes, and every non-loopback destination. Require Remora Link or host-key-verified SSH for remote Hosts. | Loopback allow tests; non-loopback, scheme, URL-secret, query, and fragment rejection tests; Link and SSH regression suites. | A malicious process on the same device can impersonate a loopback app-server. Remora Link or SSH remains required when Host identity and authorization matter. |
 | SSH server identity, host key, credential, forwarding, and terminal stream attacks | SSH credentials and terminal contents; interception or wrong-host execution | Implemented | Verify pinned host keys before authentication, protect credentials, use encrypted SSH, restrict forwarding, and close streams on lifecycle changes. | Unknown/changed/unavailable host-key tests, reconnect tests, credential-store tests, forwarding-policy tests, and terminal cleanup tests. | A trusted SSH account or server can observe commands and terminal data on that server. |
 | Retired generated-content WebViews and native bridges | Prompts, navigation, structured requests, app state, and owner intent; generated content formerly exercised native authority | Implemented | Remove generated-HTML tool registration, hydration, WebViews, native bridges, Saved Apps persistence, navigation, and platform routes on both clients. | Cross-repository stale-symbol gate, Rust tests, generated-binding check, native builds, and Android/iOS test suites. | A future browser-preview feature creates a separate Host-side boundary and may not reuse these removed mobile bridges. |
 | Hostile repository contents and provider prompt/tool attacks | Owner intent, source, credentials, tool authority; indirect instruction execution | Planned | Treat repository/provider output as untrusted data; enforce typed capability boundaries, explicit approvals, secret redaction, and no provider fallback/emulation. | Adversarial fixture tests for instructions in files/tool output, capability-denial tests, approval tests, and secret-canary scans. | Approved tools may intentionally expose workspace data within their declared capability. |
@@ -264,11 +265,9 @@ and unsigned fallback artifacts are Prohibited.
 
 A new roadmap feature cannot ship while any control required for that feature
 remains Planned. Existing feature exposure labeled Planned does not mean the
-feature is absent. The matrix explicitly marks direct remote app-server
-authorization and protected transport as a next-release blocker for that
-optional transport. Promotion to Implemented requires integrated code evidence,
-deterministic tests, platform validation, and an updated residual-risk statement;
-an isolated commit is not integrated evidence.
+feature is absent. Promotion to Implemented requires integrated code evidence,
+deterministic tests, platform validation, and an updated residual-risk
+statement; an isolated commit is not integrated evidence.
 
 Minimum security gates:
 
@@ -348,8 +347,8 @@ does not include operational exploit procedures.
   browser preview remains a separate Planned boundary.
 - The Android `ActiveTurnWidget` uses an integrated status/count-only
   projection with focused disclosure regression tests.
-- Current direct remote configuration and transport code accepts both `ws://`
-  and `wss://`; support is not evidence of identity, authorization, or protected
-  transport for every configured endpoint.
+- Raw direct app-server transport is limited to secret-free loopback
+  `ws://`/`wss://`. Remote work uses Remora Link or SSH. Focused policy tests
+  cover loopback acceptance and all rejected URL/remote classes.
 - The accepted command-center roadmap defines Planned requirements. Planning
   text alone is not implementation evidence.

@@ -8,6 +8,8 @@ mod android;
 mod app_store;
 pub(crate) mod background_relay;
 mod client;
+mod command_center;
+mod device_database;
 mod discovery;
 mod errors;
 mod parser;
@@ -31,6 +33,17 @@ pub use background_relay::{
     AppRelaySecretWriteOutcome, AppRelayStatusSnapshot, AppRelayWakeHint, BackgroundRelayError,
 };
 pub use client::AppClient;
+pub use command_center::{
+    AvailabilityState, CommandCenterStatusV1, FeatureAvailability, HistoryCapabilitiesV1,
+    HostCapabilitiesV1, HostCommandCenterStatus, InteractionCapabilitiesV1,
+    MissionControlProjectionV1, ModelCapabilitiesV1, ModelDescriptor, PermissionCapabilitiesV1,
+    ProviderInstance, ProviderReadiness, RuntimeCapabilitiesV1, SessionAttentionV1,
+    SessionListRowV1, SessionPageV1, SessionStatusV1, ThreadLifecycleCapabilitiesV1,
+    TurnCapabilitiesV1, VoiceCapabilitiesV1,
+};
+pub use device_database::{
+    AppOutboxIntent, AppOutboxIntentKind, AppOutboxState, AppSearchResult, DeviceDatabaseBridge,
+};
 pub use discovery::{
     AppSlingshotEnvironment, DiscoveryBridge, DiscoveryScanSubscription, ServerBridge,
 };

@@ -128,6 +128,7 @@ internal class AndroidAtomicRemoraLinkSecretBackend(
     context: Context,
     allowDebugEmulatorSoftwareAssurance: Boolean = false,
     private val directory: File = File(context.filesDir, RemoraLinkSecretStore.DIRECTORY_NAME),
+    private val keyAlias: String = KEY_ALIAS,
     private val faultInjector: RemoraLinkSecretWriteFaultInjector? = null,
     private val directorySyncOverride: (() -> Unit)? = null,
 ) : RemoraLinkSecretBackend {
@@ -210,7 +211,7 @@ internal class AndroidAtomicRemoraLinkSecretBackend(
 
     private fun loadOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { key ->
+        (keyStore.getKey(keyAlias, null) as? SecretKey)?.let { key ->
             requireSecureKey(key)
             return key
         }
@@ -241,7 +242,7 @@ internal class AndroidAtomicRemoraLinkSecretBackend(
 
     private fun generateKey(requestStrongBox: Boolean): SecretKey {
         val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            keyAlias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
             .setKeySize(256)
@@ -288,7 +289,7 @@ internal class AndroidAtomicRemoraLinkSecretBackend(
         runCatching {
             KeyStore.getInstance(ANDROID_KEYSTORE).apply {
                 load(null)
-                if (containsAlias(KEY_ALIAS)) deleteEntry(KEY_ALIAS)
+                if (containsAlias(keyAlias)) deleteEntry(keyAlias)
             }
         }
     }

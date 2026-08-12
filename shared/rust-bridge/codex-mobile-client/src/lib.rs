@@ -19,6 +19,7 @@ pub mod capability;
 pub mod cloud_sync;
 pub mod conversation;
 pub mod conversation_uniffi;
+pub mod device_database;
 pub mod discovery;
 pub mod discovery_uniffi;
 pub mod ffi;

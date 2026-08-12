@@ -25,10 +25,10 @@ codex-cloud-requirements = { path = "../third_party/codex/codex-rs/cloud-require
 codex-config = { path = "../third_party/codex/codex-rs/config" }
 codex-utils-absolute-path = { path = "../third_party/codex/codex-rs/utils/absolute-path" }
 codex-git-utils = { path = "../third_party/codex/codex-rs/git-utils" }
-remora-bridge-core = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-pi-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-claude-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-opencode-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
+remora-bridge-core = { git = "https://github.com/amanthanvi/remora-link.git", rev = "6442c135bfe52f3a6f7ab9b548a911ddc707061a" }
+remora-pi-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "6442c135bfe52f3a6f7ab9b548a911ddc707061a" }
+remora-claude-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "6442c135bfe52f3a6f7ab9b548a911ddc707061a" }
+remora-opencode-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "6442c135bfe52f3a6f7ab9b548a911ddc707061a" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
@@ -53,6 +53,10 @@ reqwest = { version = "0.12", default-features = false, features = ["http2", "js
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
 shlex = "1"
 zeroize = "1.8.2"
+# Must share libsqlite3-sys 0.30.1 with pinned Codex/sqlx 0.8.6. Newer
+# rusqlite releases link a second incompatible sqlite3 native package.
+rusqlite = { version = "=0.32.1", default-features = false, features = ["bundled"] }
+chacha20poly1305 = "0.10.1"
 
 [profile.release]
 strip = true

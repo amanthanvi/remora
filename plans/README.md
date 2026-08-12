@@ -37,6 +37,17 @@ evidence.
 | 011 | Clean IPC request and task lifecycle ([#21](https://github.com/amanthanvi/remora/issues/21)) | P1 | M | 012 | DONE |
 | 012 | Migrate stale codex-ipc test fixtures ([#22](https://github.com/amanthanvi/remora/issues/22)) | P0 | S | 010 | DONE |
 | 013 | Complete the greenfield obsolete-state cutover ([#23](https://github.com/amanthanvi/remora/issues/23)) | P0 | L | 009, 011 | DONE |
+| 014 | Shared command-center contracts and projections ([#24](https://github.com/amanthanvi/remora/issues/24)) | P0 | L | 013 | IN PROGRESS |
+| 015 | Durable Host domain ([#25](https://github.com/amanthanvi/remora/issues/25)) | P0 | L | 014 | IN PROGRESS |
+| 016 | Encrypted device state ([#26](https://github.com/amanthanvi/remora/issues/26)) | P0 | L | 014, 015 | IN PROGRESS |
+| 017 | Command-center mobile journeys ([#27](https://github.com/amanthanvi/remora/issues/27)) | P0 | L | 014–016 | TODO |
+| 018 | Trusted workspace suite ([#28](https://github.com/amanthanvi/remora/issues/28)) | P0 | XL | 015–017 | TODO |
+| 019 | Provider parity and Cursor ([#29](https://github.com/amanthanvi/remora/issues/29)) | P1 | L | 015, 017, 018 | TODO |
+| 020 | Browser preview and automation ([#30](https://github.com/amanthanvi/remora/issues/30)) | P1 | XL | 018 | TODO |
+| 021 | System surfaces, share, shortcuts, and awareness ([#31](https://github.com/amanthanvi/remora/issues/31)) | P1 | XL | 017 | TODO |
+| 022 | Managed DigitalOcean control plane ([#32](https://github.com/amanthanvi/remora/issues/32)) | P1 | XL | 015–018 | TODO |
+| 023 | Release factory and signed Link updates ([#33](https://github.com/amanthanvi/remora/issues/33)) | P0 | XL | 015, 022 | TODO |
+| 024 | Final release audit ([#34](https://github.com/amanthanvi/remora/issues/34)) | P0 | L | 014–023 | TODO |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 
@@ -54,14 +65,25 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 005 used the same narrow simulator validation seam and landed at
   `c4df344`. The workaround is validation-only; production project inputs and
   application behavior are unchanged.
-- The remaining command-center plans will be added monotonically after the
-  active deep audit is vetted. The user's accepted product plan is the locked
-  direction; the audit exists to give each executor exact live paths, excerpts,
-  tests, and STOP conditions rather than to reopen settled product choices.
+- Plans 014–024 are the complete accepted command-center execution graph.
+  Parallel lanes begin only after their listed shared contracts land; Link
+  changes land first and Remora pins the exact reviewed commit.
 - Plan 013 closes the untracked M0 deletion gap. Generated-HTML actions, Saved
   Apps, minigames, their WebViews/native bridges, and dedicated aggregate usage
   UI are gone across Rust, iOS, and Android. A one-time product-state rebuild
   preserves current security stores and reports completion non-modally.
+- Plan 014 has the typed capability/availability seam, bounded Mission Control
+  and Sessions projections, fail-closed raw transport policy, generated
+  bindings, and Rust tests. Native journey consumption and Link-declared
+  capability hydration remain before closure.
+- Plan 015 has the exact-pinned Link catalog foundation at
+  `6442c135bfe52f3a6f7ab9b548a911ddc707061a`: atomic snapshot, checksum
+  recovery journal, locking, permissions, durable domain records, and restart
+  tests. Full lifecycle/protocol exposure remains before closure.
+- Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
+  search primitives, native Keychain/Keystore handoff, backup exclusion,
+  corruption recovery, and focused Rust/iOS/Android tests. Organization and
+  review APIs plus authoritative delivery orchestration remain before closure.
 
 ## Findings considered and rejected
 

@@ -30,6 +30,7 @@ import uniffi.codex_mobile_client.AppThreadSourceKind
 import uniffi.codex_mobile_client.ThreadStreamingDeltaKind
 import uniffi.codex_mobile_client.AppStoreUpdateRecord
 import uniffi.codex_mobile_client.DiscoveryBridge
+import uniffi.codex_mobile_client.DeviceDatabaseBridge
 import uniffi.codex_mobile_client.HydratedConversationItem
 import uniffi.codex_mobile_client.HydratedConversationItemContent
 import uniffi.codex_mobile_client.HandoffManager
@@ -126,6 +127,8 @@ class AppModel private constructor(
     val sshSessionStore: SshSessionStore
     val parser: MessageParser
     val reconnectController: ReconnectController
+    val deviceDatabase: DeviceDatabaseBridge?
+    val deviceDatabaseError: String?
     val launchState: AppLaunchState
     /** Observes Wi-Fi ↔ cellular handoffs etc. and hints iroh. */
     val reachability: NetworkReachabilityObserver
@@ -167,6 +170,22 @@ class AppModel private constructor(
         reconnectController.setSlingshotCredentialProvider(
             KotlinSlingshotCredentialProvider(ChatGPTOAuthTokenStore(context))
         )
+        val databaseResult = runCatching { DeviceDatabaseController(context).open() }
+        deviceDatabase = databaseResult.getOrNull()?.database
+        deviceDatabaseError = databaseResult.exceptionOrNull()?.localizedMessage
+        if (databaseResult.getOrNull()?.didRebuild == true) {
+            workspaceRebuildNotice.set(true)
+        }
+        databaseResult.exceptionOrNull()?.let { error ->
+            LLog.w(
+                "AppModel",
+                "encrypted device database unavailable",
+                fields = mapOf(
+                    "errorType" to error.javaClass.simpleName,
+                    "error" to error.message,
+                ),
+            )
+        }
         launchState = AppLaunchState(context)
         reachability = NetworkReachabilityObserver(context, this)
         reachability.start()

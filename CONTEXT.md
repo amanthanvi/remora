@@ -20,9 +20,7 @@ The repository includes a self-hostable Remora relay foundation and opaque
 mobile background-awareness clients. Push is a lossy wake hint over durable,
 sequenced Rust-owned state; it never carries prompts, transcripts, credentials,
 or approval actions. The Android active-turn home widget is a separate current
-system surface; on this exact base it projects prompt, model, context, and tool
-details. Sanitization is Planned until isolated Plan 006 commit
-`e774968796139c67370ac098062b58e6f5c3571a` is integrated. A managed hosted
+system surface limited to bounded status/count-only data. A managed hosted
 deployment and provider credentials are not included in this checkout. Provider
 credentials remain operational secrets. Live Activity support remains a typed
 bounded-status projection until its dedicated extension is implemented and
@@ -71,6 +69,8 @@ when the direct-upgrade floor advances beyond 1.6.
 | `AppModel` | Transitional Swift/Kotlin observation shell that currently caches and merges Rust snapshot/stream projections; the render-only thin shell is Planned. |
 | `AppState` | Platform-only UI state; never the canonical session/thread/account store. |
 | `ThreadKey` | Stable `(serverId, threadId)` identity for a conversation. |
+| Command-center projection | Bounded Rust-owned Mission Control, Sessions, and capability views; older Link versions report `Unknown` instead of gaining inferred authority. |
+| Device database | Encrypted Rust-owned cache for outbox/search/review/organization state. Native code supplies a device-only master key; live runtime state remains Host-authoritative. |
 | `DiscoveryBridge` | Rust utility surface for discovery merge, ranking, dedupe, and probing policy. |
 | `SshBridge` | Rust utility surface for SSH connection, trust, forwarding, and remote bootstrap. |
 | Remora Link | Remora-owned host daemon and v2 pairing/transport boundary. It detects and launches installed harnesses but never installs them. |

@@ -3,6 +3,10 @@
 use crate::MobileClient;
 use crate::conversation_uniffi::{HydratedConversationItem, HydratedConversationItemContent};
 use crate::ffi::ClientError;
+use crate::ffi::command_center::{
+    CommandCenterStatusV1, MissionControlProjectionV1, SessionPageV1,
+    project_command_center_status, project_mission_control, project_sessions_page,
+};
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
 use crate::types::{AppForkThreadFromMessageRequest, AppModeKind, AppStartTurnRequest, ThreadKey};
@@ -366,6 +370,26 @@ impl AppStore {
 
     pub async fn snapshot(&self) -> Result<AppSnapshotRecord, ClientError> {
         AppSnapshotRecord::try_from(self.inner.app_snapshot()).map_err(ClientError::Serialization)
+    }
+
+    /// Bounded capability/status seam for the durable command center.
+    /// Older Link versions remain explicit `Unknown`; raw app-server entries
+    /// remain `Unavailable` and never inherit workspace authority.
+    pub fn command_center_status(&self) -> CommandCenterStatusV1 {
+        project_command_center_status(&self.inner.app_snapshot())
+    }
+
+    pub fn mission_control(&self) -> MissionControlProjectionV1 {
+        project_mission_control(&self.inner.app_snapshot())
+    }
+
+    pub fn sessions_page(
+        &self,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<SessionPageV1, ClientError> {
+        project_sessions_page(&self.inner.app_snapshot(), cursor.as_deref(), limit)
+            .map_err(ClientError::Serialization)
     }
 
     pub async fn thread_snapshot(

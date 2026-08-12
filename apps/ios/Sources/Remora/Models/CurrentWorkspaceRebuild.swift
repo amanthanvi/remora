@@ -52,4 +52,8 @@ enum CurrentWorkspaceRebuild {
         defaults.removeObject(forKey: noticeMarkerKey)
         return true
     }
+
+    static func markNotice(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: noticeMarkerKey)
+    }
 }

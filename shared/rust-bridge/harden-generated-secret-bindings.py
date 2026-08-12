@@ -109,6 +109,44 @@ def require_exact(source: str, needle: str, expected: int, label: str) -> None:
         )
 
 
+def verify_swift_device_database_key_hardening(source: str) -> None:
+    """Fail closed when the optional database bridge stops using the secret carrier."""
+    marker = "public protocol DeviceDatabaseBridgeProtocol: AnyObject, Sendable"
+    if marker not in source:
+        return
+    require_exact(
+        source,
+        "public static func `open`(path: String, masterKey: AppRelaySecretValue)",
+        1,
+        "Swift device database master-key carrier",
+    )
+    require_exact(
+        source,
+        "FfiConverterTypeAppRelaySecretValue_lower(masterKey)",
+        1,
+        "Swift device database zeroizing master-key lower",
+    )
+
+
+def verify_kotlin_device_database_key_hardening(source: str) -> None:
+    """Fail closed when the optional database bridge stops using the secret carrier."""
+    marker = "public interface DeviceDatabaseBridgeInterface"
+    if marker not in source:
+        return
+    require_exact(
+        source,
+        "fun `open`(`path`: kotlin.String, `masterKey`: AppRelaySecretValue)",
+        1,
+        "Kotlin device database master-key carrier",
+    )
+    require_exact(
+        source,
+        "FfiConverterTypeAppRelaySecretValue.lower(`masterKey`)",
+        1,
+        "Kotlin device database zeroizing master-key lower",
+    )
+
+
 SWIFT_UNIFFI_ASYNC_HELPER = """fileprivate func uniffiRustCallAsync<F, T>(
     rustFutureFunc: () -> UInt64,
     pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> (),
@@ -1312,6 +1350,7 @@ public struct FfiConverterTypeAppRemoraLinkPairingCode: FfiConverter"""
             1,
             f"Swift {backend_name}.{method} result completion wipe",
         )
+    verify_swift_device_database_key_hardening(source)
     return source
 
 
@@ -2640,6 +2679,7 @@ internal val uniffiForeignFutureHandleMap = UniffiHandleMap<Job>()
     )
     verify_kotlin_secret_callback_hardening(source)
     verify_kotlin_remora_link_callback_hardening(source)
+    verify_kotlin_device_database_key_hardening(source)
     return source
 
 

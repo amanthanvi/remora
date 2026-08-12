@@ -31,6 +31,8 @@ final class AppModel {
         let serverBridge: ServerBridge
         let ssh: SshBridge
         let reconnectController: ReconnectController
+        let deviceDatabase: DeviceDatabaseBridge?
+        let deviceDatabaseError: String?
     }
 
     /// Kick off Rust bridge construction on a background thread.
@@ -52,13 +54,22 @@ final class AppModel {
         let rc = ReconnectController()
         rc.setCredentialProvider(provider: SwiftSshCredentialProvider())
         rc.setSlingshotCredentialProvider(provider: SwiftSlingshotCredentialProvider())
+        let deviceDatabaseResult = Result {
+            try DeviceDatabaseController.shared.open()
+        }
+        if case .success(let result) = deviceDatabaseResult,
+           result.didRebuild {
+            CurrentWorkspaceRebuild.markNotice()
+        }
         return RustBridges(
             store: AppStore(),
             client: AppClient(),
             discovery: DiscoveryBridge(),
             serverBridge: ServerBridge(),
             ssh: SshBridge(),
-            reconnectController: rc
+            reconnectController: rc,
+            deviceDatabase: try? deviceDatabaseResult.get().database,
+            deviceDatabaseError: deviceDatabaseResult.failureDescription
         )
     }()
 
@@ -76,6 +87,7 @@ final class AppModel {
     let serverBridge: ServerBridge
     let ssh: SshBridge
     let reconnectController: ReconnectController
+    let deviceDatabase: DeviceDatabaseBridge?
     let chromeObservation = AppModelChromeObservation()
     let navigationObservation = AppModelNavigationObservation()
     let settingsObservation = AppModelSettingsObservation()
@@ -139,6 +151,8 @@ final class AppModel {
         self.serverBridge = serverBridge ?? bridges.serverBridge
         self.ssh = ssh ?? bridges.ssh
         self.reconnectController = reconnectController ?? bridges.reconnectController
+        self.deviceDatabase = bridges.deviceDatabase
+        self.lastError = bridges.deviceDatabaseError
 
         self.client.setSlingshotCredentialsDirectory(directory: MobilePreferencesDirectory.path)
 
@@ -1768,6 +1782,13 @@ final class AppModel {
         }
 
         return snapshot
+    }
+}
+
+private extension Result {
+    var failureDescription: String? {
+        guard case .failure(let error) = self else { return nil }
+        return (error as? LocalizedError)?.errorDescription ?? String(describing: error)
     }
 }
 

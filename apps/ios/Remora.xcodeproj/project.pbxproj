@@ -15,6 +15,7 @@
 		0393372D33CEFCB849B1B714 /* AppServerSnapshot+UI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 535359D6AC508D7AB76D279E /* AppServerSnapshot+UI.swift */; };
 		03E290EF0CC7C7D84BD7B10B /* HomeDashboardSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE587003BE37CD3913A0360 /* HomeDashboardSupport.swift */; };
 		0417C8C5B8CC09CD3343D52A /* poimandres.json in Resources */ = {isa = PBXBuildFile; fileRef = 974822255928A225B0097573 /* poimandres.json */; };
+		043031CA7CD31999B6B7B138 /* DeviceDatabaseController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F97CDB311A93D417C2583C6F /* DeviceDatabaseController.swift */; };
 		0491871238372826135B5486 /* RemoraLinkNativeAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E316D53DAF39E5B645DB0250 /* RemoraLinkNativeAdapters.swift */; };
 		049D5175BE9FC48D1BAA021E /* ConversationComposerContextBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2ADDF7DE421AFF93B7AF4A /* ConversationComposerContextBarView.swift */; };
 		049DCF761950892C8F7B523C /* remora-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = 56CC601168974759FA4FDA31 /* remora-dark.json */; };
@@ -111,6 +112,7 @@
 		2A2A117E9E5DC1AE87F2A372 /* RollingMetricText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DE6FA60E3022A166C304F20 /* RollingMetricText.swift */; };
 		2A49978368A500D83B9E6907 /* rose-pine-dawn.json in Resources */ = {isa = PBXBuildFile; fileRef = 5774EFA5B16F5AFB43C7D1EA /* rose-pine-dawn.json */; };
 		2A7FF8038EDD5F522681643F /* ConversationTurnRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FEF2824DA02F95ACAC68916 /* ConversationTurnRow.swift */; };
+		2BAD7E2DF7F84B7DF063E17D /* DeviceDatabaseControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E4644FD013FEA7EEC00DC9 /* DeviceDatabaseControllerTests.swift */; };
 		2BFAE88B97F1D26424011F01 /* MacCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2A2037285CE8B757B6D3F79 /* MacCommands.swift */; };
 		2C45020BA3CDF447B703028C /* RemoraLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30C0DF13F976468BCB6AC957 /* RemoraLogo.swift */; };
 		2C4F5B05489CE526DBA304E1 /* dracula-soft.json in Resources */ = {isa = PBXBuildFile; fileRef = BCA67ABE5B9931ABFD6D0297 /* dracula-soft.json */; };
@@ -181,6 +183,7 @@
 		43D7219C9571FDD03D95C767 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1B0300A1F31C8D6F5F1C3DA0 /* Security.framework */; };
 		443519283476C4C1AC50560F /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = CCA2ECA0E1534620A05BDA27 /* NukeUI */; };
 		44EE902D515B75093E12DC3E /* dark-plus-B1yOZ-Hy.json in Resources */ = {isa = PBXBuildFile; fileRef = B9EF6EBF16F30E7D1D172976 /* dark-plus-B1yOZ-Hy.json */; };
+		4626B01CA86CB7AF55AAD890 /* DeviceDatabaseController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F97CDB311A93D417C2583C6F /* DeviceDatabaseController.swift */; };
 		46310CBAF84D4F7A1D29F7A1 /* kanagawa-dragon-VscOyZL-.json in Resources */ = {isa = PBXBuildFile; fileRef = B2F0DB5E9395ACF18255DB9B /* kanagawa-dragon-VscOyZL-.json */; };
 		46FDE614AEE692C5688F7625 /* proof-light.json in Resources */ = {isa = PBXBuildFile; fileRef = A851361747B6E4C53B7CA7A7 /* proof-light.json */; };
 		47276EFE97FDCE97A774890D /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8975B4135A556360DD1ADB95 /* TerminalScreen.swift */; };
@@ -815,6 +818,7 @@
 		BD64F146D9F8F34C3CAD1D72 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
 		C013D6776F9ADB752E4F2CF6 /* SilentAudioKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SilentAudioKeeper.swift; sourceTree = "<group>"; };
 		C0F499A05D16D0A9EA587F19 /* BackgroundAwarenessModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundAwarenessModels.swift; sourceTree = "<group>"; };
+		C3E4644FD013FEA7EEC00DC9 /* DeviceDatabaseControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDatabaseControllerTests.swift; sourceTree = "<group>"; };
 		C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkPairingModel.swift; sourceTree = "<group>"; };
 		C48C690A262B385942C8433B /* NetworkReachabilityObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityObserver.swift; sourceTree = "<group>"; };
 		C5FD0059762AACA39E8F604F /* InlineHandoffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineHandoffView.swift; sourceTree = "<group>"; };
@@ -885,6 +889,7 @@
 		F5E886C9D0C3764A26394932 /* ConversationComposerAttachSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerAttachSheet.swift; sourceTree = "<group>"; };
 		F5EAA07B5C8258CBB9B40EBF /* AnimatedSplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedSplashView.swift; sourceTree = "<group>"; };
 		F940BF83BC68E86EBC3DF82D /* DiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryView.swift; sourceTree = "<group>"; };
+		F97CDB311A93D417C2583C6F /* DeviceDatabaseController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDatabaseController.swift; sourceTree = "<group>"; };
 		FB3CA83318790A043CCCD5B8 /* HomeComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeComposerView.swift; sourceTree = "<group>"; };
 		FBAC08ED78E62A2E738001EE /* GhosttyTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTerminalView.swift; sourceTree = "<group>"; };
 		FC2B5C1765656C9D0642CD83 /* HomeDashboardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeDashboardModel.swift; sourceTree = "<group>"; };
@@ -984,6 +989,7 @@
 				83A933EE152EF35CE7CAC6A6 /* ConversationScreenModelTests.swift */,
 				435670663CADB8DA3D00EEB4 /* CurrentKeychainNamespaceCleanupTests.swift */,
 				8191666A7326EB9CF082C964 /* CurrentWorkspaceRebuildTests.swift */,
+				C3E4644FD013FEA7EEC00DC9 /* DeviceDatabaseControllerTests.swift */,
 				8CBA73AE37F435D6A4E654A3 /* GhosttySurfaceSnapshotTests.swift */,
 				65E4AADDA22694220E64C8E6 /* HomeDashboardSupportTests.swift */,
 				E6B42ADD3A6E48D5F5434984 /* MessageContentBridgeTests.swift */,
@@ -1295,6 +1301,7 @@
 				1DEB6F41AD287973F46F2C4A /* CurrentKeychainNamespaceCleanup.swift */,
 				0AC745EE8A41D32D824715CD /* CurrentWorkspaceRebuild.swift */,
 				40C5A18D8F076A5C29806554 /* DebugSettings.swift */,
+				F97CDB311A93D417C2583C6F /* DeviceDatabaseController.swift */,
 				D41E12497D70CF747AE24672 /* DiscoveredServer.swift */,
 				70EFFFE78684DB06FB3301C0 /* ExperimentalFeatures.swift */,
 				6937E6076FBBA177313790BA /* LLog.swift */,
@@ -1415,7 +1422,7 @@
 					AC73B08B2CB46BF7B51E6F4F = {
 						DevelopmentTeam = UH66Q8ZAYG;
 						ProvisioningStyle = "$(APP_CODE_SIGN_STYLE)";
-						SystemCapabilities = "[\"com.apple.Push\": [\"enabled\": true], \"com.apple.BackgroundModes\": [\"enabled\": true]]";
+						SystemCapabilities = "[\"com.apple.BackgroundModes\": [\"enabled\": true], \"com.apple.Push\": [\"enabled\": true]]";
 					};
 					B3C4EFC92C31B3C531A24538 = {
 						DevelopmentTeam = UH66Q8ZAYG;
@@ -1715,6 +1722,7 @@
 				DD378FDDC41A4B258958147C /* CurrentWorkspaceRebuild.swift in Sources */,
 				3E64C4AB47C7AB55A4AFBDC1 /* DebugBuildLabel.swift in Sources */,
 				14AC8614CD70AA674641C748 /* DebugSettings.swift in Sources */,
+				043031CA7CD31999B6B7B138 /* DeviceDatabaseController.swift in Sources */,
 				DEAFB101E494A64BD6B346BA /* DiffRendering.swift in Sources */,
 				FBB1074B25B2105DB0B3A66D /* DirectoryPickerView.swift in Sources */,
 				FAD3A81139296BC88D9A0C70 /* DiscoveredServer.swift in Sources */,
@@ -1833,6 +1841,7 @@
 				AF7165E1B4E47743033BA9C1 /* ConversationScreenModelTests.swift in Sources */,
 				B57F0D149DFCE29942CA3F03 /* CurrentKeychainNamespaceCleanupTests.swift in Sources */,
 				F08C232F652EA8F4F063ACDF /* CurrentWorkspaceRebuildTests.swift in Sources */,
+				2BAD7E2DF7F84B7DF063E17D /* DeviceDatabaseControllerTests.swift in Sources */,
 				478B1B9DCFBC9FA0B20EEF79 /* GhosttySurfaceSnapshotTests.swift in Sources */,
 				DFFB0D76900845FD5C97B4CE /* HomeDashboardSupportTests.swift in Sources */,
 				160527A34717EFD5F063EF04 /* MessageContentBridgeTests.swift in Sources */,
@@ -1926,6 +1935,7 @@
 				3273B093A37C00ED90DBF47E /* CurrentWorkspaceRebuild.swift in Sources */,
 				CF34E2096A3B13C701052EF1 /* DebugBuildLabel.swift in Sources */,
 				202D911F5E51AD8284538926 /* DebugSettings.swift in Sources */,
+				4626B01CA86CB7AF55AAD890 /* DeviceDatabaseController.swift in Sources */,
 				BFB035F2C22097B8A91B4F14 /* DiffRendering.swift in Sources */,
 				12A93BB5DB05768AF9CFDA4D /* DirectoryPickerView.swift in Sources */,
 				0BEA121952BB2BF22CBB80B4 /* DiscoveredServer.swift in Sources */,
