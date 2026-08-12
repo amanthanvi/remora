@@ -30,9 +30,11 @@ pre-delivery draft sync, or any unbounded scan.
 Implemented: schema, per-record XChaCha20-Poly1305 with bound associated data,
 HMAC exact/prefix postings, bounded search, one-transaction idempotent enqueue,
 authoritative acknowledgement removal, protected retention, wrong-key/tamper
-failure, and native device-only key handoff. iOS and Android rebuild only the
-exact disposable cache files and retain the secure master key.
+failure, monotonic relay-sequenced organization projection, encrypted
+review-note CRUD with immutable anchors, 90-day/2 GiB logical search retention,
+and native device-only key handoff. Retention protects pinned Threads, queued
+intents, open review notes, and explicitly protected documents. iOS and Android
+rebuild only the exact disposable cache files and retain the secure master key.
 
-Remaining: delivered organization APIs, review-note CRUD, authoritative Host
-delivery worker integration, size-based 2 GiB retention, and end-to-end
+Remaining: authoritative Host delivery worker integration and end-to-end
 offline/reconnect UI coverage.

@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use crate::device_database::{
-    DeviceDatabase, DeviceDatabaseError, OutboxIntent, OutboxIntentKind, OutboxState, SearchResult,
+    DeviceDatabase, DeviceDatabaseError, OutboxIntent, OutboxIntentKind, OutboxState, ReviewNote,
+    ReviewNoteState, SearchResult, ThreadOrganization,
 };
 use crate::ffi::ClientError;
 use crate::ffi::background_relay::AppRelaySecretValue;
@@ -43,6 +44,39 @@ pub struct AppSearchResult {
     pub host_id: String,
     pub thread_id: String,
     pub snippet: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AppThreadOrganization {
+    pub host_id: String,
+    pub thread_id: String,
+    pub pinned: bool,
+    pub hidden: bool,
+    pub snoozed_until_ms: Option<i64>,
+    pub acknowledged_at_ms: Option<i64>,
+    pub relay_sequence: u64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AppReviewNoteState {
+    Open,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AppReviewNote {
+    pub note_id: String,
+    pub host_id: String,
+    pub thread_id: String,
+    pub checkpoint_id: String,
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+    pub state: AppReviewNoteState,
+    pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
 
@@ -96,6 +130,61 @@ impl DeviceDatabaseBridge {
             .map_err(map_database_error)
     }
 
+    pub fn apply_thread_organization(
+        &self,
+        organization: AppThreadOrganization,
+    ) -> Result<bool, ClientError> {
+        self.inner
+            .apply_thread_organization(&organization.into())
+            .map_err(map_database_error)
+    }
+
+    pub fn thread_organization(
+        &self,
+        host_id: String,
+        thread_id: String,
+    ) -> Result<Option<AppThreadOrganization>, ClientError> {
+        self.inner
+            .thread_organization(&host_id, &thread_id)
+            .map(|organization| organization.map(Into::into))
+            .map_err(map_database_error)
+    }
+
+    pub fn upsert_review_note(&self, note: AppReviewNote) -> Result<(), ClientError> {
+        self.inner
+            .upsert_review_note(&note.into())
+            .map_err(map_database_error)
+    }
+
+    pub fn review_notes_for_thread(
+        &self,
+        host_id: String,
+        thread_id: String,
+        limit: u32,
+    ) -> Result<Vec<AppReviewNote>, ClientError> {
+        self.inner
+            .review_notes_for_thread(&host_id, &thread_id, limit as usize)
+            .map(|notes| notes.into_iter().map(Into::into).collect())
+            .map_err(map_database_error)
+    }
+
+    pub fn set_review_note_state(
+        &self,
+        note_id: String,
+        state: AppReviewNoteState,
+        updated_at_ms: i64,
+    ) -> Result<bool, ClientError> {
+        self.inner
+            .set_review_note_state(&note_id, state.into(), updated_at_ms)
+            .map_err(map_database_error)
+    }
+
+    pub fn delete_review_note(&self, note_id: String) -> Result<bool, ClientError> {
+        self.inner
+            .delete_review_note(&note_id)
+            .map_err(map_database_error)
+    }
+
     pub fn index_search_document(
         &self,
         document_id: String,
@@ -136,6 +225,14 @@ impl DeviceDatabaseBridge {
         let deleted = self
             .inner
             .prune_search_before(before_ms, limit as usize)
+            .map_err(map_database_error)?;
+        Ok(deleted.min(u32::MAX as usize) as u32)
+    }
+
+    pub fn enforce_search_retention(&self, now_ms: i64) -> Result<u32, ClientError> {
+        let deleted = self
+            .inner
+            .enforce_search_retention(now_ms)
             .map_err(map_database_error)?;
         Ok(deleted.min(u32::MAX as usize) as u32)
     }
@@ -218,6 +315,90 @@ impl From<SearchResult> for AppSearchResult {
             host_id: value.host_id,
             thread_id: value.thread_id,
             snippet: value.snippet,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+impl From<AppThreadOrganization> for ThreadOrganization {
+    fn from(value: AppThreadOrganization) -> Self {
+        Self {
+            host_id: value.host_id,
+            thread_id: value.thread_id,
+            pinned: value.pinned,
+            hidden: value.hidden,
+            snoozed_until_ms: value.snoozed_until_ms,
+            acknowledged_at_ms: value.acknowledged_at_ms,
+            relay_sequence: value.relay_sequence,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+impl From<ThreadOrganization> for AppThreadOrganization {
+    fn from(value: ThreadOrganization) -> Self {
+        Self {
+            host_id: value.host_id,
+            thread_id: value.thread_id,
+            pinned: value.pinned,
+            hidden: value.hidden,
+            snoozed_until_ms: value.snoozed_until_ms,
+            acknowledged_at_ms: value.acknowledged_at_ms,
+            relay_sequence: value.relay_sequence,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+impl From<AppReviewNoteState> for ReviewNoteState {
+    fn from(value: AppReviewNoteState) -> Self {
+        match value {
+            AppReviewNoteState::Open => Self::Open,
+            AppReviewNoteState::Resolved => Self::Resolved,
+        }
+    }
+}
+
+impl From<ReviewNoteState> for AppReviewNoteState {
+    fn from(value: ReviewNoteState) -> Self {
+        match value {
+            ReviewNoteState::Open => Self::Open,
+            ReviewNoteState::Resolved => Self::Resolved,
+        }
+    }
+}
+
+impl From<AppReviewNote> for ReviewNote {
+    fn from(value: AppReviewNote) -> Self {
+        Self {
+            note_id: value.note_id,
+            host_id: value.host_id,
+            thread_id: value.thread_id,
+            checkpoint_id: value.checkpoint_id,
+            path: value.path,
+            start_line: value.start_line,
+            end_line: value.end_line,
+            body: value.body,
+            state: value.state.into(),
+            created_at_ms: value.created_at_ms,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+impl From<ReviewNote> for AppReviewNote {
+    fn from(value: ReviewNote) -> Self {
+        Self {
+            note_id: value.note_id,
+            host_id: value.host_id,
+            thread_id: value.thread_id,
+            checkpoint_id: value.checkpoint_id,
+            path: value.path,
+            start_line: value.start_line,
+            end_line: value.end_line,
+            body: value.body,
+            state: value.state.into(),
+            created_at_ms: value.created_at_ms,
             updated_at_ms: value.updated_at_ms,
         }
     }

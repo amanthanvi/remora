@@ -42,7 +42,8 @@ pub use command_center::{
     TurnCapabilitiesV1, VoiceCapabilitiesV1,
 };
 pub use device_database::{
-    AppOutboxIntent, AppOutboxIntentKind, AppOutboxState, AppSearchResult, DeviceDatabaseBridge,
+    AppOutboxIntent, AppOutboxIntentKind, AppOutboxState, AppReviewNote, AppReviewNoteState,
+    AppSearchResult, AppThreadOrganization, DeviceDatabaseBridge,
 };
 pub use discovery::{
     AppSlingshotEnvironment, DiscoveryBridge, DiscoveryScanSubscription, ServerBridge,
