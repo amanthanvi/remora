@@ -45,7 +45,9 @@ without parity and an intrinsic platform reason.
   selection does not hydrate timelines.
 - Bounded AppStore projections now read under the canonical Rust store lock
   instead of cloning the complete app snapshot before Mission Control,
-  Sessions-page, or thread-viewport projection.
+  Sessions-page, or thread-viewport projection. SwiftUI and Compose compute
+  Mission Control off their UI threads, and iOS also refreshes capability
+  status off-main, avoiding UI-thread waits on the Rust store lock.
 - Mission Control now has an always-available Sessions route on both native
   clients. The global inbox consumes 50-row cursor pages, opens Threads
   directly, and does not hydrate timelines while searching, filtering, or
@@ -53,9 +55,19 @@ without parity and an intrinsic platform reason.
 - Rust now applies bounded text plus exact Host/project/runtime/status,
   attention, and time filters before computing the page count and cursor.
   Swift and Kotlin render the typed rows and do not parse status strings.
+- Needs You now records only authoritative live `turn/completed` transitions;
+  historical idle Threads remain baseline-neutral. Failed completions project
+  a typed failed status that survives reload. Device-owned acknowledgement and
+  one-hour snooze state survive restart, replayed Turn IDs are idempotent, new
+  terminal events and new Turns clear stale snoozes, and opening a Thread
+  acknowledges its terminal event through the canonical Rust action.
+- The matching iOS and Android Sessions inboxes expose acknowledge, snooze, and
+  confirmed Host archive actions. Blocking approvals/questions cannot show a
+  misleading acknowledge action. Archive is shown only when the exact typed
+  Host/runtime capability is unambiguous, and continues to use the existing
+  authoritative `AppClient` operation rather than local organization state.
 
 Remaining: encrypted device-index search and partial-Host freshness/error rows,
 provider-instance filter IDs after durable catalog identity lands, migration of
 the legacy Host-detail tree derivation into Rust, Host Scratch,
-completion/failure attention, acknowledgement/snooze/archive, no-eager-
-hydration UI tests, and the complete phone/iPad journey matrix.
+no-eager-hydration UI tests, and the complete phone/iPad journey matrix.

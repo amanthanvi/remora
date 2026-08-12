@@ -5,9 +5,11 @@ use crate::conversation_uniffi::{HydratedConversationItem, HydratedConversationI
 use crate::ffi::ClientError;
 use crate::ffi::command_center::{
     CommandCenterStatusV1, MissionControlProjectionV1, NewTaskLaunchAvailabilityV1,
-    SessionFilterV1, SessionPageV1, project_command_center_status, project_mission_control,
-    project_new_task_launch_availability, project_sessions_page, project_sessions_page_filtered,
+    SessionFilterV1, SessionPageV1, project_command_center_status,
+    project_mission_control_with_attention, project_new_task_launch_availability,
+    project_sessions_page_filtered_with_attention,
 };
+use crate::ffi::device_database::DeviceDatabaseBridge;
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
 use crate::types::{AppForkThreadFromMessageRequest, AppModeKind, AppStartTurnRequest, ThreadKey};
@@ -32,6 +34,14 @@ pub(crate) struct AppStoreSubscriptionState {
 
 const MAX_COALESCED_STREAMING_TEXT_BYTES: usize = 8 * 1024;
 
+fn unix_time_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AppStoreSubscription, AppStoreSubscriptionState};
@@ -42,10 +52,79 @@ mod tests {
         HydratedMultiAgentActionData, HydratedMultiAgentStateData,
     };
     use crate::store::{AppStoreReducer, AppStoreUpdateRecord, ThreadStreamingDeltaKind};
-    use crate::types::{AppOperationStatus, AppSubagentStatus, ThreadKey};
+    use crate::types::{
+        AppOperationStatus, AppSubagentStatus, ThreadInfo, ThreadKey, ThreadSummaryStatus,
+    };
     use codex_app_server_protocol as upstream;
     use serde_json::json;
     use std::collections::{HashMap, VecDeque};
+    use std::sync::Arc;
+
+    #[test]
+    fn opening_a_terminal_thread_acknowledges_its_persisted_attention() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = Arc::new(crate::ffi::device_database::DeviceDatabaseBridge {
+            inner: Arc::new(
+                crate::device_database::DeviceDatabase::open(
+                    &directory.path().join("device.sqlite"),
+                    vec![41; 32],
+                )
+                .expect("database"),
+            ),
+        });
+        let client = crate::MobileClient::new();
+        let store = super::AppStore {
+            inner: Arc::clone(&client),
+            rt: Arc::new(tokio::runtime::Runtime::new().expect("runtime")),
+        };
+        store
+            .configure_device_database(database)
+            .expect("configure database");
+        client.app_store.upsert_server(
+            &crate::session::connection::ServerConfig {
+                server_id: "host".to_string(),
+                display_name: "Host".to_string(),
+                host: "localhost".to_string(),
+                port: 0,
+                websocket_url: None,
+                is_local: false,
+                tls: false,
+            },
+            crate::store::ServerHealthSnapshot::Connected,
+        );
+        let key = ThreadKey {
+            server_id: "host".to_string(),
+            thread_id: "thread".to_string(),
+        };
+        client.app_store.upsert_thread_list_page(
+            "host",
+            &[ThreadInfo {
+                id: key.thread_id.clone(),
+                title: Some("Completed work".to_string()),
+                model: None,
+                status: ThreadSummaryStatus::Idle,
+                preview: None,
+                cwd: None,
+                path: None,
+                model_provider: None,
+                agent_nickname: None,
+                agent_role: None,
+                parent_thread_id: None,
+                forked_from_id: None,
+                agent_status: None,
+                created_at: None,
+                updated_at: Some(1),
+            }],
+        );
+        client
+            .record_terminal_attention(&key, "turn-1", false)
+            .expect("record attention");
+        assert_eq!(store.mission_control().needs_you_count, 1);
+
+        store.set_active_thread(Some(key));
+
+        assert_eq!(store.mission_control().needs_you_count, 0);
+    }
 
     #[test]
     fn thread_item_parses_mcp_arguments_json() {
@@ -429,17 +508,34 @@ impl AppStore {
     }
 
     pub fn mission_control(&self) -> MissionControlProjectionV1 {
-        self.inner
-            .app_store
-            .project_snapshot(project_mission_control)
+        self.inner.project_thread_attention(|attention| {
+            self.inner
+                .app_store
+                .project_command_center(|snapshot, statuses| {
+                    project_mission_control_with_attention(
+                        snapshot,
+                        None,
+                        statuses,
+                        attention,
+                        unix_time_ms(),
+                    )
+                })
+        })
     }
 
     pub fn mission_control_for_server(&self, server_id: String) -> MissionControlProjectionV1 {
-        self.inner.app_store.project_snapshot(|snapshot| {
-            crate::ffi::command_center::project_mission_control_for_server(
-                snapshot,
-                Some(&server_id),
-            )
+        self.inner.project_thread_attention(|attention| {
+            self.inner
+                .app_store
+                .project_command_center(|snapshot, statuses| {
+                    project_mission_control_with_attention(
+                        snapshot,
+                        Some(&server_id),
+                        statuses,
+                        attention,
+                        unix_time_ms(),
+                    )
+                })
         })
     }
 
@@ -449,8 +545,21 @@ impl AppStore {
         limit: Option<u32>,
     ) -> Result<SessionPageV1, ClientError> {
         self.inner
-            .app_store
-            .project_snapshot(|snapshot| project_sessions_page(snapshot, cursor.as_deref(), limit))
+            .project_thread_attention(|attention| {
+                self.inner
+                    .app_store
+                    .project_command_center(|snapshot, statuses| {
+                        project_sessions_page_filtered_with_attention(
+                            snapshot,
+                            &SessionFilterV1::default(),
+                            cursor.as_deref(),
+                            limit,
+                            statuses,
+                            attention,
+                            unix_time_ms(),
+                        )
+                    })
+            })
             .map_err(ClientError::Serialization)
     }
 
@@ -461,9 +570,20 @@ impl AppStore {
         limit: Option<u32>,
     ) -> Result<SessionPageV1, ClientError> {
         self.inner
-            .app_store
-            .project_snapshot(|snapshot| {
-                project_sessions_page_filtered(snapshot, &filter, cursor.as_deref(), limit)
+            .project_thread_attention(|attention| {
+                self.inner
+                    .app_store
+                    .project_command_center(|snapshot, statuses| {
+                        project_sessions_page_filtered_with_attention(
+                            snapshot,
+                            &filter,
+                            cursor.as_deref(),
+                            limit,
+                            statuses,
+                            attention,
+                            unix_time_ms(),
+                        )
+                    })
             })
             .map_err(ClientError::Serialization)
     }
@@ -657,7 +777,41 @@ impl AppStore {
         })
     }
 
+    pub fn configure_device_database(
+        &self,
+        database: Arc<DeviceDatabaseBridge>,
+    ) -> Result<(), ClientError> {
+        self.inner
+            .configure_device_database(Arc::clone(&database.inner))
+            .map_err(|error| ClientError::Serialization(error.to_string()))
+    }
+
+    pub fn acknowledge_thread_attention(&self, key: ThreadKey) -> Result<(), ClientError> {
+        self.inner
+            .acknowledge_thread_attention(&key)
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
+        self.inner
+            .app_store
+            .notify_command_center_organization_changed();
+        Ok(())
+    }
+
+    pub fn snooze_thread_attention(&self, key: ThreadKey) -> Result<(), ClientError> {
+        self.inner
+            .snooze_thread_attention(&key)
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
+        self.inner
+            .app_store
+            .notify_command_center_organization_changed();
+        Ok(())
+    }
+
     pub fn set_active_thread(&self, key: Option<ThreadKey>) {
+        if let Some(key) = &key {
+            if let Err(error) = self.inner.acknowledge_thread_attention(key) {
+                tracing::warn!("AppStore: could not acknowledge opened Thread: {error}");
+            }
+        }
         self.inner.set_active_thread(key);
     }
 

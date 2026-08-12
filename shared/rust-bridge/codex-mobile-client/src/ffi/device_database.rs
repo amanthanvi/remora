@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::device_database::{
     DeviceDatabase, DeviceDatabaseError, OutboxIntent, OutboxIntentKind, OutboxState, ReviewNote,
@@ -82,7 +83,7 @@ pub struct AppReviewNote {
 
 #[derive(uniffi::Object)]
 pub struct DeviceDatabaseBridge {
-    inner: DeviceDatabase,
+    pub(crate) inner: Arc<DeviceDatabase>,
 }
 
 #[uniffi::export]
@@ -96,8 +97,10 @@ impl DeviceDatabaseBridge {
                 "device database path must contain 1..=4096 bytes".to_string(),
             ));
         }
-        let inner = DeviceDatabase::open(Path::new(&path), master_key.into_bytes())
-            .map_err(map_database_error)?;
+        let inner = Arc::new(
+            DeviceDatabase::open(Path::new(&path), master_key.into_bytes())
+                .map_err(map_database_error)?,
+        );
         Ok(Self { inner })
     }
 

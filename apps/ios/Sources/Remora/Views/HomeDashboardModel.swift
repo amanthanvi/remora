@@ -8,7 +8,6 @@ final class HomeDashboardModel {
         let connectedServers: [HomeDashboardServer]
         let recentSessions: [HomeDashboardRecentSession]
         let sessionSummaries: [AppSessionSummary]
-        let missionControl: MissionControlProjectionV1
     }
 
     private(set) var connectedServers: [HomeDashboardServer] = []
@@ -66,6 +65,7 @@ final class HomeDashboardModel {
     /// during `listThreads` loads) so we don't rebuild the home list
     /// hundreds of times per second.
     @ObservationIgnored private var debouncedRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var missionRefreshTask: Task<Void, Never>?
     /// Set by the UI when the user intentionally clears the server filter
     /// so the snapshot reconciler doesn't re-select a default server.
     private var userClearedSelection = false
@@ -99,6 +99,7 @@ final class HomeDashboardModel {
     }
 
     deinit {
+        missionRefreshTask?.cancel()
         if let preferencesObserver {
             NotificationCenter.default.removeObserver(preferencesObserver)
         }
@@ -174,6 +175,8 @@ final class HomeDashboardModel {
         observationGeneration &+= 1
         debouncedRefreshTask?.cancel()
         debouncedRefreshTask = nil
+        missionRefreshTask?.cancel()
+        missionRefreshTask = nil
     }
 
     /// Coalesce rapid observation-triggered refreshes. Direct callers
@@ -224,20 +227,10 @@ final class HomeDashboardModel {
                 ),
                 limit: nil
             )
-            let nextMissionControl: MissionControlProjectionV1
-            if let selectedServerId,
-               !selectedServerId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                nextMissionControl = appModel.store.missionControlForServer(
-                    serverId: selectedServerId
-                )
-            } else {
-                nextMissionControl = appModel.store.missionControl()
-            }
             return Snapshot(
                 connectedServers: nextConnectedServers,
                 recentSessions: nextAllSessions,
-                sessionSummaries: appSnapshot?.sessionSummaries ?? [],
-                missionControl: nextMissionControl
+                sessionSummaries: appSnapshot?.sessionSummaries ?? []
             )
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
@@ -249,7 +242,6 @@ final class HomeDashboardModel {
         rebuildCount += 1
         connectedServers = snapshot.connectedServers
         allSessions = snapshot.recentSessions
-        missionControl = snapshot.missionControl
         recentSessions = Self.mergedHomeSessions(
             pinned: pinnedKeys,
             hidden: hiddenKeys,
@@ -268,6 +260,38 @@ final class HomeDashboardModel {
         }
 
         reconcileSelectedProject()
+        refreshMissionControl(
+            store: appModel.store,
+            serverId: selectedServerId,
+            generation: generation
+        )
+    }
+
+    private func refreshMissionControl(
+        store: AppStore,
+        serverId: String?,
+        generation: Int
+    ) {
+        missionRefreshTask?.cancel()
+        let trimmedServerId = serverId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scopedServerId = trimmedServerId.flatMap { value in
+            value.isEmpty ? nil : value
+        }
+        missionRefreshTask = Task { @MainActor [weak self, store] in
+            let projection = await Task.detached(priority: .background) {
+                if let scopedServerId {
+                    store.missionControlForServer(serverId: scopedServerId)
+                } else {
+                    store.missionControl()
+                }
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.isActive,
+                  self.observationGeneration == generation else { return }
+            self.missionControl = projection
+        }
     }
 
     private func reloadThreadPreferences() {

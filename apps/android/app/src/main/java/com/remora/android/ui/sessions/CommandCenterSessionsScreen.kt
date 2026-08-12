@@ -19,9 +19,16 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Snooze
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -52,6 +59,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.codex_mobile_client.AppArchiveThreadRequest
+import uniffi.codex_mobile_client.AvailabilityState
 import uniffi.codex_mobile_client.SessionAttentionV1
 import uniffi.codex_mobile_client.SessionFilterV1
 import uniffi.codex_mobile_client.SessionListRowV1
@@ -84,6 +93,10 @@ fun CommandCenterSessionsScreen(
     var totalCount by remember { mutableStateOf(0u) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var mutatingKeys by remember { mutableStateOf<Set<ThreadKey>>(emptySet()) }
+    var menuRow by remember { mutableStateOf<SessionListRowV1?>(null) }
+    var pendingArchive by remember { mutableStateOf<SessionListRowV1?>(null) }
+    var actionError by remember { mutableStateOf<String?>(null) }
 
     suspend fun loadPage(reset: Boolean) {
         if (isLoading && !reset) return
@@ -120,6 +133,39 @@ fun CommandCenterSessionsScreen(
             errorMessage = error.message ?: "Unable to load sessions"
         } finally {
             isLoading = false
+        }
+    }
+
+    suspend fun mutateAttention(row: SessionListRowV1, action: () -> Unit) {
+        if (row.key in mutatingKeys) return
+        mutatingKeys = mutatingKeys + row.key
+        try {
+            withContext(Dispatchers.Default) { action() }
+            loadPage(reset = true)
+        } catch (error: Exception) {
+            actionError = error.message ?: "Unable to update this session"
+        } finally {
+            mutatingKeys = mutatingKeys - row.key
+        }
+    }
+
+    suspend fun archive(row: SessionListRowV1) {
+        if (row.key in mutatingKeys) return
+        mutatingKeys = mutatingKeys + row.key
+        try {
+            if (appModel.snapshot.value?.activeThread == row.key) {
+                appModel.activateThread(null)
+            }
+            appModel.client.archiveThread(
+                row.key.serverId,
+                AppArchiveThreadRequest(threadId = row.key.threadId),
+            )
+            appModel.refreshSnapshot()
+            loadPage(reset = true)
+        } catch (error: Exception) {
+            actionError = error.message ?: "Unable to archive this session"
+        } finally {
+            mutatingKeys = mutatingKeys - row.key
         }
     }
 
@@ -215,6 +261,44 @@ fun CommandCenterSessionsScreen(
                     CommandCenterSessionRow(
                         row = row,
                         onOpen = { onOpenConversation(row.key) },
+                        menuExpanded = menuRow?.key == row.key,
+                        enabled = row.key !in mutatingKeys,
+                        onShowMenu = { menuRow = row },
+                        onDismissMenu = { menuRow = null },
+                        onAcknowledge = if (row.canAcknowledge) {
+                            {
+                                menuRow = null
+                                scope.launch {
+                                    mutateAttention(row) {
+                                        appModel.store.acknowledgeThreadAttention(row.key)
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        onSnooze = if (row.attention == SessionAttentionV1.NEEDS_YOU) {
+                            {
+                                menuRow = null
+                                scope.launch {
+                                    mutateAttention(row) {
+                                        appModel.store.snoozeThreadAttention(row.key)
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        onArchive = if (
+                            row.archiveAvailability.state == AvailabilityState.AVAILABLE
+                        ) {
+                            {
+                                menuRow = null
+                                pendingArchive = row
+                            }
+                        } else {
+                            null
+                        },
                     )
                     HorizontalDivider(color = RemoraTheme.border.copy(alpha = 0.16f))
                     if (index == rows.lastIndex && nextCursor != null) {
@@ -235,6 +319,35 @@ fun CommandCenterSessionsScreen(
                 }
             }
         }
+    }
+
+    pendingArchive?.let { row ->
+        AlertDialog(
+            onDismissRequest = { pendingArchive = null },
+            title = { Text("Archive Session?") },
+            text = { Text("This moves the session into archived history on its Host.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingArchive = null
+                    scope.launch { archive(row) }
+                }) {
+                    Text("Archive", color = RemoraTheme.danger)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingArchive = null }) { Text("Cancel") }
+            },
+        )
+    }
+    actionError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { actionError = null },
+            title = { Text("Session Action Failed") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { actionError = null }) { Text("OK") }
+            },
+        )
     }
 }
 
@@ -272,11 +385,19 @@ private fun EmptySessions(errorMessage: String?) {
 private fun CommandCenterSessionRow(
     row: SessionListRowV1,
     onOpen: () -> Unit,
+    menuExpanded: Boolean,
+    enabled: Boolean,
+    onShowMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    onAcknowledge: (() -> Unit)?,
+    onSnooze: (() -> Unit)?,
+    onArchive: (() -> Unit)?,
 ) {
+    val hasActions = onAcknowledge != null || onSnooze != null || onArchive != null
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpen)
+            .clickable(enabled = enabled, onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -292,6 +413,55 @@ private fun CommandCenterSessionRow(
             )
             Spacer(Modifier.width(8.dp))
             SessionStatusLabel(row)
+            if (hasActions) Box {
+                IconButton(
+                    onClick = onShowMenu,
+                    enabled = enabled,
+                    modifier = Modifier.size(RemoraTheme.minimumTouchTarget),
+                ) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = "Session actions",
+                        tint = RemoraTheme.textMuted,
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = onDismissMenu,
+                ) {
+                    onAcknowledge?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Acknowledge") },
+                            leadingIcon = {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null)
+                            },
+                            onClick = action,
+                        )
+                    }
+                    onSnooze?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Snooze 1 hour") },
+                            leadingIcon = {
+                                Icon(Icons.Default.Snooze, contentDescription = null)
+                            },
+                            onClick = action,
+                        )
+                    }
+                    onArchive?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Archive", color = RemoraTheme.danger) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Archive,
+                                    contentDescription = null,
+                                    tint = RemoraTheme.danger,
+                                )
+                            },
+                            onClick = action,
+                        )
+                    }
+                }
+            }
         }
         row.preview?.takeIf { it.isNotBlank() }?.let { preview ->
             Text(
@@ -321,14 +491,19 @@ private fun CommandCenterSessionRow(
 @Composable
 private fun SessionStatusLabel(row: SessionListRowV1) {
     val needsYou = row.attention == SessionAttentionV1.NEEDS_YOU
-    val label = if (needsYou) "Needs You" else when (row.status) {
+    val snoozed = row.snoozedUntilMs != null
+    val label = if (needsYou) "Needs You" else if (snoozed) "Snoozed" else when (row.status) {
         SessionStatusV1.RUNNING -> "Running"
         SessionStatusV1.WAITING -> "Waiting"
         SessionStatusV1.FAILED -> "Failed"
         SessionStatusV1.IDLE -> "Idle"
         SessionStatusV1.UNKNOWN -> "Unknown"
     }
-    val color: Color = if (needsYou) RemoraTheme.warning else when (row.status) {
+    val color: Color = if (needsYou) {
+        RemoraTheme.warning
+    } else if (snoozed) {
+        RemoraTheme.accent
+    } else when (row.status) {
         SessionStatusV1.RUNNING -> RemoraTheme.accent
         SessionStatusV1.WAITING -> RemoraTheme.warning
         SessionStatusV1.FAILED -> RemoraTheme.danger

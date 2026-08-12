@@ -173,11 +173,15 @@ class AppModel private constructor(
         )
         val databaseResult = runCatching { DeviceDatabaseController(context).open() }
         deviceDatabase = databaseResult.getOrNull()?.database
+        val databaseConfigurationResult = runCatching {
+            deviceDatabase?.let(store::configureDeviceDatabase)
+        }
         deviceDatabaseError = databaseResult.exceptionOrNull()?.localizedMessage
+            ?: databaseConfigurationResult.exceptionOrNull()?.localizedMessage
         if (databaseResult.getOrNull()?.didRebuild == true) {
             workspaceRebuildNotice.set(true)
         }
-        databaseResult.exceptionOrNull()?.let { error ->
+        (databaseResult.exceptionOrNull() ?: databaseConfigurationResult.exceptionOrNull())?.let { error ->
             LLog.w(
                 "AppModel",
                 "encrypted device database unavailable",

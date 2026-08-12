@@ -18,7 +18,11 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+// Schema v3 adds only unencrypted attention metadata. Keep the encrypted
+// record envelope at v2 so the additive migration does not invalidate
+// existing outbox, review-note, or search ciphertext.
+const ENCRYPTION_RECORD_VERSION: i64 = 2;
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 const MAX_ID_BYTES: usize = 128;
@@ -35,6 +39,8 @@ const MAX_SNIPPET_BYTES: usize = 512;
 const MAX_REVIEW_BODY_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_PATH_BYTES: usize = 4_096;
 const MAX_REVIEW_NOTES: usize = 100;
+const MAX_THREAD_ATTENTION_ROWS: usize = 100_000;
+const MAX_SNOOZE_DURATION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const SEARCH_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
 const SEARCH_RETENTION_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_RETENTION_DELETIONS: usize = 1_000;
@@ -138,6 +144,17 @@ pub struct ThreadOrganization {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadAttentionState {
+    pub host_id: String,
+    pub thread_id: String,
+    pub terminal_event_id: Option<String>,
+    pub occurred_at_ms: Option<i64>,
+    pub failed: bool,
+    pub snoozed_until_ms: Option<i64>,
+    pub acknowledged_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewNoteState {
     Open,
@@ -227,6 +244,14 @@ impl DeviceDatabase {
                  acknowledged_at_ms INTEGER,
                  relay_sequence INTEGER NOT NULL,
                  updated_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY (host_id, thread_id)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS thread_attention (
+                 host_id TEXT NOT NULL,
+                 thread_id TEXT NOT NULL,
+                 terminal_event_id TEXT NOT NULL,
+                 occurred_at_ms INTEGER NOT NULL,
+                 failed INTEGER NOT NULL,
                  PRIMARY KEY (host_id, thread_id)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS outbox (
@@ -499,6 +524,221 @@ impl DeviceDatabase {
             },
         )
         .transpose()
+    }
+
+    /// Records an attention event only when the live Host emits a terminal
+    /// turn transition. Historical idle Threads therefore remain baseline-
+    /// neutral when a device first enables the command center.
+    pub fn record_terminal_attention(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+        terminal_event_id: &str,
+        now_ms: i64,
+        failed: bool,
+    ) -> Result<ThreadAttentionState, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        validate_id("terminal_event_id", terminal_event_id)?;
+        validate_timestamp("now_ms", now_ms)?;
+        let mut connection = self.lock()?;
+        let previous = connection
+            .query_row(
+                "SELECT occurred_at_ms, terminal_event_id FROM thread_attention
+                 WHERE host_id = ?1 AND thread_id = ?2",
+                params![host_id, thread_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if previous
+            .as_ref()
+            .is_some_and(|(_, previous_event_id)| previous_event_id == terminal_event_id)
+        {
+            drop(connection);
+            return self
+                .thread_attention_state(host_id, thread_id)?
+                .ok_or_else(|| {
+                    DeviceDatabaseError::Database(rusqlite::Error::QueryReturnedNoRows)
+                });
+        }
+        let occurred_at_ms = previous
+            .and_then(|(value, _)| value.checked_add(1))
+            .map_or(now_ms, |minimum| now_ms.max(minimum));
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO thread_organization (
+                 host_id, thread_id, pinned, hidden, snoozed_until_ms,
+                 acknowledged_at_ms, relay_sequence, updated_at_ms
+             ) VALUES (?1, ?2, 0, 0, NULL, NULL, 0, ?3)
+             ON CONFLICT(host_id, thread_id) DO UPDATE SET
+                 snoozed_until_ms = NULL,
+                 acknowledged_at_ms = NULL,
+                 updated_at_ms = MAX(thread_organization.updated_at_ms, excluded.updated_at_ms)",
+            params![host_id, thread_id, occurred_at_ms],
+        )?;
+        transaction.execute(
+            "INSERT INTO thread_attention (
+                 host_id, thread_id, terminal_event_id, occurred_at_ms, failed
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(host_id, thread_id) DO UPDATE SET
+                 terminal_event_id = excluded.terminal_event_id,
+                 occurred_at_ms = excluded.occurred_at_ms,
+                 failed = excluded.failed",
+            params![
+                host_id,
+                thread_id,
+                terminal_event_id,
+                occurred_at_ms,
+                i64::from(failed)
+            ],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.thread_attention_state(host_id, thread_id)?
+            .ok_or_else(|| DeviceDatabaseError::Database(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    pub fn acknowledge_thread_attention(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+        now_ms: i64,
+    ) -> Result<ThreadAttentionState, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        validate_timestamp("now_ms", now_ms)?;
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO thread_organization (
+                 host_id, thread_id, pinned, hidden, snoozed_until_ms,
+                 acknowledged_at_ms, relay_sequence, updated_at_ms
+             ) VALUES (
+                 ?1, ?2, 0, 0, NULL,
+                 MAX(?3, COALESCE((
+                     SELECT occurred_at_ms FROM thread_attention
+                     WHERE host_id = ?1 AND thread_id = ?2
+                 ), ?3)),
+                 0, ?3
+             )
+             ON CONFLICT(host_id, thread_id) DO UPDATE SET
+                 snoozed_until_ms = NULL,
+                 acknowledged_at_ms = MAX(
+                     ?3,
+                     COALESCE((
+                         SELECT occurred_at_ms FROM thread_attention
+                         WHERE host_id = ?1 AND thread_id = ?2
+                     ), ?3)
+                 ),
+                 updated_at_ms = MAX(thread_organization.updated_at_ms, ?3)",
+            params![host_id, thread_id, now_ms],
+        )?;
+        drop(connection);
+        self.thread_attention_state(host_id, thread_id)?
+            .ok_or_else(|| DeviceDatabaseError::Database(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    pub fn snooze_thread_attention(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+        now_ms: i64,
+        snoozed_until_ms: i64,
+    ) -> Result<ThreadAttentionState, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        validate_timestamp("now_ms", now_ms)?;
+        if snoozed_until_ms <= now_ms
+            || snoozed_until_ms.saturating_sub(now_ms) > MAX_SNOOZE_DURATION_MS
+        {
+            return Err(DeviceDatabaseError::InvalidInput(
+                "snooze must end within the next 30 days".to_string(),
+            ));
+        }
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO thread_organization (
+                 host_id, thread_id, pinned, hidden, snoozed_until_ms,
+                 acknowledged_at_ms, relay_sequence, updated_at_ms
+             ) VALUES (?1, ?2, 0, 0, ?3, NULL, 0, ?4)
+             ON CONFLICT(host_id, thread_id) DO UPDATE SET
+                 snoozed_until_ms = excluded.snoozed_until_ms,
+                 updated_at_ms = MAX(thread_organization.updated_at_ms, excluded.updated_at_ms)",
+            params![host_id, thread_id, snoozed_until_ms, now_ms],
+        )?;
+        drop(connection);
+        self.thread_attention_state(host_id, thread_id)?
+            .ok_or_else(|| DeviceDatabaseError::Database(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    pub fn delete_terminal_attention(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let deleted = transaction.execute(
+            "DELETE FROM thread_attention WHERE host_id = ?1 AND thread_id = ?2",
+            params![host_id, thread_id],
+        )? == 1;
+        transaction.execute(
+            "UPDATE thread_organization SET snoozed_until_ms = NULL
+             WHERE host_id = ?1 AND thread_id = ?2",
+            params![host_id, thread_id],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    pub fn thread_attention_states(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ThreadAttentionState>, DeviceDatabaseError> {
+        let limit = limit.clamp(1, MAX_THREAD_ATTENTION_ROWS) as i64;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT organization.host_id, organization.thread_id,
+                    attention.terminal_event_id, attention.occurred_at_ms,
+                    COALESCE(attention.failed, 0),
+                    organization.snoozed_until_ms, organization.acknowledged_at_ms
+             FROM thread_organization AS organization
+             LEFT JOIN thread_attention AS attention
+               ON attention.host_id = organization.host_id
+              AND attention.thread_id = organization.thread_id
+             ORDER BY organization.updated_at_ms DESC,
+                      organization.host_id ASC, organization.thread_id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], decode_thread_attention_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn thread_attention_state(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ThreadAttentionState>, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT organization.host_id, organization.thread_id,
+                        attention.terminal_event_id, attention.occurred_at_ms,
+                        COALESCE(attention.failed, 0),
+                        organization.snoozed_until_ms, organization.acknowledged_at_ms
+                 FROM thread_organization AS organization
+                 LEFT JOIN thread_attention AS attention
+                   ON attention.host_id = organization.host_id
+                  AND attention.thread_id = organization.thread_id
+                 WHERE organization.host_id = ?1 AND organization.thread_id = ?2",
+                params![host_id, thread_id],
+                decode_thread_attention_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn upsert_review_note(&self, note: &ReviewNote) -> Result<(), DeviceDatabaseError> {
@@ -1011,7 +1251,12 @@ impl DeviceDatabase {
             )
             .optional()?;
         if let Some(existing) = existing {
-            if existing != SCHEMA_VERSION.to_be_bytes() {
+            if existing == 2_i64.to_be_bytes() {
+                connection.execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                    [SCHEMA_VERSION.to_be_bytes().as_slice()],
+                )?;
+            } else if existing != SCHEMA_VERSION.to_be_bytes() {
                 return Err(DeviceDatabaseError::Authentication);
             }
         } else {
@@ -1100,7 +1345,34 @@ fn take_key(bytes: &mut Vec<u8>) -> Result<Zeroizing<[u8; KEY_BYTES]>, DeviceDat
 }
 
 fn associated_data(record_type: &str, primary_key: &str, host_id: &str) -> String {
-    format!("{SCHEMA_VERSION}|{record_type}|{primary_key}|{host_id}")
+    format!("{ENCRYPTION_RECORD_VERSION}|{record_type}|{primary_key}|{host_id}")
+}
+
+fn decode_thread_attention_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<ThreadAttentionState, rusqlite::Error> {
+    let failed = row.get::<_, i64>(4)?;
+    if !matches!(failed, 0 | 1) {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(4, failed));
+    }
+    Ok(ThreadAttentionState {
+        host_id: row.get(0)?,
+        thread_id: row.get(1)?,
+        terminal_event_id: row.get(2)?,
+        occurred_at_ms: row.get(3)?,
+        failed: failed == 1,
+        snoozed_until_ms: row.get(5)?,
+        acknowledged_at_ms: row.get(6)?,
+    })
+}
+
+fn validate_timestamp(name: &str, value: i64) -> Result<(), DeviceDatabaseError> {
+    if value <= 0 {
+        return Err(DeviceDatabaseError::InvalidInput(format!(
+            "{name} must be a positive Unix timestamp"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_id(name: &str, value: &str) -> Result<(), DeviceDatabaseError> {
@@ -1396,6 +1668,92 @@ mod tests {
             .expect("organization");
         assert_eq!(current.relay_sequence, 11);
         assert!(!current.pinned);
+    }
+
+    #[test]
+    fn terminal_attention_is_event_driven_snoozable_and_acknowledgeable() {
+        let database = DeviceDatabase::open_in_memory(key(18)).expect("open");
+        let first = database
+            .record_terminal_attention("host", "thread", "turn-1", 100, false)
+            .expect("record completion");
+        assert_eq!(first.occurred_at_ms, Some(100));
+        assert!(!first.failed);
+        assert_eq!(first.acknowledged_at_ms, None);
+
+        let snoozed = database
+            .snooze_thread_attention("host", "thread", 101, 1_001)
+            .expect("snooze");
+        assert_eq!(snoozed.snoozed_until_ms, Some(1_001));
+
+        let failed = database
+            .record_terminal_attention("host", "thread", "turn-2", 102, true)
+            .expect("record newer failure");
+        assert_eq!(failed.occurred_at_ms, Some(102));
+        assert!(failed.failed);
+        assert_eq!(failed.snoozed_until_ms, None);
+
+        let acknowledged = database
+            .acknowledge_thread_attention("host", "thread", 103)
+            .expect("acknowledge");
+        assert_eq!(acknowledged.acknowledged_at_ms, Some(103));
+
+        let replay = database
+            .record_terminal_attention("host", "thread", "turn-2", 104, true)
+            .expect("replay the acknowledged event");
+        assert_eq!(replay.acknowledged_at_ms, Some(103));
+
+        let monotonic = database
+            .record_terminal_attention("host", "thread", "turn-3", 102, false)
+            .expect("record a new event with a repeated clock value");
+        assert_eq!(monotonic.occurred_at_ms, Some(103));
+        assert!(!monotonic.failed);
+        assert_eq!(monotonic.acknowledged_at_ms, None);
+
+        database
+            .snooze_thread_attention("host", "thread", 104, 1_004)
+            .expect("snooze before new work");
+        database
+            .delete_terminal_attention("host", "thread")
+            .expect("clear terminal state for new work");
+        let cleared = database
+            .thread_attention_state("host", "thread")
+            .expect("read cleared state")
+            .expect("organization state remains");
+        assert_eq!(cleared.terminal_event_id, None);
+        assert_eq!(cleared.occurred_at_ms, None);
+        assert_eq!(cleared.snoozed_until_ms, None);
+    }
+
+    #[test]
+    fn attention_layout_migrates_without_invalidating_encrypted_records() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("device.sqlite");
+        let database = DeviceDatabase::open(&path, key(19)).expect("open");
+        database
+            .enqueue_outbox(&intent("intent", "host", b"preserved"))
+            .expect("enqueue");
+        {
+            let connection = database.lock().expect("lock");
+            connection
+                .execute("DROP TABLE thread_attention", [])
+                .expect("drop additive table");
+            connection
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                    [2_i64.to_be_bytes().as_slice()],
+                )
+                .expect("restore v2 marker");
+        }
+        drop(database);
+
+        let migrated = DeviceDatabase::open(&path, key(19)).expect("migrate");
+        assert_eq!(
+            migrated.due_outbox(10, 1).expect("read preserved")[0].payload,
+            b"preserved"
+        );
+        migrated
+            .record_terminal_attention("host", "thread", "turn", 100, false)
+            .expect("new table available");
     }
 
     #[test]

@@ -32,9 +32,13 @@ HMAC exact/prefix postings, bounded search, one-transaction idempotent enqueue,
 authoritative acknowledgement removal, protected retention, wrong-key/tamper
 failure, monotonic relay-sequenced organization projection, encrypted
 review-note CRUD with immutable anchors, 90-day/2 GiB logical search retention,
-and native device-only key handoff. Retention protects pinned Threads, queued
-intents, open review notes, and explicitly protected documents. iOS and Android
-rebuild only the exact disposable cache files and retain the secure master key.
+native device-only key handoff, and Turn-ID-idempotent event-driven
+terminal-attention metadata.
+The additive v2→v3 layout migration deliberately preserves the v2 encrypted
+record envelope, so queued intents, indexed content, and review notes remain
+decryptable. Retention protects pinned Threads, queued intents, open review
+notes, and explicitly protected documents. iOS and Android rebuild only the
+exact disposable cache files and retain the secure master key.
 
 Remaining: authoritative Host delivery worker integration and end-to-end
 offline/reconnect UI coverage.

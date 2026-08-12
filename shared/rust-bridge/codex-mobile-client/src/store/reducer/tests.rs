@@ -639,6 +639,30 @@ fn thread_status_changed_idle_clears_active_turn() {
 }
 
 #[test]
+fn failed_turn_completion_projects_a_terminal_error_status() {
+    let reducer = AppStoreReducer::new();
+    let key = ThreadKey {
+        server_id: "srv".to_string(),
+        thread_id: "thread".to_string(),
+    };
+    let mut thread = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+    thread.active_turn_id = Some("turn-1".to_string());
+    thread.info.status = ThreadSummaryStatus::Active;
+    reducer.upsert_thread_snapshot(thread);
+
+    reducer.apply_ui_event(&UiEvent::TurnCompleted {
+        key: key.clone(),
+        turn_id: "turn-1".to_string(),
+        error: Some("provider failed".to_string()),
+    });
+
+    let snapshot = reducer.snapshot();
+    let thread = snapshot.threads.get(&key).expect("thread exists");
+    assert_eq!(thread.active_turn_id, None);
+    assert_eq!(thread.info.status, ThreadSummaryStatus::SystemError);
+}
+
+#[test]
 fn thread_item_changed_projects_multi_agent_targets_to_display_labels() {
     let reducer = AppStoreReducer::new();
     let parent_key = ThreadKey {

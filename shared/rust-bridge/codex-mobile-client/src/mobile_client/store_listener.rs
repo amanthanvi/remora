@@ -105,6 +105,25 @@ pub(super) fn spawn_store_listener(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if let Some(client) = owner.upgrade() {
+                        let attention_result = match &event {
+                            UiEvent::TurnCompleted {
+                                key,
+                                turn_id,
+                                error,
+                            } => client.record_terminal_attention(key, turn_id, error.is_some()),
+                            UiEvent::TurnStarted { key, .. } => {
+                                client.delete_terminal_attention(key)
+                            }
+                            UiEvent::ThreadArchived { key } => {
+                                client.delete_terminal_attention(key)
+                            }
+                            _ => Ok(()),
+                        };
+                        if let Err(error) = attention_result {
+                            warn!("MobileClient: device attention update failed: {error}");
+                        }
+                    }
                     app_store.apply_ui_event(&event);
                     maybe_hydrate_collab_agent_metadata(
                         Arc::clone(&app_store),

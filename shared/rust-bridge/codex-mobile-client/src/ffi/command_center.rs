@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::device_database::ThreadAttentionState;
 use crate::store::boundary::session_summaries_from_snapshot;
 use crate::store::{AppSessionSummary, AppSnapshot};
 use crate::types::{ThreadKey, ThreadSummaryStatus};
@@ -23,14 +24,14 @@ const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_RUNTIME_BYTES: usize = 64;
 const MAX_MODEL_BYTES: usize = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
 pub enum AvailabilityState {
     Available,
     Unknown,
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, uniffi::Record)]
 pub struct FeatureAvailability {
     pub state: AvailabilityState,
     pub reason: Option<String>,
@@ -225,6 +226,9 @@ pub struct SessionListRowV1 {
     pub preview: Option<String>,
     pub status: SessionStatusV1,
     pub attention: SessionAttentionV1,
+    pub can_acknowledge: bool,
+    pub snoozed_until_ms: Option<i64>,
+    pub archive_availability: FeatureAvailability,
     pub updated_at_ms: Option<i64>,
 }
 
@@ -578,6 +582,7 @@ fn project_link_runtime_capabilities(value: LinkRuntimeCapabilitiesV1) -> Runtim
     }
 }
 
+#[cfg(test)]
 pub(crate) fn project_sessions_page(
     snapshot: &AppSnapshot,
     cursor: Option<&str>,
@@ -586,11 +591,32 @@ pub(crate) fn project_sessions_page(
     project_sessions_page_filtered(snapshot, &SessionFilterV1::default(), cursor, limit)
 }
 
+#[cfg(test)]
 pub(crate) fn project_sessions_page_filtered(
     snapshot: &AppSnapshot,
     filter: &SessionFilterV1,
     cursor: Option<&str>,
     limit: Option<u32>,
+) -> Result<SessionPageV1, String> {
+    project_sessions_page_filtered_with_attention(
+        snapshot,
+        filter,
+        cursor,
+        limit,
+        &HashMap::new(),
+        &HashMap::new(),
+        unix_time_ms(),
+    )
+}
+
+pub(crate) fn project_sessions_page_filtered_with_attention(
+    snapshot: &AppSnapshot,
+    filter: &SessionFilterV1,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+    attention_states: &HashMap<ThreadKey, ThreadAttentionState>,
+    now_ms: i64,
 ) -> Result<SessionPageV1, String> {
     let query = filter
         .query
@@ -603,7 +629,15 @@ pub(crate) fn project_sessions_page_filtered(
     let server_id = normalized_filter_value(filter.server_id.as_deref(), MAX_TITLE_BYTES);
     let rows = session_summaries_from_snapshot(snapshot)
         .iter()
-        .map(|summary| session_row(snapshot, summary))
+        .map(|summary| {
+            session_row(
+                snapshot,
+                summary,
+                link_statuses,
+                attention_states.get(&summary.key),
+                now_ms,
+            )
+        })
         .filter(|row| {
             server_id
                 .as_deref()
@@ -640,13 +674,31 @@ pub(crate) fn project_sessions_page_filtered(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn project_mission_control(snapshot: &AppSnapshot) -> MissionControlProjectionV1 {
     project_mission_control_for_server(snapshot, None)
 }
 
+#[cfg(test)]
 pub(crate) fn project_mission_control_for_server(
     snapshot: &AppSnapshot,
     server_id: Option<&str>,
+) -> MissionControlProjectionV1 {
+    project_mission_control_with_attention(
+        snapshot,
+        server_id,
+        &HashMap::new(),
+        &HashMap::new(),
+        unix_time_ms(),
+    )
+}
+
+pub(crate) fn project_mission_control_with_attention(
+    snapshot: &AppSnapshot,
+    server_id: Option<&str>,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+    attention_states: &HashMap<ThreadKey, ThreadAttentionState>,
+    now_ms: i64,
 ) -> MissionControlProjectionV1 {
     let summaries = session_summaries_from_snapshot(snapshot)
         .into_iter()
@@ -654,7 +706,15 @@ pub(crate) fn project_mission_control_for_server(
         .collect::<Vec<_>>();
     let rows = summaries
         .iter()
-        .map(|summary| session_row(snapshot, summary))
+        .map(|summary| {
+            session_row(
+                snapshot,
+                summary,
+                link_statuses,
+                attention_states.get(&summary.key),
+                now_ms,
+            )
+        })
         .collect::<Vec<_>>();
     let needs_you_count = rows
         .iter()
@@ -710,12 +770,34 @@ fn decode_session_cursor(cursor: Option<&str>, total: usize) -> Result<usize, St
     Ok(offset)
 }
 
-fn session_row(snapshot: &AppSnapshot, summary: &AppSessionSummary) -> SessionListRowV1 {
-    let attention = has_pending_attention(snapshot, &summary.key);
-    let status = if attention {
+fn session_row(
+    snapshot: &AppSnapshot,
+    summary: &AppSessionSummary,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+    organization: Option<&ThreadAttentionState>,
+    now_ms: i64,
+) -> SessionListRowV1 {
+    let blocking_attention = has_pending_attention(snapshot, &summary.key);
+    let terminal_attention = organization
+        .and_then(|state| state.occurred_at_ms.map(|occurred| (state, occurred)))
+        .is_some_and(|(state, occurred)| {
+            state
+                .acknowledged_at_ms
+                .is_none_or(|acknowledged| acknowledged < occurred)
+        });
+    let snoozed_until_ms = organization
+        .and_then(|state| state.snoozed_until_ms)
+        .filter(|until| *until > now_ms);
+    let needs_attention = (blocking_attention || terminal_attention) && snoozed_until_ms.is_none();
+    let terminal_failed = organization.is_some_and(|state| {
+        state.terminal_event_id.is_some() && state.occurred_at_ms.is_some() && state.failed
+    });
+    let status = if blocking_attention {
         SessionStatusV1::Waiting
     } else if summary.has_active_turn {
         SessionStatusV1::Running
+    } else if terminal_failed {
+        SessionStatusV1::Failed
     } else {
         snapshot
             .threads
@@ -742,15 +824,65 @@ fn session_row(snapshot: &AppSnapshot, summary: &AppSessionSummary) -> SessionLi
             .or_else(|| (!summary.preview.is_empty()).then_some(summary.preview.as_str()))
             .map(|value| bound_utf8(value, MAX_PREVIEW_BYTES)),
         status,
-        attention: if attention {
+        attention: if needs_attention {
             SessionAttentionV1::NeedsYou
         } else {
             SessionAttentionV1::None
         },
+        can_acknowledge: terminal_attention,
+        snoozed_until_ms,
+        archive_availability: archive_availability(summary, link_statuses),
         updated_at_ms: summary
             .updated_at
             .and_then(|seconds| seconds.checked_mul(1_000)),
     }
+}
+
+fn archive_availability(
+    summary: &AppSessionSummary,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+) -> FeatureAvailability {
+    let Some(status) = link_statuses.get(&summary.key.server_id) else {
+        return if summary.key.server_id.starts_with("remora-link:") {
+            FeatureAvailability::unknown("Connected Link has not declared archive support")
+        } else {
+            // Existing direct app-server transports expose typed thread/archive
+            // RPC coverage through AppClient.
+            FeatureAvailability::available()
+        };
+    };
+    let mut matching = status
+        .provider_instances
+        .iter()
+        .filter(|provider| provider.runtime_id == summary.agent_runtime_kind)
+        .map(|provider| provider.capabilities.thread_lifecycle.archive.clone())
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return FeatureAvailability::unknown(
+            "The active provider has not declared archive support",
+        );
+    }
+    if matching
+        .iter()
+        .all(|feature| feature.state == LinkAvailabilityState::Available)
+    {
+        return FeatureAvailability::available();
+    }
+    matching.sort_by_key(|feature| match feature.state {
+        LinkAvailabilityState::Unavailable => 0,
+        LinkAvailabilityState::Unknown => 1,
+        LinkAvailabilityState::Available => 2,
+    });
+    project_link_feature(matching.remove(0))
+}
+
+#[cfg(test)]
+fn unix_time_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX).max(1)
 }
 
 fn has_pending_attention(snapshot: &AppSnapshot, key: &ThreadKey) -> bool {
@@ -1290,6 +1422,108 @@ mod tests {
     }
 
     #[test]
+    fn archive_action_requires_declared_link_capability() {
+        let direct_store = AppStoreReducer::new();
+        direct_store.upsert_server(
+            &server_config("direct-server"),
+            ServerHealthSnapshot::Connected,
+        );
+        direct_store.upsert_thread_list_page("direct-server", &[thread_info(1)]);
+        let direct = project_sessions_page(&direct_store.snapshot(), None, None)
+            .expect("direct Sessions page");
+        assert_eq!(
+            direct.rows[0].archive_availability.state,
+            AvailabilityState::Available
+        );
+
+        let link_server_id = "remora-link:host";
+        let link_store = AppStoreReducer::new();
+        link_store.upsert_server(
+            &server_config(link_server_id),
+            ServerHealthSnapshot::Connected,
+        );
+        link_store.upsert_thread_list_page(link_server_id, &[thread_info(2)]);
+        let snapshot = link_store.snapshot();
+        let undeclared =
+            project_sessions_page(&snapshot, None, None).expect("older Link Sessions page");
+        assert_eq!(
+            undeclared.rows[0].archive_availability.state,
+            AvailabilityState::Unknown
+        );
+
+        let mut provider =
+            link_provider("codex-default", "codex", LinkProviderReadiness::Ready, None);
+        provider.capabilities.thread_lifecycle.archive =
+            LinkFeatureAvailability::unavailable("Archive disabled by Host policy");
+        let mut statuses =
+            HashMap::from([(link_server_id.to_string(), link_status(vec![provider]))]);
+        let unavailable = project_sessions_page_filtered_with_attention(
+            &snapshot,
+            &SessionFilterV1::default(),
+            None,
+            None,
+            &statuses,
+            &HashMap::new(),
+            1,
+        )
+        .expect("unavailable archive Sessions page");
+        assert_eq!(
+            unavailable.rows[0].archive_availability,
+            FeatureAvailability::unavailable("Archive disabled by Host policy")
+        );
+
+        statuses
+            .get_mut(link_server_id)
+            .expect("Link status")
+            .provider_instances[0]
+            .capabilities
+            .thread_lifecycle
+            .archive = LinkFeatureAvailability::available();
+        let available = project_sessions_page_filtered_with_attention(
+            &snapshot,
+            &SessionFilterV1::default(),
+            None,
+            None,
+            &statuses,
+            &HashMap::new(),
+            1,
+        )
+        .expect("available archive Sessions page");
+        assert_eq!(
+            available.rows[0].archive_availability.state,
+            AvailabilityState::Available
+        );
+
+        let mut conflicting = link_provider(
+            "codex-restricted",
+            "codex",
+            LinkProviderReadiness::Ready,
+            None,
+        );
+        conflicting.capabilities.thread_lifecycle.archive =
+            LinkFeatureAvailability::unavailable("Archive unavailable for one matching instance");
+        statuses
+            .get_mut(link_server_id)
+            .expect("Link status")
+            .provider_instances
+            .push(conflicting);
+        let ambiguous = project_sessions_page_filtered_with_attention(
+            &snapshot,
+            &SessionFilterV1::default(),
+            None,
+            None,
+            &statuses,
+            &HashMap::new(),
+            1,
+        )
+        .expect("ambiguous archive Sessions page");
+        assert_eq!(
+            ambiguous.rows[0].archive_availability.state,
+            AvailabilityState::Unavailable
+        );
+    }
+
+    #[test]
     fn empty_mission_control_is_bounded_and_stable() {
         let projection = project_mission_control(&AppSnapshot::default());
         assert!(projection.needs_you.is_empty());
@@ -1354,5 +1588,130 @@ mod tests {
                 .chain(scoped.active.iter())
                 .all(|row| row.key.server_id == "server-a")
         );
+    }
+
+    #[test]
+    fn terminal_attention_requires_a_live_event_and_obeys_acknowledgement_and_snooze() {
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config("server"), ServerHealthSnapshot::Connected);
+        let mut completed = thread_info(1);
+        completed.id = "completed".to_string();
+        let mut historical = thread_info(2);
+        historical.id = "historical".to_string();
+        store.upsert_thread_list_page("server", &[completed, historical]);
+        let snapshot = store.snapshot();
+        let key = ThreadKey {
+            server_id: "server".to_string(),
+            thread_id: "completed".to_string(),
+        };
+        let mut attention = HashMap::from([(
+            key.clone(),
+            ThreadAttentionState {
+                host_id: key.server_id.clone(),
+                thread_id: key.thread_id.clone(),
+                terminal_event_id: Some("turn".to_string()),
+                occurred_at_ms: Some(100),
+                failed: true,
+                snoozed_until_ms: None,
+                acknowledged_at_ms: None,
+            },
+        )]);
+
+        let statuses = HashMap::new();
+        let unread =
+            project_mission_control_with_attention(&snapshot, None, &statuses, &attention, 200);
+        assert_eq!(unread.needs_you_count, 1);
+        assert_eq!(unread.needs_you[0].key, key);
+        assert_eq!(unread.needs_you[0].status, SessionStatusV1::Failed);
+        assert!(unread.needs_you[0].can_acknowledge);
+        assert_eq!(unread.recent_count, 1);
+        assert_eq!(unread.recent[0].key.thread_id, "historical");
+
+        attention.get_mut(&key).unwrap().snoozed_until_ms = Some(300);
+        let snoozed =
+            project_mission_control_with_attention(&snapshot, None, &statuses, &attention, 200);
+        assert_eq!(snoozed.needs_you_count, 0);
+        let snoozed_row = snoozed
+            .recent
+            .iter()
+            .find(|row| row.key == key)
+            .expect("snoozed row remains reachable");
+        assert_eq!(snoozed_row.snoozed_until_ms, Some(300));
+
+        let expired =
+            project_mission_control_with_attention(&snapshot, None, &statuses, &attention, 301);
+        assert_eq!(expired.needs_you_count, 1);
+        assert_eq!(expired.needs_you[0].snoozed_until_ms, None);
+
+        let state = attention.get_mut(&key).unwrap();
+        state.snoozed_until_ms = None;
+        state.acknowledged_at_ms = Some(100);
+        let acknowledged =
+            project_mission_control_with_attention(&snapshot, None, &statuses, &attention, 301);
+        assert_eq!(acknowledged.needs_you_count, 0);
+        assert_eq!(acknowledged.recent_count, 2);
+        assert!(acknowledged.recent.iter().all(|row| !row.can_acknowledge));
+        assert_eq!(
+            acknowledged
+                .recent
+                .iter()
+                .find(|row| row.key == key)
+                .expect("acknowledged failure remains recent")
+                .status,
+            SessionStatusV1::Failed
+        );
+    }
+
+    #[test]
+    fn snooze_suppresses_blocking_attention_without_changing_waiting_status() {
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config("server"), ServerHealthSnapshot::Connected);
+        let mut waiting = thread_info(1);
+        waiting.id = "waiting".to_string();
+        store.upsert_thread_list_page("server", &[waiting]);
+        let mut snapshot = store.snapshot();
+        snapshot
+            .pending_approvals
+            .push(crate::types::PendingApproval {
+                id: "approval".to_string(),
+                server_id: "server".to_string(),
+                kind: crate::types::ApprovalKind::Command,
+                thread_id: Some("waiting".to_string()),
+                turn_id: None,
+                item_id: None,
+                command: None,
+                path: None,
+                grant_root: None,
+                cwd: None,
+                reason: None,
+            });
+        let key = ThreadKey {
+            server_id: "server".to_string(),
+            thread_id: "waiting".to_string(),
+        };
+        let attention = HashMap::from([(
+            key.clone(),
+            ThreadAttentionState {
+                host_id: key.server_id.clone(),
+                thread_id: key.thread_id.clone(),
+                terminal_event_id: None,
+                occurred_at_ms: None,
+                failed: false,
+                snoozed_until_ms: Some(300),
+                acknowledged_at_ms: None,
+            },
+        )]);
+
+        let projection = project_mission_control_with_attention(
+            &snapshot,
+            None,
+            &HashMap::new(),
+            &attention,
+            200,
+        );
+        assert_eq!(projection.needs_you_count, 0);
+        assert_eq!(projection.recent_count, 1);
+        assert_eq!(projection.recent[0].status, SessionStatusV1::Waiting);
+        assert_eq!(projection.recent[0].snoozed_until_ms, Some(300));
     }
 }

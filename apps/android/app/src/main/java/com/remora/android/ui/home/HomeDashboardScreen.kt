@@ -60,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -113,6 +114,7 @@ import com.remora.android.ui.common.AgentRuntimeKind
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AppServerSnapshot
 import uniffi.codex_mobile_client.AppSessionSummary
+import uniffi.codex_mobile_client.MissionControlProjectionV1
 import uniffi.codex_mobile_client.PinnedThreadKey
 import uniffi.codex_mobile_client.ThreadKey
 import uniffi.codex_mobile_client.deriveProjects
@@ -180,11 +182,24 @@ fun HomeDashboardScreen(
 
     val scopedServerId = selectedProject?.serverId ?: selectedServerId
     var selectedMissionLane by remember { mutableStateOf<HomeMissionLane?>(null) }
-    val missionControl = remember(snap, scopedServerId) {
-        if (scopedServerId.isNullOrEmpty()) {
-            appModel.store.missionControl()
-        } else {
-            appModel.store.missionControlForServer(scopedServerId)
+    val missionControl by produceState(
+        initialValue = MissionControlProjectionV1(
+            needsYou = emptyList(),
+            active = emptyList(),
+            recent = emptyList(),
+            needsYouCount = 0u,
+            activeCount = 0u,
+            recentCount = 0u,
+        ),
+        snap,
+        scopedServerId,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (scopedServerId.isNullOrEmpty()) {
+                appModel.store.missionControl()
+            } else {
+                appModel.store.missionControlForServer(scopedServerId)
+            }
         }
     }
     val scopedHomeSessions = remember(homeSessions, scopedServerId) {

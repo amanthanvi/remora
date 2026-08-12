@@ -1246,6 +1246,13 @@ impl AppStoreReducer {
         self.emit(AppStoreUpdateRecord::ActiveThreadChanged { key });
     }
 
+    pub(crate) fn notify_command_center_organization_changed(&self) {
+        // Organization mutations are infrequent explicit user actions. A
+        // resync keeps existing native subscription handling unchanged while
+        // the paginated command-center projection remains Rust-owned.
+        self.emit(AppStoreUpdateRecord::FullResync);
+    }
+
     pub fn set_voice_handoff_thread(&self, key: Option<ThreadKey>) {
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
@@ -1802,14 +1809,26 @@ impl AppStoreReducer {
                     self.emit_thread_metadata_changed(key);
                 }
             }
-            UiEvent::TurnCompleted { key, turn_id, .. } => {
+            UiEvent::TurnCompleted {
+                key,
+                turn_id,
+                error,
+            } => {
                 if self
                     .mutate_thread_with_result(key, |thread| {
                         thread.active_turn_id = None;
                         thread.active_plan_progress = None;
-                        thread.info.status = ThreadSummaryStatus::Idle;
+                        thread.info.status = if error.is_some() {
+                            ThreadSummaryStatus::SystemError
+                        } else {
+                            ThreadSummaryStatus::Idle
+                        };
                         if thread.info.parent_thread_id.is_some() {
-                            thread.info.agent_status = Some("completed".to_string());
+                            thread.info.agent_status = Some(if error.is_some() {
+                                "errored".to_string()
+                            } else {
+                                "completed".to_string()
+                            });
                         }
                         // Clean up user input response overlays — they were
                         // answered during this turn and no longer need to show.

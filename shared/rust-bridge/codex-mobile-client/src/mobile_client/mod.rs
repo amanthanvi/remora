@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
+use crate::device_database::{DeviceDatabase, DeviceDatabaseError, ThreadAttentionState};
 use crate::discovery::{DiscoveredServer, DiscoveryConfig, DiscoveryService, MdnsSeed};
 use crate::session::connection::InProcessConfig;
 use crate::session::connection::{
@@ -64,6 +65,16 @@ use self::user_input::normalize_pending_user_input_answers;
 const MOBILE_CLIENT_TRACING_TARGET: &str = module_path!();
 const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POST_RECONNECT_REFRESH_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
+const MAX_CACHED_THREAD_ATTENTION_ROWS: usize = 100_000;
+const ATTENTION_SNOOZE_DURATION_MS: i64 = 60 * 60 * 1_000;
+
+fn unix_time_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX).max(1)
+}
 
 #[derive(Clone, Debug)]
 struct PendingTurnReconciliation {
@@ -163,6 +174,11 @@ pub struct MobileClient {
         Arc<RwLock<Option<Arc<crate::ffi::remora_link_v2::ConfiguredRemoraLink>>>>,
     /// Serializes Remora Link configuration replacement and endpoint teardown.
     pub(crate) remora_link_configuration: Arc<tokio::sync::RwLock<()>>,
+    /// Device-owned organization state. The database remains authoritative
+    /// for persistence; this bounded cache keeps synchronous UI projections
+    /// free of SQLite I/O.
+    device_database: Arc<RwLock<Option<Arc<DeviceDatabase>>>>,
+    thread_attention: Arc<RwLock<HashMap<ThreadKey, ThreadAttentionState>>>,
 }
 
 /// State for a single in-flight guided SSH connect.
@@ -252,8 +268,223 @@ impl MobileClient {
                 background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
                 remora_link: Arc::new(RwLock::new(None)),
                 remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
+                device_database: Arc::new(RwLock::new(None)),
+                thread_attention: Arc::new(RwLock::new(HashMap::new())),
             }
         })
+    }
+
+    pub(crate) fn configure_device_database(
+        &self,
+        database: Arc<DeviceDatabase>,
+    ) -> Result<(), DeviceDatabaseError> {
+        let states = database.thread_attention_states(MAX_CACHED_THREAD_ATTENTION_ROWS)?;
+        let cache = states
+            .into_iter()
+            .map(|state| {
+                (
+                    ThreadKey {
+                        // Transitional until every Link-backed Thread carries
+                        // its durable Host ID through the session projection.
+                        server_id: state.host_id.clone(),
+                        thread_id: state.thread_id.clone(),
+                    },
+                    state,
+                )
+            })
+            .collect();
+        *self
+            .thread_attention
+            .write()
+            .expect("thread attention lock poisoned") = cache;
+        *self
+            .device_database
+            .write()
+            .expect("device database lock poisoned") = Some(database);
+        Ok(())
+    }
+
+    pub(crate) fn project_thread_attention<R>(
+        &self,
+        project: impl FnOnce(&HashMap<ThreadKey, ThreadAttentionState>) -> R,
+    ) -> R {
+        let attention = self
+            .thread_attention
+            .read()
+            .expect("thread attention lock poisoned");
+        project(&attention)
+    }
+
+    pub(crate) fn record_terminal_attention(
+        &self,
+        key: &ThreadKey,
+        terminal_event_id: &str,
+        failed: bool,
+    ) -> Result<(), DeviceDatabaseError> {
+        let now_ms = unix_time_ms();
+        let database = self
+            .device_database
+            .read()
+            .expect("device database lock poisoned")
+            .clone();
+        let state = if let Some(database) = database {
+            database.record_terminal_attention(
+                &key.server_id,
+                &key.thread_id,
+                terminal_event_id,
+                now_ms,
+                failed,
+            )?
+        } else {
+            let previous = self
+                .thread_attention
+                .read()
+                .expect("thread attention lock poisoned")
+                .get(key)
+                .cloned();
+            if previous
+                .as_ref()
+                .and_then(|state| state.terminal_event_id.as_deref())
+                == Some(terminal_event_id)
+            {
+                return Ok(());
+            }
+            let occurred_at_ms = previous
+                .as_ref()
+                .and_then(|state| state.occurred_at_ms)
+                .and_then(|value| value.checked_add(1))
+                .map_or(now_ms, |minimum| now_ms.max(minimum));
+            ThreadAttentionState {
+                host_id: key.server_id.clone(),
+                thread_id: key.thread_id.clone(),
+                terminal_event_id: Some(terminal_event_id.to_string()),
+                occurred_at_ms: Some(occurred_at_ms),
+                failed,
+                snoozed_until_ms: None,
+                acknowledged_at_ms: None,
+            }
+        };
+        self.thread_attention
+            .write()
+            .expect("thread attention lock poisoned")
+            .insert(key.clone(), state);
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge_thread_attention(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<(), DeviceDatabaseError> {
+        let now_ms = unix_time_ms();
+        self.update_thread_attention(
+            key,
+            |database| {
+                database.acknowledge_thread_attention(&key.server_id, &key.thread_id, now_ms)
+            },
+            |previous| ThreadAttentionState {
+                host_id: key.server_id.clone(),
+                thread_id: key.thread_id.clone(),
+                terminal_event_id: previous
+                    .as_ref()
+                    .and_then(|state| state.terminal_event_id.clone()),
+                occurred_at_ms: previous.as_ref().and_then(|state| state.occurred_at_ms),
+                failed: previous.as_ref().is_some_and(|state| state.failed),
+                snoozed_until_ms: None,
+                acknowledged_at_ms: Some(
+                    now_ms.max(
+                        previous
+                            .as_ref()
+                            .and_then(|state| state.occurred_at_ms)
+                            .unwrap_or(now_ms),
+                    ),
+                ),
+            },
+        )
+    }
+
+    pub(crate) fn snooze_thread_attention(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<(), DeviceDatabaseError> {
+        let now_ms = unix_time_ms();
+        let snoozed_until_ms = now_ms.saturating_add(ATTENTION_SNOOZE_DURATION_MS);
+        self.update_thread_attention(
+            key,
+            |database| {
+                database.snooze_thread_attention(
+                    &key.server_id,
+                    &key.thread_id,
+                    now_ms,
+                    snoozed_until_ms,
+                )
+            },
+            |previous| ThreadAttentionState {
+                host_id: key.server_id.clone(),
+                thread_id: key.thread_id.clone(),
+                terminal_event_id: previous
+                    .as_ref()
+                    .and_then(|state| state.terminal_event_id.clone()),
+                occurred_at_ms: previous.as_ref().and_then(|state| state.occurred_at_ms),
+                failed: previous.as_ref().is_some_and(|state| state.failed),
+                snoozed_until_ms: Some(snoozed_until_ms),
+                acknowledged_at_ms: previous.and_then(|state| state.acknowledged_at_ms),
+            },
+        )
+    }
+
+    pub(crate) fn delete_terminal_attention(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<(), DeviceDatabaseError> {
+        if let Some(database) = self
+            .device_database
+            .read()
+            .expect("device database lock poisoned")
+            .clone()
+        {
+            database.delete_terminal_attention(&key.server_id, &key.thread_id)?;
+        }
+        if let Some(state) = self
+            .thread_attention
+            .write()
+            .expect("thread attention lock poisoned")
+            .get_mut(key)
+        {
+            state.occurred_at_ms = None;
+            state.terminal_event_id = None;
+            state.failed = false;
+            state.snoozed_until_ms = None;
+        }
+        Ok(())
+    }
+
+    fn update_thread_attention(
+        &self,
+        key: &ThreadKey,
+        persisted: impl FnOnce(&DeviceDatabase) -> Result<ThreadAttentionState, DeviceDatabaseError>,
+        ephemeral: impl FnOnce(Option<ThreadAttentionState>) -> ThreadAttentionState,
+    ) -> Result<(), DeviceDatabaseError> {
+        let database = self
+            .device_database
+            .read()
+            .expect("device database lock poisoned")
+            .clone();
+        let state = if let Some(database) = database {
+            persisted(&database)?
+        } else {
+            let previous = self
+                .thread_attention
+                .read()
+                .expect("thread attention lock poisoned")
+                .get(key)
+                .cloned();
+            ephemeral(previous)
+        };
+        self.thread_attention
+            .write()
+            .expect("thread attention lock poisoned")
+            .insert(key.clone(), state);
+        Ok(())
     }
 
     fn sessions_write(

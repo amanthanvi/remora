@@ -86,8 +86,9 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   exposure remains before closure.
 - Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
   search primitives, native Keychain/Keystore handoff, backup exclusion,
-  corruption recovery, and focused Rust/iOS/Android tests. Organization and
-  review APIs plus authoritative delivery orchestration remain before closure.
+  corruption recovery, organization/review APIs, persistent terminal-attention
+  state, and focused Rust/iOS/Android tests. Authoritative delivery
+  orchestration remains before closure.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and
@@ -96,9 +97,12 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   native session canvas or eagerly hydrating timelines. Sessions now has a
   matching global native inbox backed by bounded Rust filtering and
   50-row cursor pages; scrolling and filtering do not hydrate timelines. The
-  encrypted offline search/freshness layer, Host Scratch, attention
-  organization actions, and the remaining Needs You lifecycle remain before
-  closure.
+  Needs You lifecycle now includes event-driven completion/failure attention,
+  Turn-ID-idempotent acknowledgement-on-open, one-hour snooze, and
+  capability-gated confirmed Host archive actions on both platforms. Native
+  Mission Control and iOS capability refreshes no longer wait on Rust store
+  locks from the UI thread. The encrypted offline search/freshness layer, Host
+  Scratch, and the remaining journey matrix remain before closure.
 
 ## Findings considered and rejected
 

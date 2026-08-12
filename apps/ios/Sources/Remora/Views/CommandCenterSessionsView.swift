@@ -43,6 +43,9 @@ struct CommandCenterSessionsView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var requestGeneration: UInt64 = 0
+    @State private var mutatingKeys: Set<ThreadKey> = []
+    @State private var pendingArchive: SessionListRowV1?
+    @State private var actionError: String?
 
     private var requestKey: String {
         "\(serverId ?? "all")|\(selectedFilter.rawValue)|\(query)"
@@ -65,6 +68,34 @@ struct CommandCenterSessionsView: View {
                 guard !Task.isCancelled else { return }
             }
             await loadPage(cursor: nil, generation: generation)
+        }
+        .confirmationDialog(
+            "Archive Session?",
+            isPresented: Binding(
+                get: { pendingArchive != nil },
+                set: { if !$0 { pendingArchive = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingArchive {
+                Button("Archive", role: .destructive) {
+                    Task { await archive(pendingArchive) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingArchive = nil }
+        } message: {
+            Text("This moves the session into archived history on its Host.")
+        }
+        .alert(
+            "Session Action Failed",
+            isPresented: Binding(
+                get: { actionError != nil },
+                set: { if !$0 { actionError = nil } }
+            )
+        ) {
+            Button("OK") { actionError = nil }
+        } message: {
+            Text(actionError ?? "Try again after reconnecting the Host.")
         }
     }
 
@@ -147,6 +178,28 @@ struct CommandCenterSessionsView: View {
                 ForEach(rows, id: \.key) { row in
                     sessionRow(row)
                         .listRowBackground(RemoraTheme.surface.opacity(0.42))
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            if row.canAcknowledge {
+                                Button("Acknowledge") {
+                                    Task { await acknowledge(row) }
+                                }
+                                .tint(RemoraTheme.success)
+                            }
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if row.archiveAvailability.state == .available {
+                                Button("Archive", role: .destructive) {
+                                    pendingArchive = row
+                                }
+                            }
+                            if row.attention == .needsYou {
+                                Button("Snooze 1h") {
+                                    Task { await snooze(row) }
+                                }
+                                .tint(RemoraTheme.warning)
+                            }
+                        }
+                        .disabled(mutatingKeys.contains(row.key))
                         .onAppear {
                             guard row.key == rows.last?.key, nextCursor != nil else { return }
                             Task { await loadNextPage() }
@@ -228,6 +281,7 @@ struct CommandCenterSessionsView: View {
 
     private func statusText(_ row: SessionListRowV1) -> String {
         if row.attention == .needsYou { return "Needs You" }
+        if row.snoozedUntilMs != nil { return "Snoozed" }
         return switch row.status {
         case .running: "Running"
         case .waiting: "Waiting"
@@ -239,6 +293,7 @@ struct CommandCenterSessionsView: View {
 
     private func statusColor(_ row: SessionListRowV1) -> Color {
         if row.attention == .needsYou { return RemoraTheme.warning }
+        if row.snoozedUntilMs != nil { return RemoraTheme.accentForeground }
         return switch row.status {
         case .running: RemoraTheme.accentForeground
         case .failed: RemoraTheme.danger
@@ -309,6 +364,58 @@ struct CommandCenterSessionsView: View {
         }
         if generation == requestGeneration {
             isLoading = false
+        }
+    }
+
+    @MainActor
+    private func acknowledge(_ row: SessionListRowV1) async {
+        await mutate(row) { store, key in
+            try store.acknowledgeThreadAttention(key: key)
+        }
+    }
+
+    @MainActor
+    private func snooze(_ row: SessionListRowV1) async {
+        await mutate(row) { store, key in
+            try store.snoozeThreadAttention(key: key)
+        }
+    }
+
+    @MainActor
+    private func mutate(
+        _ row: SessionListRowV1,
+        action: @escaping @Sendable (AppStore, ThreadKey) throws -> Void
+    ) async {
+        guard mutatingKeys.insert(row.key).inserted else { return }
+        defer { mutatingKeys.remove(row.key) }
+        let store = appModel.store
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try action(store, row.key)
+            }.value
+            await reloadImmediately()
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func archive(_ row: SessionListRowV1) async {
+        pendingArchive = nil
+        guard mutatingKeys.insert(row.key).inserted else { return }
+        defer { mutatingKeys.remove(row.key) }
+        do {
+            if appModel.snapshot?.activeThread == row.key {
+                appModel.activateThread(nil)
+            }
+            try await appModel.client.archiveThread(
+                serverId: row.key.serverId,
+                params: AppArchiveThreadRequest(threadId: row.key.threadId)
+            )
+            await appModel.refreshSnapshot()
+            await reloadImmediately()
+        } catch {
+            actionError = error.localizedDescription
         }
     }
 }

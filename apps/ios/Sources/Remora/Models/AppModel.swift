@@ -57,19 +57,27 @@ final class AppModel {
         let deviceDatabaseResult = Result {
             try DeviceDatabaseController.shared.open()
         }
+        let store = AppStore()
+        let deviceDatabase = try? deviceDatabaseResult.get().database
+        let deviceDatabaseConfigurationResult: Result<Void, Error> = Result {
+            if let deviceDatabase {
+                try store.configureDeviceDatabase(database: deviceDatabase)
+            }
+        }
         if case .success(let result) = deviceDatabaseResult,
            result.didRebuild {
             CurrentWorkspaceRebuild.markNotice()
         }
         return RustBridges(
-            store: AppStore(),
+            store: store,
             client: AppClient(),
             discovery: DiscoveryBridge(),
             serverBridge: ServerBridge(),
             ssh: SshBridge(),
             reconnectController: rc,
-            deviceDatabase: try? deviceDatabaseResult.get().database,
+            deviceDatabase: deviceDatabase,
             deviceDatabaseError: deviceDatabaseResult.failureDescription
+                ?? deviceDatabaseConfigurationResult.failureDescription
         )
     }()
 
@@ -225,8 +233,11 @@ final class AppModel {
         _ = await refreshSnapshotAuthoritative()
     }
 
-    private func refreshCommandCenterStatus() {
-        commandCenterStatus = store.commandCenterStatus()
+    private func refreshCommandCenterStatus() async {
+        let store = store
+        commandCenterStatus = await Task.detached(priority: .background) {
+            store.commandCenterStatus()
+        }.value
     }
 
     /// Fetches and applies one canonical Rust snapshot while reporting whether
@@ -556,10 +567,10 @@ final class AppModel {
         case .serverRemoved:
             await refreshSnapshot()
         case .commandCenterStatusChanged:
-            refreshCommandCenterStatus()
+            await refreshCommandCenterStatus()
         case .fullResync:
             await refreshSnapshot()
-            refreshCommandCenterStatus()
+            await refreshCommandCenterStatus()
         case .voiceSessionChanged:
             await refreshSnapshot()
         case .realtimeTranscriptUpdated:
