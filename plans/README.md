@@ -91,8 +91,11 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and
-  preserve the draft. Mission Control, exhaustive Sessions, Host Scratch, and
-  Needs You remain before closure.
+  preserve the draft. Home now also exposes Rust-owned, Host-scoped Needs You,
+  Active, and Recent lane counts and filters without replacing the proven
+  native session canvas or eagerly hydrating timelines. Exhaustive Sessions,
+  Host Scratch, attention organization actions, and the remaining Needs You
+  lifecycle remain before closure.
 
 ## Findings considered and rejected
 

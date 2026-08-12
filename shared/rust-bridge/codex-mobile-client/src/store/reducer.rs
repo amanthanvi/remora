@@ -145,6 +145,11 @@ impl AppStoreReducer {
             .clone()
     }
 
+    pub(crate) fn project_snapshot<R>(&self, project: impl FnOnce(&AppSnapshot) -> R) -> R {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        project(&snapshot)
+    }
+
     pub(crate) fn project_command_center<R>(
         &self,
         project: impl FnOnce(&AppSnapshot, &HashMap<String, HostCommandCenterStatusV1>) -> R,

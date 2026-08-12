@@ -22,13 +22,21 @@ enum HomeSupporterBadgeToolbarLayout: Equatable {
     case expanded
 }
 
+private enum HomeMissionLane: Equatable {
+    case needsYou
+    case active
+    case recent
+}
+
 struct HomeDashboardView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var chrome: HomeDashboardChrome = .full
     let recentSessions: [HomeDashboardRecentSession]
     let allSessions: [HomeDashboardRecentSession]
+    let missionControl: MissionControlProjectionV1
     let pinnedThreadKeys: [SavedThreadsStore.PinnedKey]
+    let hiddenThreadKeys: [SavedThreadsStore.PinnedKey]
     let connectedServers: [HomeDashboardServer]
     let projects: [AppProject]
     let selectedServerId: String?
@@ -94,6 +102,7 @@ struct HomeDashboardView: View {
     @State private var hydratingKeys: Set<String> = []
     @State private var isLoadingThreadListing = false
     @State private var suppressComposerCollapse = false
+    @State private var selectedMissionLane: HomeMissionLane?
 
     private var launchableServers: [HomeDashboardServer] {
         connectedServers.filter(\.canLaunchSessions)
@@ -179,9 +188,43 @@ struct HomeDashboardView: View {
     }
 
     private var visibleSessions: [HomeDashboardRecentSession] {
+        let source = selectedMissionLane == nil ? recentSessions : missionLaneSessions
         let serverId = selectedMachineServerId
-        guard let serverId, !serverId.isEmpty else { return recentSessions }
-        return recentSessions.filter { $0.serverId == serverId }
+        guard let serverId, !serverId.isEmpty else { return source }
+        return source.filter { $0.serverId == serverId }
+    }
+
+    private var missionLaneRows: [SessionListRowV1] {
+        switch selectedMissionLane {
+        case .needsYou: missionControl.needsYou
+        case .active: missionControl.active
+        case .recent: missionControl.recent
+        case nil: []
+        }
+    }
+
+    private var missionLaneSessions: [HomeDashboardRecentSession] {
+        let hidden = Set(hiddenThreadKeys)
+        let byKey = Dictionary(
+            allSessions.map { (SavedThreadsStore.PinnedKey(threadKey: $0.key), $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        return missionLaneRows.compactMap { row in
+            let key = SavedThreadsStore.PinnedKey(threadKey: row.key)
+            guard !hidden.contains(key) else { return nil }
+            return byKey[key]
+        }
+    }
+
+    private var missionBarVisible: Bool {
+        !isSearchExpanded
+            && (missionControl.needsYouCount > 0
+                || missionControl.activeCount > 0
+                || missionControl.recentCount > 0)
+    }
+
+    private var sessionsTopInset: CGFloat {
+        missionBarVisible ? 102 : 48
     }
 
     private var zoomIcon: String {
@@ -252,6 +295,11 @@ struct HomeDashboardView: View {
                 if let selectedSearchRuntimeKind, !kinds.contains(selectedSearchRuntimeKind) {
                     self.selectedSearchRuntimeKind = nil
                 }
+            }
+            .onChange(of: missionControl) { _, _ in
+                guard let selectedMissionLane,
+                      missionLaneCount(selectedMissionLane) == 0 else { return }
+                self.selectedMissionLane = nil
             }
             .background(dashboardBackground)
             .alert("Delete Session?", isPresented: Binding(
@@ -450,7 +498,7 @@ struct HomeDashboardView: View {
                         onRemove: { session in
                             onUnpinThread(session.key)
                         },
-                        contentInsets: EdgeInsets(top: 48, leading: 0, bottom: chrome == .full ? 140 : 80, trailing: 0)
+                        contentInsets: EdgeInsets(top: sessionsTopInset, leading: 0, bottom: chrome == .full ? 140 : 80, trailing: 0)
                     )
                 }
                 .transition(reduceMotion ? .identity : .opacity)
@@ -507,20 +555,89 @@ struct HomeDashboardView: View {
     // replacement for the sessions list when `isSearchExpanded` is true.
 
     private var topChrome: some View {
-        ServerPillRow(
-            servers: connectedServers,
-            selectedServerId: selectedMachineServerId,
-            onTap: onSelectServer,
-            onReconnect: { server in onReconnectServer?(server) },
-            onRestartAppServer: { server in onRestartAppServer?(server) },
-            onRename: { server in
-                renameServerText = server.displayName
-                renameServerTarget = server
-            },
-            onRemove: { server in onDisconnectServer?(server.id) },
-            onAdd: onAddServer
-        )
+        VStack(spacing: 4) {
+            ServerPillRow(
+                servers: connectedServers,
+                selectedServerId: selectedMachineServerId,
+                onTap: onSelectServer,
+                onReconnect: { server in onReconnectServer?(server) },
+                onRestartAppServer: { server in onRestartAppServer?(server) },
+                onRename: { server in
+                    renameServerText = server.displayName
+                    renameServerTarget = server
+                },
+                onRemove: { server in onDisconnectServer?(server.id) },
+                onAdd: onAddServer
+            )
+            if missionBarVisible {
+                missionControlBar
+            }
+        }
         .frame(maxWidth: .infinity)
+    }
+
+    private var missionControlBar: some View {
+        HStack(spacing: 6) {
+            missionLaneButton(.needsYou, title: "Needs You", count: missionControl.needsYouCount)
+            missionLaneButton(.active, title: "Active", count: missionControl.activeCount)
+            missionLaneButton(.recent, title: "Recent", count: missionControl.recentCount)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Mission Control")
+    }
+
+    private func missionLaneButton(
+        _ lane: HomeMissionLane,
+        title: String,
+        count: UInt32
+    ) -> some View {
+        let isSelected = selectedMissionLane == lane
+        return Button {
+            withAnimation(RemoraMotionPolicy.animation(.easeOut(duration: 0.16), reduceMotion: reduceMotion)) {
+                selectedMissionLane = isSelected ? nil : lane
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(title)
+                    .lineLimit(1)
+                Text(count.formatted())
+                    .remoraMonoFont(size: 10, weight: .semibold)
+            }
+            .remoraFont(.caption)
+            .foregroundStyle(missionLaneTint(lane, enabled: count > 0))
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(
+                isSelected ? RemoraTheme.surfaceLight.opacity(0.9) : RemoraTheme.surface.opacity(0.52),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? missionLaneTint(lane, enabled: true).opacity(0.55) : Color.clear)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(count == 0)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityValue(isSelected ? "Filtered" : "Show lane")
+    }
+
+    private func missionLaneCount(_ lane: HomeMissionLane) -> UInt32 {
+        switch lane {
+        case .needsYou: missionControl.needsYouCount
+        case .active: missionControl.activeCount
+        case .recent: missionControl.recentCount
+        }
+    }
+
+    private func missionLaneTint(_ lane: HomeMissionLane, enabled: Bool) -> Color {
+        guard enabled else { return RemoraTheme.textMuted }
+        return switch lane {
+        case .needsYou: RemoraTheme.warning
+        case .active: RemoraTheme.accentForeground
+        case .recent: RemoraTheme.textSecondary
+        }
     }
 
     /// Sidebar chrome gets a compact search-only bar at the bottom —
@@ -607,7 +724,7 @@ struct HomeDashboardView: View {
         // pinch).
         ZStack {
             if visibleSessions.isEmpty {
-                ScrollView { emptyState.padding(.top, 48).padding(.bottom, 140) }
+                ScrollView { emptyState.padding(.top, sessionsTopInset).padding(.bottom, 140) }
                     .scrollContentBackground(.hidden)
             } else {
                 HomeSessionsScrollView(
@@ -618,7 +735,7 @@ struct HomeDashboardView: View {
                     openingKey: openingRecentSessionKey,
                     zoomLevel: $zoomLevel,
                     showMascotFooter: chrome == .full,
-                    topInset: 48,
+                    topInset: sessionsTopInset,
                     bottomInset: chrome == .full ? 140 : 24,
                     callbacks: HomeSessionsScrollView.Callbacks(
                         onOpen: { session in

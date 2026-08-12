@@ -51,6 +51,7 @@ oversized, and negative inputs.
 | Thread turn pagination (newer remotes)  | Conversation opens with last 5 turns; "Load earlier messages" fetches older 5-turn pages via `thread/turns/list`        |
 | Thread turn pagination fallback         | Capability flips off via response inspection; embedded turns load fully; "Load earlier messages" is hidden             |
 | New-Thread provider readiness           | Home composer uses the shared Rust launch projection; known-unready Hosts disable inline, expanded, keyboard, and hardware send, show bounded Host guidance, and preserve the draft. Older Links remain usable only when the typed runtime directory declares the selected runtime available. |
+| Mission Control lanes                   | Home shows matching Needs You, Active, and Recent counts from the bounded Rust projection. Host selection scopes in Rust. A lane tap filters existing rich cards, a second tap restores the pinned/recent view, hidden Threads stay hidden, and lane selection does not hydrate timelines. |
 
 ## Remote Terminal UX Matrix
 

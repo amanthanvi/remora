@@ -37,7 +37,16 @@ without parity and an intrinsic platform reason.
 - Focused Rust tests cover legacy compatibility, connection loss, deterministic
   named-instance selection, exact Host guidance, and UTF-8 bounds. Native build
   and parity validation evidence is recorded with tracker issue #27.
+- Home exposes matching Needs You, Active, and Recent lane controls on iOS and
+  Android. Counts, ordering, attention/status classification, 20-row lane
+  bounds, and optional Host scope come from Rust. Selecting a lane reuses the
+  existing rich native cards and gesture system; selecting it again returns to
+  the unchanged pinned/recent view. Hidden Threads stay hidden and lane
+  selection does not hydrate timelines.
+- Bounded AppStore projections now read under the canonical Rust store lock
+  instead of cloning the complete app snapshot before Mission Control,
+  Sessions-page, or thread-viewport projection.
 
-Remaining: Mission Control, exhaustive Sessions, Host Scratch, Needs You,
-attention organization actions, filters, no-eager-hydration UI tests, and the
-complete phone/iPad journey matrix.
+Remaining: exhaustive Sessions, Host Scratch, completion/failure attention,
+acknowledgement/snooze/archive, no-eager-hydration UI tests, and the complete
+phone/iPad journey matrix.

@@ -178,14 +178,52 @@ fun HomeDashboardScreen(
     }
 
     val scopedServerId = selectedProject?.serverId ?: selectedServerId
-    val recentSessions = remember(homeSessions, scopedServerId) {
+    var selectedMissionLane by remember { mutableStateOf<HomeMissionLane?>(null) }
+    val missionControl = remember(snap, scopedServerId) {
+        if (scopedServerId.isNullOrEmpty()) {
+            appModel.store.missionControl()
+        } else {
+            appModel.store.missionControlForServer(scopedServerId)
+        }
+    }
+    val scopedHomeSessions = remember(homeSessions, scopedServerId) {
         if (scopedServerId.isNullOrEmpty()) homeSessions
         else homeSessions.filter { it.key.serverId == scopedServerId }
+    }
+    val missionRows = when (selectedMissionLane) {
+        HomeMissionLane.NEEDS_YOU -> missionControl.needsYou
+        HomeMissionLane.ACTIVE -> missionControl.active
+        HomeMissionLane.RECENT -> missionControl.recent
+        null -> emptyList()
+    }
+    val missionSessions = remember(missionRows, hiddenKeys, allSessions) {
+        val hiddenSet = hiddenKeys.toSet()
+        val sessionsByKey = allSessions.associateBy { it.key }
+        missionRows.mapNotNull { row ->
+            val hiddenKey = PinnedThreadKey(
+                serverId = row.key.serverId,
+                threadId = row.key.threadId,
+            )
+            sessionsByKey[row.key]?.takeUnless { hiddenKey in hiddenSet }
+        }
+    }
+    val recentSessions = if (selectedMissionLane == null) scopedHomeSessions else missionSessions
+    val selectedMissionCount = when (selectedMissionLane) {
+        HomeMissionLane.NEEDS_YOU -> missionControl.needsYouCount
+        HomeMissionLane.ACTIVE -> missionControl.activeCount
+        HomeMissionLane.RECENT -> missionControl.recentCount
+        null -> 0u
+    }
+
+    LaunchedEffect(selectedMissionLane, selectedMissionCount) {
+        if (selectedMissionLane != null && selectedMissionCount == 0u) {
+            selectedMissionLane = null
+        }
     }
 
     fun pinThreadOnHome(key: ThreadKey) {
         val displacedKeys = if (pinnedKeys.isEmpty()) {
-            recentSessions
+            scopedHomeSessions
                 .map { it.key }
                 .filter { it != key }
         } else {
@@ -714,6 +752,21 @@ fun HomeDashboardScreen(
                 onAddBoundsChanged = { coachmarkTargetBounds[CoachmarkTarget.AddServer] = it },
             )
 
+            if (
+                !isSearchExpanded &&
+                (missionControl.needsYouCount > 0u ||
+                    missionControl.activeCount > 0u ||
+                    missionControl.recentCount > 0u)
+            ) {
+                MissionControlBar(
+                    projection = missionControl,
+                    selectedLane = selectedMissionLane,
+                    onSelectLane = { lane ->
+                        selectedMissionLane = if (selectedMissionLane == lane) null else lane
+                    },
+                )
+            }
+
             // Short fade at the bottom of the top scrim for a soft transition.
             Box(
                 modifier = Modifier
@@ -1186,6 +1239,93 @@ fun HomeDashboardScreen(
         ) {
             com.remora.android.ui.settings.TipJarScreen(onBack = { showTipJar = false })
         }
+    }
+}
+
+private enum class HomeMissionLane {
+    NEEDS_YOU,
+    ACTIVE,
+    RECENT,
+}
+
+@Composable
+private fun MissionControlBar(
+    projection: uniffi.codex_mobile_client.MissionControlProjectionV1,
+    selectedLane: HomeMissionLane?,
+    onSelectLane: (HomeMissionLane) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        MissionControlLaneButton(
+            lane = HomeMissionLane.NEEDS_YOU,
+            title = "Needs You",
+            count = projection.needsYouCount,
+            selected = selectedLane == HomeMissionLane.NEEDS_YOU,
+            tint = RemoraTheme.warning,
+            onSelectLane = onSelectLane,
+            modifier = Modifier.weight(1f),
+        )
+        MissionControlLaneButton(
+            lane = HomeMissionLane.ACTIVE,
+            title = "Active",
+            count = projection.activeCount,
+            selected = selectedLane == HomeMissionLane.ACTIVE,
+            tint = RemoraTheme.accent,
+            onSelectLane = onSelectLane,
+            modifier = Modifier.weight(1f),
+        )
+        MissionControlLaneButton(
+            lane = HomeMissionLane.RECENT,
+            title = "Recent",
+            count = projection.recentCount,
+            selected = selectedLane == HomeMissionLane.RECENT,
+            tint = RemoraTheme.textSecondary,
+            onSelectLane = onSelectLane,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun MissionControlLaneButton(
+    lane: HomeMissionLane,
+    title: String,
+    count: UInt,
+    selected: Boolean,
+    tint: Color,
+    onSelectLane: (HomeMissionLane) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val enabled = count > 0u
+    TextButton(
+        onClick = { onSelectLane(lane) },
+        enabled = enabled,
+        modifier = modifier
+            .height(RemoraTheme.minimumTouchTarget)
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (selected) RemoraTheme.surfaceLight.copy(alpha = 0.9f)
+                else RemoraTheme.surface.copy(alpha = 0.52f),
+            )
+            .then(
+                if (selected) Modifier.border(
+                    width = 1.dp,
+                    color = tint.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(12.dp),
+                ) else Modifier,
+            ),
+    ) {
+        Text(
+            text = "$title $count",
+            color = if (enabled) tint else RemoraTheme.textMuted,
+            fontSize = RemoraTextStyle.caption.scaled,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
     }
 }
 

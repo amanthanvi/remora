@@ -587,7 +587,17 @@ pub(crate) fn project_sessions_page(
 }
 
 pub(crate) fn project_mission_control(snapshot: &AppSnapshot) -> MissionControlProjectionV1 {
-    let summaries = session_summaries_from_snapshot(snapshot);
+    project_mission_control_for_server(snapshot, None)
+}
+
+pub(crate) fn project_mission_control_for_server(
+    snapshot: &AppSnapshot,
+    server_id: Option<&str>,
+) -> MissionControlProjectionV1 {
+    let summaries = session_summaries_from_snapshot(snapshot)
+        .into_iter()
+        .filter(|summary| server_id.is_none_or(|selected| summary.key.server_id == selected))
+        .collect::<Vec<_>>();
     let rows = summaries
         .iter()
         .map(|summary| session_row(snapshot, summary))
@@ -1141,6 +1151,59 @@ mod tests {
         assert_eq!(
             bytes,
             serde_json::to_vec(&projection).expect("serialize twice")
+        );
+    }
+
+    #[test]
+    fn mission_control_scopes_rows_and_prioritizes_attention() {
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config("server-a"), ServerHealthSnapshot::Connected);
+        store.upsert_server(&server_config("server-b"), ServerHealthSnapshot::Connected);
+
+        let mut waiting = thread_info(1);
+        waiting.id = "waiting".to_string();
+        let mut active = thread_info(2);
+        active.id = "active".to_string();
+        active.status = ThreadSummaryStatus::Active;
+        let mut other_host = thread_info(3);
+        other_host.id = "other-host".to_string();
+        store.upsert_thread_list_page("server-a", &[waiting, active]);
+        store.upsert_thread_list_page("server-b", &[other_host]);
+
+        let mut snapshot = store.snapshot();
+        snapshot
+            .pending_approvals
+            .push(crate::types::PendingApproval {
+                id: "approval".to_string(),
+                server_id: "server-a".to_string(),
+                kind: crate::types::ApprovalKind::Command,
+                thread_id: Some("waiting".to_string()),
+                turn_id: None,
+                item_id: None,
+                command: None,
+                path: None,
+                grant_root: None,
+                cwd: None,
+                reason: None,
+            });
+
+        let global = project_mission_control(&snapshot);
+        assert_eq!(global.needs_you_count, 1);
+        assert_eq!(global.active_count, 1);
+        assert_eq!(global.recent_count, 1);
+        assert_eq!(global.needs_you[0].key.thread_id, "waiting");
+        assert_eq!(global.active[0].key.thread_id, "active");
+
+        let scoped = project_mission_control_for_server(&snapshot, Some("server-a"));
+        assert_eq!(scoped.needs_you_count, 1);
+        assert_eq!(scoped.active_count, 1);
+        assert_eq!(scoped.recent_count, 0);
+        assert!(
+            scoped
+                .needs_you
+                .iter()
+                .chain(scoped.active.iter())
+                .all(|row| row.key.server_id == "server-a")
         );
     }
 }

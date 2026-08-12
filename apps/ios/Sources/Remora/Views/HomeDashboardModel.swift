@@ -8,6 +8,7 @@ final class HomeDashboardModel {
         let connectedServers: [HomeDashboardServer]
         let recentSessions: [HomeDashboardRecentSession]
         let sessionSummaries: [AppSessionSummary]
+        let missionControl: MissionControlProjectionV1
     }
 
     private(set) var connectedServers: [HomeDashboardServer] = []
@@ -18,6 +19,14 @@ final class HomeDashboardModel {
     /// Every session we know about across connected servers, newest first —
     /// used by the search view so the user can pick any thread.
     private(set) var allSessions: [HomeDashboardRecentSession] = []
+    private(set) var missionControl = MissionControlProjectionV1(
+        needsYou: [],
+        active: [],
+        recent: [],
+        needsYouCount: 0,
+        activeCount: 0,
+        recentCount: 0
+    )
     private(set) var pinnedKeys: [SavedThreadsStore.PinnedKey] = []
     private(set) var hiddenKeys: [SavedThreadsStore.PinnedKey] = []
     private(set) var projects: [AppProject] = []
@@ -30,6 +39,9 @@ final class HomeDashboardModel {
                     userClearedSelection = false
                 }
                 reconcileSelectedProject()
+                if isActive {
+                    scheduleObservedRefresh()
+                }
             }
         }
     }
@@ -180,6 +192,14 @@ final class HomeDashboardModel {
         guard isActive, let appModel else {
             connectedServers = []
             recentSessions = []
+            missionControl = MissionControlProjectionV1(
+                needsYou: [],
+                active: [],
+                recent: [],
+                needsYouCount: 0,
+                activeCount: 0,
+                recentCount: 0
+            )
             projects = []
             return
         }
@@ -204,10 +224,20 @@ final class HomeDashboardModel {
                 ),
                 limit: nil
             )
+            let nextMissionControl: MissionControlProjectionV1
+            if let selectedServerId,
+               !selectedServerId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                nextMissionControl = appModel.store.missionControlForServer(
+                    serverId: selectedServerId
+                )
+            } else {
+                nextMissionControl = appModel.store.missionControl()
+            }
             return Snapshot(
                 connectedServers: nextConnectedServers,
                 recentSessions: nextAllSessions,
-                sessionSummaries: appSnapshot?.sessionSummaries ?? []
+                sessionSummaries: appSnapshot?.sessionSummaries ?? [],
+                missionControl: nextMissionControl
             )
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
@@ -219,6 +249,7 @@ final class HomeDashboardModel {
         rebuildCount += 1
         connectedServers = snapshot.connectedServers
         allSessions = snapshot.recentSessions
+        missionControl = snapshot.missionControl
         recentSessions = Self.mergedHomeSessions(
             pinned: pinnedKeys,
             hidden: hiddenKeys,

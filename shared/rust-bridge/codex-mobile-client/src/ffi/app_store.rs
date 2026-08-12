@@ -429,7 +429,18 @@ impl AppStore {
     }
 
     pub fn mission_control(&self) -> MissionControlProjectionV1 {
-        project_mission_control(&self.inner.app_snapshot())
+        self.inner
+            .app_store
+            .project_snapshot(project_mission_control)
+    }
+
+    pub fn mission_control_for_server(&self, server_id: String) -> MissionControlProjectionV1 {
+        self.inner.app_store.project_snapshot(|snapshot| {
+            crate::ffi::command_center::project_mission_control_for_server(
+                snapshot,
+                Some(&server_id),
+            )
+        })
     }
 
     pub fn sessions_page(
@@ -437,7 +448,9 @@ impl AppStore {
         cursor: Option<String>,
         limit: Option<u32>,
     ) -> Result<SessionPageV1, ClientError> {
-        project_sessions_page(&self.inner.app_snapshot(), cursor.as_deref(), limit)
+        self.inner
+            .app_store
+            .project_snapshot(|snapshot| project_sessions_page(snapshot, cursor.as_deref(), limit))
             .map_err(ClientError::Serialization)
     }
 
@@ -445,7 +458,9 @@ impl AppStore {
         &self,
         key: ThreadKey,
     ) -> Result<Option<AppThreadSnapshot>, ClientError> {
-        crate::store::project_thread_snapshot(&self.inner.app_snapshot(), &key)
+        self.inner
+            .app_store
+            .project_snapshot(|snapshot| crate::store::project_thread_snapshot(snapshot, &key))
             .map_err(ClientError::Serialization)
     }
 
