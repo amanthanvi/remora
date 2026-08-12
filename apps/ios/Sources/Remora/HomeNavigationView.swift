@@ -143,6 +143,11 @@ struct HomeNavigationView: View {
             }
             .navigationDestination(for: HomeNavigationRoute.self) { route in
                 switch route {
+                case .allSessions:
+                    CommandCenterSessionsView(
+                        serverId: nil,
+                        onOpenConversation: openConversation
+                    )
                 case let .sessions(serverId, title):
                     SessionsScreen(
                         onOpenConversation: { key in
@@ -912,6 +917,7 @@ struct HomeNavigationView: View {
             onSelectServer: handleSelectServer,
             onAddServer: { appState.showServerPicker = true },
             onOpenProjectPicker: { showProjectPicker = true },
+            onShowSessions: { navigationPath.append(.allSessions) },
             onThreadCreated: { key in homeDashboardModel.pinThread(key) },
             onShowSettings: { appState.showSettings = true },
             onShowCommandPalette: {
@@ -960,6 +966,7 @@ struct HomeNavigationView: View {
             onSelectServer: handleSelectServer,
             onAddServer: { appState.showServerPicker = true },
             onOpenProjectPicker: { showProjectPicker = true },
+            onShowSessions: { navigationPath.append(.allSessions) },
             onThreadCreated: { key in homeDashboardModel.pinThread(key) },
             onShowSettings: { appState.showSettings = true },
             onShowCommandPalette: {

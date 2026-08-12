@@ -4,9 +4,9 @@ use crate::MobileClient;
 use crate::conversation_uniffi::{HydratedConversationItem, HydratedConversationItemContent};
 use crate::ffi::ClientError;
 use crate::ffi::command_center::{
-    CommandCenterStatusV1, MissionControlProjectionV1, NewTaskLaunchAvailabilityV1, SessionPageV1,
-    project_command_center_status, project_mission_control, project_new_task_launch_availability,
-    project_sessions_page,
+    CommandCenterStatusV1, MissionControlProjectionV1, NewTaskLaunchAvailabilityV1,
+    SessionFilterV1, SessionPageV1, project_command_center_status, project_mission_control,
+    project_new_task_launch_availability, project_sessions_page, project_sessions_page_filtered,
 };
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
@@ -451,6 +451,20 @@ impl AppStore {
         self.inner
             .app_store
             .project_snapshot(|snapshot| project_sessions_page(snapshot, cursor.as_deref(), limit))
+            .map_err(ClientError::Serialization)
+    }
+
+    pub fn sessions_page_filtered(
+        &self,
+        filter: SessionFilterV1,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<SessionPageV1, ClientError> {
+        self.inner
+            .app_store
+            .project_snapshot(|snapshot| {
+                project_sessions_page_filtered(snapshot, &filter, cursor.as_deref(), limit)
+            })
             .map_err(ClientError::Serialization)
     }
 

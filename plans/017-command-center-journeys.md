@@ -46,7 +46,16 @@ without parity and an intrinsic platform reason.
 - Bounded AppStore projections now read under the canonical Rust store lock
   instead of cloning the complete app snapshot before Mission Control,
   Sessions-page, or thread-viewport projection.
+- Mission Control now has an always-available Sessions route on both native
+  clients. The global inbox consumes 50-row cursor pages, opens Threads
+  directly, and does not hydrate timelines while searching, filtering, or
+  scrolling. Existing Host-detail tree screens remain available.
+- Rust now applies bounded text plus exact Host/project/runtime/status,
+  attention, and time filters before computing the page count and cursor.
+  Swift and Kotlin render the typed rows and do not parse status strings.
 
-Remaining: exhaustive Sessions, Host Scratch, completion/failure attention,
-acknowledgement/snooze/archive, no-eager-hydration UI tests, and the complete
-phone/iPad journey matrix.
+Remaining: encrypted device-index search and partial-Host freshness/error rows,
+provider-instance filter IDs after durable catalog identity lands, migration of
+the legacy Host-detail tree derivation into Rust, Host Scratch,
+completion/failure attention, acknowledgement/snooze/archive, no-eager-
+hydration UI tests, and the complete phone/iPad journey matrix.

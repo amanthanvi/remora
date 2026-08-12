@@ -17,6 +17,7 @@ const MAX_REASON_BYTES: usize = 256;
 const MAX_COMMAND_CENTER_HOSTS: usize = 32;
 const MAX_SESSION_PAGE_ROWS: usize = 100;
 const MAX_MISSION_LANE_ROWS: usize = 20;
+const MAX_SESSION_QUERY_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_RUNTIME_BYTES: usize = 64;
@@ -232,6 +233,19 @@ pub struct SessionPageV1 {
     pub rows: Vec<SessionListRowV1>,
     pub next_cursor: Option<String>,
     pub total_count: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct SessionFilterV1 {
+    pub query: Option<String>,
+    /// Transitional app-server key. Durable Host IDs replace this field once
+    /// every Link-backed Thread is catalog-addressable.
+    pub server_id: Option<String>,
+    pub project_label: Option<String>,
+    pub runtime_id: Option<String>,
+    pub status: Option<SessionStatusV1>,
+    pub attention: Option<SessionAttentionV1>,
+    pub updated_after_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, uniffi::Record)]
@@ -569,20 +583,60 @@ pub(crate) fn project_sessions_page(
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<SessionPageV1, String> {
-    let summaries = session_summaries_from_snapshot(snapshot);
-    let start = decode_session_cursor(cursor, summaries.len())?;
+    project_sessions_page_filtered(snapshot, &SessionFilterV1::default(), cursor, limit)
+}
+
+pub(crate) fn project_sessions_page_filtered(
+    snapshot: &AppSnapshot,
+    filter: &SessionFilterV1,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<SessionPageV1, String> {
+    let query = filter
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| bound_utf8(value, MAX_SESSION_QUERY_BYTES).to_lowercase());
+    let project_label = normalized_filter_value(filter.project_label.as_deref(), MAX_TITLE_BYTES);
+    let runtime_id = normalized_filter_value(filter.runtime_id.as_deref(), MAX_RUNTIME_BYTES);
+    let server_id = normalized_filter_value(filter.server_id.as_deref(), MAX_TITLE_BYTES);
+    let rows = session_summaries_from_snapshot(snapshot)
+        .iter()
+        .map(|summary| session_row(snapshot, summary))
+        .filter(|row| {
+            server_id
+                .as_deref()
+                .is_none_or(|selected| row.key.server_id == selected)
+                && project_label.as_deref().is_none_or(|selected| {
+                    row.project_label
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(selected))
+                })
+                && runtime_id
+                    .as_deref()
+                    .is_none_or(|selected| row.runtime_id.eq_ignore_ascii_case(selected))
+                && filter.status.is_none_or(|selected| row.status == selected)
+                && filter
+                    .attention
+                    .is_none_or(|selected| row.attention == selected)
+                && filter
+                    .updated_after_ms
+                    .is_none_or(|minimum| row.updated_at_ms.is_some_and(|value| value >= minimum))
+                && query
+                    .as_deref()
+                    .is_none_or(|needle| session_row_matches(row, needle))
+        })
+        .collect::<Vec<_>>();
+    let start = decode_session_cursor(cursor, rows.len())?;
     let limit = limit
         .unwrap_or(MAX_SESSION_PAGE_ROWS as u32)
         .clamp(1, MAX_SESSION_PAGE_ROWS as u32) as usize;
-    let end = start.saturating_add(limit).min(summaries.len());
-    let rows = summaries[start..end]
-        .iter()
-        .map(|summary| session_row(snapshot, summary))
-        .collect();
+    let end = start.saturating_add(limit).min(rows.len());
     Ok(SessionPageV1 {
-        rows,
-        next_cursor: (end < summaries.len()).then(|| format!("v1:{end}")),
-        total_count: summaries.len().min(u32::MAX as usize) as u32,
+        rows: rows[start..end].to_vec(),
+        next_cursor: (end < rows.len()).then(|| format!("v1:{end}")),
+        total_count: rows.len().min(u32::MAX as usize) as u32,
     })
 }
 
@@ -719,6 +773,31 @@ fn project_label(cwd: &str) -> Option<String> {
 fn nonempty_bounded(value: &str, maximum: usize) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| bound_utf8(value, maximum))
+}
+
+fn normalized_filter_value(value: Option<&str>, maximum: usize) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| bound_utf8(value, maximum))
+}
+
+fn session_row_matches(row: &SessionListRowV1, needle: &str) -> bool {
+    row.title.to_lowercase().contains(needle)
+        || row.host_label.to_lowercase().contains(needle)
+        || row
+            .project_label
+            .as_deref()
+            .is_some_and(|value| value.to_lowercase().contains(needle))
+        || row.runtime_id.to_lowercase().contains(needle)
+        || row
+            .model_label
+            .as_deref()
+            .is_some_and(|value| value.to_lowercase().contains(needle))
+        || row
+            .preview
+            .as_deref()
+            .is_some_and(|value| value.to_lowercase().contains(needle))
 }
 
 fn bound_utf8(value: &str, maximum: usize) -> String {
@@ -1131,6 +1210,76 @@ mod tests {
                 .all(|row| row.model_label.as_ref().unwrap().len() <= 128)
         );
         assert!(serde_json::to_vec(&page).expect("serialize").len() <= 256 * 1024);
+    }
+
+    #[test]
+    fn sessions_page_filters_before_counting_and_paging() {
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config("server-a"), ServerHealthSnapshot::Connected);
+        store.upsert_server(&server_config("server-b"), ServerHealthSnapshot::Connected);
+
+        let mut active = thread_info(10);
+        active.id = "active".to_string();
+        active.title = Some("Fix login flow".to_string());
+        active.cwd = Some("/repo/alpha".to_string());
+        active.status = ThreadSummaryStatus::Active;
+        let mut waiting = thread_info(20);
+        waiting.id = "waiting".to_string();
+        waiting.title = Some("Write documentation".to_string());
+        waiting.cwd = Some("/repo/beta".to_string());
+        store.upsert_thread_list_page("server-a", &[active]);
+        store.upsert_thread_list_page("server-b", &[waiting]);
+
+        let mut snapshot = store.snapshot();
+        snapshot
+            .pending_approvals
+            .push(crate::types::PendingApproval {
+                id: "approval".to_string(),
+                server_id: "server-b".to_string(),
+                kind: crate::types::ApprovalKind::Command,
+                thread_id: Some("waiting".to_string()),
+                turn_id: None,
+                item_id: None,
+                command: None,
+                path: None,
+                grant_root: None,
+                cwd: None,
+                reason: None,
+            });
+
+        let active_page = project_sessions_page_filtered(
+            &snapshot,
+            &SessionFilterV1 {
+                query: Some(" LOGIN ".to_string()),
+                server_id: Some("server-a".to_string()),
+                project_label: Some("ALPHA".to_string()),
+                runtime_id: None,
+                status: Some(SessionStatusV1::Running),
+                attention: Some(SessionAttentionV1::None),
+                updated_after_ms: Some(9_000),
+            },
+            None,
+            Some(1),
+        )
+        .expect("filtered page");
+        assert_eq!(active_page.total_count, 1);
+        assert_eq!(active_page.rows[0].key.thread_id, "active");
+        assert!(active_page.next_cursor.is_none());
+
+        let attention_page = project_sessions_page_filtered(
+            &snapshot,
+            &SessionFilterV1 {
+                attention: Some(SessionAttentionV1::NeedsYou),
+                updated_after_ms: Some(15_000),
+                ..SessionFilterV1::default()
+            },
+            None,
+            None,
+        )
+        .expect("attention page");
+        assert_eq!(attention_page.total_count, 1);
+        assert_eq!(attention_page.rows[0].key.thread_id, "waiting");
+        assert_eq!(attention_page.rows[0].status, SessionStatusV1::Waiting);
     }
 
     #[test]

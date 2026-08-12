@@ -96,6 +96,7 @@ enum RemoraNavigationLayoutPolicy {
 }
 
 enum HomeNavigationRoute: Hashable {
+    case allSessions
     case sessions(serverId: String, title: String)
     case conversation(ThreadKey)
     case realtimeVoice(ThreadKey)

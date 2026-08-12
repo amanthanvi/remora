@@ -245,6 +245,7 @@
 		5E94E40CB117ECC8F7CEB263 /* matrix-dark.json in Resources */ = {isa = PBXBuildFile; fileRef = AD28A481FE75CA38EE4B9D6F /* matrix-dark.json */; };
 		5F8FA54F8C3A3073C41F4FBB /* HomeDashboardModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC2B5C1765656C9D0642CD83 /* HomeDashboardModel.swift */; };
 		5FE530E86DC4E238ADD8EC6B /* vesper.json in Resources */ = {isa = PBXBuildFile; fileRef = 14257960342C7986F9B8FE6C /* vesper.json */; };
+		607E7D71A0B80FAB4A68340C /* CommandCenterSessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6294892809CDC946277E774 /* CommandCenterSessionsView.swift */; };
 		613440AA7E15ABA254BEB54E /* CurrentKeychainNamespaceCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DEB6F41AD287973F46F2C4A /* CurrentKeychainNamespaceCleanup.swift */; };
 		61524E1D3B6688CFDA77350E /* ChatGPTOAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F05AA8BF7FA72EDB4486EDB /* ChatGPTOAuth.swift */; };
 		61526DA970B29AF91920666E /* StreamingAssistantRenderCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC73C042CDE6FA746706C07 /* StreamingAssistantRenderCache.swift */; };
@@ -416,6 +417,7 @@
 		B63EF8636CFC149A05523EE1 /* ComputerUseToolCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8581A21AB32EE4D68C49E81A /* ComputerUseToolCallView.swift */; };
 		B6A5928DB747572011FC0578 /* BackgroundAwarenessController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9748A77480444065AEA91B7F /* BackgroundAwarenessController.swift */; };
 		B760B44AACFD70C457BD02AB /* ChatWallpaperBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5EFEB40C08121B6F50B231 /* ChatWallpaperBackground.swift */; };
+		B82168C39903062E74AC461B /* CommandCenterSessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6294892809CDC946277E774 /* CommandCenterSessionsView.swift */; };
 		B87F0A2C1CD98BE5C6A534D6 /* BerkeleyMono-Bold.otf in Resources */ = {isa = PBXBuildFile; fileRef = A9010332FE72D1CA72B8C2D7 /* BerkeleyMono-Bold.otf */; };
 		B89D64398C978773C97E6D93 /* ConversationTimelineCommandRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFB85406E19AB2148C4E87C /* ConversationTimelineCommandRows.swift */; };
 		B8BD461633208482A5DF392E /* ThemeDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AAC710EB03C53592B0C6E73 /* ThemeDefinition.swift */; };
@@ -822,6 +824,7 @@
 		C3FCC7BDF29833DE8E606522 /* RemoraLinkPairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoraLinkPairingModel.swift; sourceTree = "<group>"; };
 		C48C690A262B385942C8433B /* NetworkReachabilityObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityObserver.swift; sourceTree = "<group>"; };
 		C5FD0059762AACA39E8F604F /* InlineHandoffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineHandoffView.swift; sourceTree = "<group>"; };
+		C6294892809CDC946277E774 /* CommandCenterSessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterSessionsView.swift; sourceTree = "<group>"; };
 		C84ECDA1C1606A617CD37BB4 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		C8A3A6F574DDEE46764CCF3F /* usgc-metalgate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "usgc-metalgate.json"; sourceTree = "<group>"; };
 		C90E83E4AAC3C7DFDAD40641 /* AppSnapshotRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSnapshotRuntimeTests.swift; sourceTree = "<group>"; };
@@ -1181,6 +1184,7 @@
 				F53771DCADCC8768DCCCAB97 /* CatalystVoiceStubs.swift */,
 				AC5EFEB40C08121B6F50B231 /* ChatWallpaperBackground.swift */,
 				46D59439BDAA4F0686E7D50A /* CodeBlockView.swift */,
+				C6294892809CDC946277E774 /* CommandCenterSessionsView.swift */,
 				E2644C3FD24851010FBACFF1 /* CommandPaletteView.swift */,
 				8581A21AB32EE4D68C49E81A /* ComputerUseToolCallView.swift */,
 				DF25B4AC8DDA01FB3BD7AC34 /* ContextBadgeView.swift */,
@@ -1683,6 +1687,7 @@
 				B760B44AACFD70C457BD02AB /* ChatWallpaperBackground.swift in Sources */,
 				52912A5228D6A38EF4794EB2 /* CloudKVSBridge.swift in Sources */,
 				313929E011AD36EAA12154CD /* CodeBlockView.swift in Sources */,
+				607E7D71A0B80FAB4A68340C /* CommandCenterSessionsView.swift in Sources */,
 				1898F8C5CBD489518C4BA837 /* CommandPaletteView.swift in Sources */,
 				B63EF8636CFC149A05523EE1 /* ComputerUseToolCallView.swift in Sources */,
 				D5178315894A94C7F355F7F5 /* ConnectionTarget.swift in Sources */,
@@ -1896,6 +1901,7 @@
 				201DD9627F31A3C84FD0C412 /* ChatWallpaperBackground.swift in Sources */,
 				1E68871EAC7908A7B1446910 /* CloudKVSBridge.swift in Sources */,
 				C7E0A5BF9397BE30191EBD51 /* CodeBlockView.swift in Sources */,
+				B82168C39903062E74AC461B /* CommandCenterSessionsView.swift in Sources */,
 				9E0A98B7D6FBB1EE1F326ABF /* CommandPaletteView.swift in Sources */,
 				3BED97586A576FA399A534C0 /* ComputerUseToolCallView.swift in Sources */,
 				CCBA7D87CDCB7FA1C9B40FBC /* ConnectionTarget.swift in Sources */,

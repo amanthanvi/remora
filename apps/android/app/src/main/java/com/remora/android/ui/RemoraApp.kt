@@ -455,6 +455,7 @@ fun RemoraApp(
                         onShowDiscovery = { showDiscovery = true },
                         onShowSettings = { showSettings = true },
                         onOpenProjectPicker = { showProjectPicker = true },
+                        onShowSessions = { navigate(Route.AllSessions) },
                         onOpenAccount = { serverId -> showAccountForServer = serverId },
                         selectedProject = selectedProject,
                         selectedServerId = selectedServerId,
@@ -493,6 +494,14 @@ fun RemoraApp(
                         },
                         focusSearchRequest = focusSearchRequest,
                         onInputFocusChanged = { homeWorkflowBlocked = it },
+                    )
+                }
+
+                Route.AllSessions -> {
+                    com.remora.android.ui.sessions.CommandCenterSessionsScreen(
+                        serverId = null,
+                        onOpenConversation = navigateToConversation,
+                        onBack = navigateBack,
                     )
                 }
 

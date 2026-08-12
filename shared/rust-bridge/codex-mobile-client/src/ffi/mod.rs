@@ -38,7 +38,7 @@ pub use command_center::{
     HostCapabilitiesV1, HostCommandCenterStatus, InteractionCapabilitiesV1,
     MissionControlProjectionV1, ModelCapabilitiesV1, ModelDescriptor, NewTaskLaunchAvailabilityV1,
     PermissionCapabilitiesV1, ProviderInstance, ProviderReadiness, RuntimeCapabilitiesV1,
-    SessionAttentionV1, SessionListRowV1, SessionPageV1, SessionStatusV1,
+    SessionAttentionV1, SessionFilterV1, SessionListRowV1, SessionPageV1, SessionStatusV1,
     ThreadLifecycleCapabilitiesV1, TurnCapabilitiesV1, VoiceCapabilitiesV1,
 };
 pub use device_database::{

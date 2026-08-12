@@ -46,6 +46,7 @@ struct HomeDashboardView: View {
     let onSelectServer: (HomeDashboardServer) -> Void
     let onAddServer: () -> Void
     let onOpenProjectPicker: () -> Void
+    let onShowSessions: () -> Void
     let onThreadCreated: (ThreadKey) -> Void
     let onShowSettings: () -> Void
     let onShowCommandPalette: () -> Void
@@ -218,13 +219,17 @@ struct HomeDashboardView: View {
 
     private var missionBarVisible: Bool {
         !isSearchExpanded
-            && (missionControl.needsYouCount > 0
-                || missionControl.activeCount > 0
-                || missionControl.recentCount > 0)
+    }
+
+    private var missionLanesVisible: Bool {
+        missionControl.needsYouCount > 0
+            || missionControl.activeCount > 0
+            || missionControl.recentCount > 0
     }
 
     private var sessionsTopInset: CGFloat {
-        missionBarVisible ? 102 : 48
+        guard missionBarVisible else { return 48 }
+        return missionLanesVisible ? 138 : 88
     }
 
     private var zoomIcon: String {
@@ -577,13 +582,36 @@ struct HomeDashboardView: View {
     }
 
     private var missionControlBar: some View {
-        HStack(spacing: 6) {
-            missionLaneButton(.needsYou, title: "Needs You", count: missionControl.needsYouCount)
-            missionLaneButton(.active, title: "Active", count: missionControl.activeCount)
-            missionLaneButton(.recent, title: "Recent", count: missionControl.recentCount)
+        VStack(spacing: 4) {
+            HStack {
+                Text("Mission Control")
+                    .remoraFont(.caption)
+                    .foregroundStyle(RemoraTheme.textMuted)
+                Spacer()
+                Button(action: onShowSessions) {
+                    HStack(spacing: 4) {
+                        Text("Sessions")
+                        Image(systemName: "chevron.right")
+                            .remoraFont(size: 9, weight: .semibold)
+                    }
+                    .remoraFont(.caption)
+                    .foregroundStyle(RemoraTheme.accentForegroundOnSurface)
+                    .frame(minHeight: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Show every session")
+            }
+            .padding(.horizontal, 14)
+            if missionLanesVisible {
+                HStack(spacing: 6) {
+                    missionLaneButton(.needsYou, title: "Needs You", count: missionControl.needsYouCount)
+                    missionLaneButton(.active, title: "Active", count: missionControl.activeCount)
+                    missionLaneButton(.recent, title: "Recent", count: missionControl.recentCount)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 4)
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 4)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Mission Control")
     }

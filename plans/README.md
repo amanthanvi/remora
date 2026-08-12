@@ -93,9 +93,12 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   for a known-unready provider, show the bounded Host guidance inline, and
   preserve the draft. Home now also exposes Rust-owned, Host-scoped Needs You,
   Active, and Recent lane counts and filters without replacing the proven
-  native session canvas or eagerly hydrating timelines. Exhaustive Sessions,
-  Host Scratch, attention organization actions, and the remaining Needs You
-  lifecycle remain before closure.
+  native session canvas or eagerly hydrating timelines. Sessions now has a
+  matching global native inbox backed by bounded Rust filtering and
+  50-row cursor pages; scrolling and filtering do not hydrate timelines. The
+  encrypted offline search/freshness layer, Host Scratch, attention
+  organization actions, and the remaining Needs You lifecycle remain before
+  closure.
 
 ## Findings considered and rejected
 

@@ -52,6 +52,7 @@ oversized, and negative inputs.
 | Thread turn pagination fallback         | Capability flips off via response inspection; embedded turns load fully; "Load earlier messages" is hidden             |
 | New-Thread provider readiness           | Home composer uses the shared Rust launch projection; known-unready Hosts disable inline, expanded, keyboard, and hardware send, show bounded Host guidance, and preserve the draft. Older Links remain usable only when the typed runtime directory declares the selected runtime available. |
 | Mission Control lanes                   | Home shows matching Needs You, Active, and Recent counts from the bounded Rust projection. Host selection scopes in Rust. A lane tap filters existing rich cards, a second tap restores the pinned/recent view, hidden Threads stay hidden, and lane selection does not hydrate timelines. |
+| Global Sessions inbox                   | Mission Control links to a matching flat inbox on both platforms. Rust applies bounded search plus Host/project/runtime/status/attention/time filters before 50-row cursor paging. Rows open directly; scrolling/filtering never hydrates a timeline. |
 
 ## Remote Terminal UX Matrix
 

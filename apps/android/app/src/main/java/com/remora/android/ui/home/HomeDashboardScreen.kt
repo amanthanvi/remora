@@ -125,6 +125,7 @@ fun HomeDashboardScreen(
     onShowDiscovery: () -> Unit,
     onShowSettings: () -> Unit,
     onOpenProjectPicker: () -> Unit,
+    onShowSessions: () -> Unit,
     onOpenAccount: (String) -> Unit,
     selectedProject: AppProject?,
     selectedServerId: String?,
@@ -752,15 +753,11 @@ fun HomeDashboardScreen(
                 onAddBoundsChanged = { coachmarkTargetBounds[CoachmarkTarget.AddServer] = it },
             )
 
-            if (
-                !isSearchExpanded &&
-                (missionControl.needsYouCount > 0u ||
-                    missionControl.activeCount > 0u ||
-                    missionControl.recentCount > 0u)
-            ) {
+            if (!isSearchExpanded) {
                 MissionControlBar(
                     projection = missionControl,
                     selectedLane = selectedMissionLane,
+                    onShowSessions = onShowSessions,
                     onSelectLane = { lane ->
                         selectedMissionLane = if (selectedMissionLane == lane) null else lane
                     },
@@ -1252,41 +1249,73 @@ private enum class HomeMissionLane {
 private fun MissionControlBar(
     projection: uniffi.codex_mobile_client.MissionControlProjectionV1,
     selectedLane: HomeMissionLane?,
+    onShowSessions: () -> Unit,
     onSelectLane: (HomeMissionLane) -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        MissionControlLaneButton(
-            lane = HomeMissionLane.NEEDS_YOU,
-            title = "Needs You",
-            count = projection.needsYouCount,
-            selected = selectedLane == HomeMissionLane.NEEDS_YOU,
-            tint = RemoraTheme.warning,
-            onSelectLane = onSelectLane,
-            modifier = Modifier.weight(1f),
-        )
-        MissionControlLaneButton(
-            lane = HomeMissionLane.ACTIVE,
-            title = "Active",
-            count = projection.activeCount,
-            selected = selectedLane == HomeMissionLane.ACTIVE,
-            tint = RemoraTheme.accent,
-            onSelectLane = onSelectLane,
-            modifier = Modifier.weight(1f),
-        )
-        MissionControlLaneButton(
-            lane = HomeMissionLane.RECENT,
-            title = "Recent",
-            count = projection.recentCount,
-            selected = selectedLane == HomeMissionLane.RECENT,
-            tint = RemoraTheme.textSecondary,
-            onSelectLane = onSelectLane,
-            modifier = Modifier.weight(1f),
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Mission Control",
+                color = RemoraTheme.textMuted,
+                fontSize = RemoraTextStyle.caption.scaled,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onShowSessions,
+                modifier = Modifier.height(RemoraTheme.minimumTouchTarget),
+            ) {
+                Text(
+                    text = "Sessions ›",
+                    color = RemoraTheme.accent,
+                    fontSize = RemoraTextStyle.caption.scaled,
+                )
+            }
+        }
+        if (
+            projection.needsYouCount > 0u ||
+            projection.activeCount > 0u ||
+            projection.recentCount > 0u
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                MissionControlLaneButton(
+                    lane = HomeMissionLane.NEEDS_YOU,
+                    title = "Needs You",
+                    count = projection.needsYouCount,
+                    selected = selectedLane == HomeMissionLane.NEEDS_YOU,
+                    tint = RemoraTheme.warning,
+                    onSelectLane = onSelectLane,
+                    modifier = Modifier.weight(1f),
+                )
+                MissionControlLaneButton(
+                    lane = HomeMissionLane.ACTIVE,
+                    title = "Active",
+                    count = projection.activeCount,
+                    selected = selectedLane == HomeMissionLane.ACTIVE,
+                    tint = RemoraTheme.accent,
+                    onSelectLane = onSelectLane,
+                    modifier = Modifier.weight(1f),
+                )
+                MissionControlLaneButton(
+                    lane = HomeMissionLane.RECENT,
+                    title = "Recent",
+                    count = projection.recentCount,
+                    selected = selectedLane == HomeMissionLane.RECENT,
+                    tint = RemoraTheme.textSecondary,
+                    onSelectLane = onSelectLane,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
     }
 }
 

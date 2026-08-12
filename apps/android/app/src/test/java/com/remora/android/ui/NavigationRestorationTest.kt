@@ -16,6 +16,7 @@ class NavigationRestorationTest {
     fun everyRouteRoundTripsThroughRestorationToken() {
         val routes = listOf(
             Route.Home,
+            Route.AllSessions,
             Route.Sessions("server:one", "My sessions / active"),
             Route.Conversation(key),
             Route.RealtimeVoice(key),

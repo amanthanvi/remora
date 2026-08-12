@@ -10,6 +10,7 @@ import uniffi.codex_mobile_client.ThreadKey
  */
 sealed class Route {
     data object Home : Route()
+    data object AllSessions : Route()
     data class Sessions(val serverId: String, val title: String) : Route()
     data class Conversation(val key: ThreadKey) : Route()
     data class RealtimeVoice(val key: ThreadKey) : Route()
@@ -58,6 +59,7 @@ private fun decodeRouteValue(value: String): String? = runCatching {
 
 internal fun Route.restorationToken(): String = when (this) {
     Route.Home -> "home"
+    Route.AllSessions -> "all-sessions"
     is Route.Sessions -> "sessions:${encodeRouteValue(serverId)}:${encodeRouteValue(title)}"
     is Route.Conversation -> "conversation:${encodeRouteValue(key.serverId)}:${encodeRouteValue(key.threadId)}"
     is Route.RealtimeVoice -> "voice:${encodeRouteValue(key.serverId)}:${encodeRouteValue(key.threadId)}"
@@ -81,6 +83,7 @@ internal fun routeFromRestorationToken(token: String): Route? {
 
     return when (parts.firstOrNull()) {
         "home" -> Route.Home
+        "all-sessions" -> Route.AllSessions
         "sessions" -> {
             val serverId = value(1) ?: return null
             val title = value(2) ?: return null
