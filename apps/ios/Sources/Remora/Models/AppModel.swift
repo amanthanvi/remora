@@ -104,6 +104,7 @@ final class AppModel {
         }
     }
     private(set) var snapshotRevision: UInt64 = 0
+    private(set) var commandCenterStatus: CommandCenterStatusV1?
     private(set) var lastError: String?
     private(set) var composerPrefillRequest: ComposerPrefillRequest? {
         didSet {
@@ -186,6 +187,7 @@ final class AppModel {
         updateTask = Task.detached(priority: .userInitiated) { [weak self, subscription] in
             guard let self else { return }
             await self.refreshSnapshot()
+            await self.refreshCommandCenterStatus()
             while !Task.isCancelled {
                 do {
                     let update = try await subscription.nextUpdate()
@@ -221,6 +223,10 @@ final class AppModel {
 
     func refreshSnapshot() async {
         _ = await refreshSnapshotAuthoritative()
+    }
+
+    private func refreshCommandCenterStatus() {
+        commandCenterStatus = store.commandCenterStatus()
     }
 
     /// Fetches and applies one canonical Rust snapshot while reporting whether
@@ -549,8 +555,11 @@ final class AppModel {
             scheduleSnapshotRefreshDebounced()
         case .serverRemoved:
             await refreshSnapshot()
+        case .commandCenterStatusChanged:
+            refreshCommandCenterStatus()
         case .fullResync:
             await refreshSnapshot()
+            refreshCommandCenterStatus()
         case .voiceSessionChanged:
             await refreshSnapshot()
         case .realtimeTranscriptUpdated:

@@ -882,7 +882,8 @@ impl AppClient {
     ) -> Result<HostCommandCenterStatus, RemoraLinkError> {
         let _configuration = self.inner.remora_link_configuration.read().await;
         let configured = self.configured_remora_link()?;
-        project_command_center_status_result(
+        reconcile_command_center_status_result(
+            &self.inner.app_store,
             &host_id,
             configured.lifecycle.command_center_status(&host_id).await,
         )
@@ -1266,7 +1267,8 @@ impl AppClient {
     }
 }
 
-fn project_command_center_status_result(
+fn reconcile_command_center_status_result(
+    app_store: &crate::store::AppStoreReducer,
     legacy_server_id: &str,
     result: Result<
         Option<remora_bridge_core::command_center::HostCommandCenterStatusV1>,
@@ -1274,9 +1276,19 @@ fn project_command_center_status_result(
     >,
 ) -> Result<HostCommandCenterStatus, RemoraLinkError> {
     match result {
-        Ok(Some(status)) => Ok(project_link_command_center_status(legacy_server_id, status)),
-        Ok(None) => Ok(project_unknown_link_command_center_status(legacy_server_id)),
-        Err(error) => Err(error.into()),
+        Ok(Some(status)) => {
+            let projected = project_link_command_center_status(legacy_server_id, status.clone());
+            app_store.reconcile_command_center_status(legacy_server_id, Some(status));
+            Ok(projected)
+        }
+        Ok(None) => {
+            app_store.reconcile_command_center_status(legacy_server_id, None);
+            Ok(project_unknown_link_command_center_status(legacy_server_id))
+        }
+        Err(error) => {
+            app_store.reconcile_command_center_status(legacy_server_id, None);
+            Err(error.into())
+        }
     }
 }
 
@@ -1362,6 +1374,24 @@ impl crate::MobileClient {
         );
         for host_id in host_ids {
             self.disconnect_remora_link_session(&host_id).await;
+        }
+    }
+
+    async fn refresh_remora_link_command_center_status(
+        &self,
+        configured: &ConfiguredRemoraLink,
+        host_id: &str,
+    ) {
+        if let Err(error) = reconcile_command_center_status_result(
+            &self.app_store,
+            host_id,
+            configured.lifecycle.command_center_status(host_id).await,
+        ) {
+            warn!(
+                server_id = host_id,
+                %error,
+                "Remora Link command-center status refresh failed"
+            );
         }
     }
 
@@ -1479,6 +1509,8 @@ impl crate::MobileClient {
             {
                 let mut connected_runtime_ids = available.into_iter().collect::<Vec<_>>();
                 connected_runtime_ids.sort();
+                self.refresh_remora_link_command_center_status(&configured, host_id)
+                    .await;
                 return Ok(RemoraLinkRuntimeConnectOutcome {
                     server_id: host_id.to_string(),
                     connected_runtime_ids,
@@ -1625,6 +1657,8 @@ impl crate::MobileClient {
             }
         };
         self.attach_remote_session(host_id, session, runtime_infos);
+        self.refresh_remora_link_command_center_status(&configured, host_id)
+            .await;
         projection_guard.disarm();
         Ok(RemoraLinkRuntimeConnectOutcome {
             server_id: host_id.to_string(),
@@ -3456,6 +3490,8 @@ mod tests {
 
     use super::*;
     use crate::remote_host_pairing::remora_link_v2::CredentialJournalV2;
+    use crate::session::connection::ServerConfig;
+    use crate::store::{AppStoreReducer, AppStoreUpdateRecord, ServerHealthSnapshot};
 
     struct CountingShellConnection {
         closes: Arc<AtomicUsize>,
@@ -4770,6 +4806,20 @@ mod tests {
     #[test]
     fn command_center_status_projects_durable_identity_and_old_link_unknown() {
         let legacy_server_id = "remora-link:transport-node";
+        let store = AppStoreReducer::new();
+        store.upsert_server(
+            &ServerConfig {
+                server_id: legacy_server_id.to_string(),
+                display_name: "Host".to_string(),
+                host: "transport-node".to_string(),
+                port: 0,
+                websocket_url: None,
+                is_local: false,
+                tls: false,
+            },
+            ServerHealthSnapshot::Connected,
+        );
+        let mut updates = store.subscribe();
         let status = remora_bridge_core::command_center::HostCommandCenterStatusV1 {
             version: 1,
             host_id: remora_bridge_core::command_center::HostId(URL_SAFE_NO_PAD.encode([1_u8; 16])),
@@ -4780,8 +4830,12 @@ mod tests {
             provider_instances: Vec::new(),
         };
 
-        let projected =
-            project_command_center_status_result(legacy_server_id, Ok(Some(status))).unwrap();
+        let projected = reconcile_command_center_status_result(
+            &store,
+            legacy_server_id,
+            Ok(Some(status.clone())),
+        )
+        .unwrap();
         assert_eq!(projected.legacy_server_id, legacy_server_id);
         assert_eq!(
             projected.host_id.as_deref(),
@@ -4792,8 +4846,36 @@ mod tests {
             projected.availability.state,
             crate::ffi::command_center::AvailabilityState::Available
         );
+        assert!(matches!(
+            updates.try_recv().expect("status update"),
+            AppStoreUpdateRecord::CommandCenterStatusChanged { server_id }
+                if server_id == legacy_server_id
+        ));
+        assert_eq!(
+            store.project_command_center(|_, statuses| statuses
+                .get(legacy_server_id)
+                .map(|status| status.catalog_generation)),
+            Some(7)
+        );
+        store.update_server_health(legacy_server_id, ServerHealthSnapshot::Disconnected);
+        assert!(matches!(
+            updates.try_recv().expect("status invalidation"),
+            AppStoreUpdateRecord::CommandCenterStatusChanged { server_id }
+                if server_id == legacy_server_id
+        ));
+        assert!(matches!(
+            updates.try_recv().expect("server health update"),
+            AppStoreUpdateRecord::ServerChanged { server_id }
+                if server_id == legacy_server_id
+        ));
+        assert!(store.project_command_center(|_, statuses| statuses.is_empty()));
+        store.reconcile_command_center_status(legacy_server_id, Some(status.clone()));
+        store.reconcile_command_center_status("remora-link:unknown", Some(status));
+        assert!(store.project_command_center(|_, statuses| statuses.is_empty()));
+        assert!(updates.try_recv().is_err());
 
-        let legacy = project_command_center_status_result(legacy_server_id, Ok(None)).unwrap();
+        let legacy =
+            reconcile_command_center_status_result(&store, legacy_server_id, Ok(None)).unwrap();
         assert_eq!(legacy.host_id, None);
         assert_eq!(legacy.catalog_generation, None);
         assert_eq!(
@@ -4801,8 +4883,10 @@ mod tests {
             crate::ffi::command_center::AvailabilityState::Unknown
         );
         assert!(legacy.provider_instances.is_empty());
+        assert!(store.project_command_center(|_, statuses| statuses.is_empty()));
         assert_eq!(
-            project_command_center_status_result(
+            reconcile_command_center_status_result(
+                &store,
                 legacy_server_id,
                 Err(LifecycleErrorV2::ProtocolViolation),
             ),

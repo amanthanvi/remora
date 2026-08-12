@@ -75,8 +75,10 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 014 has the typed capability/availability seam, bounded Mission Control
   and Sessions projections, fail-closed raw transport policy, generated
   bindings, Rust tests, and authenticated Link-declared capability hydration at
-  `99811347aecdc87f2555dbb511c31b35d40c3272`. Native journey consumption and
-  final shared-store hydration remain before closure.
+  `99811347aecdc87f2555dbb511c31b35d40c3272`. Connected Host status now lives
+  in an independently invalidated Rust cache with bounded stable projection and
+  thin Swift/Kotlin observation. Native journey consumption remains before
+  closure.
 - Plan 015 has the exact-pinned Link implementation at
   `99811347aecdc87f2555dbb511c31b35d40c3272`: atomic snapshot, checksum
   recovery journal, locking, permissions, durable domain records, restart

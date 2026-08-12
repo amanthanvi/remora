@@ -3,6 +3,7 @@ use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Mutex, RwLock};
 
 use codex_app_server_protocol as upstream;
+use remora_bridge_core::command_center::HostCommandCenterStatusV1;
 use tokio::sync::broadcast;
 
 use crate::conversation::{
@@ -91,6 +92,9 @@ fn dedupe_agent_runtimes(runtimes: Vec<AgentRuntimeInfo>) -> Vec<AgentRuntimeInf
 
 pub struct AppStoreReducer {
     snapshot: RwLock<AppSnapshot>,
+    /// Authenticated Link capability state is independently projected so
+    /// ordinary app snapshots never clone bounded-but-large provider catalogs.
+    command_center_statuses: RwLock<HashMap<String, HostCommandCenterStatusV1>>,
     /// Serializes streamed UI-event application with conditional authoritative
     /// refresh commits. Network work never holds this lock.
     ui_event_generations: Mutex<HashMap<String, u64>>,
@@ -125,6 +129,7 @@ impl AppStoreReducer {
         let (updates_tx, _) = broadcast::channel(1024);
         Self {
             snapshot: RwLock::new(AppSnapshot::default()),
+            command_center_statuses: RwLock::new(HashMap::new()),
             ui_event_generations: Mutex::new(HashMap::new()),
             last_thread_state_updates: RwLock::new(HashMap::new()),
             last_thread_item_upserts: RwLock::new(HashMap::new()),
@@ -138,6 +143,54 @@ impl AppStoreReducer {
             .read()
             .expect("app store lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn project_command_center<R>(
+        &self,
+        project: impl FnOnce(&AppSnapshot, &HashMap<String, HostCommandCenterStatusV1>) -> R,
+    ) -> R {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        let statuses = self
+            .command_center_statuses
+            .read()
+            .expect("command-center status lock poisoned");
+        project(&snapshot, &statuses)
+    }
+
+    pub(crate) fn reconcile_command_center_status(
+        &self,
+        server_id: &str,
+        status: Option<HostCommandCenterStatusV1>,
+    ) {
+        let cache_allowed = self
+            .snapshot
+            .read()
+            .expect("app store lock poisoned")
+            .servers
+            .get(server_id)
+            .is_some_and(|server| matches!(&server.health, ServerHealthSnapshot::Connected));
+        let mut statuses = self
+            .command_center_statuses
+            .write()
+            .expect("command-center status lock poisoned");
+        let changed = match status {
+            Some(status) if cache_allowed => {
+                if statuses.get(server_id) == Some(&status) {
+                    false
+                } else {
+                    statuses.insert(server_id.to_string(), status);
+                    true
+                }
+            }
+            Some(_) => statuses.remove(server_id).is_some(),
+            None => statuses.remove(server_id).is_some(),
+        };
+        drop(statuses);
+        if changed {
+            self.emit(AppStoreUpdateRecord::CommandCenterStatusChanged {
+                server_id: server_id.to_string(),
+            });
+        }
     }
 
     pub(crate) fn thread_snapshot(&self, key: &ThreadKey) -> Option<ThreadSnapshot> {
@@ -193,8 +246,11 @@ impl AppStoreReducer {
     }
 
     pub fn upsert_server(&self, config: &ServerConfig, health: ServerHealthSnapshot) {
+        let invalidates_command_center = !matches!(health, ServerHealthSnapshot::Connected);
+        let is_new_server;
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+            is_new_server = !snapshot.servers.contains_key(&config.server_id);
             let (
                 existing_wake_mac,
                 existing_account,
@@ -264,6 +320,14 @@ impl AppStoreReducer {
                 },
             );
         }
+        if invalidates_command_center {
+            self.reconcile_command_center_status(&config.server_id, None);
+        }
+        if is_new_server {
+            self.emit(AppStoreUpdateRecord::CommandCenterStatusChanged {
+                server_id: config.server_id.clone(),
+            });
+        }
         self.emit(AppStoreUpdateRecord::ServerChanged {
             server_id: config.server_id.clone(),
         });
@@ -272,9 +336,10 @@ impl AppStoreReducer {
     pub fn remove_server(&self, server_id: &str) {
         let mut removed_thread_keys = Vec::new();
         let agent_directory_version;
+        let removed_server;
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-            snapshot.servers.remove(server_id);
+            removed_server = snapshot.servers.remove(server_id).is_some();
             snapshot.threads.retain(|key, _| {
                 let keep = key.server_id != server_id;
                 if !keep {
@@ -313,6 +378,16 @@ impl AppStoreReducer {
                 snapshot.voice_session = AppVoiceSessionSnapshot::default();
             }
             agent_directory_version = current_agent_directory_version(&snapshot);
+        }
+        let removed_command_center_status = self
+            .command_center_statuses
+            .write()
+            .expect("command-center status lock poisoned")
+            .remove(server_id);
+        if removed_server || removed_command_center_status.is_some() {
+            self.emit(AppStoreUpdateRecord::CommandCenterStatusChanged {
+                server_id: server_id.to_string(),
+            });
         }
         self.emit(AppStoreUpdateRecord::ServerRemoved {
             server_id: server_id.to_string(),
@@ -1455,11 +1530,15 @@ impl AppStoreReducer {
     }
 
     pub fn update_server_health(&self, server_id: &str, health: ServerHealthSnapshot) {
+        let invalidates_command_center = !matches!(health, ServerHealthSnapshot::Connected);
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
             if let Some(server) = snapshot.servers.get_mut(server_id) {
                 server.health = health;
             }
+        }
+        if invalidates_command_center {
+            self.reconcile_command_center_status(server_id, None);
         }
         self.emit(AppStoreUpdateRecord::ServerChanged {
             server_id: server_id.to_string(),
@@ -2426,6 +2505,9 @@ impl AppStoreReducer {
             }
             AppStoreUpdateRecord::ServerRemoved { server_id } => {
                 tracing::debug!(target: "store", server_id, "emit ServerRemoved")
+            }
+            AppStoreUpdateRecord::CommandCenterStatusChanged { server_id } => {
+                tracing::debug!(target: "store", server_id, "emit CommandCenterStatusChanged")
             }
             AppStoreUpdateRecord::ThreadUpserted { thread, .. } => {
                 tracing::debug!(

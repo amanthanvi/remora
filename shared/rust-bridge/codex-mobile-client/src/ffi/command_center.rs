@@ -1,5 +1,7 @@
 //! Handwritten, bounded UniFFI contract for command-center capability state.
 
+use std::collections::HashMap;
+
 use crate::store::boundary::session_summaries_from_snapshot;
 use crate::store::{AppSessionSummary, AppSnapshot};
 use crate::types::{ThreadKey, ThreadSummaryStatus};
@@ -12,6 +14,7 @@ use remora_bridge_core::command_center::{
 };
 
 const MAX_REASON_BYTES: usize = 256;
+const MAX_COMMAND_CENTER_HOSTS: usize = 32;
 const MAX_SESSION_PAGE_ROWS: usize = 100;
 const MAX_MISSION_LANE_ROWS: usize = 20;
 const MAX_TITLE_BYTES: usize = 256;
@@ -184,6 +187,7 @@ pub struct HostCommandCenterStatus {
 pub struct CommandCenterStatusV1 {
     pub schema_version: u32,
     pub hosts: Vec<HostCommandCenterStatus>,
+    pub overflow_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
@@ -234,11 +238,20 @@ pub struct MissionControlProjectionV1 {
     pub recent_count: u32,
 }
 
-pub(crate) fn project_command_center_status(snapshot: &AppSnapshot) -> CommandCenterStatusV1 {
-    let mut hosts = snapshot
-        .servers
-        .values()
+pub(crate) fn project_command_center_status(
+    snapshot: &AppSnapshot,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+) -> CommandCenterStatusV1 {
+    let mut servers = snapshot.servers.values().collect::<Vec<_>>();
+    servers.sort_by(|left, right| left.server_id.cmp(&right.server_id));
+    let overflow_count = servers.len().saturating_sub(MAX_COMMAND_CENTER_HOSTS) as u32;
+    servers.truncate(MAX_COMMAND_CENTER_HOSTS);
+    let hosts = servers
+        .into_iter()
         .map(|server| {
+            if let Some(status) = link_statuses.get(&server.server_id) {
+                return project_link_command_center_status(&server.server_id, status.clone());
+            }
             let is_link = server.server_id.starts_with("remora-link:");
             let reason = if is_link {
                 "Connected Link protocol has not declared command-center v1"
@@ -280,10 +293,10 @@ pub(crate) fn project_command_center_status(snapshot: &AppSnapshot) -> CommandCe
             }
         })
         .collect::<Vec<_>>();
-    hosts.sort_by(|left, right| left.legacy_server_id.cmp(&right.legacy_server_id));
     CommandCenterStatusV1 {
         schema_version: 1,
         hosts,
+        overflow_count,
     }
 }
 
@@ -653,8 +666,9 @@ mod tests {
             ServerHealthSnapshot::Connected,
         );
 
-        let projection = project_command_center_status(&store.snapshot());
+        let projection = project_command_center_status(&store.snapshot(), &HashMap::new());
         assert_eq!(projection.hosts.len(), 1);
+        assert_eq!(projection.overflow_count, 0);
         assert_eq!(
             projection.hosts[0].availability.state,
             AvailabilityState::Unknown
@@ -678,11 +692,84 @@ mod tests {
             ServerHealthSnapshot::Disconnected,
         );
 
-        let projection = project_command_center_status(&store.snapshot());
+        let projection = project_command_center_status(&store.snapshot(), &HashMap::new());
         assert_eq!(
             projection.hosts[0].availability.state,
             AvailabilityState::Unavailable
         );
+    }
+
+    #[test]
+    fn authenticated_link_status_replaces_unknown_for_exact_server_only() {
+        let store = AppStoreReducer::new();
+        for server_id in ["remora-link:node-a", "remora-link:node-b"] {
+            store.upsert_server(
+                &ServerConfig {
+                    server_id: server_id.to_string(),
+                    display_name: "Host".to_string(),
+                    host: server_id.to_string(),
+                    port: 0,
+                    websocket_url: None,
+                    is_local: false,
+                    tls: false,
+                },
+                ServerHealthSnapshot::Connected,
+            );
+        }
+        let status = LinkHostCommandCenterStatusV1 {
+            version: 1,
+            host_id: remora_bridge_core::command_center::HostId(
+                "AQEBAQEBAQEBAQEBAQEBAQ".to_string(),
+            ),
+            catalog_generation: 7,
+            host_capabilities: LinkHostCapabilitiesV1::all_unknown(2, "0.1.0"),
+            provider_instances: Vec::new(),
+        };
+        let statuses = HashMap::from([("remora-link:node-b".to_string(), status)]);
+
+        let projection = project_command_center_status(&store.snapshot(), &statuses);
+
+        assert_eq!(projection.hosts.len(), 2);
+        assert_eq!(
+            projection.hosts[0].availability.state,
+            AvailabilityState::Unknown
+        );
+        assert_eq!(
+            projection.hosts[1].availability.state,
+            AvailabilityState::Available
+        );
+        assert_eq!(projection.hosts[1].catalog_generation, Some(7));
+        assert_eq!(
+            projection.hosts[1].host_id.as_deref(),
+            Some("AQEBAQEBAQEBAQEBAQEBAQ")
+        );
+    }
+
+    #[test]
+    fn command_center_hosts_are_sorted_clamped_and_count_overflow() {
+        let store = AppStoreReducer::new();
+        for index in (0..40).rev() {
+            let server_id = format!("remora-link:node-{index:02}");
+            store.upsert_server(
+                &ServerConfig {
+                    server_id: server_id.clone(),
+                    display_name: server_id.clone(),
+                    host: server_id,
+                    port: 0,
+                    websocket_url: None,
+                    is_local: false,
+                    tls: false,
+                },
+                ServerHealthSnapshot::Connected,
+            );
+        }
+
+        let projection = project_command_center_status(&store.snapshot(), &HashMap::new());
+
+        assert_eq!(projection.hosts.len(), MAX_COMMAND_CENTER_HOSTS);
+        assert_eq!(projection.overflow_count, 8);
+        assert_eq!(projection.hosts[0].legacy_server_id, "remora-link:node-00");
+        assert_eq!(projection.hosts[31].legacy_server_id, "remora-link:node-31");
     }
 
     #[test]

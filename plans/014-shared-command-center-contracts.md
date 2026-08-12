@@ -35,6 +35,14 @@ malformed or oversized responses, and opts into the 512 KiB status bound only
 after correlating that exact request. Provider instances are already filtered
 by the Host grant before serialization.
 
+The authenticated status now reconciles into an independently versioned Rust
+cache after every successful Link connection and explicit status query. The
+cache accepts only connected, known Hosts; disconnect, removal, legacy status,
+and status errors invalidate it. Its stable projection is clamped to 32 Hosts,
+reports overflow, and does not clone hydrated timelines. Swift and Kotlin
+AppModels subscribe to the same narrow invalidation and expose the generated
+projection without adding platform policy.
+
 Focused Link/Rust protocol tests, binding generation, the iOS simulator build,
-the Android arm64 debug build, and Android unit tests pass. Native journey
-consumption and the final shared-store hydration seam remain before closure.
+the Android arm64 debug build, and Android unit tests pass. User-facing native
+journey consumption remains before closure.

@@ -22,6 +22,9 @@ pub enum AppStoreUpdateRecord {
     ServerRemoved {
         server_id: String,
     },
+    CommandCenterStatusChanged {
+        server_id: String,
+    },
     ThreadUpserted {
         thread: AppThreadSnapshot,
         session_summary: AppSessionSummary,

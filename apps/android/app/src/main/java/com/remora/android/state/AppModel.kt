@@ -29,6 +29,7 @@ import uniffi.codex_mobile_client.AppThreadSortKey
 import uniffi.codex_mobile_client.AppThreadSourceKind
 import uniffi.codex_mobile_client.ThreadStreamingDeltaKind
 import uniffi.codex_mobile_client.AppStoreUpdateRecord
+import uniffi.codex_mobile_client.CommandCenterStatusV1
 import uniffi.codex_mobile_client.DiscoveryBridge
 import uniffi.codex_mobile_client.DeviceDatabaseBridge
 import uniffi.codex_mobile_client.HydratedConversationItem
@@ -236,6 +237,10 @@ class AppModel private constructor(
     private val _snapshot = MutableStateFlow<AppSnapshotRecord?>(null)
     val snapshot: StateFlow<AppSnapshotRecord?> = _snapshot.asStateFlow()
 
+    private val _commandCenterStatus = MutableStateFlow<CommandCenterStatusV1?>(null)
+    val commandCenterStatus: StateFlow<CommandCenterStatusV1?> =
+        _commandCenterStatus.asStateFlow()
+
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
     private val loadingModelServerIds = mutableSetOf<String>()
@@ -310,6 +315,7 @@ class AppModel private constructor(
             try {
                 val subscription: AppStoreSubscription = store.subscribeUpdates()
                 refreshSnapshot()
+                refreshCommandCenterStatus()
                 while (true) {
                     try {
                         val update: AppStoreUpdateRecord = subscription.nextUpdate()
@@ -356,6 +362,10 @@ class AppModel private constructor(
         } catch (e: Exception) {
             _lastError.value = e.message
         }
+    }
+
+    private fun refreshCommandCenterStatus() {
+        _commandCenterStatus.value = store.commandCenterStatus()
     }
 
     private fun applySnapshot(snapshot: AppSnapshotRecord?) {
@@ -1077,7 +1087,11 @@ class AppModel private constructor(
             is AppStoreUpdateRecord.PendingUserInputsChanged -> refreshSnapshot()
             is AppStoreUpdateRecord.ServerChanged -> refreshSnapshot()
             is AppStoreUpdateRecord.ServerRemoved -> refreshSnapshot()
-            is AppStoreUpdateRecord.FullResync -> refreshSnapshot()
+            is AppStoreUpdateRecord.CommandCenterStatusChanged -> refreshCommandCenterStatus()
+            is AppStoreUpdateRecord.FullResync -> {
+                refreshSnapshot()
+                refreshCommandCenterStatus()
+            }
             is AppStoreUpdateRecord.VoiceSessionChanged -> refreshSnapshot()
             is AppStoreUpdateRecord.RealtimeTranscriptUpdated -> Unit
             is AppStoreUpdateRecord.RealtimeHandoffRequested -> Unit

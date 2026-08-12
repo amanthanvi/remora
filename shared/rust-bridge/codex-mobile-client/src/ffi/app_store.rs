@@ -33,7 +33,7 @@ const MAX_COALESCED_STREAMING_TEXT_BYTES: usize = 8 * 1024;
 
 #[cfg(test)]
 mod tests {
-    use super::should_preserve_thread_item_update_boundary;
+    use super::{merge_app_update, should_preserve_thread_item_update_boundary};
     use super::{AppStoreSubscription, AppStoreSubscriptionState};
     use crate::conversation_uniffi::{
         HydratedAssistantMessageData, HydratedConversationItem, HydratedConversationItemContent,
@@ -196,6 +196,33 @@ mod tests {
             .expect("next update should succeed");
 
         assert!(matches!(update, AppStoreUpdateRecord::FullResync));
+    }
+
+    #[test]
+    fn command_center_status_updates_coalesce_only_for_the_same_host() {
+        let mut update = AppStoreUpdateRecord::CommandCenterStatusChanged {
+            server_id: "host-a".to_string(),
+        };
+
+        assert!(
+            merge_app_update(
+                &mut update,
+                AppStoreUpdateRecord::CommandCenterStatusChanged {
+                    server_id: "host-a".to_string(),
+                },
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            merge_app_update(
+                &mut update,
+                AppStoreUpdateRecord::CommandCenterStatusChanged {
+                    server_id: "host-b".to_string(),
+                },
+            ),
+            Err(AppStoreUpdateRecord::CommandCenterStatusChanged { server_id })
+                if server_id == "host-b"
+        ));
     }
 
     #[test]
@@ -376,7 +403,11 @@ impl AppStore {
     /// Older Link versions remain explicit `Unknown`; raw app-server entries
     /// remain `Unavailable` and never inherit workspace authority.
     pub fn command_center_status(&self) -> CommandCenterStatusV1 {
-        project_command_center_status(&self.inner.app_snapshot())
+        self.inner
+            .app_store
+            .project_command_center(|snapshot, statuses| {
+                project_command_center_status(snapshot, statuses)
+            })
     }
 
     pub fn mission_control(&self) -> MissionControlProjectionV1 {
@@ -893,6 +924,12 @@ fn merge_app_update(
             *key = next_key;
             Ok(())
         }
+        (
+            AppStoreUpdateRecord::CommandCenterStatusChanged { server_id },
+            AppStoreUpdateRecord::CommandCenterStatusChanged {
+                server_id: next_server_id,
+            },
+        ) if *server_id == next_server_id => Ok(()),
         (_current, next) => Err(next),
     }
 }
