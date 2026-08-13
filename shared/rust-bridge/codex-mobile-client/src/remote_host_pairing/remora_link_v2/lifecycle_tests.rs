@@ -240,6 +240,12 @@ struct ScriptedHostV2 {
     include_out_of_grant_agent: AtomicBool,
     command_center_unsupported: AtomicBool,
     malformed_command_center_terminal: AtomicBool,
+    work_intent_reserved: AtomicBool,
+    work_intent_dispatching: AtomicBool,
+    work_intent_succeeded: AtomicBool,
+    work_intent_calls: StdMutex<Vec<(String, String, String, String)>>,
+    work_intent_unsupported: AtomicBool,
+    work_intent_rejected: AtomicBool,
 }
 
 impl ScriptedHostV2 {
@@ -280,6 +286,12 @@ impl ScriptedHostV2 {
             include_out_of_grant_agent: AtomicBool::new(false),
             command_center_unsupported: AtomicBool::new(false),
             malformed_command_center_terminal: AtomicBool::new(false),
+            work_intent_reserved: AtomicBool::new(false),
+            work_intent_dispatching: AtomicBool::new(false),
+            work_intent_succeeded: AtomicBool::new(false),
+            work_intent_calls: StdMutex::new(Vec::new()),
+            work_intent_unsupported: AtomicBool::new(false),
+            work_intent_rejected: AtomicBool::new(false),
         }
     }
 
@@ -295,6 +307,7 @@ impl ScriptedHostV2 {
             restart: None,
             agents: None,
             command_center_status: None,
+            work_intent: None,
             session: None,
             error_code: None,
             error: None,
@@ -634,6 +647,93 @@ impl HostPortV2 for ScriptedHostV2 {
                     host_capabilities: HostCapabilitiesV1::all_unknown(2, "0.1.0"),
                     provider_instances: Vec::new(),
                 });
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::PrepareSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | RequestV2::BeginSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | RequestV2::CompleteSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => {
+                self.work_intent_calls.lock().unwrap().push((
+                    round.request.operation().to_string(),
+                    intent_id.clone(),
+                    thread_id.clone(),
+                    request_fingerprint.clone(),
+                ));
+                if self.work_intent_unsupported.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::InvalidRequest);
+                    response.error = Some(ErrorCodeV2::InvalidRequest.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                if self.work_intent_rejected.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::WorkIntentRejected);
+                    response.error = Some(ErrorCodeV2::WorkIntentRejected.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                let status = match &round.request {
+                    RequestV2::PrepareSendMessageIntent { .. } => {
+                        if self.work_intent_succeeded.load(Ordering::SeqCst) {
+                            WorkIntentStatusV2::Succeeded
+                        } else if self.work_intent_dispatching.load(Ordering::SeqCst) {
+                            WorkIntentStatusV2::OutcomeUnknown
+                        } else if self.work_intent_reserved.swap(true, Ordering::SeqCst) {
+                            WorkIntentStatusV2::Reserved
+                        } else {
+                            WorkIntentStatusV2::Execute
+                        }
+                    }
+                    RequestV2::BeginSendMessageIntent { .. } => {
+                        if self.work_intent_succeeded.load(Ordering::SeqCst) {
+                            WorkIntentStatusV2::Succeeded
+                        } else if self.work_intent_dispatching.swap(true, Ordering::SeqCst) {
+                            WorkIntentStatusV2::OutcomeUnknown
+                        } else {
+                            WorkIntentStatusV2::Execute
+                        }
+                    }
+                    RequestV2::CompleteSendMessageIntent { .. } => {
+                        self.work_intent_succeeded.store(true, Ordering::SeqCst);
+                        WorkIntentStatusV2::Succeeded
+                    }
+                    _ => unreachable!("matched work-intent operation"),
+                };
+                let unknown = status == WorkIntentStatusV2::OutcomeUnknown;
+                let mut response = Self::terminal(!unknown);
+                response.work_intent = Some(WorkIntentReceiptV2 {
+                    intent_id: intent_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: (status == WorkIntentStatusV2::Succeeded)
+                        .then(|| URL_SAFE_NO_PAD.encode([12_u8; 16])),
+                    status,
+                });
+                if unknown {
+                    response.error_code = Some(ErrorCodeV2::OutcomeUnknown);
+                    response.error = Some(ErrorCodeV2::OutcomeUnknown.message().to_string());
+                }
                 Ok(FinishedExchangeV2 {
                     response,
                     attachment_id: None,
@@ -1624,6 +1724,129 @@ async fn command_center_status_uses_the_enrolled_inspection_grant() {
             .command_center_status(&harness.host_id)
             .await,
         Err(LifecycleErrorV2::ProtocolViolation)
+    );
+}
+
+#[tokio::test]
+async fn send_message_intent_lifecycle_never_reexecutes_an_ambiguous_dispatch() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    let intent_id = "mobile-intent-1";
+    let thread_id = URL_SAFE_NO_PAD.encode([11_u8; 16]);
+    let fingerprint = "ab".repeat(32);
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .prepare_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Execute
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .prepare_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Reserved
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .begin_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Execute
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .begin_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::OutcomeUnknown
+    );
+
+    let expected_turn_id = URL_SAFE_NO_PAD.encode([12_u8; 16]);
+    assert_eq!(
+        harness
+            .lifecycle
+            .complete_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Succeeded {
+            turn_id: expected_turn_id.clone()
+        }
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .prepare_send_message_intent(&harness.host_id, intent_id, &thread_id, &fingerprint,)
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Succeeded {
+            turn_id: expected_turn_id
+        }
+    );
+
+    let calls = harness.host.work_intent_calls.lock().unwrap();
+    assert_eq!(calls.len(), 6);
+    assert!(
+        calls
+            .iter()
+            .all(|(_, call_intent, call_thread, call_fingerprint)| {
+                call_intent == intent_id
+                    && call_thread == &thread_id
+                    && call_fingerprint == &fingerprint
+            })
+    );
+}
+
+#[tokio::test]
+async fn older_link_work_intent_support_degrades_to_explicit_unavailable() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    harness
+        .host
+        .work_intent_unsupported
+        .store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .prepare_send_message_intent(
+                &harness.host_id,
+                "mobile-intent-1",
+                &URL_SAFE_NO_PAD.encode([11_u8; 16]),
+                &"ab".repeat(32),
+            )
+            .await
+            .unwrap(),
+        WorkIntentOutcomeV2::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn current_link_work_intent_rejection_is_not_reported_as_unavailable() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    harness
+        .host
+        .work_intent_rejected
+        .store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .prepare_send_message_intent(
+                &harness.host_id,
+                "mobile-intent-1",
+                &URL_SAFE_NO_PAD.encode([11_u8; 16]),
+                &"ab".repeat(32),
+            )
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
     );
 }
 

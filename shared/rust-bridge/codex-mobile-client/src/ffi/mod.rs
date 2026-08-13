@@ -62,7 +62,8 @@ pub use remora_link_v2::{
     AppRemoraLinkPairingCode, AppRemoraLinkPairingOutcome, AppRemoraLinkPendingApproval,
     AppRemoraLinkReconnectAttempt, AppRemoraLinkReconnectBatch, AppRemoraLinkReconnectResult,
     AppRemoraLinkRevocationOutcome, AppRemoraLinkRuntimeOffer, AppRemoraLinkScope,
-    AppRemoraLinkTransportIdentityBackend, AppRemoraLinkTransportIdentityError, RemoraLinkError,
+    AppRemoraLinkTransportIdentityBackend, AppRemoraLinkTransportIdentityError,
+    AppRemoraLinkWorkIntentOutcome, RemoraLinkError,
 };
 pub use remote_path::RemotePath;
 pub use ssh::{AppSshBridgeConnectResult, AppSshConnectionResult, AppSshSessionResult, SshBridge};

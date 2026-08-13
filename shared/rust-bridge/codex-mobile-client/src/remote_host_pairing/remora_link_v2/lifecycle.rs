@@ -32,7 +32,8 @@ use super::v2_ports::{
 use super::wire::{
     AgentInfoV2, ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
     InvitationInspectionV2, PendingEnrollmentV2, RequestV2, ResponseV2, RestartStatusV2,
-    RevocationReceiptV2, SessionV2, WireError, derive_sas, valid_device_name, validate_policy,
+    RevocationReceiptV2, SessionV2, WireError, WorkIntentStatusV2, derive_sas, valid_device_name,
+    validate_policy,
 };
 use crate::remote_host_pairing::identity::V2Invite;
 
@@ -57,6 +58,22 @@ pub(crate) struct ReconnectOutcomeV2 {
 pub(crate) enum RestartOutcomeV2 {
     Succeeded { command_sequence: u64 },
     OutcomeUnknown { command_sequence: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkIntentOutcomeV2 {
+    Execute,
+    Reserved,
+    Succeeded { turn_id: String },
+    OutcomeUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkIntentOperationV2 {
+    Prepare,
+    Begin,
+    Complete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,6 +503,148 @@ impl PairingLifecycleV2 {
             .command_center_status
             .map(Some)
             .ok_or(LifecycleErrorV2::ProtocolViolation)
+    }
+
+    pub(crate) async fn prepare_send_message_intent(
+        &self,
+        host_id: &str,
+        intent_id: &str,
+        thread_id: &str,
+        request_fingerprint: &str,
+    ) -> Result<WorkIntentOutcomeV2, LifecycleErrorV2> {
+        self.send_message_work_intent(
+            host_id,
+            WorkIntentOperationV2::Prepare,
+            intent_id,
+            thread_id,
+            request_fingerprint,
+        )
+        .await
+    }
+
+    pub(crate) async fn begin_send_message_intent(
+        &self,
+        host_id: &str,
+        intent_id: &str,
+        thread_id: &str,
+        request_fingerprint: &str,
+    ) -> Result<WorkIntentOutcomeV2, LifecycleErrorV2> {
+        self.send_message_work_intent(
+            host_id,
+            WorkIntentOperationV2::Begin,
+            intent_id,
+            thread_id,
+            request_fingerprint,
+        )
+        .await
+    }
+
+    pub(crate) async fn complete_send_message_intent(
+        &self,
+        host_id: &str,
+        intent_id: &str,
+        thread_id: &str,
+        request_fingerprint: &str,
+    ) -> Result<WorkIntentOutcomeV2, LifecycleErrorV2> {
+        self.send_message_work_intent(
+            host_id,
+            WorkIntentOperationV2::Complete,
+            intent_id,
+            thread_id,
+            request_fingerprint,
+        )
+        .await
+    }
+
+    async fn send_message_work_intent(
+        &self,
+        host_id: &str,
+        operation: WorkIntentOperationV2,
+        intent_id: &str,
+        thread_id: &str,
+        request_fingerprint: &str,
+    ) -> Result<WorkIntentOutcomeV2, LifecycleErrorV2> {
+        let host_lock = self.host_lock(host_id).await;
+        let _operation = host_lock.lock().await;
+        let mut entry = self
+            .load(host_id)
+            .await?
+            .ok_or(LifecycleErrorV2::NotEnrolled)?;
+        if !matches!(entry.phase, JournalPhaseV2::Enrolled) {
+            return Err(LifecycleErrorV2::NotEnrolled);
+        }
+        let credential = entry
+            .credential
+            .clone()
+            .ok_or(LifecycleErrorV2::JournalCorrupt)?;
+        if !credential
+            .granted_scopes
+            .contains(&DeviceScopeV2::ConnectRuntime)
+        {
+            return Err(LifecycleErrorV2::InvalidSelection);
+        }
+
+        let request = match operation {
+            WorkIntentOperationV2::Prepare => RequestV2::PrepareSendMessageIntent {
+                v: super::wire::PROTOCOL_VERSION,
+                credential_id: credential.credential_id,
+                client_nonce: self.fresh_nonce(),
+                intent_id: intent_id.to_string(),
+                thread_id: thread_id.to_string(),
+                request_fingerprint: request_fingerprint.to_string(),
+            },
+            WorkIntentOperationV2::Begin => RequestV2::BeginSendMessageIntent {
+                v: super::wire::PROTOCOL_VERSION,
+                credential_id: credential.credential_id,
+                client_nonce: self.fresh_nonce(),
+                intent_id: intent_id.to_string(),
+                thread_id: thread_id.to_string(),
+                request_fingerprint: request_fingerprint.to_string(),
+            },
+            WorkIntentOperationV2::Complete => RequestV2::CompleteSendMessageIntent {
+                v: super::wire::PROTOCOL_VERSION,
+                credential_id: credential.credential_id,
+                client_nonce: self.fresh_nonce(),
+                intent_id: intent_id.to_string(),
+                thread_id: thread_id.to_string(),
+                request_fingerprint: request_fingerprint.to_string(),
+            },
+        };
+        request
+            .validate()
+            .map_err(|_| LifecycleErrorV2::InvalidSelection)?;
+        let started = self.begin_round(&mut entry, &request, false).await?;
+        let terminal = self
+            .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
+            .await?
+            .response;
+        if !terminal.ok
+            && terminal.error_code == Some(super::wire::ErrorCodeV2::InvalidRequest)
+            && terminal.work_intent.is_none()
+        {
+            return Ok(WorkIntentOutcomeV2::Unavailable);
+        }
+        let receipt = terminal
+            .work_intent
+            .as_ref()
+            .ok_or_else(|| map_terminal_error(&terminal))?;
+        match receipt.status {
+            WorkIntentStatusV2::Execute if terminal.ok => Ok(WorkIntentOutcomeV2::Execute),
+            WorkIntentStatusV2::Reserved if terminal.ok => Ok(WorkIntentOutcomeV2::Reserved),
+            WorkIntentStatusV2::Succeeded if terminal.ok => Ok(WorkIntentOutcomeV2::Succeeded {
+                turn_id: receipt
+                    .turn_id
+                    .clone()
+                    .ok_or(LifecycleErrorV2::ProtocolViolation)?,
+            }),
+            WorkIntentStatusV2::OutcomeUnknown
+                if !terminal.ok
+                    && terminal.error_code == Some(super::wire::ErrorCodeV2::OutcomeUnknown) =>
+            {
+                Ok(WorkIntentOutcomeV2::OutcomeUnknown)
+            }
+            _ => Err(LifecycleErrorV2::ProtocolViolation),
+        }
     }
 
     /// Restart one granted runtime with a lifetime-monotonic, at-most-once
@@ -1759,6 +1918,7 @@ fn map_terminal_error(response: &ResponseV2) -> LifecycleErrorV2 {
         }
         Some(super::wire::ErrorCodeV2::AgentUnavailable) => LifecycleErrorV2::AgentUnavailable,
         Some(super::wire::ErrorCodeV2::OutcomeUnknown) => LifecycleErrorV2::OutcomeUnknown,
+        Some(super::wire::ErrorCodeV2::WorkIntentRejected) => LifecycleErrorV2::InvalidSelection,
         Some(super::wire::ErrorCodeV2::InvalidRequest)
         | Some(super::wire::ErrorCodeV2::Internal)
         | None => LifecycleErrorV2::ProtocolViolation,

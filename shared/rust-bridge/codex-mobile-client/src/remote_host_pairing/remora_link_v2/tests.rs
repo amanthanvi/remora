@@ -130,6 +130,26 @@ fn command_center_status_request() -> RequestV2 {
     .expect("published command-center status request is valid")
 }
 
+fn work_intent_thread_id() -> String {
+    URL_SAFE_NO_PAD.encode([11_u8; 16])
+}
+
+fn work_intent_fingerprint() -> String {
+    "ab".repeat(32)
+}
+
+fn work_intent_request(operation: &str) -> RequestV2 {
+    RequestV2::decode_json(
+        format!(
+            r#"{{"op":"{operation}","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
+            work_intent_thread_id(),
+            work_intent_fingerprint(),
+        )
+        .as_bytes(),
+    )
+    .expect("published work-intent request is valid")
+}
+
 fn command_center_status_json() -> serde_json::Value {
     serde_json::to_value(HostCommandCenterStatusV1 {
         version: 1,
@@ -214,6 +234,92 @@ fn command_center_status_uses_a_distinct_signed_operation_with_no_payload_fields
         request.terminal_correlation().unwrap(),
         RequestCorrelationV2::CommandCenterStatus { .. }
     ));
+}
+
+#[test]
+fn work_intent_operations_are_content_free_strict_and_phase_correlated() {
+    let prepare = work_intent_request("prepare_send_message_intent");
+    let begin = work_intent_request("begin_send_message_intent");
+    let complete = work_intent_request("complete_send_message_intent");
+    assert_eq!(
+        prepare.operation_payload_hash().unwrap(),
+        begin.operation_payload_hash().unwrap()
+    );
+    assert_eq!(
+        begin.operation_payload_hash().unwrap(),
+        complete.operation_payload_hash().unwrap()
+    );
+    for request in [&prepare, &begin, &complete] {
+        let value = serde_json::to_value(request).unwrap();
+        assert!(value.get("prompt").is_none());
+        assert!(value.get("payload").is_none());
+        assert!(value.get("message").is_none());
+    }
+
+    let forbidden = format!(
+        r#"{{"op":"prepare_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}","prompt":"secret"}}"#,
+        work_intent_thread_id(),
+        work_intent_fingerprint(),
+    );
+    assert_eq!(
+        RequestV2::decode_json(forbidden.as_bytes()),
+        Err(WireError::InvalidRequest)
+    );
+    let uppercase_fingerprint = format!(
+        r#"{{"op":"prepare_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
+        work_intent_thread_id(),
+        "AB".repeat(32),
+    );
+    assert_eq!(
+        RequestV2::decode_json(uppercase_fingerprint.as_bytes()),
+        Err(WireError::InvalidRequest)
+    );
+
+    let reserved = decode_response(serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "work_intent": {
+            "intent_id": "mobile-intent-1",
+            "thread_id": work_intent_thread_id(),
+            "status": "reserved",
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        reserved.validate_terminal_shape_for_request(
+            &begin,
+            &published_challenge(),
+            CLIENT_ENDPOINT_ID,
+        ),
+        Err(WireError::InvalidResponse)
+    );
+    assert_eq!(
+        reserved.validate_terminal_shape_for_request(
+            &complete,
+            &published_challenge(),
+            CLIENT_ENDPOINT_ID,
+        ),
+        Err(WireError::InvalidResponse)
+    );
+
+    let mismatched = decode_response(serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "work_intent": {
+            "intent_id": "different-intent",
+            "thread_id": work_intent_thread_id(),
+            "status": "execute",
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        mismatched.validate_terminal_shape_for_request(
+            &prepare,
+            &published_challenge(),
+            CLIENT_ENDPOINT_ID,
+        ),
+        Err(WireError::InvalidResponse)
+    );
 }
 
 #[test]
@@ -326,7 +432,7 @@ fn pinned_fixture_declares_the_exact_v2_domains_and_encoding() {
 }
 
 #[test]
-fn all_eight_requests_have_exact_canonical_json_shapes() {
+fn all_eleven_requests_have_exact_canonical_json_shapes() {
     let fixture = golden_vectors();
     let requests = [
         format!(
@@ -338,6 +444,21 @@ fn all_eight_requests_have_exact_canonical_json_shapes() {
         fixture.vector.list_agents_request_json,
         format!(
             r#"{{"op":"command_center_status","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}"}}"#
+        ),
+        format!(
+            r#"{{"op":"prepare_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
+            work_intent_thread_id(),
+            work_intent_fingerprint(),
+        ),
+        format!(
+            r#"{{"op":"begin_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
+            work_intent_thread_id(),
+            work_intent_fingerprint(),
+        ),
+        format!(
+            r#"{{"op":"complete_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
+            work_intent_thread_id(),
+            work_intent_fingerprint(),
         ),
         fixture.vector.restart_request_json,
         format!(
@@ -356,6 +477,9 @@ fn all_eight_requests_have_exact_canonical_json_shapes() {
         "enroll",
         "list_agents",
         "command_center_status",
+        "prepare_send_message_intent",
+        "begin_send_message_intent",
+        "complete_send_message_intent",
         "restart_agent",
         "connect",
         "revoke_self",
@@ -453,6 +577,15 @@ fn typed_responses_accept_every_terminal_result_shape() {
         "ok": true,
         "command_center_status": command_center_status_json()
     });
+    let work_intent = serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "work_intent": {
+            "intent_id": "mobile-intent-1",
+            "thread_id": work_intent_thread_id(),
+            "status": "execute"
+        }
+    });
     let session = serde_json::json!({
         "v": 2,
         "ok": true,
@@ -466,6 +599,7 @@ fn typed_responses_accept_every_terminal_result_shape() {
         revocation,
         agents,
         command_center_status,
+        work_intent,
         session,
     ] {
         decode_response(response).unwrap();
@@ -505,6 +639,9 @@ fn response_envelope_invariants_reject_ambiguous_or_incoherent_results() {
         serde_json::json!({"v": 2, "ok": true, "challenge": challenge, "agents": []}),
         serde_json::json!({"v": 2, "ok": true, "agents": [], "session": {"attached": "fresh", "current_seq": 0, "floor_seq": 0}}),
         serde_json::json!({"v": 2, "ok": true, "restart": {"agent": "codex", "idempotency_key": "restart-1", "command_sequence": 1, "status": "outcome_unknown"}}),
+        serde_json::json!({"v": 2, "ok": true, "work_intent": {"intent_id": "mobile-intent-1", "thread_id": work_intent_thread_id(), "turn_id": URL_SAFE_NO_PAD.encode([12_u8; 16]), "status": "execute"}}),
+        serde_json::json!({"v": 2, "ok": true, "work_intent": {"intent_id": "mobile-intent-1", "thread_id": work_intent_thread_id(), "status": "succeeded"}}),
+        serde_json::json!({"v": 2, "ok": true, "work_intent": {"intent_id": "mobile-intent-1", "thread_id": work_intent_thread_id(), "status": "outcome_unknown"}}),
     ];
     for value in invalid {
         assert_eq!(decode_response(value), Err(WireError::InvalidResponse));
@@ -520,6 +657,18 @@ fn response_envelope_invariants_reject_ambiguous_or_incoherent_results() {
     decode_response(serde_json::json!({
         "v": 2,
         "ok": false,
+        "error_code": "outcome_unknown",
+        "error": "operation outcome unknown"
+    }))
+    .unwrap();
+    decode_response(serde_json::json!({
+        "v": 2,
+        "ok": false,
+        "work_intent": {
+            "intent_id": "mobile-intent-1",
+            "thread_id": work_intent_thread_id(),
+            "status": "outcome_unknown"
+        },
         "error_code": "outcome_unknown",
         "error": "operation outcome unknown"
     }))
@@ -558,7 +707,7 @@ fn assert_correlated_exchange(
 }
 
 #[test]
-fn challenge_and_terminal_results_correlate_to_all_eight_operations() {
+fn challenge_and_terminal_results_correlate_to_all_eleven_operations() {
     let inspect = RequestV2::decode_json(
         format!(
             r#"{{"op":"inspect_invitation","v":2,"invitation_id":"{INVITATION_ID}","secret":"{INVITATION_SECRET}","device_public_key":"{DEVICE_PUBLIC_KEY}","client_nonce":"{CLIENT_NONCE}"}}"#
@@ -623,6 +772,31 @@ fn challenge_and_terminal_results_correlate_to_all_eight_operations() {
             "command_center_status": command_center_status_json()
         }),
     );
+
+    for (operation, status, ok) in [
+        ("prepare_send_message_intent", "reserved", true),
+        ("begin_send_message_intent", "execute", true),
+        ("complete_send_message_intent", "succeeded", true),
+    ] {
+        let mut terminal = serde_json::json!({
+            "v": 2,
+            "ok": ok,
+            "work_intent": {
+                "intent_id": "mobile-intent-1",
+                "thread_id": work_intent_thread_id(),
+                "status": status,
+            }
+        });
+        if status == "succeeded" {
+            terminal["work_intent"]["turn_id"] =
+                serde_json::json!(URL_SAFE_NO_PAD.encode([12_u8; 16]));
+        }
+        assert_correlated_exchange(
+            work_intent_request(operation),
+            published_challenge(),
+            terminal,
+        );
+    }
 
     let fixture = golden_vectors();
     let restart = RequestV2::decode_json(fixture.vector.restart_request_json.as_bytes()).unwrap();

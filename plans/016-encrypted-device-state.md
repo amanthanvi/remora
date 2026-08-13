@@ -46,5 +46,30 @@ protects pinned Threads, queued intents, open review notes, and explicitly
 protected documents. iOS and Android rebuild only the exact disposable cache
 files and retain the secure master key.
 
-Remaining: authoritative Host delivery worker integration and end-to-end
-offline compose/reconnect delivery coverage.
+The pinned Link/Remora contract now supplies the missing at-most-once Host
+fence for send-message delivery. Its three authenticated, content-free control
+operations expose only opaque intent/Thread IDs and a SHA-256 request
+fingerprint; prompts remain in the encrypted provider stream. Shared Rust
+validates all eleven Link v2 operations, rejects cross-phase or cross-intent
+receipts, and exports the same typed prepare/begin/complete outcomes to Swift
+and Kotlin. A signed `invalid_request` from an older Link becomes explicit
+`Unavailable` with bounded Rust-owned guidance; it is never inferred from a
+provider name or protocol-version threshold. A current Link uses the distinct
+`work_intent_rejected` terminal code for identity/fingerprint/state conflicts,
+so those failures cannot be misreported as missing support. A dispatch replay
+is explicit `OutcomeUnknown` and never silently reexecutes.
+
+Remaining: map provider session Threads to their durable Host Thread IDs, drive
+the encrypted SQLite rows through this fence inside the Rust runtime, reconcile
+an authoritative provider turn acknowledgement, and add end-to-end offline
+compose/reconnect coverage. A crash after the durable begin fence but before
+provider transmission remains recoverable only through authoritative history;
+the worker must not acknowledge or retry that row until the mapping and
+reconciliation path can decide it safely.
+
+Validation at Link `94e20108739b89d726f54804458416ab10d9cadb`:
+Link format, all-target/all-feature clippy with warnings denied, and the full
+locked/frozen workspace suite pass; the focused mobile Link-v2 suite passes
+94 tests. Remora's canonical native verifier passes 18 generated-binding
+hardening tests, 1,097 shared Rust tests, 266 iOS tests, and the Android unit
+test build.

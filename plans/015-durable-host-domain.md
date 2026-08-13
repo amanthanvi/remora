@@ -3,7 +3,7 @@
 Status: **IN PROGRESS**
 Tracker: [#25](https://github.com/amanthanvi/remora/issues/25)
 Baselines: Remora `f9dbfc7a4453e14cb508211046ba6835bdc4a5c0`; Link `42e27678cda63bda440a8f6620344f10baefea4f`
-Pinned implementation: Link `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`
+Pinned implementation: Link `94e20108739b89d726f54804458416ab10d9cadb`
 Depends on: Plan 014
 
 ## Scope and ownership
@@ -39,3 +39,14 @@ runtime/provider bindings, missing or cross-Thread session/checkpoint/route
 references, invalid Git OIDs/hidden refs, duplicate model IDs/profiles, and
 backwards archive/completion timestamps. Full Project/Working Copy/Thread
 lifecycle mutation exposure remains before closure.
+
+The Host catalog now also owns bounded send-message work-intent receipts. A
+credential-scoped prepare → dispatch-fence → success sequence is journaled
+before acknowledgement, is bound to the exact origin credential, durable
+Thread ID, and lowercase SHA-256 request fingerprint, and can never transition
+backwards or be deleted/rebound through a catalog update. A replay after the
+dispatch fence returns `outcome_unknown` rather than authorizing a duplicate
+provider send. Snapshot-mirror failure after journal fsync now advances live
+state to the durable generation and reports committed-unknown, closing a
+pre-existing journal/live-state split. Full Link workspace tests and clippy
+pass at the pinned revision.

@@ -43,8 +43,8 @@ use crate::remote_host_pairing::remora_link_v2::{
     JournalPortErrorV2, JournalPortV2, LifecycleErrorV2, MutationOutcomeV2, PairingJournalEntryV2,
     PairingLifecycleV2, ReconnectOutcomeV2, RequestCorrelationV2, RequestV2, ResponseV2,
     RestartDispositionV2, RestartOutcomeV2, RetainedAttachmentRegistryV2, StartedExchangeV2,
-    connect_runtime_client_v2, read_response_frame, read_response_frame_bounded, write_proof_frame,
-    write_request_frame,
+    WorkIntentOutcomeV2, connect_runtime_client_v2, read_response_frame,
+    read_response_frame_bounded, write_proof_frame, write_request_frame,
 };
 use crate::session::connection::{
     RemoteSessionExtras, RuntimeRemoteSessionResource, ServerConfig, ServerSession,
@@ -454,6 +454,15 @@ pub enum AppRemoraLinkRevocationOutcome {
 pub enum AppRemoraLinkRestartOutcome {
     Succeeded { command_sequence: u64 },
     OutcomeUnknown { command_sequence: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppRemoraLinkWorkIntentOutcome {
+    Execute,
+    Reserved,
+    Succeeded { turn_id: String },
+    OutcomeUnknown,
+    Unavailable { reason: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -1154,6 +1163,63 @@ impl AppClient {
             .lifecycle
             .acknowledge_unknown_restart(&host_id)
             .await
+            .map_err(Into::into)
+    }
+
+    /// Reserve one device-owned send-message intent on its authoritative Host.
+    /// This control request carries only opaque IDs and a SHA-256 fingerprint.
+    pub async fn prepare_remora_link_send_message_intent(
+        &self,
+        host_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    ) -> Result<AppRemoraLinkWorkIntentOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        configured
+            .lifecycle
+            .prepare_send_message_intent(&host_id, &intent_id, &thread_id, &request_fingerprint)
+            .await
+            .map(project_work_intent_outcome)
+            .map_err(Into::into)
+    }
+
+    /// Durably fence a prepared intent immediately before provider dispatch.
+    /// Only `Execute` authorizes the caller to send the retained message.
+    pub async fn begin_remora_link_send_message_intent(
+        &self,
+        host_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    ) -> Result<AppRemoraLinkWorkIntentOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        configured
+            .lifecycle
+            .begin_send_message_intent(&host_id, &intent_id, &thread_id, &request_fingerprint)
+            .await
+            .map(project_work_intent_outcome)
+            .map_err(Into::into)
+    }
+
+    /// Record success only after the provider's authoritative turn-start
+    /// acknowledgement has reconciled through the shared Rust client.
+    pub async fn complete_remora_link_send_message_intent(
+        &self,
+        host_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    ) -> Result<AppRemoraLinkWorkIntentOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        configured
+            .lifecycle
+            .complete_send_message_intent(&host_id, &intent_id, &thread_id, &request_fingerprint)
+            .await
+            .map(project_work_intent_outcome)
             .map_err(Into::into)
     }
 
@@ -3385,6 +3451,20 @@ impl From<ReconnectOutcomeV2> for AppRemoraLinkReconnectResult {
             current_sequence: value.session.current_seq,
             floor_sequence: value.session.floor_seq,
         }
+    }
+}
+
+fn project_work_intent_outcome(value: WorkIntentOutcomeV2) -> AppRemoraLinkWorkIntentOutcome {
+    match value {
+        WorkIntentOutcomeV2::Execute => AppRemoraLinkWorkIntentOutcome::Execute,
+        WorkIntentOutcomeV2::Reserved => AppRemoraLinkWorkIntentOutcome::Reserved,
+        WorkIntentOutcomeV2::Succeeded { turn_id } => {
+            AppRemoraLinkWorkIntentOutcome::Succeeded { turn_id }
+        }
+        WorkIntentOutcomeV2::OutcomeUnknown => AppRemoraLinkWorkIntentOutcome::OutcomeUnknown,
+        WorkIntentOutcomeV2::Unavailable => AppRemoraLinkWorkIntentOutcome::Unavailable {
+            reason: "Connected Link does not support durable work intents".to_string(),
+        },
     }
 }
 

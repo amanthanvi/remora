@@ -75,22 +75,26 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 014 has the typed capability/availability seam, bounded Mission Control
   and Sessions projections, fail-closed raw transport policy, generated
   bindings, Rust tests, and authenticated Link-declared capability hydration at
-  `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`. Connected Host status now lives
+  `94e20108739b89d726f54804458416ab10d9cadb`. Connected Host status now lives
   in an independently invalidated Rust cache with bounded stable projection and
   thin Swift/Kotlin observation. Native journey consumption remains before
   closure.
 - Plan 015 has the exact-pinned Link implementation at
-  `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`: atomic snapshot, checksum
+  `94e20108739b89d726f54804458416ab10d9cadb`: atomic snapshot, checksum
   recovery journal, locking, permissions, durable domain records, restart
   tests, grant-filtered bounded capability status, and fail-closed bounds plus
-  relational validation for every durable catalog collection. Full lifecycle
-  mutation exposure remains before closure.
+  relational validation for every durable catalog collection. The same catalog
+  now durably fences content-free send-message intent receipts and treats a
+  replay after dispatch as outcome-unknown; the journal/live-state commit
+  boundary is also crash-safe. Full lifecycle mutation exposure remains before
+  closure.
 - Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
   search primitives, native Keychain/Keystore handoff, backup exclusion,
   corruption recovery, organization/review APIs, persistent terminal-attention
   state, batched/coalesced encrypted Sessions indexing, per-Host freshness, and
-  focused Rust/iOS/Android tests. Authoritative delivery orchestration remains
-  before closure.
+  focused Rust/iOS/Android tests. The Host at-most-once intent fence and typed
+  mobile control seam are implemented; durable Host/provider Thread mapping
+  and authoritative delivery orchestration remain before closure.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and

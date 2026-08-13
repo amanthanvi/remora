@@ -10,7 +10,8 @@ use p256::ecdsa::{Signature, VerifyingKey};
 use remora_bridge_core::command_center::{
     FeatureAvailability as LinkFeatureAvailability, HostCapabilitiesV1 as LinkHostCapabilitiesV1,
     HostCommandCenterStatusV1, MAX_DISPLAY_LABEL_BYTES, MAX_MODELS_PER_PROVIDER,
-    MAX_PROVIDER_INSTANCES, RuntimeCapabilitiesV1 as LinkRuntimeCapabilitiesV1,
+    MAX_PROVIDER_INSTANCES, MAX_WORK_INTENT_ID_BYTES,
+    RuntimeCapabilitiesV1 as LinkRuntimeCapabilitiesV1,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -90,6 +91,30 @@ pub(crate) enum RequestV2 {
         credential_id: String,
         client_nonce: String,
     },
+    PrepareSendMessageIntent {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
+    BeginSendMessageIntent {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
+    CompleteSendMessageIntent {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
     RestartAgent {
         v: u32,
         credential_id: String,
@@ -164,6 +189,24 @@ pub(crate) enum RequestCorrelationV2 {
     CommandCenterStatus {
         credential_id: String,
     },
+    PrepareSendMessageIntent {
+        credential_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
+    BeginSendMessageIntent {
+        credential_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
+    CompleteSendMessageIntent {
+        credential_id: String,
+        intent_id: String,
+        thread_id: String,
+        request_fingerprint: String,
+    },
     RestartAgent {
         credential_id: String,
         agent: String,
@@ -199,6 +242,9 @@ impl RequestV2 {
             Self::Enroll { .. } => "enroll",
             Self::ListAgents { .. } => "list_agents",
             Self::CommandCenterStatus { .. } => "command_center_status",
+            Self::PrepareSendMessageIntent { .. } => "prepare_send_message_intent",
+            Self::BeginSendMessageIntent { .. } => "begin_send_message_intent",
+            Self::CompleteSendMessageIntent { .. } => "complete_send_message_intent",
             Self::RestartAgent { .. } => "restart_agent",
             Self::Connect { .. } => "connect",
             Self::RevokeSelf { .. } => "revoke_self",
@@ -211,6 +257,9 @@ impl RequestV2 {
             | Self::Enroll { v, .. }
             | Self::ListAgents { v, .. }
             | Self::CommandCenterStatus { v, .. }
+            | Self::PrepareSendMessageIntent { v, .. }
+            | Self::BeginSendMessageIntent { v, .. }
+            | Self::CompleteSendMessageIntent { v, .. }
             | Self::RestartAgent { v, .. }
             | Self::Connect { v, .. }
             | Self::RevokeSelf { v, .. }
@@ -223,6 +272,9 @@ impl RequestV2 {
             | Self::Enroll { client_nonce, .. }
             | Self::ListAgents { client_nonce, .. }
             | Self::CommandCenterStatus { client_nonce, .. }
+            | Self::PrepareSendMessageIntent { client_nonce, .. }
+            | Self::BeginSendMessageIntent { client_nonce, .. }
+            | Self::CompleteSendMessageIntent { client_nonce, .. }
             | Self::RestartAgent { client_nonce, .. }
             | Self::Connect { client_nonce, .. }
             | Self::RevokeSelf { client_nonce, .. }
@@ -234,6 +286,9 @@ impl RequestV2 {
             Self::InspectInvitation { .. } | Self::Enroll { .. } => None,
             Self::ListAgents { credential_id, .. }
             | Self::CommandCenterStatus { credential_id, .. }
+            | Self::PrepareSendMessageIntent { credential_id, .. }
+            | Self::BeginSendMessageIntent { credential_id, .. }
+            | Self::CompleteSendMessageIntent { credential_id, .. }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -271,6 +326,42 @@ impl RequestV2 {
                     credential_id: credential_id.clone(),
                 }
             }
+            Self::PrepareSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => RequestCorrelationV2::PrepareSendMessageIntent {
+                credential_id: credential_id.clone(),
+                intent_id: intent_id.clone(),
+                thread_id: thread_id.clone(),
+                request_fingerprint: request_fingerprint.clone(),
+            },
+            Self::BeginSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => RequestCorrelationV2::BeginSendMessageIntent {
+                credential_id: credential_id.clone(),
+                intent_id: intent_id.clone(),
+                thread_id: thread_id.clone(),
+                request_fingerprint: request_fingerprint.clone(),
+            },
+            Self::CompleteSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => RequestCorrelationV2::CompleteSendMessageIntent {
+                credential_id: credential_id.clone(),
+                intent_id: intent_id.clone(),
+                thread_id: thread_id.clone(),
+                request_fingerprint: request_fingerprint.clone(),
+            },
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -341,6 +432,24 @@ impl RequestV2 {
             ]),
             Self::ListAgents { .. } => operation_payload_hash(&[]),
             Self::CommandCenterStatus { .. } => operation_payload_hash(&[]),
+            Self::PrepareSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | Self::BeginSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | Self::CompleteSendMessageIntent {
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => operation_payload_hash(&[intent_id, thread_id, request_fingerprint]),
             Self::RestartAgent {
                 agent,
                 idempotency_key,
@@ -399,6 +508,32 @@ impl RequestV2 {
             Self::ListAgents { credential_id, .. }
             | Self::CommandCenterStatus { credential_id, .. } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?
+            }
+            Self::PrepareSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | Self::BeginSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            }
+            | Self::CompleteSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_work_intent_id(intent_id)?;
+                valid_opaque(thread_id, OPAQUE_ID_BYTES)?;
+                valid_sha256(request_fingerprint)?;
             }
             Self::RestartAgent {
                 credential_id,
@@ -469,6 +604,29 @@ impl RequestCorrelationV2 {
             Self::CommandCenterStatus { credential_id } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
             }
+            Self::PrepareSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+            }
+            | Self::BeginSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+            }
+            | Self::CompleteSendMessageIntent {
+                credential_id,
+                intent_id,
+                thread_id,
+                request_fingerprint,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_work_intent_id(intent_id)?;
+                valid_opaque(thread_id, OPAQUE_ID_BYTES)?;
+                valid_sha256(request_fingerprint)?;
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -533,6 +691,9 @@ impl RequestCorrelationV2 {
             ),
             Self::ListAgents { credential_id }
             | Self::CommandCenterStatus { credential_id }
+            | Self::PrepareSendMessageIntent { credential_id, .. }
+            | Self::BeginSendMessageIntent { credential_id, .. }
+            | Self::CompleteSendMessageIntent { credential_id, .. }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -628,6 +789,7 @@ pub(crate) enum ErrorCodeV2 {
     PairingUnavailable,
     AuthorizationRequired,
     InvalidRequest,
+    WorkIntentRejected,
     AgentUnavailable,
     OutcomeUnknown,
     Internal,
@@ -639,6 +801,7 @@ impl ErrorCodeV2 {
             Self::PairingUnavailable => "pairing unavailable",
             Self::AuthorizationRequired => "device authorization required",
             Self::InvalidRequest => "invalid request",
+            Self::WorkIntentRejected => "work intent rejected",
             Self::AgentUnavailable => "agent unavailable",
             Self::OutcomeUnknown => "operation outcome unknown",
             Self::Internal => "request failed",
@@ -935,6 +1098,44 @@ impl RestartResultV2 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkIntentStatusV2 {
+    Execute,
+    Reserved,
+    Succeeded,
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkIntentReceiptV2 {
+    pub(crate) intent_id: String,
+    pub(crate) thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_id: Option<String>,
+    pub(crate) status: WorkIntentStatusV2,
+}
+
+impl WorkIntentReceiptV2 {
+    fn validate(&self) -> Result<(), WireError> {
+        valid_work_intent_id(&self.intent_id).map_err(|_| WireError::InvalidResponse)?;
+        valid_opaque(&self.thread_id, OPAQUE_ID_BYTES).map_err(|_| WireError::InvalidResponse)?;
+        if let Some(turn_id) = &self.turn_id {
+            valid_opaque(turn_id, OPAQUE_ID_BYTES).map_err(|_| WireError::InvalidResponse)?;
+        }
+        if matches!(
+            self.status,
+            WorkIntentStatusV2::Execute | WorkIntentStatusV2::Reserved
+        ) && self.turn_id.is_some()
+            || self.status == WorkIntentStatusV2::Succeeded && self.turn_id.is_none()
+        {
+            return Err(WireError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RevocationReceiptV2 {
@@ -977,6 +1178,8 @@ pub(crate) struct ResponseV2 {
     pub(crate) agents: Option<Vec<AgentInfoV2>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command_center_status: Option<HostCommandCenterStatusV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) work_intent: Option<WorkIntentReceiptV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<SessionV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1032,6 +1235,9 @@ impl ResponseV2 {
         if let Some(value) = &self.command_center_status {
             validate_command_center_status(value)?;
         }
+        if let Some(value) = &self.work_intent {
+            value.validate()?;
+        }
         if let Some(value) = &self.session {
             value.validate()?;
         }
@@ -1044,6 +1250,7 @@ impl ResponseV2 {
             self.restart.is_some(),
             self.agents.is_some(),
             self.command_center_status.is_some(),
+            self.work_intent.is_some(),
             self.session.is_some(),
         ]
         .into_iter()
@@ -1069,6 +1276,13 @@ impl ResponseV2 {
             {
                 return Err(WireError::InvalidResponse);
             }
+            if self
+                .work_intent
+                .as_ref()
+                .is_some_and(|value| value.status == WorkIntentStatusV2::OutcomeUnknown)
+            {
+                return Err(WireError::InvalidResponse);
+            }
             return Ok(());
         }
 
@@ -1076,18 +1290,31 @@ impl ResponseV2 {
         if self.error.as_deref() != Some(code.message()) {
             return Err(WireError::InvalidResponse);
         }
-        match (self.restart.as_ref(), self.revocation.as_ref()) {
-            (Some(restart), None)
+        match (
+            self.restart.as_ref(),
+            self.revocation.as_ref(),
+            self.work_intent.as_ref(),
+        ) {
+            (Some(restart), None, None)
                 if terminal_count == 1
                     && restart.status == RestartStatusV2::OutcomeUnknown
                     && *code == ErrorCodeV2::OutcomeUnknown =>
             {
                 Ok(())
             }
-            (None, Some(_)) if terminal_count == 1 && *code == ErrorCodeV2::OutcomeUnknown => {
+            (None, Some(_), None)
+                if terminal_count == 1 && *code == ErrorCodeV2::OutcomeUnknown =>
+            {
                 Ok(())
             }
-            (None, None) if terminal_count == 0 => Ok(()),
+            (None, None, Some(intent))
+                if terminal_count == 1
+                    && intent.status == WorkIntentStatusV2::OutcomeUnknown
+                    && *code == ErrorCodeV2::OutcomeUnknown =>
+            {
+                Ok(())
+            }
+            (None, None, None) if terminal_count == 0 => Ok(()),
             _ => Err(WireError::InvalidResponse),
         }
     }
@@ -1169,7 +1396,11 @@ impl ResponseV2 {
         if self.challenge.is_some() {
             return Err(WireError::InvalidResponse);
         }
-        if !self.ok && self.restart.is_none() && self.revocation.is_none() {
+        if !self.ok
+            && self.restart.is_none()
+            && self.revocation.is_none()
+            && self.work_intent.is_none()
+        {
             return Ok(());
         }
 
@@ -1214,6 +1445,48 @@ impl ResponseV2 {
                     return Err(WireError::InvalidResponse);
                 }
             }
+            RequestCorrelationV2::PrepareSendMessageIntent {
+                intent_id,
+                thread_id,
+                ..
+            } => validate_work_intent_correlation(
+                self.work_intent.as_ref(),
+                intent_id,
+                thread_id,
+                &[
+                    WorkIntentStatusV2::Execute,
+                    WorkIntentStatusV2::Reserved,
+                    WorkIntentStatusV2::Succeeded,
+                    WorkIntentStatusV2::OutcomeUnknown,
+                ],
+            )?,
+            RequestCorrelationV2::BeginSendMessageIntent {
+                intent_id,
+                thread_id,
+                ..
+            } => validate_work_intent_correlation(
+                self.work_intent.as_ref(),
+                intent_id,
+                thread_id,
+                &[
+                    WorkIntentStatusV2::Execute,
+                    WorkIntentStatusV2::Succeeded,
+                    WorkIntentStatusV2::OutcomeUnknown,
+                ],
+            )?,
+            RequestCorrelationV2::CompleteSendMessageIntent {
+                intent_id,
+                thread_id,
+                ..
+            } => validate_work_intent_correlation(
+                self.work_intent.as_ref(),
+                intent_id,
+                thread_id,
+                &[
+                    WorkIntentStatusV2::Succeeded,
+                    WorkIntentStatusV2::OutcomeUnknown,
+                ],
+            )?,
             RequestCorrelationV2::RestartAgent {
                 agent,
                 idempotency_key,
@@ -1589,6 +1862,9 @@ fn is_operation(value: &str) -> bool {
             | "enroll"
             | "list_agents"
             | "command_center_status"
+            | "prepare_send_message_intent"
+            | "begin_send_message_intent"
+            | "complete_send_message_intent"
             | "restart_agent"
             | "connect"
             | "revoke_self"
@@ -1641,6 +1917,31 @@ fn valid_idempotency(value: &str) -> Result<(), WireError> {
     if value.is_empty()
         || value.len() > MAX_IDEMPOTENCY_BYTES
         || value.chars().any(char::is_control)
+    {
+        Err(WireError::InvalidRequest)
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_work_intent_id(value: &str) -> Result<(), WireError> {
+    if value.is_empty()
+        || value.len() > MAX_WORK_INTENT_ID_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Err(WireError::InvalidRequest)
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_sha256(value: &str) -> Result<(), WireError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         Err(WireError::InvalidRequest)
     } else {
@@ -1884,6 +2185,22 @@ fn validate_revocation_correlation(
 ) -> Result<(), WireError> {
     let receipt = receipt.ok_or(WireError::InvalidResponse)?;
     if receipt.credential_id != credential_id || receipt.idempotency_key != idempotency_key {
+        return Err(WireError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_work_intent_correlation(
+    receipt: Option<&WorkIntentReceiptV2>,
+    intent_id: &str,
+    thread_id: &str,
+    allowed_statuses: &[WorkIntentStatusV2],
+) -> Result<(), WireError> {
+    let receipt = receipt.ok_or(WireError::InvalidResponse)?;
+    if receipt.intent_id != intent_id
+        || receipt.thread_id != thread_id
+        || !allowed_statuses.contains(&receipt.status)
+    {
         return Err(WireError::InvalidResponse);
     }
     Ok(())

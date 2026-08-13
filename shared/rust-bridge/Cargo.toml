@@ -25,10 +25,10 @@ codex-cloud-requirements = { path = "../third_party/codex/codex-rs/cloud-require
 codex-config = { path = "../third_party/codex/codex-rs/config" }
 codex-utils-absolute-path = { path = "../third_party/codex/codex-rs/utils/absolute-path" }
 codex-git-utils = { path = "../third_party/codex/codex-rs/git-utils" }
-remora-bridge-core = { git = "https://github.com/amanthanvi/remora-link.git", rev = "b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04" }
-remora-pi-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04" }
-remora-claude-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04" }
-remora-opencode-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04" }
+remora-bridge-core = { git = "https://github.com/amanthanvi/remora-link.git", rev = "94e20108739b89d726f54804458416ab10d9cadb" }
+remora-pi-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "94e20108739b89d726f54804458416ab10d9cadb" }
+remora-claude-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "94e20108739b89d726f54804458416ab10d9cadb" }
+remora-opencode-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "94e20108739b89d726f54804458416ab10d9cadb" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

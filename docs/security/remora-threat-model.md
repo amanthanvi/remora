@@ -142,6 +142,13 @@ cross-boundary validation or recovery.
 - The canonical Rust store/reconnect/reducer is implemented even though native
   caches, streaming merges, projection merges, and provider inference remain.
 - Bounded pairing frames reject oversized Remora Link control input.
+- Durable send-message intent receipts bind an originating credential, Host
+  Thread, and request fingerprint before dispatch. Replays after the dispatch
+  fence return an explicit unknown outcome and never authorize another send;
+  prompts and message payloads do not cross this control API. Older Hosts
+  negotiate explicit unavailability through the authenticated operation rather
+  than a provider-name or protocol-version guess; current Host conflicts use a
+  distinct terminal code and cannot masquerade as missing support.
 - Approval decisions are presented and submitted in-app; wake and lock-screen
   surfaces cannot decide them.
 - Native ChatGPT OAuth currently implements PKCE, state validation, and
@@ -150,21 +157,23 @@ cross-boundary validation or recovery.
   endpoints. Non-loopback endpoints fail closed with guidance to use Remora
   Link or SSH; credentials, query strings, and fragments are rejected.
 
-The new device SQLite foundation encrypts outbox payloads, search documents,
-and review-note bodies per record with a device-only Keychain/Keystore master
-key. It is a cache, not authority for live Host/provider state. Delivered
-organization/review workflows, rich awareness APIs, browser controller/CDP
-integration, worktrees/checkpoints, managed DigitalOcean lifecycle,
-passkey/recovery administration, signed Link updates, and release promotion are
-not yet Implemented.
+The device SQLite foundation encrypts outbox payloads, search documents, and
+review-note bodies per record with a device-only Keychain/Keystore master key;
+HMAC exact/prefix postings avoid plaintext search terms. It is a cache, not
+authority for live Host/provider state. Durable Host/provider Thread mapping,
+the authoritative outbox delivery worker, delivered organization/review
+workflows, rich awareness APIs, browser controller/CDP integration,
+worktrees/checkpoints, managed DigitalOcean lifecycle, passkey/recovery
+administration, signed Link updates, and release promotion are not yet
+implemented.
 
 Generated-HTML/WebView surfaces are removed, and the Android widget is
 constrained to status/count projection data.
 
 ### Planned controls
 
-- XChaCha20-Poly1305 record encryption for device work records and HMAC search
-  postings that do not disclose plaintext search terms.
+- Authoritative outbox delivery through durable Host/provider Thread mapping,
+  with history reconciliation for the crash window after the dispatch fence.
 - Passkey user verification, offline recovery enrollment/revocation, short
   sessions, and one-time websocket tickets.
 - Workspace confinement, argv allowlists, canonical path checks, and symlink
@@ -198,7 +207,8 @@ constrained to status/count projection data.
 | --- | --- | --- | --- | --- | --- |
 | Public relay compromise | Work content and routes; disclosure, tampering, or loss | Implemented | Keep relay work state end-to-end encrypted and make authenticated durable reconciliation authoritative. | Relay ciphertext, payload-shape, replay/drift, and opaque-wake tests. | Relay operators can observe metadata and deny service. |
 | Future admin HTTPS compromise | Owner authority and managed Hosts; unauthorized administration | Planned | Require passkey verification, short sessions, one-time websocket tickets, origin checks, and auditable admin changes before admin launch. | Authentication, origin, expiry, replay, revocation, and authorization negative tests. | Admin controls do not repair compromised owner devices or Hosts. |
-| Mobile device compromise and stolen pairing material | Device authority and saved work; impersonation or disclosure | Implemented / Planned | Implemented: non-exportable P-256 signing authority, scoped grants, epochs, and platform credential storage. Planned: encrypted work records, recovery enrollment, and broader revocation administration. | Key-provider tests, copied-invitation/replay tests, revoke/forget tests, encrypted-record migration, recovery, and locked-device tests. | A fully compromised unlocked device can invoke available authority and read displayed data. |
+| Mobile device compromise and stolen pairing material | Device authority and saved work; impersonation or disclosure | Implemented / Planned | Implemented: non-exportable P-256 signing authority, scoped grants, epochs, platform credential storage, and per-record encrypted work cache. Planned: recovery enrollment and broader revocation administration. | Key-provider tests, copied-invitation/replay tests, revoke/forget tests, encrypted-record migration, recovery, and locked-device tests. | A fully compromised unlocked device can invoke available authority and read displayed data. |
+| Offline intent replay or ambiguous provider dispatch | Duplicate owner messages, unintended provider work, or silent loss | Implemented / Planned | Implemented: encrypted device intent, credential/Thread/fingerprint-bound Host receipt, durable pre-dispatch fence, monotonic receipt states, and explicit outcome-unknown replay. Planned: durable Host/provider Thread mapping plus authoritative history reconciliation before retry or acknowledgement. | Wrong-fingerprint/credential/Thread, backwards transition, journal/snapshot failure, lost-response, forbidden-content, phase-correlation, and end-to-end reconnect tests. | A crash after the dispatch fence but before provider transmission can require explicit recovery; availability is preferred over a duplicate send. |
 | Malicious or compromised Host | Source, terminal, prompts, credentials, runtime authority; exfiltration or false results | Implemented / Planned | Implemented: pinned Link identity, scoped grants/runtime set, and stream closure on epoch change. Planned: workspace confinement and constrained command/provider/browser delegation. | Wrong-Host, narrowed-grant, revoke-stream, workspace escape, and capability-boundary tests. | A Host-account attacker able to replace Link controls that Host's data and behavior. |
 | ChatGPT OAuth redirect, token, account-binding, and credential custody failures | Account tokens and identity; account confusion or takeover | Implemented | Native PKCE, state validation, platform token custody, cross-account refresh rejection on both platforms, refresh-token preservation, and loopback-only bounded iOS callbacks. | Wrong-account refresh, state/PKCE, callback interface/port/path, timeout, duplicate-callback, cancellation, refresh omission, and secure-store tests. | A compromised device or provider endpoint can still misuse tokens legitimately available to it. |
 | WebRTC signaling, transcript, microphone, and audio privacy | Live audio, transcripts, presence; covert capture or unintended retention | Implemented / Planned | Implemented: platform microphone permission and native media session. Planned: explicit signaling-identity gates, bounded transcript retention, and separation from awareness/export. | Permission-denied, background/end-session, wrong-peer signaling, transcript deletion, log-redaction, and support-bundle tests. | Peers and a compromised endpoint can observe media they legitimately receive; network metadata remains visible. |
