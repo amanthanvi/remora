@@ -1227,7 +1227,9 @@ impl MobileClient {
         server_id: &str,
         params: upstream::TurnStartParams,
     ) -> Result<(), RpcError> {
-        self.start_turn_with_claim(server_id, params, None).await
+        self.start_turn_with_policy(server_id, params, None, true, None)
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn start_turn_with_claim(
@@ -1236,6 +1238,29 @@ impl MobileClient {
         params: upstream::TurnStartParams,
         autosend_claim_id: Option<String>,
     ) -> Result<(), RpcError> {
+        self.start_turn_with_policy(server_id, params, autosend_claim_id, true, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn start_outbox_turn(
+        self: &Arc<Self>,
+        server_id: &str,
+        params: upstream::TurnStartParams,
+        dispatch_fence: OutboxDispatchFence,
+    ) -> Result<OutboxTurnStartOutcome, RpcError> {
+        self.start_turn_with_policy(server_id, params, None, false, Some(dispatch_fence))
+            .await
+    }
+
+    async fn start_turn_with_policy(
+        self: &Arc<Self>,
+        server_id: &str,
+        params: upstream::TurnStartParams,
+        autosend_claim_id: Option<String>,
+        allow_local_queue: bool,
+        dispatch_fence: Option<OutboxDispatchFence>,
+    ) -> Result<OutboxTurnStartOutcome, RpcError> {
         self.get_session(server_id)?;
         let mut params = params;
         let mut autosend_claim_id = autosend_claim_id;
@@ -1280,6 +1305,24 @@ impl MobileClient {
         self.app_store
             .dismiss_plan_implementation_prompt(&thread_key);
         let thread_snapshot = self.snapshot_thread(&thread_key).ok();
+        if !allow_local_queue
+            && thread_snapshot.as_ref().is_some_and(|thread| {
+                thread.active_turn_id.is_some() || !thread.queued_follow_up_drafts.is_empty()
+            })
+        {
+            return Ok(OutboxTurnStartOutcome::Deferred);
+        }
+        if let Some(dispatch_fence) = dispatch_fence {
+            match dispatch_fence.await {
+                OutboxDispatchAuthorization::Execute => {}
+                OutboxDispatchAuthorization::HostAlreadySucceeded => {
+                    return Ok(OutboxTurnStartOutcome::HostAlreadySucceeded);
+                }
+                OutboxDispatchAuthorization::OutcomeUnknown => {
+                    return Ok(OutboxTurnStartOutcome::OutcomeUnknown);
+                }
+            }
+        }
         let mut causal_anchor_turn_id = autosend_claim_id.as_deref().and_then(|claim_id| {
             thread_snapshot.as_ref().and_then(|thread| {
                 thread
@@ -1297,7 +1340,7 @@ impl MobileClient {
                     .is_some_and(|draft| draft.preview.id == claim_id && draft.autosend_claimed)
             });
             if !claim_is_current {
-                return Ok(());
+                return Ok(OutboxTurnStartOutcome::Deferred);
             }
             if thread_snapshot
                 .as_ref()
@@ -1305,7 +1348,7 @@ impl MobileClient {
             {
                 self.app_store
                     .release_thread_follow_up_claim(&thread_key, claim_id);
-                return Ok(());
+                return Ok(OutboxTurnStartOutcome::Deferred);
             }
         } else if thread_snapshot.as_ref().is_some_and(|thread| {
             thread.active_turn_id.is_none() && !thread.queued_follow_up_drafts.is_empty()
@@ -1318,7 +1361,7 @@ impl MobileClient {
             }
             let Some(draft) = self.app_store.try_claim_first_queued_follow_up(&thread_key) else {
                 // Another autosend task already owns the retained first draft.
-                return Ok(());
+                return Ok(OutboxTurnStartOutcome::Deferred);
             };
             causal_anchor_turn_id = draft.causal_anchor_turn_id.clone();
             params = upstream::TurnStartParams {
@@ -1398,7 +1441,7 @@ impl MobileClient {
         // When a draft was queued, the user can Steer it or it will auto-send
         // when the turn finishes.  Don't also auto-steer here.
         if queued_draft.is_some() {
-            return Ok(());
+            return Ok(OutboxTurnStartOutcome::Deferred);
         }
 
         // If there's an active turn, try turn/steer first (injects input
@@ -1455,7 +1498,7 @@ impl MobileClient {
                 Ok(Ok((Ok(_), _guard))) => {
                     // Draft cleanup happens via TurnStarted / item upsert;
                     // don't remove here so the user sees the queued preview.
-                    return Ok(());
+                    return Ok(OutboxTurnStartOutcome::Accepted);
                 }
                 Ok(Ok((Err(error), _guard))) if turn_request_error_is_ambiguous(&error) => {
                     return Err(error);
@@ -1539,7 +1582,7 @@ impl MobileClient {
             result
         });
         match tokio::time::timeout(self.turn_request_timeout, &mut response_task).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => result.map(|()| OutboxTurnStartOutcome::Accepted),
             Ok(Err(error)) => Err(RpcError::Deserialization(format!(
                 "turn/start task failed to join: {error}"
             ))),

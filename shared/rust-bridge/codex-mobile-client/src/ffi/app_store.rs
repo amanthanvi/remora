@@ -10,6 +10,9 @@ use crate::ffi::command_center::{
     project_new_task_launch_availability, project_sessions_page_filtered_with_cache,
 };
 use crate::ffi::device_database::DeviceDatabaseBridge;
+use crate::ffi::remora_link_v2::{
+    AppRemoraLinkOfflineMessageEnqueueOutcome, AppRemoraLinkOutboxDeliveryReport,
+};
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
 use crate::types::{AppForkThreadFromMessageRequest, AppModeKind, AppStartTurnRequest, ThreadKey};
@@ -634,6 +637,30 @@ impl AppStore {
         })
     }
 
+    /// Persist one text-only send intent when its provider Thread already has
+    /// an authenticated durable Host binding. The encrypted device database
+    /// owns the draft until the Host acknowledges delivery.
+    pub async fn enqueue_remora_link_offline_message(
+        &self,
+        key: ThreadKey,
+        params: AppStartTurnRequest,
+    ) -> Result<AppRemoraLinkOfflineMessageEnqueueOutcome, ClientError> {
+        blocking_async!(self.rt, self.inner, |c| {
+            c.enqueue_remora_link_offline_message(key, params).await
+        })
+    }
+
+    /// Deliver a bounded batch through Host work-intent fences. This never
+    /// resends a post-dispatch ambiguous intent.
+    pub async fn deliver_remora_link_outbox(
+        &self,
+        limit: u32,
+    ) -> Result<AppRemoraLinkOutboxDeliveryReport, ClientError> {
+        blocking_async!(self.rt, self.inner, |c| {
+            c.deliver_remora_link_outbox(limit as usize).await
+        })
+    }
+
     pub async fn set_thread_collaboration_mode(
         &self,
         key: ThreadKey,
@@ -804,7 +831,12 @@ impl AppStore {
     ) -> Result<(), ClientError> {
         self.inner
             .configure_device_database(Arc::clone(&database.inner))
-            .map_err(|error| ClientError::Serialization(error.to_string()))
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
+        let client = Arc::clone(&self.inner);
+        self.rt.spawn(async move {
+            let _ = client.deliver_remora_link_outbox(10).await;
+        });
+        Ok(())
     }
 
     pub fn acknowledge_thread_attention(&self, key: ThreadKey) -> Result<(), ClientError> {

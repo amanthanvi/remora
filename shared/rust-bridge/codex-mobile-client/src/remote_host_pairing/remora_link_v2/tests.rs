@@ -2,8 +2,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use remora_bridge_core::command_center::{
     HostCapabilitiesV1, HostCommandCenterStatusV1, HostId, MAX_COMMAND_CENTER_STATUS_BYTES,
-    ModelDescriptor, ProviderInstance, ProviderInstanceId, ProviderReadiness,
-    RuntimeCapabilitiesV1,
+    MAX_DISPLAY_LABEL_BYTES, ModelDescriptor, ProviderInstance, ProviderInstanceId,
+    ProviderReadiness, RuntimeCapabilitiesV1,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -130,6 +130,46 @@ fn command_center_status_request() -> RequestV2 {
     .expect("published command-center status request is valid")
 }
 
+fn provider_thread_id() -> &'static str {
+    "provider-thread-1"
+}
+
+fn host_thread_id() -> String {
+    URL_SAFE_NO_PAD.encode([13_u8; 16])
+}
+
+fn bind_provider_thread_request() -> RequestV2 {
+    RequestV2::decode_json(
+        format!(
+            r#"{{"op":"bind_provider_thread","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","runtime_id":"codex","provider_thread_id":"{}"}}"#,
+            provider_thread_id(),
+        )
+        .as_bytes(),
+    )
+    .expect("published bind-provider-Thread request is valid")
+}
+
+fn resolve_thread_binding_request() -> RequestV2 {
+    RequestV2::decode_json(
+        format!(
+            r#"{{"op":"resolve_thread_binding","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","thread_id":"{}"}}"#,
+            host_thread_id(),
+        )
+        .as_bytes(),
+    )
+    .expect("published resolve-Thread-binding request is valid")
+}
+
+fn thread_binding_json() -> serde_json::Value {
+    serde_json::json!({
+        "thread_id": host_thread_id(),
+        "provider_session_id": URL_SAFE_NO_PAD.encode([14_u8; 16]),
+        "provider_instance_id": URL_SAFE_NO_PAD.encode([15_u8; 16]),
+        "runtime_id": "codex",
+        "provider_thread_id": provider_thread_id(),
+    })
+}
+
 fn work_intent_thread_id() -> String {
     URL_SAFE_NO_PAD.encode([11_u8; 16])
 }
@@ -234,6 +274,74 @@ fn command_center_status_uses_a_distinct_signed_operation_with_no_payload_fields
         request.terminal_correlation().unwrap(),
         RequestCorrelationV2::CommandCenterStatus { .. }
     ));
+}
+
+#[test]
+fn provider_thread_binding_is_content_free_bounded_and_strictly_correlated() {
+    let bind = bind_provider_thread_request();
+    let resolve = resolve_thread_binding_request();
+    for request in [&bind, &resolve] {
+        let value = serde_json::to_value(request).unwrap();
+        for forbidden in ["prompt", "payload", "path", "transcript", "command"] {
+            assert!(value.get(forbidden).is_none());
+        }
+    }
+
+    let oversized = format!(
+        r#"{{"op":"bind_provider_thread","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","runtime_id":"codex","provider_thread_id":"{}"}}"#,
+        "x".repeat(MAX_DISPLAY_LABEL_BYTES + 1),
+    );
+    assert_eq!(
+        RequestV2::decode_json(oversized.as_bytes()),
+        Err(WireError::InvalidRequest)
+    );
+
+    let terminal = decode_response(serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "thread_binding": thread_binding_json(),
+    }))
+    .unwrap();
+    terminal
+        .validate_terminal_shape_for_request(&bind, &published_challenge(), CLIENT_ENDPOINT_ID)
+        .unwrap();
+    terminal
+        .validate_terminal_shape_for_request(&resolve, &published_challenge(), CLIENT_ENDPOINT_ID)
+        .unwrap();
+
+    let mut wrong_runtime = thread_binding_json();
+    wrong_runtime["runtime_id"] = serde_json::json!("claude");
+    let wrong_runtime = decode_response(serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "thread_binding": wrong_runtime,
+    }))
+    .unwrap();
+    assert_eq!(
+        wrong_runtime.validate_terminal_shape_for_request(
+            &bind,
+            &published_challenge(),
+            CLIENT_ENDPOINT_ID,
+        ),
+        Err(WireError::InvalidResponse)
+    );
+
+    let mut wrong_thread = thread_binding_json();
+    wrong_thread["thread_id"] = serde_json::json!(URL_SAFE_NO_PAD.encode([16_u8; 16]));
+    let wrong_thread = decode_response(serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "thread_binding": wrong_thread,
+    }))
+    .unwrap();
+    assert_eq!(
+        wrong_thread.validate_terminal_shape_for_request(
+            &resolve,
+            &published_challenge(),
+            CLIENT_ENDPOINT_ID,
+        ),
+        Err(WireError::InvalidResponse)
+    );
 }
 
 #[test]
@@ -432,7 +540,7 @@ fn pinned_fixture_declares_the_exact_v2_domains_and_encoding() {
 }
 
 #[test]
-fn all_eleven_requests_have_exact_canonical_json_shapes() {
+fn all_thirteen_requests_have_exact_canonical_json_shapes() {
     let fixture = golden_vectors();
     let requests = [
         format!(
@@ -444,6 +552,14 @@ fn all_eleven_requests_have_exact_canonical_json_shapes() {
         fixture.vector.list_agents_request_json,
         format!(
             r#"{{"op":"command_center_status","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}"}}"#
+        ),
+        format!(
+            r#"{{"op":"bind_provider_thread","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","runtime_id":"codex","provider_thread_id":"{}"}}"#,
+            provider_thread_id(),
+        ),
+        format!(
+            r#"{{"op":"resolve_thread_binding","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","thread_id":"{}"}}"#,
+            host_thread_id(),
         ),
         format!(
             r#"{{"op":"prepare_send_message_intent","v":2,"credential_id":"{CREDENTIAL_ID}","client_nonce":"{CLIENT_NONCE}","intent_id":"mobile-intent-1","thread_id":"{}","request_fingerprint":"{}"}}"#,
@@ -477,6 +593,8 @@ fn all_eleven_requests_have_exact_canonical_json_shapes() {
         "enroll",
         "list_agents",
         "command_center_status",
+        "bind_provider_thread",
+        "resolve_thread_binding",
         "prepare_send_message_intent",
         "begin_send_message_intent",
         "complete_send_message_intent",
@@ -577,6 +695,11 @@ fn typed_responses_accept_every_terminal_result_shape() {
         "ok": true,
         "command_center_status": command_center_status_json()
     });
+    let thread_binding = serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "thread_binding": thread_binding_json()
+    });
     let work_intent = serde_json::json!({
         "v": 2,
         "ok": true,
@@ -599,6 +722,7 @@ fn typed_responses_accept_every_terminal_result_shape() {
         revocation,
         agents,
         command_center_status,
+        thread_binding,
         work_intent,
         session,
     ] {
@@ -638,6 +762,8 @@ fn response_envelope_invariants_reject_ambiguous_or_incoherent_results() {
         serde_json::json!({"v": 2, "ok": false, "error_code": "invalid_request", "error": "wrong"}),
         serde_json::json!({"v": 2, "ok": true, "challenge": challenge, "agents": []}),
         serde_json::json!({"v": 2, "ok": true, "agents": [], "session": {"attached": "fresh", "current_seq": 0, "floor_seq": 0}}),
+        serde_json::json!({"v": 2, "ok": true, "agents": [], "thread_binding": thread_binding_json()}),
+        serde_json::json!({"v": 2, "ok": false, "thread_binding": thread_binding_json(), "error_code": "thread_binding_rejected", "error": "provider Thread binding rejected"}),
         serde_json::json!({"v": 2, "ok": true, "restart": {"agent": "codex", "idempotency_key": "restart-1", "command_sequence": 1, "status": "outcome_unknown"}}),
         serde_json::json!({"v": 2, "ok": true, "work_intent": {"intent_id": "mobile-intent-1", "thread_id": work_intent_thread_id(), "turn_id": URL_SAFE_NO_PAD.encode([12_u8; 16]), "status": "execute"}}),
         serde_json::json!({"v": 2, "ok": true, "work_intent": {"intent_id": "mobile-intent-1", "thread_id": work_intent_thread_id(), "status": "succeeded"}}),
@@ -659,6 +785,13 @@ fn response_envelope_invariants_reject_ambiguous_or_incoherent_results() {
         "ok": false,
         "error_code": "outcome_unknown",
         "error": "operation outcome unknown"
+    }))
+    .unwrap();
+    decode_response(serde_json::json!({
+        "v": 2,
+        "ok": false,
+        "error_code": "thread_binding_rejected",
+        "error": "provider Thread binding rejected"
     }))
     .unwrap();
     decode_response(serde_json::json!({
@@ -707,7 +840,7 @@ fn assert_correlated_exchange(
 }
 
 #[test]
-fn challenge_and_terminal_results_correlate_to_all_eleven_operations() {
+fn challenge_and_terminal_results_correlate_to_all_thirteen_operations() {
     let inspect = RequestV2::decode_json(
         format!(
             r#"{{"op":"inspect_invitation","v":2,"invitation_id":"{INVITATION_ID}","secret":"{INVITATION_SECRET}","device_public_key":"{DEVICE_PUBLIC_KEY}","client_nonce":"{CLIENT_NONCE}"}}"#
@@ -771,6 +904,22 @@ fn challenge_and_terminal_results_correlate_to_all_eleven_operations() {
             "ok": true,
             "command_center_status": command_center_status_json()
         }),
+    );
+
+    let thread_binding_terminal = serde_json::json!({
+        "v": 2,
+        "ok": true,
+        "thread_binding": thread_binding_json()
+    });
+    assert_correlated_exchange(
+        bind_provider_thread_request(),
+        published_challenge(),
+        thread_binding_terminal.clone(),
+    );
+    assert_correlated_exchange(
+        resolve_thread_binding_request(),
+        published_challenge(),
+        thread_binding_terminal,
     );
 
     for (operation, status, ok) in [

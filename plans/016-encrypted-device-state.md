@@ -50,7 +50,7 @@ The pinned Link/Remora contract now supplies the missing at-most-once Host
 fence for send-message delivery. Its three authenticated, content-free control
 operations expose only opaque intent/Thread IDs and a SHA-256 request
 fingerprint; prompts remain in the encrypted provider stream. Shared Rust
-validates all eleven Link v2 operations, rejects cross-phase or cross-intent
+validates all thirteen Link v2 operations, rejects cross-phase or cross-intent
 receipts, and exports the same typed prepare/begin/complete outcomes to Swift
 and Kotlin. A signed `invalid_request` from an older Link becomes explicit
 `Unavailable` with bounded Rust-owned guidance; it is never inferred from a
@@ -59,17 +59,27 @@ provider name or protocol-version threshold. A current Link uses the distinct
 so those failures cannot be misreported as missing support. A dispatch replay
 is explicit `OutcomeUnknown` and never silently reexecutes.
 
-Remaining: map provider session Threads to their durable Host Thread IDs, drive
-the encrypted SQLite rows through this fence inside the Rust runtime, reconcile
-an authoritative provider turn acknowledgement, and add end-to-end offline
-compose/reconnect coverage. A crash after the durable begin fence but before
-provider transmission remains recoverable only through authoritative history;
-the worker must not acknowledge or retry that row until the mapping and
-reconciliation path can decide it safely.
+Shared Rust now binds provider Threads to durable Host Thread IDs after an
+authoritative start/resume/read, caches only bounded ID mappings, and resolves
+them from the Host on a cold delivery pass. Text-only offline intents enqueue
+in one encrypted SQLite transaction. The serialized worker pre-hydrates the
+provider Thread, checks active-turn state under the existing per-Thread send
+lock, crosses the Host dispatch fence only while idle, reuses the canonical
+turn-start ambiguity reconciler, completes the Host receipt only after the
+authoritative provider acknowledgement, and removes SQLite state only after
+Host `Succeeded`. Reconnect and database configuration both schedule bounded
+delivery; exponential retry is capped. Post-dispatch uncertainty remains
+`OutcomeUnknown` and is never resent automatically.
 
-Validation at Link `94e20108739b89d726f54804458416ab10d9cadb`:
+Remaining: native offline composer affordances, explicit user-facing recovery
+for an outcome-unknown dispatch, and device-level offline/reconnect journey
+coverage.
+
+Validation at Link `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3`:
 Link format, all-target/all-feature clippy with warnings denied, and the full
 locked/frozen workspace suite pass; the focused mobile Link-v2 suite passes
-94 tests. Remora's canonical native verifier passes 18 generated-binding
-hardening tests, 1,097 shared Rust tests, 266 iOS tests, and the Android unit
-test build.
+97 tests. Focused outbox persistence, direct-dispatch race, payload, and native
+database-configuration tests pass. Regenerated Swift/Kotlin bindings expose
+the same typed bind, enqueue, and bounded delivery outcomes. The canonical
+native verifier passes the full shared Rust suite, 266 iOS tests, and the
+Android debug unit-test build.

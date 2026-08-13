@@ -43,7 +43,7 @@ use crate::remote_host_pairing::remora_link_v2::{
     JournalPortErrorV2, JournalPortV2, LifecycleErrorV2, MutationOutcomeV2, PairingJournalEntryV2,
     PairingLifecycleV2, ReconnectOutcomeV2, RequestCorrelationV2, RequestV2, ResponseV2,
     RestartDispositionV2, RestartOutcomeV2, RetainedAttachmentRegistryV2, StartedExchangeV2,
-    WorkIntentOutcomeV2, connect_runtime_client_v2, read_response_frame,
+    ThreadBindingOutcomeV2, WorkIntentOutcomeV2, connect_runtime_client_v2, read_response_frame,
     read_response_frame_bounded, write_proof_frame, write_request_frame,
 };
 use crate::session::connection::{
@@ -55,7 +55,10 @@ use crate::session::remote_transport::{
 };
 use crate::store::ServerHealthSnapshot;
 use crate::transport::TransportError;
-use crate::types::AgentRuntimeInfo;
+use crate::types::{AgentRuntimeInfo, ThreadKey};
+
+mod outbox;
+pub use outbox::{AppRemoraLinkOfflineMessageEnqueueOutcome, AppRemoraLinkOutboxDeliveryReport};
 
 const NATIVE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 const HOST_START_TIMEOUT: Duration = Duration::from_secs(35);
@@ -68,6 +71,8 @@ const MAX_JOURNAL_CAS_ATTEMPTS: usize = 8;
 const MAX_CACHED_INVITATIONS: usize = 32;
 const MAX_PAIRING_CODE_BYTES: usize = 4_096 + 32;
 const MAX_LIVE_EXCHANGES: usize = 64;
+const MAX_CACHED_THREAD_BINDINGS: usize = 20_000;
+const REMORA_LINK_RUNTIME_URL: &str = "ws://remora-link-v2/runtime";
 const MAX_LIVE_EXCHANGE_AGE: Duration = Duration::from_secs(2 * 60);
 const MAX_RETAINED_ATTACHMENTS: usize = 64;
 const MAX_RETAINED_ATTACHMENT_AGE: Duration = Duration::from_secs(2 * 60);
@@ -465,6 +470,20 @@ pub enum AppRemoraLinkWorkIntentOutcome {
     Unavailable { reason: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppRemoraLinkThreadBindingOutcome {
+    Bound {
+        thread_id: String,
+        provider_session_id: String,
+        provider_instance_id: String,
+        runtime_id: String,
+        provider_thread_id: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum AppRemoraLinkPairingCancellationOutcome {
     Cancelled,
@@ -542,11 +561,40 @@ pub(crate) struct ConfiguredRemoraLink {
     host: Arc<IrohRemoraLinkHost>,
     invitations: Mutex<InvitationCache>,
     session_connect_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    thread_bindings: RwLock<HashMap<ThreadKey, String>>,
 }
 
 impl ConfiguredRemoraLink {
     pub(crate) fn close_shells_for_host(&self, host_id: &str) {
         self.host.shell_connections.close_host(host_id);
+    }
+
+    fn cache_thread_binding(&self, host_id: &str, outcome: &ThreadBindingOutcomeV2) {
+        let ThreadBindingOutcomeV2::Bound(binding) = outcome else {
+            return;
+        };
+        let key = ThreadKey {
+            server_id: host_id.to_string(),
+            thread_id: binding.provider_thread_id.clone(),
+        };
+        let mut bindings = self
+            .thread_bindings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !bindings.contains_key(&key) && bindings.len() >= MAX_CACHED_THREAD_BINDINGS {
+            if let Some(evicted) = bindings.keys().next().cloned() {
+                bindings.remove(&evicted);
+            }
+        }
+        bindings.insert(key, binding.thread_id.clone());
+    }
+
+    fn cached_host_thread_id(&self, key: &ThreadKey) -> Option<String> {
+        self.thread_bindings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
     }
 }
 
@@ -896,6 +944,43 @@ impl AppClient {
             &host_id,
             configured.lifecycle.command_center_status(&host_id).await,
         )
+    }
+
+    /// Bind one authoritative provider Thread to a durable Host Scratch
+    /// Thread. This request carries no prompt, transcript, path, or payload.
+    pub async fn bind_remora_link_provider_thread(
+        &self,
+        host_id: String,
+        runtime_id: String,
+        provider_thread_id: String,
+    ) -> Result<AppRemoraLinkThreadBindingOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        let outcome = configured
+            .lifecycle
+            .bind_provider_thread(&host_id, &runtime_id, &provider_thread_id)
+            .await
+            .map_err(RemoraLinkError::from)?;
+        configured.cache_thread_binding(&host_id, &outcome);
+        Ok(project_thread_binding_outcome(outcome))
+    }
+
+    /// Resolve one opaque durable Host Thread to its provider Thread after a
+    /// device restart. The Host re-checks the credential's runtime grant.
+    pub async fn resolve_remora_link_thread_binding(
+        &self,
+        host_id: String,
+        thread_id: String,
+    ) -> Result<AppRemoraLinkThreadBindingOutcome, RemoraLinkError> {
+        let _configuration = self.inner.remora_link_configuration.read().await;
+        let configured = self.configured_remora_link()?;
+        let outcome = configured
+            .lifecycle
+            .resolve_thread_binding(&host_id, &thread_id)
+            .await
+            .map_err(RemoraLinkError::from)?;
+        configured.cache_thread_binding(&host_id, &outcome);
+        Ok(project_thread_binding_outcome(outcome))
     }
 
     /// Decode, authenticate, and inspect a QR/paste value through one path.
@@ -1359,10 +1444,44 @@ fn reconcile_command_center_status_result(
 }
 
 impl crate::MobileClient {
-    /// Open one authenticated v2 shell attachment without registering an
-    /// app-server session. The durable v2 journal remains the sole authority:
-    /// `reconnect` rejects unknown hosts, unselected shell runtimes, and
-    /// credentials without `ConnectRuntime` before any attachment is taken.
+    /// Schedule a best-effort durable Host binding after an authoritative
+    /// provider start/resume/read succeeds. The provider RPC is never retried
+    /// or failed because Link binding is unavailable.
+    pub(crate) fn schedule_remora_link_thread_binding(
+        self: &Arc<Self>,
+        key: ThreadKey,
+        runtime_id: String,
+    ) {
+        let is_link_session = self
+            .sessions_read()
+            .get(&key.server_id)
+            .is_some_and(|session| {
+                session.config().websocket_url.as_deref() == Some(REMORA_LINK_RUNTIME_URL)
+            });
+        if !is_link_session {
+            return;
+        }
+        let client = Arc::clone(self);
+        tokio::spawn(async move {
+            let _configuration = client.remora_link_configuration.read().await;
+            let Some(configured) = remora_link_read(&client.remora_link).clone() else {
+                return;
+            };
+            match configured
+                .lifecycle
+                .bind_provider_thread(&key.server_id, &runtime_id, &key.thread_id)
+                .await
+            {
+                Ok(outcome) => configured.cache_thread_binding(&key.server_id, &outcome),
+                Err(error) => warn!(
+                    host_id = key.server_id,
+                    %error,
+                    "durable Remora Link Thread binding unavailable"
+                ),
+            }
+        });
+    }
+
     pub(crate) async fn open_remora_link_shell_transport(
         &self,
         host_id: &str,
@@ -1469,7 +1588,7 @@ impl crate::MobileClient {
     /// successful runtime owns exactly one `RemoteTransport` reconnect path.
     /// Shell is deliberately excluded from this app-server session.
     async fn connect_remora_link_runtime(
-        &self,
+        self: &Arc<Self>,
         configured: Arc<ConfiguredRemoraLink>,
         host_id: &str,
         force_cold_rebuild: bool,
@@ -1503,7 +1622,7 @@ impl crate::MobileClient {
                 .unwrap_or_else(|| "Remote Host".to_string()),
             host: entry.binding.node_id.clone(),
             port: 0,
-            websocket_url: Some("ws://remora-link-v2/runtime".to_string()),
+            websocket_url: Some(REMORA_LINK_RUNTIME_URL.to_string()),
             is_local: false,
             tls: false,
         };
@@ -1577,6 +1696,7 @@ impl crate::MobileClient {
                 connected_runtime_ids.sort();
                 self.refresh_remora_link_command_center_status(&configured, host_id)
                     .await;
+                self.schedule_remora_link_outbox_delivery();
                 return Ok(RemoraLinkRuntimeConnectOutcome {
                     server_id: host_id.to_string(),
                     connected_runtime_ids,
@@ -1725,6 +1845,7 @@ impl crate::MobileClient {
         self.attach_remote_session(host_id, session, runtime_infos);
         self.refresh_remora_link_command_center_status(&configured, host_id)
             .await;
+        self.schedule_remora_link_outbox_delivery();
         projection_guard.disarm();
         Ok(RemoraLinkRuntimeConnectOutcome {
             server_id: host_id.to_string(),
@@ -1839,6 +1960,7 @@ async fn build_configuration(
         host,
         invitations: Mutex::new(InvitationCache::default()),
         session_connect_locks: Mutex::new(HashMap::new()),
+        thread_bindings: RwLock::new(HashMap::new()),
     }))
 }
 
@@ -3464,6 +3586,23 @@ fn project_work_intent_outcome(value: WorkIntentOutcomeV2) -> AppRemoraLinkWorkI
         WorkIntentOutcomeV2::OutcomeUnknown => AppRemoraLinkWorkIntentOutcome::OutcomeUnknown,
         WorkIntentOutcomeV2::Unavailable => AppRemoraLinkWorkIntentOutcome::Unavailable {
             reason: "Connected Link does not support durable work intents".to_string(),
+        },
+    }
+}
+
+fn project_thread_binding_outcome(
+    value: ThreadBindingOutcomeV2,
+) -> AppRemoraLinkThreadBindingOutcome {
+    match value {
+        ThreadBindingOutcomeV2::Bound(binding) => AppRemoraLinkThreadBindingOutcome::Bound {
+            thread_id: binding.thread_id,
+            provider_session_id: binding.provider_session_id,
+            provider_instance_id: binding.provider_instance_id,
+            runtime_id: binding.runtime_id,
+            provider_thread_id: binding.provider_thread_id,
+        },
+        ThreadBindingOutcomeV2::Unavailable => AppRemoraLinkThreadBindingOutcome::Unavailable {
+            reason: "Connected Link does not support durable Thread binding".to_string(),
         },
     }
 }

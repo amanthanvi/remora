@@ -32,8 +32,8 @@ use super::v2_ports::{
 use super::wire::{
     AgentInfoV2, ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
     InvitationInspectionV2, PendingEnrollmentV2, RequestV2, ResponseV2, RestartStatusV2,
-    RevocationReceiptV2, SessionV2, WireError, WorkIntentStatusV2, derive_sas, valid_device_name,
-    validate_policy,
+    RevocationReceiptV2, SessionV2, ThreadBindingReceiptV2, WireError, WorkIntentStatusV2,
+    derive_sas, valid_device_name, validate_policy,
 };
 use crate::remote_host_pairing::identity::V2Invite;
 
@@ -66,6 +66,12 @@ pub(crate) enum WorkIntentOutcomeV2 {
     Reserved,
     Succeeded { turn_id: String },
     OutcomeUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadBindingOutcomeV2 {
+    Bound(ThreadBindingReceiptV2),
     Unavailable,
 }
 
@@ -502,6 +508,93 @@ impl PairingLifecycleV2 {
         terminal
             .command_center_status
             .map(Some)
+            .ok_or(LifecycleErrorV2::ProtocolViolation)
+    }
+
+    pub(crate) async fn bind_provider_thread(
+        &self,
+        host_id: &str,
+        runtime_id: &str,
+        provider_thread_id: &str,
+    ) -> Result<ThreadBindingOutcomeV2, LifecycleErrorV2> {
+        self.provider_thread_binding(host_id, Some(runtime_id), provider_thread_id)
+            .await
+    }
+
+    pub(crate) async fn resolve_thread_binding(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadBindingOutcomeV2, LifecycleErrorV2> {
+        self.provider_thread_binding(host_id, None, thread_id).await
+    }
+
+    async fn provider_thread_binding(
+        &self,
+        host_id: &str,
+        runtime_id: Option<&str>,
+        thread_id: &str,
+    ) -> Result<ThreadBindingOutcomeV2, LifecycleErrorV2> {
+        let host_lock = self.host_lock(host_id).await;
+        let _operation = host_lock.lock().await;
+        let mut entry = self
+            .load(host_id)
+            .await?
+            .ok_or(LifecycleErrorV2::NotEnrolled)?;
+        if !matches!(entry.phase, JournalPhaseV2::Enrolled) {
+            return Err(LifecycleErrorV2::NotEnrolled);
+        }
+        let credential = entry
+            .credential
+            .clone()
+            .ok_or(LifecycleErrorV2::JournalCorrupt)?;
+        if !credential
+            .granted_scopes
+            .contains(&DeviceScopeV2::ConnectRuntime)
+            || runtime_id.is_some_and(|runtime_id| {
+                !credential
+                    .selected_runtime_ids
+                    .iter()
+                    .any(|selected| selected == runtime_id)
+            })
+        {
+            return Err(LifecycleErrorV2::InvalidSelection);
+        }
+        let request = match runtime_id {
+            Some(runtime_id) => RequestV2::BindProviderThread {
+                v: super::wire::PROTOCOL_VERSION,
+                credential_id: credential.credential_id,
+                client_nonce: self.fresh_nonce(),
+                runtime_id: runtime_id.to_string(),
+                provider_thread_id: thread_id.to_string(),
+            },
+            None => RequestV2::ResolveThreadBinding {
+                v: super::wire::PROTOCOL_VERSION,
+                credential_id: credential.credential_id,
+                client_nonce: self.fresh_nonce(),
+                thread_id: thread_id.to_string(),
+            },
+        };
+        request
+            .validate()
+            .map_err(|_| LifecycleErrorV2::InvalidSelection)?;
+        let started = self.begin_round(&mut entry, &request, false).await?;
+        let terminal = self
+            .complete_round(&mut entry, &request, started, Some(credential.auth_epoch))
+            .await?
+            .response;
+        if !terminal.ok
+            && terminal.error_code == Some(super::wire::ErrorCodeV2::InvalidRequest)
+            && terminal.thread_binding.is_none()
+        {
+            return Ok(ThreadBindingOutcomeV2::Unavailable);
+        }
+        if !terminal.ok {
+            return Err(map_terminal_error(&terminal));
+        }
+        terminal
+            .thread_binding
+            .map(ThreadBindingOutcomeV2::Bound)
             .ok_or(LifecycleErrorV2::ProtocolViolation)
     }
 
@@ -1918,6 +2011,7 @@ fn map_terminal_error(response: &ResponseV2) -> LifecycleErrorV2 {
         }
         Some(super::wire::ErrorCodeV2::AgentUnavailable) => LifecycleErrorV2::AgentUnavailable,
         Some(super::wire::ErrorCodeV2::OutcomeUnknown) => LifecycleErrorV2::OutcomeUnknown,
+        Some(super::wire::ErrorCodeV2::ThreadBindingRejected) => LifecycleErrorV2::InvalidSelection,
         Some(super::wire::ErrorCodeV2::WorkIntentRejected) => LifecycleErrorV2::InvalidSelection,
         Some(super::wire::ErrorCodeV2::InvalidRequest)
         | Some(super::wire::ErrorCodeV2::Internal)

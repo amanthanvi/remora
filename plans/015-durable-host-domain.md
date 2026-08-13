@@ -3,7 +3,7 @@
 Status: **IN PROGRESS**
 Tracker: [#25](https://github.com/amanthanvi/remora/issues/25)
 Baselines: Remora `f9dbfc7a4453e14cb508211046ba6835bdc4a5c0`; Link `42e27678cda63bda440a8f6620344f10baefea4f`
-Pinned implementation: Link `94e20108739b89d726f54804458416ab10d9cadb`
+Pinned implementation: Link `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3`
 Depends on: Plan 014
 
 ## Scope and ownership
@@ -50,3 +50,16 @@ provider send. Snapshot-mirror failure after journal fsync now advances live
 state to the durable generation and reports committed-unknown, closing a
 pre-existing journal/live-state split. Full Link workspace tests and clippy
 pass at the pinned revision.
+
+The same pinned catalog now binds authoritative provider Threads to durable
+Host Scratch Threads, Provider Sessions, provider instances, and opaque route
+handles. Provider runtime/instance/session identity is immutable; an optional
+resumable provider ID may be populated once but never removed or rebound.
+Replay returns the same binding, cold resolution rechecks the runtime grant,
+and a runtime with multiple named instances refuses ambiguous implicit
+selection. The strict authenticated v2 operations carry IDs only and degrade
+to explicit unavailable on an older Link.
+
+Validation at the pinned Link revision includes format, all-target/all-feature
+clippy with warnings denied, and the full locked/frozen workspace suite. The
+matching Remora pin passes the canonical shared Rust, iOS, and Android verifier.

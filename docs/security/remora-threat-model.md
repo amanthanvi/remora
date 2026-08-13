@@ -160,9 +160,11 @@ cross-boundary validation or recovery.
 The device SQLite foundation encrypts outbox payloads, search documents, and
 review-note bodies per record with a device-only Keychain/Keystore master key;
 HMAC exact/prefix postings avoid plaintext search terms. It is a cache, not
-authority for live Host/provider state. Durable Host/provider Thread mapping,
-the authoritative outbox delivery worker, delivered organization/review
-workflows, rich awareness APIs, browser controller/CDP integration,
+authority for live Host/provider state. Durable Host/provider Thread binding
+and the serialized outbox delivery worker are implemented with content-free
+Host fences; outcome-unknown dispatches remain retained and are not replayed
+automatically. Explicit recovery UX, delivered organization/review workflows,
+rich awareness APIs, browser controller/CDP integration,
 worktrees/checkpoints, managed DigitalOcean lifecycle, passkey/recovery
 administration, signed Link updates, and release promotion are not yet
 implemented.
@@ -172,8 +174,8 @@ constrained to status/count projection data.
 
 ### Planned controls
 
-- Authoritative outbox delivery through durable Host/provider Thread mapping,
-  with history reconciliation for the crash window after the dispatch fence.
+- Explicit in-app recovery for outcome-unknown outbox dispatches after
+  authoritative provider/Host inspection; automatic replay remains forbidden.
 - Passkey user verification, offline recovery enrollment/revocation, short
   sessions, and one-time websocket tickets.
 - Workspace confinement, argv allowlists, canonical path checks, and symlink

@@ -21,7 +21,8 @@ pub(crate) use client::{
 #[allow(unused_imports)]
 pub(crate) use lifecycle::{
     EnrollmentOutcomeV2, ForgetOutcomeV2, LifecycleErrorV2, MutationOutcomeV2, PairingLifecycleV2,
-    ReconnectOutcomeV2, RecoveryOutcomeV2, RestartOutcomeV2, WorkIntentOutcomeV2,
+    ReconnectOutcomeV2, RecoveryOutcomeV2, RestartOutcomeV2, ThreadBindingOutcomeV2,
+    WorkIntentOutcomeV2,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime_transport::{
@@ -46,11 +47,11 @@ pub(crate) use wire::{
     ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
     EnrollmentTranscriptInput, ErrorCodeV2, InvitationInspectionV2, PendingEnrollmentV2,
     ProofChallengeV2, ProofTranscriptInput, ProofV2, RequestCorrelationV2, RequestV2, ResponseV2,
-    RestartResultV2, RestartStatusV2, RevocationReceiptV2, RuntimeOfferV2, SessionV2, WireError,
-    WorkIntentReceiptV2, WorkIntentStatusV2, derive_sas, encode_enrollment_transcript,
-    encode_host_policy_transcript, encode_proof_transcript, encode_prospective_credential_material,
-    enrollment_transcript_hash, host_policy_digest, operation_payload_hash,
-    prospective_credential_id, validate_policy,
+    RestartResultV2, RestartStatusV2, RevocationReceiptV2, RuntimeOfferV2, SessionV2,
+    ThreadBindingReceiptV2, WireError, WorkIntentReceiptV2, WorkIntentStatusV2, derive_sas,
+    encode_enrollment_transcript, encode_host_policy_transcript, encode_proof_transcript,
+    encode_prospective_credential_material, enrollment_transcript_hash, host_policy_digest,
+    operation_payload_hash, prospective_credential_id, validate_policy,
 };
 
 #[cfg(test)]

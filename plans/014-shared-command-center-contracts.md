@@ -27,7 +27,7 @@ change, an unbounded field, platform-side policy, or a non-loopback bypass.
 
 ## Progress evidence
 
-Remora now pins Link `94e20108739b89d726f54804458416ab10d9cadb` and exposes
+Remora now pins Link `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3` and exposes
 its authenticated, `InspectRuntimes`-scoped `command_center_status` operation as
 one handwritten UniFFI result. The client preserves `Unknown` for an older Link
 that returns the authenticated `invalid_request` terminal response, rejects
@@ -43,6 +43,7 @@ reports overflow, and does not clone hydrated timelines. Swift and Kotlin
 AppModels subscribe to the same narrow invalidation and expose the generated
 projection without adding platform policy.
 
-Focused Link/Rust protocol tests, binding generation, the iOS simulator build,
-the Android arm64 debug build, and Android unit tests pass. User-facing native
-journey consumption remains before closure.
+Focused Link/Rust protocol tests and binding generation pass. The canonical
+native verifier also passes the full shared Rust suite, 266 iOS tests, and the
+Android debug unit-test build. User-facing native journey consumption remains
+before closure.

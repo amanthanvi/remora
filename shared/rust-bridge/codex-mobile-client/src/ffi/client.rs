@@ -181,7 +181,8 @@ impl AppClient {
             let key = c
                 .apply_thread_start_response(&server_id, &response)
                 .map_err(ClientError::Serialization)?;
-            c.note_thread_runtime(key.clone(), runtime_kind);
+            c.note_thread_runtime(key.clone(), runtime_kind.clone());
+            c.schedule_remora_link_thread_binding(key.clone(), runtime_kind);
             Ok(key)
         })
     }
@@ -202,6 +203,8 @@ impl AppClient {
             let key = c
                 .apply_thread_resume_response(&server_id, &response)
                 .map_err(ClientError::Serialization)?;
+            let runtime_kind = c.runtime_for_thread(&key);
+            c.schedule_remora_link_thread_binding(key.clone(), runtime_kind);
             hydrate_thread_goal_if_available(c.as_ref(), &server_id, &key).await;
             Ok(key)
         })
@@ -539,6 +542,8 @@ impl AppClient {
             let key = c
                 .apply_thread_read_response(&server_id, &response)
                 .map_err(ClientError::Serialization)?;
+            let runtime_kind = c.runtime_for_thread(&key);
+            c.schedule_remora_link_thread_binding(key.clone(), runtime_kind);
             hydrate_thread_goal_if_available(c.as_ref(), &server_id, &key).await;
             Ok(key)
         })

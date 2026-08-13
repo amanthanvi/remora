@@ -75,26 +75,30 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 014 has the typed capability/availability seam, bounded Mission Control
   and Sessions projections, fail-closed raw transport policy, generated
   bindings, Rust tests, and authenticated Link-declared capability hydration at
-  `94e20108739b89d726f54804458416ab10d9cadb`. Connected Host status now lives
+  `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3`. Connected Host status now lives
   in an independently invalidated Rust cache with bounded stable projection and
   thin Swift/Kotlin observation. Native journey consumption remains before
   closure.
 - Plan 015 has the exact-pinned Link implementation at
-  `94e20108739b89d726f54804458416ab10d9cadb`: atomic snapshot, checksum
+  `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3`: atomic snapshot, checksum
   recovery journal, locking, permissions, durable domain records, restart
   tests, grant-filtered bounded capability status, and fail-closed bounds plus
   relational validation for every durable catalog collection. The same catalog
   now durably fences content-free send-message intent receipts and treats a
   replay after dispatch as outcome-unknown; the journal/live-state commit
-  boundary is also crash-safe. Full lifecycle mutation exposure remains before
-  closure.
+  boundary is also crash-safe. Provider Threads now bind idempotently to
+  durable Host Scratch Threads, sessions, instances, and route handles through
+  strict content-free v2 operations. Full lifecycle mutation exposure remains
+  before closure.
 - Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
   search primitives, native Keychain/Keystore handoff, backup exclusion,
   corruption recovery, organization/review APIs, persistent terminal-attention
   state, batched/coalesced encrypted Sessions indexing, per-Host freshness, and
-  focused Rust/iOS/Android tests. The Host at-most-once intent fence and typed
-  mobile control seam are implemented; durable Host/provider Thread mapping
-  and authoritative delivery orchestration remain before closure.
+  focused Rust/iOS/Android tests. Durable Host/provider Thread binding and the
+  bounded serialized Rust delivery worker now carry encrypted text intents
+  through prepare/begin/provider acknowledgement/Host completion without
+  automatically replaying post-dispatch uncertainty. Native offline composer
+  and recovery UX remain before closure.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and

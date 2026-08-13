@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
@@ -70,6 +71,24 @@ const DEFAULT_TURN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::f
 const POST_RECONNECT_REFRESH_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
 const MAX_CACHED_THREAD_ATTENTION_ROWS: usize = 100_000;
 const ATTENTION_SNOOZE_DURATION_MS: i64 = 60 * 60 * 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboxTurnStartOutcome {
+    Accepted,
+    Deferred,
+    HostAlreadySucceeded,
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboxDispatchAuthorization {
+    Execute,
+    HostAlreadySucceeded,
+    OutcomeUnknown,
+}
+
+pub(crate) type OutboxDispatchFence =
+    Pin<Box<dyn std::future::Future<Output = OutboxDispatchAuthorization> + Send + 'static>>;
 
 fn unix_time_ms() -> i64 {
     let millis = std::time::SystemTime::now()
@@ -177,6 +196,9 @@ pub struct MobileClient {
         Arc<RwLock<Option<Arc<crate::ffi::remora_link_v2::ConfiguredRemoraLink>>>>,
     /// Serializes Remora Link configuration replacement and endpoint teardown.
     pub(crate) remora_link_configuration: Arc<tokio::sync::RwLock<()>>,
+    /// Prevents overlapping device-outbox delivery passes. Host work-intent
+    /// receipts remain the cross-device idempotency authority.
+    pub(crate) outbox_delivery: Arc<tokio::sync::Mutex<()>>,
     /// Device-owned organization state. The database remains authoritative
     /// for persistence; this bounded cache keeps synchronous UI projections
     /// free of SQLite I/O.
@@ -272,6 +294,7 @@ impl MobileClient {
                 background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
                 remora_link: Arc::new(RwLock::new(None)),
                 remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
+                outbox_delivery: Arc::new(tokio::sync::Mutex::new(())),
                 device_database: Arc::new(RwLock::new(None)),
                 thread_attention: Arc::new(RwLock::new(HashMap::new())),
             }

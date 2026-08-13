@@ -621,7 +621,7 @@ mod tests {
     use crate::mobile_client::thread_operations::AMBIGUOUS_TURN_REPAIR_PAGE_LIMIT;
     use crate::session::connection::TestRequestHandler;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn lag_reconcile_gate_coalesces_concurrent_requests_into_one_follow_up() {
@@ -3119,6 +3119,129 @@ mod tests {
         assert_eq!(thread.queued_follow_up_drafts.len(), 1);
         assert_eq!(thread.queued_follow_up_drafts[0].preview.text, "second");
         assert!(!thread.queued_follow_up_drafts[0].autosend_claimed);
+    }
+
+    #[tokio::test]
+    async fn outbox_send_defers_before_host_dispatch_when_the_thread_is_active() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let key = ThreadKey {
+            server_id: server_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        client
+            .start_turn(server_id, turn_start_params(thread_id, "active"))
+            .await
+            .expect("first turn starts");
+        let dispatch_polled = Arc::new(AtomicBool::new(false));
+        let fence_polled = Arc::clone(&dispatch_polled);
+        let outcome = client
+            .start_outbox_turn(
+                server_id,
+                turn_start_params(thread_id, "offline"),
+                Box::pin(async move {
+                    fence_polled.store(true, Ordering::SeqCst);
+                    OutboxDispatchAuthorization::Execute
+                }),
+            )
+            .await
+            .expect("busy thread defers safely");
+
+        assert_eq!(outcome, OutboxTurnStartOutcome::Deferred);
+        assert!(!dispatch_polled.load(Ordering::SeqCst));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let thread = client
+            .app_store
+            .thread_snapshot(&key)
+            .expect("thread snapshot");
+        assert!(thread.queued_follow_up_drafts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outbox_send_requires_host_execute_before_provider_dispatch() {
+        let client = MobileClient::new();
+        let server_id = "srv";
+        let thread_id = "thread-1";
+        let config = make_server_config(server_id);
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot(server_id, thread_id));
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler: TestRequestHandler = {
+            let requests = Arc::clone(&requests);
+            Arc::new(move |request| {
+                assert!(matches!(request, upstream::ClientRequest::TurnStart { .. }));
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok(successful_turn_start_response())
+            })
+        };
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config,
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .expect("sessions lock")
+            .insert(server_id.to_string(), session);
+
+        let unknown = client
+            .start_outbox_turn(
+                server_id,
+                turn_start_params(thread_id, "unknown"),
+                Box::pin(async { OutboxDispatchAuthorization::OutcomeUnknown }),
+            )
+            .await
+            .expect("unknown Host outcome is retained");
+        assert_eq!(unknown, OutboxTurnStartOutcome::OutcomeUnknown);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+        let accepted = client
+            .start_outbox_turn(
+                server_id,
+                turn_start_params(thread_id, "deliver"),
+                Box::pin(async { OutboxDispatchAuthorization::Execute }),
+            )
+            .await
+            .expect("Host-authorized send succeeds");
+        assert_eq!(accepted, OutboxTurnStartOutcome::Accepted);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

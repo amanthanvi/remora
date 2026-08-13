@@ -91,6 +91,19 @@ pub(crate) enum RequestV2 {
         credential_id: String,
         client_nonce: String,
     },
+    BindProviderThread {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        runtime_id: String,
+        provider_thread_id: String,
+    },
+    ResolveThreadBinding {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        thread_id: String,
+    },
     PrepareSendMessageIntent {
         v: u32,
         credential_id: String,
@@ -189,6 +202,15 @@ pub(crate) enum RequestCorrelationV2 {
     CommandCenterStatus {
         credential_id: String,
     },
+    BindProviderThread {
+        credential_id: String,
+        runtime_id: String,
+        provider_thread_id: String,
+    },
+    ResolveThreadBinding {
+        credential_id: String,
+        thread_id: String,
+    },
     PrepareSendMessageIntent {
         credential_id: String,
         intent_id: String,
@@ -242,6 +264,8 @@ impl RequestV2 {
             Self::Enroll { .. } => "enroll",
             Self::ListAgents { .. } => "list_agents",
             Self::CommandCenterStatus { .. } => "command_center_status",
+            Self::BindProviderThread { .. } => "bind_provider_thread",
+            Self::ResolveThreadBinding { .. } => "resolve_thread_binding",
             Self::PrepareSendMessageIntent { .. } => "prepare_send_message_intent",
             Self::BeginSendMessageIntent { .. } => "begin_send_message_intent",
             Self::CompleteSendMessageIntent { .. } => "complete_send_message_intent",
@@ -257,6 +281,8 @@ impl RequestV2 {
             | Self::Enroll { v, .. }
             | Self::ListAgents { v, .. }
             | Self::CommandCenterStatus { v, .. }
+            | Self::BindProviderThread { v, .. }
+            | Self::ResolveThreadBinding { v, .. }
             | Self::PrepareSendMessageIntent { v, .. }
             | Self::BeginSendMessageIntent { v, .. }
             | Self::CompleteSendMessageIntent { v, .. }
@@ -272,6 +298,8 @@ impl RequestV2 {
             | Self::Enroll { client_nonce, .. }
             | Self::ListAgents { client_nonce, .. }
             | Self::CommandCenterStatus { client_nonce, .. }
+            | Self::BindProviderThread { client_nonce, .. }
+            | Self::ResolveThreadBinding { client_nonce, .. }
             | Self::PrepareSendMessageIntent { client_nonce, .. }
             | Self::BeginSendMessageIntent { client_nonce, .. }
             | Self::CompleteSendMessageIntent { client_nonce, .. }
@@ -286,6 +314,8 @@ impl RequestV2 {
             Self::InspectInvitation { .. } | Self::Enroll { .. } => None,
             Self::ListAgents { credential_id, .. }
             | Self::CommandCenterStatus { credential_id, .. }
+            | Self::BindProviderThread { credential_id, .. }
+            | Self::ResolveThreadBinding { credential_id, .. }
             | Self::PrepareSendMessageIntent { credential_id, .. }
             | Self::BeginSendMessageIntent { credential_id, .. }
             | Self::CompleteSendMessageIntent { credential_id, .. }
@@ -326,6 +356,24 @@ impl RequestV2 {
                     credential_id: credential_id.clone(),
                 }
             }
+            Self::BindProviderThread {
+                credential_id,
+                runtime_id,
+                provider_thread_id,
+                ..
+            } => RequestCorrelationV2::BindProviderThread {
+                credential_id: credential_id.clone(),
+                runtime_id: runtime_id.clone(),
+                provider_thread_id: provider_thread_id.clone(),
+            },
+            Self::ResolveThreadBinding {
+                credential_id,
+                thread_id,
+                ..
+            } => RequestCorrelationV2::ResolveThreadBinding {
+                credential_id: credential_id.clone(),
+                thread_id: thread_id.clone(),
+            },
             Self::PrepareSendMessageIntent {
                 credential_id,
                 intent_id,
@@ -432,6 +480,12 @@ impl RequestV2 {
             ]),
             Self::ListAgents { .. } => operation_payload_hash(&[]),
             Self::CommandCenterStatus { .. } => operation_payload_hash(&[]),
+            Self::BindProviderThread {
+                runtime_id,
+                provider_thread_id,
+                ..
+            } => operation_payload_hash(&[runtime_id, provider_thread_id]),
+            Self::ResolveThreadBinding { thread_id, .. } => operation_payload_hash(&[thread_id]),
             Self::PrepareSendMessageIntent {
                 intent_id,
                 thread_id,
@@ -508,6 +562,24 @@ impl RequestV2 {
             Self::ListAgents { credential_id, .. }
             | Self::CommandCenterStatus { credential_id, .. } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?
+            }
+            Self::BindProviderThread {
+                credential_id,
+                runtime_id,
+                provider_thread_id,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_runtime_id(runtime_id)?;
+                valid_bounded_request_label(provider_thread_id)?;
+            }
+            Self::ResolveThreadBinding {
+                credential_id,
+                thread_id,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_opaque(thread_id, OPAQUE_ID_BYTES)?;
             }
             Self::PrepareSendMessageIntent {
                 credential_id,
@@ -604,6 +676,22 @@ impl RequestCorrelationV2 {
             Self::CommandCenterStatus { credential_id } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
             }
+            Self::BindProviderThread {
+                credential_id,
+                runtime_id,
+                provider_thread_id,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_runtime_id(runtime_id)?;
+                valid_bounded_request_label(provider_thread_id)?;
+            }
+            Self::ResolveThreadBinding {
+                credential_id,
+                thread_id,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_opaque(thread_id, OPAQUE_ID_BYTES)?;
+            }
             Self::PrepareSendMessageIntent {
                 credential_id,
                 intent_id,
@@ -691,6 +779,8 @@ impl RequestCorrelationV2 {
             ),
             Self::ListAgents { credential_id }
             | Self::CommandCenterStatus { credential_id }
+            | Self::BindProviderThread { credential_id, .. }
+            | Self::ResolveThreadBinding { credential_id, .. }
             | Self::PrepareSendMessageIntent { credential_id, .. }
             | Self::BeginSendMessageIntent { credential_id, .. }
             | Self::CompleteSendMessageIntent { credential_id, .. }
@@ -789,6 +879,7 @@ pub(crate) enum ErrorCodeV2 {
     PairingUnavailable,
     AuthorizationRequired,
     InvalidRequest,
+    ThreadBindingRejected,
     WorkIntentRejected,
     AgentUnavailable,
     OutcomeUnknown,
@@ -801,6 +892,7 @@ impl ErrorCodeV2 {
             Self::PairingUnavailable => "pairing unavailable",
             Self::AuthorizationRequired => "device authorization required",
             Self::InvalidRequest => "invalid request",
+            Self::ThreadBindingRejected => "provider Thread binding rejected",
             Self::WorkIntentRejected => "work intent rejected",
             Self::AgentUnavailable => "agent unavailable",
             Self::OutcomeUnknown => "operation outcome unknown",
@@ -1138,6 +1230,30 @@ impl WorkIntentReceiptV2 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ThreadBindingReceiptV2 {
+    pub(crate) thread_id: String,
+    pub(crate) provider_session_id: String,
+    pub(crate) provider_instance_id: String,
+    pub(crate) runtime_id: String,
+    pub(crate) provider_thread_id: String,
+}
+
+impl ThreadBindingReceiptV2 {
+    fn validate(&self) -> Result<(), WireError> {
+        for value in [
+            &self.thread_id,
+            &self.provider_session_id,
+            &self.provider_instance_id,
+        ] {
+            valid_opaque(value, OPAQUE_ID_BYTES).map_err(|_| WireError::InvalidResponse)?;
+        }
+        valid_runtime_id(&self.runtime_id).map_err(|_| WireError::InvalidResponse)?;
+        valid_bounded_response_label(&self.provider_thread_id)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RevocationReceiptV2 {
     pub(crate) credential_id: String,
     pub(crate) auth_epoch: u64,
@@ -1178,6 +1294,8 @@ pub(crate) struct ResponseV2 {
     pub(crate) agents: Option<Vec<AgentInfoV2>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command_center_status: Option<HostCommandCenterStatusV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) thread_binding: Option<ThreadBindingReceiptV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) work_intent: Option<WorkIntentReceiptV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1235,6 +1353,9 @@ impl ResponseV2 {
         if let Some(value) = &self.command_center_status {
             validate_command_center_status(value)?;
         }
+        if let Some(value) = &self.thread_binding {
+            value.validate()?;
+        }
         if let Some(value) = &self.work_intent {
             value.validate()?;
         }
@@ -1250,6 +1371,7 @@ impl ResponseV2 {
             self.restart.is_some(),
             self.agents.is_some(),
             self.command_center_status.is_some(),
+            self.thread_binding.is_some(),
             self.work_intent.is_some(),
             self.session.is_some(),
         ]
@@ -1399,6 +1521,7 @@ impl ResponseV2 {
         if !self.ok
             && self.restart.is_none()
             && self.revocation.is_none()
+            && self.thread_binding.is_none()
             && self.work_intent.is_none()
         {
             return Ok(());
@@ -1444,6 +1567,36 @@ impl ResponseV2 {
                 if self.command_center_status.is_none() {
                     return Err(WireError::InvalidResponse);
                 }
+            }
+            RequestCorrelationV2::BindProviderThread {
+                runtime_id,
+                provider_thread_id,
+                ..
+            } => {
+                if !self.ok {
+                    return Err(WireError::InvalidResponse);
+                }
+                validate_thread_binding_correlation(
+                    self.thread_binding.as_ref(),
+                    None,
+                    runtime_id,
+                    provider_thread_id,
+                )?;
+            }
+            RequestCorrelationV2::ResolveThreadBinding { thread_id, .. } => {
+                if !self.ok {
+                    return Err(WireError::InvalidResponse);
+                }
+                let receipt = self
+                    .thread_binding
+                    .as_ref()
+                    .ok_or(WireError::InvalidResponse)?;
+                validate_thread_binding_correlation(
+                    Some(receipt),
+                    Some(thread_id),
+                    &receipt.runtime_id,
+                    &receipt.provider_thread_id,
+                )?;
             }
             RequestCorrelationV2::PrepareSendMessageIntent {
                 intent_id,
@@ -1862,6 +2015,8 @@ fn is_operation(value: &str) -> bool {
             | "enroll"
             | "list_agents"
             | "command_center_status"
+            | "bind_provider_thread"
+            | "resolve_thread_binding"
             | "prepare_send_message_intent"
             | "begin_send_message_intent"
             | "complete_send_message_intent"
@@ -1947,6 +2102,16 @@ fn valid_sha256(value: &str) -> Result<(), WireError> {
     } else {
         Ok(())
     }
+}
+
+fn valid_bounded_request_label(value: &str) -> Result<(), WireError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_DISPLAY_LABEL_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(WireError::InvalidRequest);
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_device_name(value: &str) -> Result<(), WireError> {
@@ -2083,6 +2248,10 @@ fn valid_response_label(value: &str) -> Result<(), WireError> {
     Ok(())
 }
 
+fn valid_bounded_response_label(value: &str) -> Result<(), WireError> {
+    valid_bounded_request_label(value).map_err(|_| WireError::InvalidResponse)
+}
+
 fn valid_unbounded_display_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= super::client::MAX_CONTROL_FRAME_BYTES
@@ -2200,6 +2369,22 @@ fn validate_work_intent_correlation(
     if receipt.intent_id != intent_id
         || receipt.thread_id != thread_id
         || !allowed_statuses.contains(&receipt.status)
+    {
+        return Err(WireError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_thread_binding_correlation(
+    receipt: Option<&ThreadBindingReceiptV2>,
+    thread_id: Option<&String>,
+    runtime_id: &str,
+    provider_thread_id: &str,
+) -> Result<(), WireError> {
+    let receipt = receipt.ok_or(WireError::InvalidResponse)?;
+    if thread_id.is_some_and(|thread_id| receipt.thread_id != *thread_id)
+        || receipt.runtime_id != runtime_id
+        || receipt.provider_thread_id != provider_thread_id
     {
         return Err(WireError::InvalidResponse);
     }

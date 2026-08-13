@@ -58,12 +58,13 @@ pub use remora_link_v2::{
     AppRemoraLinkHostFailure, AppRemoraLinkHostState, AppRemoraLinkHostSummary,
     AppRemoraLinkInspection, AppRemoraLinkJournalBackend, AppRemoraLinkJournalLoad,
     AppRemoraLinkJournalSnapshot, AppRemoraLinkJournalWriteOutcome, AppRemoraLinkKeyAssurance,
-    AppRemoraLinkKeyDeletionStatus, AppRemoraLinkOffer, AppRemoraLinkPairingCancellationOutcome,
+    AppRemoraLinkKeyDeletionStatus, AppRemoraLinkOffer, AppRemoraLinkOfflineMessageEnqueueOutcome,
+    AppRemoraLinkOutboxDeliveryReport, AppRemoraLinkPairingCancellationOutcome,
     AppRemoraLinkPairingCode, AppRemoraLinkPairingOutcome, AppRemoraLinkPendingApproval,
     AppRemoraLinkReconnectAttempt, AppRemoraLinkReconnectBatch, AppRemoraLinkReconnectResult,
     AppRemoraLinkRevocationOutcome, AppRemoraLinkRuntimeOffer, AppRemoraLinkScope,
-    AppRemoraLinkTransportIdentityBackend, AppRemoraLinkTransportIdentityError,
-    AppRemoraLinkWorkIntentOutcome, RemoraLinkError,
+    AppRemoraLinkThreadBindingOutcome, AppRemoraLinkTransportIdentityBackend,
+    AppRemoraLinkTransportIdentityError, AppRemoraLinkWorkIntentOutcome, RemoraLinkError,
 };
 pub use remote_path::RemotePath;
 pub use ssh::{AppSshBridgeConnectResult, AppSshConnectionResult, AppSshSessionResult, SshBridge};

@@ -240,6 +240,9 @@ struct ScriptedHostV2 {
     include_out_of_grant_agent: AtomicBool,
     command_center_unsupported: AtomicBool,
     malformed_command_center_terminal: AtomicBool,
+    thread_binding_calls: StdMutex<Vec<(String, String, String)>>,
+    thread_binding_unsupported: AtomicBool,
+    thread_binding_rejected: AtomicBool,
     work_intent_reserved: AtomicBool,
     work_intent_dispatching: AtomicBool,
     work_intent_succeeded: AtomicBool,
@@ -286,6 +289,9 @@ impl ScriptedHostV2 {
             include_out_of_grant_agent: AtomicBool::new(false),
             command_center_unsupported: AtomicBool::new(false),
             malformed_command_center_terminal: AtomicBool::new(false),
+            thread_binding_calls: StdMutex::new(Vec::new()),
+            thread_binding_unsupported: AtomicBool::new(false),
+            thread_binding_rejected: AtomicBool::new(false),
             work_intent_reserved: AtomicBool::new(false),
             work_intent_dispatching: AtomicBool::new(false),
             work_intent_succeeded: AtomicBool::new(false),
@@ -307,6 +313,7 @@ impl ScriptedHostV2 {
             restart: None,
             agents: None,
             command_center_status: None,
+            thread_binding: None,
             work_intent: None,
             session: None,
             error_code: None,
@@ -646,6 +653,84 @@ impl HostPortV2 for ScriptedHostV2 {
                     catalog_generation: 7,
                     host_capabilities: HostCapabilitiesV1::all_unknown(2, "0.1.0"),
                     provider_instances: Vec::new(),
+                });
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::BindProviderThread {
+                runtime_id,
+                provider_thread_id,
+                ..
+            } => {
+                self.thread_binding_calls.lock().unwrap().push((
+                    round.request.operation().to_string(),
+                    runtime_id.clone(),
+                    provider_thread_id.clone(),
+                ));
+                if self.thread_binding_unsupported.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::InvalidRequest);
+                    response.error = Some(ErrorCodeV2::InvalidRequest.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                if self.thread_binding_rejected.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::ThreadBindingRejected);
+                    response.error = Some(ErrorCodeV2::ThreadBindingRejected.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                let mut response = Self::terminal(true);
+                response.thread_binding = Some(ThreadBindingReceiptV2 {
+                    thread_id: URL_SAFE_NO_PAD.encode([13_u8; 16]),
+                    provider_session_id: URL_SAFE_NO_PAD.encode([14_u8; 16]),
+                    provider_instance_id: URL_SAFE_NO_PAD.encode([15_u8; 16]),
+                    runtime_id: runtime_id.clone(),
+                    provider_thread_id: provider_thread_id.clone(),
+                });
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::ResolveThreadBinding { thread_id, .. } => {
+                self.thread_binding_calls.lock().unwrap().push((
+                    round.request.operation().to_string(),
+                    "codex".to_string(),
+                    thread_id.clone(),
+                ));
+                if self.thread_binding_unsupported.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::InvalidRequest);
+                    response.error = Some(ErrorCodeV2::InvalidRequest.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                if self.thread_binding_rejected.load(Ordering::SeqCst) {
+                    let mut response = Self::terminal(false);
+                    response.error_code = Some(ErrorCodeV2::ThreadBindingRejected);
+                    response.error = Some(ErrorCodeV2::ThreadBindingRejected.message().to_string());
+                    return Ok(FinishedExchangeV2 {
+                        response,
+                        attachment_id: None,
+                    });
+                }
+                let mut response = Self::terminal(true);
+                response.thread_binding = Some(ThreadBindingReceiptV2 {
+                    thread_id: thread_id.clone(),
+                    provider_session_id: URL_SAFE_NO_PAD.encode([14_u8; 16]),
+                    provider_instance_id: URL_SAFE_NO_PAD.encode([15_u8; 16]),
+                    runtime_id: "codex".to_string(),
+                    provider_thread_id: "provider-thread-1".to_string(),
                 });
                 Ok(FinishedExchangeV2 {
                     response,
@@ -1724,6 +1809,84 @@ async fn command_center_status_uses_the_enrolled_inspection_grant() {
             .command_center_status(&harness.host_id)
             .await,
         Err(LifecycleErrorV2::ProtocolViolation)
+    );
+}
+
+#[tokio::test]
+async fn provider_thread_binding_is_correlated_grant_scoped_and_resolvable() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    let provider_thread_id = "provider-thread-1";
+    let host_thread_id = URL_SAFE_NO_PAD.encode([13_u8; 16]);
+
+    assert_eq!(
+        harness
+            .lifecycle
+            .bind_provider_thread(&harness.host_id, "codex", provider_thread_id)
+            .await
+            .unwrap(),
+        ThreadBindingOutcomeV2::Bound(ThreadBindingReceiptV2 {
+            thread_id: host_thread_id.clone(),
+            provider_session_id: URL_SAFE_NO_PAD.encode([14_u8; 16]),
+            provider_instance_id: URL_SAFE_NO_PAD.encode([15_u8; 16]),
+            runtime_id: "codex".to_string(),
+            provider_thread_id: provider_thread_id.to_string(),
+        })
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .resolve_thread_binding(&harness.host_id, &host_thread_id)
+            .await
+            .unwrap(),
+        ThreadBindingOutcomeV2::Bound(ThreadBindingReceiptV2 {
+            thread_id: host_thread_id.clone(),
+            provider_session_id: URL_SAFE_NO_PAD.encode([14_u8; 16]),
+            provider_instance_id: URL_SAFE_NO_PAD.encode([15_u8; 16]),
+            runtime_id: "codex".to_string(),
+            provider_thread_id: provider_thread_id.to_string(),
+        })
+    );
+    assert_eq!(
+        harness
+            .lifecycle
+            .bind_provider_thread(&harness.host_id, "claude", provider_thread_id)
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
+    );
+    assert_eq!(harness.host.thread_binding_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn provider_thread_binding_distinguishes_old_link_from_current_rejection() {
+    let harness = harness();
+    inspect_and_enroll(&harness).await;
+    harness
+        .host
+        .thread_binding_unsupported
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .lifecycle
+            .bind_provider_thread(&harness.host_id, "codex", "provider-thread-1")
+            .await,
+        Ok(ThreadBindingOutcomeV2::Unavailable)
+    );
+
+    harness
+        .host
+        .thread_binding_unsupported
+        .store(false, Ordering::SeqCst);
+    harness
+        .host
+        .thread_binding_rejected
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness
+            .lifecycle
+            .bind_provider_thread(&harness.host_id, "codex", "provider-thread-1")
+            .await,
+        Err(LifecycleErrorV2::InvalidSelection)
     );
 }
 
