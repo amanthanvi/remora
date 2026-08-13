@@ -27,7 +27,7 @@ change, an unbounded field, platform-side policy, or a non-loopback bypass.
 
 ## Progress evidence
 
-Remora now pins Link `99811347aecdc87f2555dbb511c31b35d40c3272` and exposes
+Remora now pins Link `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04` and exposes
 its authenticated, `InspectRuntimes`-scoped `command_center_status` operation as
 one handwritten UniFFI result. The client preserves `Unknown` for an older Link
 that returns the authenticated `invalid_request` terminal response, rejects

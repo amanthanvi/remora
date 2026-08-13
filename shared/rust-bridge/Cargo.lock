@@ -4222,7 +4222,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -8823,7 +8823,7 @@ checksum = "bde7a5d5102f1cff03d482240f0ed20551661f63663620f4b26112ed751165e9"
 dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -10959,7 +10959,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "remora-bridge-core"
 version = "0.1.0"
-source = "git+https://github.com/amanthanvi/remora-link.git?rev=99811347aecdc87f2555dbb511c31b35d40c3272#99811347aecdc87f2555dbb511c31b35d40c3272"
+source = "git+https://github.com/amanthanvi/remora-link.git?rev=b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04#b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10980,7 +10980,7 @@ dependencies = [
 [[package]]
 name = "remora-claude-bridge"
 version = "0.1.0"
-source = "git+https://github.com/amanthanvi/remora-link.git?rev=99811347aecdc87f2555dbb511c31b35d40c3272#99811347aecdc87f2555dbb511c31b35d40c3272"
+source = "git+https://github.com/amanthanvi/remora-link.git?rev=b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04#b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11004,7 +11004,7 @@ dependencies = [
 [[package]]
 name = "remora-codex-proto"
 version = "0.1.0"
-source = "git+https://github.com/amanthanvi/remora-link.git?rev=99811347aecdc87f2555dbb511c31b35d40c3272#99811347aecdc87f2555dbb511c31b35d40c3272"
+source = "git+https://github.com/amanthanvi/remora-link.git?rev=b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04#b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04"
 dependencies = [
  "chrono",
  "serde",
@@ -11015,7 +11015,7 @@ dependencies = [
 [[package]]
 name = "remora-opencode-bridge"
 version = "0.1.0"
-source = "git+https://github.com/amanthanvi/remora-link.git?rev=99811347aecdc87f2555dbb511c31b35d40c3272#99811347aecdc87f2555dbb511c31b35d40c3272"
+source = "git+https://github.com/amanthanvi/remora-link.git?rev=b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04#b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11039,7 +11039,7 @@ dependencies = [
 [[package]]
 name = "remora-pi-bridge"
 version = "0.1.0"
-source = "git+https://github.com/amanthanvi/remora-link.git?rev=99811347aecdc87f2555dbb511c31b35d40c3272#99811347aecdc87f2555dbb511c31b35d40c3272"
+source = "git+https://github.com/amanthanvi/remora-link.git?rev=b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04#b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -75,15 +75,16 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 014 has the typed capability/availability seam, bounded Mission Control
   and Sessions projections, fail-closed raw transport policy, generated
   bindings, Rust tests, and authenticated Link-declared capability hydration at
-  `99811347aecdc87f2555dbb511c31b35d40c3272`. Connected Host status now lives
+  `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`. Connected Host status now lives
   in an independently invalidated Rust cache with bounded stable projection and
   thin Swift/Kotlin observation. Native journey consumption remains before
   closure.
 - Plan 015 has the exact-pinned Link implementation at
-  `99811347aecdc87f2555dbb511c31b35d40c3272`: atomic snapshot, checksum
+  `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`: atomic snapshot, checksum
   recovery journal, locking, permissions, durable domain records, restart
-  tests, and grant-filtered bounded capability status. Full lifecycle mutation
-  exposure remains before closure.
+  tests, grant-filtered bounded capability status, and fail-closed bounds plus
+  relational validation for every durable catalog collection. Full lifecycle
+  mutation exposure remains before closure.
 - Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
   search primitives, native Keychain/Keystore handoff, backup exclusion,
   corruption recovery, organization/review APIs, persistent terminal-attention

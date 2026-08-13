@@ -3,7 +3,7 @@
 Status: **IN PROGRESS**
 Tracker: [#25](https://github.com/amanthanvi/remora/issues/25)
 Baselines: Remora `f9dbfc7a4453e14cb508211046ba6835bdc4a5c0`; Link `42e27678cda63bda440a8f6620344f10baefea4f`
-Pinned implementation: Link `99811347aecdc87f2555dbb511c31b35d40c3272`
+Pinned implementation: Link `b7640e7f1a3746b0321fc829d2b0cf5a7dc00c04`
 Depends on: Plan 014
 
 ## Scope and ownership
@@ -32,4 +32,10 @@ files, crash replay, corruption recovery, immutable Thread runtime, bounded Host
 and provider capability status, and the authenticated status wire operation.
 The endpoint requires `InspectRuntimes`, discloses only provider instances whose
 runtime IDs are authorized by the grant, and excludes workspace content. Full
-Project/Working Copy/Thread lifecycle mutation exposure remains before closure.
+catalog validation now bounds provider sessions, checkpoints, route handles,
+trusted scripts, browser profiles, script argv/environment, and every durable
+string. It also fails closed on cross-Project Working Copies, mismatched
+runtime/provider bindings, missing or cross-Thread session/checkpoint/route
+references, invalid Git OIDs/hidden refs, duplicate model IDs/profiles, and
+backwards archive/completion timestamps. Full Project/Working Copy/Thread
+lifecycle mutation exposure remains before closure.
