@@ -5,9 +5,9 @@ use crate::conversation_uniffi::{HydratedConversationItem, HydratedConversationI
 use crate::ffi::ClientError;
 use crate::ffi::command_center::{
     CommandCenterStatusV1, MissionControlProjectionV1, NewTaskLaunchAvailabilityV1,
-    SessionFilterV1, SessionPageV1, project_command_center_status,
-    project_mission_control_with_attention, project_new_task_launch_availability,
-    project_sessions_page_filtered_with_attention,
+    SessionFilterV1, SessionPageV1, bounded_session_search_query, decode_session_search_results,
+    project_command_center_status, project_mission_control_with_attention,
+    project_new_task_launch_availability, project_sessions_page_filtered_with_cache,
 };
 use crate::ffi::device_database::DeviceDatabaseBridge;
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
@@ -544,18 +544,24 @@ impl AppStore {
         cursor: Option<String>,
         limit: Option<u32>,
     ) -> Result<SessionPageV1, ClientError> {
+        let search_host_states = self
+            .inner
+            .session_search_host_states()
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
         self.inner
             .project_thread_attention(|attention| {
                 self.inner
                     .app_store
                     .project_command_center(|snapshot, statuses| {
-                        project_sessions_page_filtered_with_attention(
+                        project_sessions_page_filtered_with_cache(
                             snapshot,
                             &SessionFilterV1::default(),
                             cursor.as_deref(),
                             limit,
                             statuses,
                             attention,
+                            &[],
+                            &search_host_states,
                             unix_time_ms(),
                         )
                     })
@@ -569,18 +575,33 @@ impl AppStore {
         cursor: Option<String>,
         limit: Option<u32>,
     ) -> Result<SessionPageV1, ClientError> {
+        let search_query = bounded_session_search_query(filter.query.as_deref());
+        let search_results = search_query
+            .as_deref()
+            .map_or_else(
+                || Ok(Vec::new()),
+                |query| self.inner.search_session_documents(query),
+            )
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
+        let cached_documents = decode_session_search_results(&search_results);
+        let search_host_states = self
+            .inner
+            .session_search_host_states()
+            .map_err(|error| ClientError::Serialization(error.to_string()))?;
         self.inner
             .project_thread_attention(|attention| {
                 self.inner
                     .app_store
                     .project_command_center(|snapshot, statuses| {
-                        project_sessions_page_filtered_with_attention(
+                        project_sessions_page_filtered_with_cache(
                             snapshot,
                             &filter,
                             cursor.as_deref(),
                             limit,
                             statuses,
                             attention,
+                            &cached_documents,
+                            &search_host_states,
                             unix_time_ms(),
                         )
                     })

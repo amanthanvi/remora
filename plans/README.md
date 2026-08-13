@@ -87,8 +87,9 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
 - Plan 016 has the encrypted SQLite schema, bounded/idempotent outbox and
   search primitives, native Keychain/Keystore handoff, backup exclusion,
   corruption recovery, organization/review APIs, persistent terminal-attention
-  state, and focused Rust/iOS/Android tests. Authoritative delivery
-  orchestration remains before closure.
+  state, batched/coalesced encrypted Sessions indexing, per-Host freshness, and
+  focused Rust/iOS/Android tests. Authoritative delivery orchestration remains
+  before closure.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and
@@ -101,8 +102,10 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   Turn-ID-idempotent acknowledgement-on-open, one-hour snooze, and
   capability-gated confirmed Host archive actions on both platforms. Native
   Mission Control and iOS capability refreshes no longer wait on Rust store
-  locks from the UI thread. The encrypted offline search/freshness layer, Host
-  Scratch, and the remaining journey matrix remain before closure.
+  locks from the UI thread. Sessions search now merges live summaries with a
+  bounded encrypted device index, reports live/cached/unavailable Host
+  freshness, and keeps cached rows visibly non-actionable on both platforms.
+  Host Scratch and the remaining journey matrix remain before closure.
 
 ## Findings considered and rejected
 

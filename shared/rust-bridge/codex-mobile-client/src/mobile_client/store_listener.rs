@@ -3,6 +3,7 @@ use super::*;
 const SUBAGENT_METADATA_HYDRATE_DELAYS_MS: [u64; 3] = [150, 800, 2500];
 const LAG_STALE_RETRY_DELAYS_MS: [u64; 3] = [50, 250, 1000];
 const LAG_STALE_RETRY_CYCLE_DELAY_MS: u64 = 5000;
+const SESSION_SEARCH_INDEX_COALESCE_MS: u64 = 2_000;
 
 fn next_lag_stale_retry_delay_ms(stale_retry_index: &mut usize) -> u64 {
     if let Some(delay_ms) = LAG_STALE_RETRY_DELAYS_MS.get(*stale_retry_index) {
@@ -125,6 +126,12 @@ pub(super) fn spawn_store_listener(
                         }
                     }
                     app_store.apply_ui_event(&event);
+                    if let UiEvent::TurnCompleted { key, .. } = &event
+                        && let Some(client) = owner.upgrade()
+                        && let Err(error) = client.index_session_search_key_now(key)
+                    {
+                        warn!("MobileClient: terminal session search-index flush failed: {error}");
+                    }
                     maybe_hydrate_collab_agent_metadata(
                         Arc::clone(&app_store),
                         Arc::clone(&sessions),
@@ -164,6 +171,162 @@ pub(super) fn spawn_store_listener(
             }
         }
     });
+}
+
+pub(super) fn spawn_session_search_index_listener(
+    owner: std::sync::Weak<MobileClient>,
+    mut rx: broadcast::Receiver<AppStoreUpdateRecord>,
+) {
+    MobileClient::spawn_detached(async move {
+        let mut pending_documents = HashMap::<String, SearchDocumentInput>::new();
+        let mut pending_deletions = HashSet::<String>::new();
+        let mut pending_host_clears = HashSet::<String>::new();
+        let mut needs_full_refresh = false;
+
+        loop {
+            let update = match rx.recv().await {
+                Ok(update) => update,
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "MobileClient: session search index lagged {skipped} store updates; rebuilding summaries"
+                    );
+                    needs_full_refresh = true;
+                    AppStoreUpdateRecord::FullResync
+                }
+            };
+            collect_session_search_update(
+                update,
+                &mut pending_documents,
+                &mut pending_deletions,
+                &mut pending_host_clears,
+                &mut needs_full_refresh,
+            );
+            if pending_documents.is_empty()
+                && pending_deletions.is_empty()
+                && pending_host_clears.is_empty()
+                && !needs_full_refresh
+            {
+                continue;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                SESSION_SEARCH_INDEX_COALESCE_MS,
+            ))
+            .await;
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => collect_session_search_update(
+                        update,
+                        &mut pending_documents,
+                        &mut pending_deletions,
+                        &mut pending_host_clears,
+                        &mut needs_full_refresh,
+                    ),
+                    Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                        warn!(
+                            "MobileClient: session search index lagged {skipped} buffered updates; rebuilding summaries"
+                        );
+                        needs_full_refresh = true;
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(broadcast::error::TryRecvError::Closed) => return,
+                }
+            }
+
+            let Some(client) = owner.upgrade() else {
+                return;
+            };
+            let Some(database) = client.configured_device_database() else {
+                pending_documents.clear();
+                pending_deletions.clear();
+                pending_host_clears.clear();
+                needs_full_refresh = false;
+                continue;
+            };
+            if needs_full_refresh {
+                let summaries = client
+                    .app_store
+                    .project_snapshot(crate::store::boundary::session_summaries_from_snapshot);
+                for summary in summaries {
+                    match crate::ffi::command_center::session_search_document(&summary) {
+                        Ok(document) => {
+                            pending_deletions.remove(&document.document_id);
+                            pending_documents.insert(document.document_id.clone(), document);
+                        }
+                        Err(error) => {
+                            warn!("MobileClient: could not serialize session search row: {error}")
+                        }
+                    }
+                }
+            }
+            let documents = pending_documents
+                .drain()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            let deletions = pending_deletions.drain().collect::<Vec<_>>();
+            let host_clears = pending_host_clears.drain().collect::<Vec<_>>();
+            needs_full_refresh = false;
+            let indexed_at_ms = unix_time_ms();
+            let result = tokio::task::spawn_blocking(move || {
+                for host_id in host_clears {
+                    database.clear_host_search_index(&host_id)?;
+                }
+                for batch in deletions.chunks(500) {
+                    database.delete_search_documents(batch)?;
+                }
+                for batch in documents.chunks(500) {
+                    database.index_search_documents(batch, indexed_at_ms)?;
+                }
+                Ok::<_, DeviceDatabaseError>(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!("MobileClient: session search-index batch failed: {error}")
+                }
+                Err(error) => warn!("MobileClient: session search-index worker failed: {error}"),
+            }
+        }
+    });
+}
+
+fn collect_session_search_update(
+    update: AppStoreUpdateRecord,
+    pending_documents: &mut HashMap<String, SearchDocumentInput>,
+    pending_deletions: &mut HashSet<String>,
+    pending_host_clears: &mut HashSet<String>,
+    needs_full_refresh: &mut bool,
+) {
+    match update {
+        AppStoreUpdateRecord::ThreadUpserted {
+            session_summary, ..
+        }
+        | AppStoreUpdateRecord::ThreadMetadataChanged {
+            session_summary, ..
+        }
+        | AppStoreUpdateRecord::ThreadItemChanged {
+            session_summary, ..
+        } => match crate::ffi::command_center::session_search_document(&session_summary) {
+            Ok(document) => {
+                pending_deletions.remove(&document.document_id);
+                pending_documents.insert(document.document_id.clone(), document);
+            }
+            Err(error) => warn!("MobileClient: could not serialize session search row: {error}"),
+        },
+        AppStoreUpdateRecord::ThreadRemoved { key, .. } => {
+            let document_id = crate::ffi::command_center::session_search_document_id(&key);
+            pending_documents.remove(&document_id);
+            pending_deletions.insert(document_id);
+        }
+        AppStoreUpdateRecord::ServerRemoved { server_id } => {
+            pending_documents.retain(|_, document| document.host_id != server_id);
+            pending_host_clears.insert(server_id);
+        }
+        AppStoreUpdateRecord::FullResync => *needs_full_refresh = true,
+        _ => {}
+    }
 }
 
 async fn reconcile_after_store_listener_lag(client: Arc<MobileClient>) -> bool {

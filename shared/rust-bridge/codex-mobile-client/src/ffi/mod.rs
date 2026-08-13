@@ -8,7 +8,7 @@ mod android;
 mod app_store;
 pub(crate) mod background_relay;
 mod client;
-mod command_center;
+pub(crate) mod command_center;
 mod device_database;
 mod discovery;
 mod errors;

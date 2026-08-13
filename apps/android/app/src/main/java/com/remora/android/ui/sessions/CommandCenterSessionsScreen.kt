@@ -63,6 +63,8 @@ import uniffi.codex_mobile_client.AppArchiveThreadRequest
 import uniffi.codex_mobile_client.AvailabilityState
 import uniffi.codex_mobile_client.SessionAttentionV1
 import uniffi.codex_mobile_client.SessionFilterV1
+import uniffi.codex_mobile_client.SessionHostFreshnessV1
+import uniffi.codex_mobile_client.SessionHostStateV1
 import uniffi.codex_mobile_client.SessionListRowV1
 import uniffi.codex_mobile_client.SessionStatusV1
 import uniffi.codex_mobile_client.ThreadKey
@@ -91,6 +93,8 @@ fun CommandCenterSessionsScreen(
     var rows by remember { mutableStateOf<List<SessionListRowV1>>(emptyList()) }
     var nextCursor by remember { mutableStateOf<String?>(null) }
     var totalCount by remember { mutableStateOf(0u) }
+    var hostStates by remember { mutableStateOf<List<SessionHostStateV1>>(emptyList()) }
+    var isPartial by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var mutatingKeys by remember { mutableStateOf<Set<ThreadKey>>(emptySet()) }
@@ -106,6 +110,8 @@ fun CommandCenterSessionsScreen(
             rows = emptyList()
             nextCursor = null
             totalCount = 0u
+            hostStates = emptyList()
+            isPartial = false
         }
         try {
             val filter = SessionFilterV1(
@@ -129,6 +135,8 @@ fun CommandCenterSessionsScreen(
             rows = rows + page.rows.filterNot { it.key in existing }
             nextCursor = page.nextCursor
             totalCount = page.totalCount
+            hostStates = page.hostStates
+            isPartial = page.isPartial
         } catch (error: Exception) {
             errorMessage = error.message ?: "Unable to load sessions"
         } finally {
@@ -247,6 +255,9 @@ fun CommandCenterSessionsScreen(
                     ),
                 )
             }
+        }
+        if (isPartial) {
+            PartialResultsNotice(hostStates)
         }
         HorizontalDivider(color = RemoraTheme.border.copy(alpha = 0.25f))
 
@@ -382,6 +393,60 @@ private fun EmptySessions(errorMessage: String?) {
 }
 
 @Composable
+private fun PartialResultsNotice(hostStates: List<SessionHostStateV1>) {
+    val degraded = hostStates.filter { it.freshness != SessionHostFreshnessV1.LIVE }
+    var expanded by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(RemoraTheme.warning.copy(alpha = 0.08f))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Partial results · ${degraded.size} Host${if (degraded.size == 1) "" else "s"}",
+                color = RemoraTheme.warning,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Hide" else "Details", color = RemoraTheme.warning)
+            }
+        }
+        if (expanded) {
+            degraded.forEach { state ->
+                Text(
+                    text = buildString {
+                        append(state.hostLabel)
+                        append(" · ")
+                        append(
+                            when (state.freshness) {
+                                SessionHostFreshnessV1.LIVE -> "Live"
+                                SessionHostFreshnessV1.CACHED -> "Cached"
+                                SessionHostFreshnessV1.UNAVAILABLE -> "Unavailable"
+                            },
+                        )
+                        state.reason?.takeIf { it.isNotBlank() }?.let {
+                            append(" — ")
+                            append(it)
+                        }
+                        state.lastIndexedAtMs?.let {
+                            append(" · Indexed ")
+                            append(HomeDashboardSupport.relativeTime(it / 1_000L))
+                        }
+                    },
+                    color = RemoraTheme.textMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun CommandCenterSessionRow(
     row: SessionListRowV1,
     onOpen: () -> Unit,
@@ -397,7 +462,7 @@ private fun CommandCenterSessionRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onOpen)
+            .clickable(enabled = enabled && !row.isCached, onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -492,14 +557,16 @@ private fun CommandCenterSessionRow(
 private fun SessionStatusLabel(row: SessionListRowV1) {
     val needsYou = row.attention == SessionAttentionV1.NEEDS_YOU
     val snoozed = row.snoozedUntilMs != null
-    val label = if (needsYou) "Needs You" else if (snoozed) "Snoozed" else when (row.status) {
+    val label = if (row.isCached) "Cached" else if (needsYou) "Needs You" else if (snoozed) "Snoozed" else when (row.status) {
         SessionStatusV1.RUNNING -> "Running"
         SessionStatusV1.WAITING -> "Waiting"
         SessionStatusV1.FAILED -> "Failed"
         SessionStatusV1.IDLE -> "Idle"
         SessionStatusV1.UNKNOWN -> "Unknown"
     }
-    val color: Color = if (needsYou) {
+    val color: Color = if (row.isCached) {
+        RemoraTheme.textMuted
+    } else if (needsYou) {
         RemoraTheme.warning
     } else if (snoozed) {
         RemoraTheme.accent

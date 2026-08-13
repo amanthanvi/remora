@@ -7,7 +7,10 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::device_database::{DeviceDatabase, DeviceDatabaseError, ThreadAttentionState};
+use crate::device_database::{
+    DeviceDatabase, DeviceDatabaseError, SearchDocumentInput, SearchHostState, SearchResult,
+    ThreadAttentionState,
+};
 use crate::discovery::{DiscoveredServer, DiscoveryConfig, DiscoveryService, MdnsSeed};
 use crate::session::connection::InProcessConfig;
 use crate::session::connection::{
@@ -246,6 +249,7 @@ impl MobileClient {
                 Arc::clone(&sessions),
                 event_processor.subscribe(),
             );
+            spawn_session_search_index_listener(owner.clone(), app_store.subscribe());
             Self {
                 sessions,
                 event_processor,
@@ -300,8 +304,84 @@ impl MobileClient {
         *self
             .device_database
             .write()
-            .expect("device database lock poisoned") = Some(database);
+            .expect("device database lock poisoned") = Some(Arc::clone(&database));
+        self.index_all_session_summaries(&database)?;
         Ok(())
+    }
+
+    fn index_all_session_summaries(
+        &self,
+        database: &DeviceDatabase,
+    ) -> Result<(), DeviceDatabaseError> {
+        let summaries = self
+            .app_store
+            .project_snapshot(crate::store::boundary::session_summaries_from_snapshot);
+        let documents = summaries
+            .iter()
+            .map(crate::ffi::command_center::session_search_document)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DeviceDatabaseError::InvalidInput)?;
+        self.index_session_search_documents(database, &documents, unix_time_ms())
+    }
+
+    pub(crate) fn index_session_search_documents(
+        &self,
+        database: &DeviceDatabase,
+        documents: &[SearchDocumentInput],
+        indexed_at_ms: i64,
+    ) -> Result<(), DeviceDatabaseError> {
+        for batch in documents.chunks(500) {
+            database.index_search_documents(batch, indexed_at_ms)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn configured_device_database(&self) -> Option<Arc<DeviceDatabase>> {
+        self.device_database
+            .read()
+            .expect("device database lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn search_session_documents(
+        &self,
+        query: &str,
+    ) -> Result<Vec<SearchResult>, DeviceDatabaseError> {
+        self.configured_device_database()
+            .map_or_else(|| Ok(Vec::new()), |database| database.search(query, 50))
+    }
+
+    pub(crate) fn session_search_host_states(
+        &self,
+    ) -> Result<Vec<SearchHostState>, DeviceDatabaseError> {
+        self.configured_device_database().map_or_else(
+            || Ok(Vec::new()),
+            |database| database.search_host_states(100),
+        )
+    }
+
+    pub(crate) fn index_session_search_key_now(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<(), DeviceDatabaseError> {
+        let Some(database) = self.configured_device_database() else {
+            return Ok(());
+        };
+        let summary = self.app_store.project_snapshot(|snapshot| {
+            snapshot.threads.get(key).map(|thread| {
+                crate::store::boundary::app_session_summary(
+                    snapshot,
+                    thread,
+                    snapshot.servers.get(&key.server_id),
+                )
+            })
+        });
+        let Some(summary) = summary else {
+            return Ok(());
+        };
+        let document = crate::ffi::command_center::session_search_document(&summary)
+            .map_err(DeviceDatabaseError::InvalidInput)?;
+        database.index_search_documents(&[document], unix_time_ms())
     }
 
     pub(crate) fn project_thread_attention<R>(

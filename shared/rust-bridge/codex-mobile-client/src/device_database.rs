@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
-const SCHEMA_VERSION: i64 = 3;
-// Schema v3 adds only unencrypted attention metadata. Keep the encrypted
-// record envelope at v2 so the additive migration does not invalidate
-// existing outbox, review-note, or search ciphertext.
+const SCHEMA_VERSION: i64 = 4;
+// Schema v3 and v4 add only unencrypted attention/search-freshness metadata.
+// Keep the encrypted record envelope at v2 so additive migrations do not
+// invalidate existing outbox, review-note, or search ciphertext.
 const ENCRYPTION_RECORD_VERSION: i64 = 2;
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
@@ -31,6 +31,8 @@ const MAX_SEARCH_BODY_BYTES: usize = 1024 * 1024;
 const MAX_OUTBOX_ROWS: usize = 100;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_CANDIDATES: usize = 200;
+const MAX_SEARCH_INDEX_BATCH: usize = 500;
+const MAX_SEARCH_HOST_STATES: usize = 100;
 const MAX_SEARCH_QUERY_BYTES: usize = 4_096;
 const MAX_QUERY_TOKENS: usize = 8;
 const MAX_TOKEN_CHARS: usize = 64;
@@ -129,7 +131,28 @@ pub struct SearchResult {
     pub host_id: String,
     pub thread_id: String,
     pub snippet: String,
+    /// Decrypted only after the bounded postings candidate query. Kept inside
+    /// Rust so typed projections can recover cached display metadata without
+    /// exposing the encrypted document format to Swift or Kotlin.
+    pub body: String,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchDocumentInput {
+    pub document_id: String,
+    pub host_id: String,
+    pub thread_id: String,
+    pub body: String,
+    pub search_text: String,
+    pub updated_at_ms: i64,
+    pub protected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHostState {
+    pub host_id: String,
+    pub last_indexed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +322,11 @@ impl DeviceDatabase {
                  PRIMARY KEY (term_hash, document_id)
              ) STRICT;
              CREATE INDEX IF NOT EXISTS search_terms_document
-                 ON search_terms(document_id);",
+                 ON search_terms(document_id);
+             CREATE TABLE IF NOT EXISTS search_hosts (
+                 host_id TEXT PRIMARY KEY,
+                 last_indexed_at_ms INTEGER NOT NULL
+             ) STRICT;",
         )?;
 
         let database = Self {
@@ -911,57 +938,146 @@ impl DeviceDatabase {
         updated_at_ms: i64,
         protected: bool,
     ) -> Result<(), DeviceDatabaseError> {
-        validate_id("document_id", document_id)?;
-        validate_id("host_id", host_id)?;
-        validate_id("thread_id", thread_id)?;
-        if body.len() > MAX_SEARCH_BODY_BYTES {
-            return Err(DeviceDatabaseError::InvalidInput(
-                "search document exceeds 1 MiB".to_string(),
-            ));
+        self.index_search_documents(
+            &[SearchDocumentInput {
+                document_id: document_id.to_string(),
+                host_id: host_id.to_string(),
+                thread_id: thread_id.to_string(),
+                body: body.to_string(),
+                search_text: body.to_string(),
+                updated_at_ms,
+                protected,
+            }],
+            updated_at_ms.max(1),
+        )
+    }
+
+    /// Indexes a bounded summary batch in one transaction. `search_text`
+    /// contains only user-visible values while `body` may carry a typed,
+    /// encrypted Rust-owned payload used to reconstruct cached projections.
+    pub fn index_search_documents(
+        &self,
+        documents: &[SearchDocumentInput],
+        indexed_at_ms: i64,
+    ) -> Result<(), DeviceDatabaseError> {
+        if documents.is_empty() {
+            return Ok(());
         }
-        let (nonce, ciphertext) =
-            self.encrypt("search_document", document_id, host_id, body.as_bytes())?;
-        let terms = posting_terms(body)
-            .into_iter()
-            .map(|term| self.term_hash(&term))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+        if documents.len() > MAX_SEARCH_INDEX_BATCH {
+            return Err(DeviceDatabaseError::InvalidInput(format!(
+                "search index batch exceeds {MAX_SEARCH_INDEX_BATCH} documents"
+            )));
+        }
+        validate_timestamp("indexed_at_ms", indexed_at_ms)?;
+
+        let mut prepared = Vec::with_capacity(documents.len());
+        let mut indexed_hosts = BTreeSet::new();
+        for document in documents {
+            validate_id("document_id", &document.document_id)?;
+            validate_id("host_id", &document.host_id)?;
+            validate_id("thread_id", &document.thread_id)?;
+            if document.body.len() > MAX_SEARCH_BODY_BYTES
+                || document.search_text.len() > MAX_SEARCH_BODY_BYTES
+            {
+                return Err(DeviceDatabaseError::InvalidInput(
+                    "search document exceeds 1 MiB".to_string(),
+                ));
+            }
+            let (nonce, ciphertext) = self.encrypt(
+                "search_document",
+                &document.document_id,
+                &document.host_id,
+                document.body.as_bytes(),
+            )?;
+            let terms = posting_terms(&document.search_text)
+                .into_iter()
+                .map(|term| self.term_hash(&term))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            indexed_hosts.insert(document.host_id.clone());
+            prepared.push((document, nonce, ciphertext, terms));
+        }
+
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO search_documents (
-                 document_id, host_id, thread_id, nonce, encrypted_body,
-                 updated_at_ms, protected
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(document_id) DO UPDATE SET
-                 host_id = excluded.host_id,
-                 thread_id = excluded.thread_id,
-                 nonce = excluded.nonce,
-                 encrypted_body = excluded.encrypted_body,
-                 updated_at_ms = excluded.updated_at_ms,
-                 protected = excluded.protected",
-            params![
-                document_id,
-                host_id,
-                thread_id,
-                nonce.as_slice(),
-                ciphertext,
-                updated_at_ms,
-                i64::from(protected),
-            ],
-        )?;
-        transaction.execute(
-            "DELETE FROM search_terms WHERE document_id = ?1",
-            [document_id],
-        )?;
         {
+            let mut upsert = transaction.prepare(
+                "INSERT INTO search_documents (
+                     document_id, host_id, thread_id, nonce, encrypted_body,
+                     updated_at_ms, protected
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(document_id) DO UPDATE SET
+                     host_id = excluded.host_id,
+                     thread_id = excluded.thread_id,
+                     nonce = excluded.nonce,
+                     encrypted_body = excluded.encrypted_body,
+                     updated_at_ms = excluded.updated_at_ms,
+                     protected = excluded.protected",
+            )?;
+            let mut delete_terms =
+                transaction.prepare("DELETE FROM search_terms WHERE document_id = ?1")?;
             let mut insert = transaction
                 .prepare("INSERT INTO search_terms(term_hash, document_id) VALUES (?1, ?2)")?;
-            for term_hash in terms {
-                insert.execute(params![term_hash.as_slice(), document_id])?;
+            for (document, nonce, ciphertext, terms) in prepared {
+                upsert.execute(params![
+                    document.document_id,
+                    document.host_id,
+                    document.thread_id,
+                    nonce.as_slice(),
+                    ciphertext,
+                    document.updated_at_ms,
+                    i64::from(document.protected),
+                ])?;
+                delete_terms.execute([document.document_id.as_str()])?;
+                for term_hash in terms {
+                    insert.execute(params![term_hash.as_slice(), document.document_id])?;
+                }
+            }
+        }
+        {
+            let mut upsert_host = transaction.prepare(
+                "INSERT INTO search_hosts(host_id, last_indexed_at_ms)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(host_id) DO UPDATE SET
+                     last_indexed_at_ms = MAX(
+                         search_hosts.last_indexed_at_ms,
+                         excluded.last_indexed_at_ms
+                     )",
+            )?;
+            for host_id in indexed_hosts {
+                upsert_host.execute(params![host_id, indexed_at_ms])?;
             }
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn delete_search_documents(
+        &self,
+        document_ids: &[String],
+    ) -> Result<usize, DeviceDatabaseError> {
+        if document_ids.is_empty() {
+            return Ok(0);
+        }
+        if document_ids.len() > MAX_SEARCH_INDEX_BATCH {
+            return Err(DeviceDatabaseError::InvalidInput(format!(
+                "search delete batch exceeds {MAX_SEARCH_INDEX_BATCH} documents"
+            )));
+        }
+        for document_id in document_ids {
+            validate_id("document_id", document_id)?;
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let mut deleted = 0;
+        {
+            let mut delete =
+                transaction.prepare("DELETE FROM search_documents WHERE document_id = ?1")?;
+            for document_id in document_ids {
+                deleted += delete.execute([document_id])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     pub fn search(
@@ -974,15 +1090,7 @@ impl DeviceDatabase {
                 "search query exceeds 4096 bytes".to_string(),
             ));
         }
-        let query_tokens = normalized_tokens(query).into_iter().fold(
-            Vec::with_capacity(MAX_QUERY_TOKENS),
-            |mut tokens, token| {
-                if tokens.len() < MAX_QUERY_TOKENS && !tokens.contains(&token) {
-                    tokens.push(token);
-                }
-                tokens
-            },
-        );
+        let query_tokens = normalized_query_tokens(query);
         if query_tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -1041,17 +1149,13 @@ impl DeviceDatabase {
                 &ciphertext,
             )?;
             let body = String::from_utf8(body).map_err(|_| DeviceDatabaseError::Authentication)?;
-            let candidate_tokens = normalized_tokens(&body);
-            if query_tokens.iter().all(|token| {
-                candidate_tokens
-                    .iter()
-                    .any(|candidate| candidate.starts_with(token))
-            }) {
+            if search_tokens_match(&query_tokens, &body) {
                 results.push(SearchResult {
                     document_id,
                     host_id,
                     thread_id,
                     snippet: bound_utf8(body.trim(), MAX_SNIPPET_BYTES),
+                    body,
                     updated_at_ms,
                 });
                 if results.len() == limit {
@@ -1065,8 +1169,34 @@ impl DeviceDatabase {
 
     pub fn clear_host_search_index(&self, host_id: &str) -> Result<usize, DeviceDatabaseError> {
         validate_id("host_id", host_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let deleted =
+            transaction.execute("DELETE FROM search_documents WHERE host_id = ?1", [host_id])?;
+        transaction.execute("DELETE FROM search_hosts WHERE host_id = ?1", [host_id])?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    pub fn search_host_states(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SearchHostState>, DeviceDatabaseError> {
+        let limit = limit.clamp(1, MAX_SEARCH_HOST_STATES) as i64;
         let connection = self.lock()?;
-        Ok(connection.execute("DELETE FROM search_documents WHERE host_id = ?1", [host_id])?)
+        let mut statement = connection.prepare(
+            "SELECT host_id, last_indexed_at_ms
+             FROM search_hosts
+             ORDER BY last_indexed_at_ms DESC, host_id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            Ok(SearchHostState {
+                host_id: row.get(0)?,
+                last_indexed_at_ms: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn prune_search_before(
@@ -1251,7 +1381,7 @@ impl DeviceDatabase {
             )
             .optional()?;
         if let Some(existing) = existing {
-            if existing == 2_i64.to_be_bytes() {
+            if existing == 2_i64.to_be_bytes() || existing == 3_i64.to_be_bytes() {
                 connection.execute(
                     "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
                     [SCHEMA_VERSION.to_be_bytes().as_slice()],
@@ -1443,6 +1573,32 @@ fn normalized_tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn normalized_query_tokens(value: &str) -> Vec<String> {
+    normalized_tokens(value).into_iter().fold(
+        Vec::with_capacity(MAX_QUERY_TOKENS),
+        |mut tokens, token| {
+            if tokens.len() < MAX_QUERY_TOKENS && !tokens.contains(&token) {
+                tokens.push(token);
+            }
+            tokens
+        },
+    )
+}
+
+fn search_tokens_match(query_tokens: &[String], candidate: &str) -> bool {
+    let candidate_tokens = normalized_tokens(candidate);
+    query_tokens.iter().all(|token| {
+        candidate_tokens
+            .iter()
+            .any(|candidate| candidate.starts_with(token))
+    })
+}
+
+pub(crate) fn search_text_matches(query: &str, candidate: &str) -> bool {
+    let query_tokens = normalized_query_tokens(query);
+    !query_tokens.is_empty() && search_tokens_match(&query_tokens, candidate)
+}
+
 fn posting_terms(value: &str) -> BTreeSet<String> {
     let mut terms = BTreeSet::new();
     for token in normalized_tokens(value) {
@@ -1603,6 +1759,45 @@ mod tests {
     }
 
     #[test]
+    fn search_batch_uses_explicit_terms_and_records_host_freshness() {
+        let database = DeviceDatabase::open_in_memory(key(20)).expect("open");
+        let body = r#"{"schema_version":1,"title":"Needle workflow"}"#;
+        database
+            .index_search_documents(
+                &[SearchDocumentInput {
+                    document_id: "document".to_string(),
+                    host_id: "host".to_string(),
+                    thread_id: "thread".to_string(),
+                    body: body.to_string(),
+                    search_text: "Needle workflow".to_string(),
+                    updated_at_ms: 100,
+                    protected: false,
+                }],
+                200,
+            )
+            .expect("batch index");
+
+        let result = database.search("need", 50).expect("search");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].body, body);
+        assert!(database.search("schema", 50).expect("search").is_empty());
+        assert_eq!(
+            database.search_host_states(100).expect("host states"),
+            vec![SearchHostState {
+                host_id: "host".to_string(),
+                last_indexed_at_ms: 200,
+            }]
+        );
+        assert_eq!(
+            database
+                .delete_search_documents(&["document".to_string()])
+                .expect("delete"),
+            1
+        );
+        assert!(database.search("need", 50).expect("search").is_empty());
+    }
+
+    #[test]
     fn search_ciphertext_tampering_fails_closed() {
         let database = DeviceDatabase::open_in_memory(key(6)).expect("open");
         database
@@ -1754,6 +1949,42 @@ mod tests {
         migrated
             .record_terminal_attention("host", "thread", "turn", 100, false)
             .expect("new table available");
+    }
+
+    #[test]
+    fn search_freshness_layout_migrates_without_invalidating_encrypted_records() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("device.sqlite");
+        let database = DeviceDatabase::open(&path, key(21)).expect("open");
+        database
+            .index_search_document("document", "host", "thread", "preserved", 1, false)
+            .expect("index");
+        {
+            let connection = database.lock().expect("lock");
+            connection
+                .execute("DROP TABLE search_hosts", [])
+                .expect("drop additive table");
+            connection
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                    [3_i64.to_be_bytes().as_slice()],
+                )
+                .expect("restore v3 marker");
+        }
+        drop(database);
+
+        let migrated = DeviceDatabase::open(&path, key(21)).expect("migrate");
+        assert_eq!(
+            migrated.search("pres", 1).expect("read preserved")[0].body,
+            "preserved"
+        );
+        migrated
+            .index_search_document("new", "host", "thread", "fresh", 2, false)
+            .expect("new table available");
+        assert_eq!(
+            migrated.search_host_states(1).expect("freshness")[0].host_id,
+            "host"
+        );
     }
 
     #[test]

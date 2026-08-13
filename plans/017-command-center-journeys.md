@@ -66,8 +66,13 @@ without parity and an intrinsic platform reason.
   misleading acknowledge action. Archive is shown only when the exact typed
   Host/runtime capability is unambiguous, and continues to use the existing
   authoritative `AppClient` operation rather than local organization state.
+- Sessions search now combines live summaries with bounded encrypted device
+  results. Rust reports each Host as live, cached, or unavailable with bounded
+  guidance and the last indexed time. SwiftUI and Compose render matching
+  partial-result disclosures; cached rows are visibly stale, display-only, and
+  cannot route, acknowledge, snooze, or archive. Search still hydrates zero
+  timelines, and live metadata wins a stale encrypted match.
 
-Remaining: encrypted device-index search and partial-Host freshness/error rows,
-provider-instance filter IDs after durable catalog identity lands, migration of
-the legacy Host-detail tree derivation into Rust, Host Scratch,
+Remaining: provider-instance filter IDs after durable catalog identity lands,
+migration of the legacy Host-detail tree derivation into Rust, Host Scratch,
 no-eager-hydration UI tests, and the complete phone/iPad journey matrix.

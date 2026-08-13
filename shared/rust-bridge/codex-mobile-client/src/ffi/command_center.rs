@@ -1,8 +1,10 @@
 //! Handwritten, bounded UniFFI contract for command-center capability state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::device_database::ThreadAttentionState;
+use crate::device_database::{
+    SearchDocumentInput, SearchHostState, SearchResult, ThreadAttentionState,
+};
 use crate::store::boundary::session_summaries_from_snapshot;
 use crate::store::{AppSessionSummary, AppSnapshot};
 use crate::types::{ThreadKey, ThreadSummaryStatus};
@@ -13,16 +15,20 @@ use remora_bridge_core::command_center::{
     ProviderInstance as LinkProviderInstance, ProviderReadiness as LinkProviderReadiness,
     RuntimeCapabilitiesV1 as LinkRuntimeCapabilitiesV1,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const MAX_REASON_BYTES: usize = 256;
 const MAX_COMMAND_CENTER_HOSTS: usize = 32;
 const MAX_SESSION_PAGE_ROWS: usize = 100;
+const MAX_SESSION_SEARCH_RESULTS: usize = 50;
 const MAX_MISSION_LANE_ROWS: usize = 20;
 const MAX_SESSION_QUERY_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_RUNTIME_BYTES: usize = 64;
 const MAX_MODEL_BYTES: usize = 128;
+const SESSION_SEARCH_DOCUMENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
 pub enum AvailabilityState {
@@ -198,7 +204,7 @@ pub struct NewTaskLaunchAvailabilityV1 {
     pub availability: FeatureAvailability,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum SessionStatusV1 {
     Idle,
     Running,
@@ -207,7 +213,7 @@ pub enum SessionStatusV1 {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum SessionAttentionV1 {
     None,
     NeedsYou,
@@ -230,6 +236,9 @@ pub struct SessionListRowV1 {
     pub snoozed_until_ms: Option<i64>,
     pub archive_availability: FeatureAvailability,
     pub updated_at_ms: Option<i64>,
+    /// Cached rows are display-only and may describe a currently unreachable
+    /// Thread. Native clients must not route or mutate them.
+    pub is_cached: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, uniffi::Record)]
@@ -237,6 +246,139 @@ pub struct SessionPageV1 {
     pub rows: Vec<SessionListRowV1>,
     pub next_cursor: Option<String>,
     pub total_count: u32,
+    pub host_states: Vec<SessionHostStateV1>,
+    pub is_partial: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, uniffi::Enum)]
+pub enum SessionHostFreshnessV1 {
+    Live,
+    Cached,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, uniffi::Record)]
+pub struct SessionHostStateV1 {
+    /// Transitional store key until every Host is catalog-addressable.
+    pub legacy_server_id: String,
+    pub host_label: String,
+    pub freshness: SessionHostFreshnessV1,
+    pub last_indexed_at_ms: Option<i64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionSearchDocumentV1 {
+    schema_version: u32,
+    server_id: String,
+    thread_id: String,
+    host_label: String,
+    project_label: Option<String>,
+    runtime_id: String,
+    model_label: Option<String>,
+    title: String,
+    preview: Option<String>,
+    updated_at_ms: Option<i64>,
+}
+
+impl SessionSearchDocumentV1 {
+    fn from_summary(summary: &AppSessionSummary) -> Self {
+        Self {
+            schema_version: SESSION_SEARCH_DOCUMENT_VERSION,
+            server_id: bound_utf8(&summary.key.server_id, MAX_TITLE_BYTES),
+            thread_id: bound_utf8(&summary.key.thread_id, MAX_TITLE_BYTES),
+            host_label: bound_utf8(&summary.server_display_name, MAX_TITLE_BYTES),
+            project_label: project_label(&summary.cwd),
+            runtime_id: bound_utf8(&summary.agent_runtime_kind, MAX_RUNTIME_BYTES),
+            model_label: nonempty_bounded(&summary.model, MAX_MODEL_BYTES),
+            title: bound_utf8(&summary.title, MAX_TITLE_BYTES),
+            preview: summary
+                .last_response_preview
+                .as_deref()
+                .or_else(|| (!summary.preview.is_empty()).then_some(summary.preview.as_str()))
+                .map(|value| bound_utf8(value, MAX_PREVIEW_BYTES)),
+            updated_at_ms: summary
+                .updated_at
+                .and_then(|seconds| seconds.checked_mul(1_000)),
+        }
+    }
+
+    fn key(&self) -> ThreadKey {
+        ThreadKey {
+            server_id: self.server_id.clone(),
+            thread_id: self.thread_id.clone(),
+        }
+    }
+
+    fn document_id_for(key: &ThreadKey) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"remora-session-search-v1\0");
+        digest.update(key.server_id.as_bytes());
+        digest.update(b"\0");
+        digest.update(key.thread_id.as_bytes());
+        format!("session-{}", hex::encode(digest.finalize()))
+    }
+
+    fn search_text(&self) -> String {
+        [
+            Some(self.title.as_str()),
+            Some(self.host_label.as_str()),
+            self.project_label.as_deref(),
+            Some(self.runtime_id.as_str()),
+            self.model_label.as_deref(),
+            self.preview.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
+    fn decode(result: &SearchResult) -> Option<Self> {
+        let document = serde_json::from_str::<Self>(&result.body).ok()?;
+        (document.schema_version == SESSION_SEARCH_DOCUMENT_VERSION
+            && document.server_id == result.host_id
+            && document.thread_id == result.thread_id
+            && Self::document_id_for(&document.key()) == result.document_id)
+            .then_some(document)
+    }
+}
+
+pub(crate) fn session_search_document(
+    summary: &AppSessionSummary,
+) -> Result<SearchDocumentInput, String> {
+    let document = SessionSearchDocumentV1::from_summary(summary);
+    let key = document.key();
+    let body = serde_json::to_string(&document).map_err(|error| error.to_string())?;
+    Ok(SearchDocumentInput {
+        document_id: SessionSearchDocumentV1::document_id_for(&key),
+        host_id: key.server_id,
+        thread_id: key.thread_id,
+        search_text: document.search_text(),
+        body,
+        updated_at_ms: document.updated_at_ms.unwrap_or_else(unix_time_ms),
+        protected: false,
+    })
+}
+
+pub(crate) fn session_search_document_id(key: &ThreadKey) -> String {
+    SessionSearchDocumentV1::document_id_for(key)
+}
+
+pub(crate) fn decode_session_search_results(
+    results: &[SearchResult],
+) -> Vec<SessionSearchDocumentV1> {
+    results
+        .iter()
+        .filter_map(SessionSearchDocumentV1::decode)
+        .collect()
+}
+
+pub(crate) fn bounded_session_search_query(query: Option<&str>) -> Option<String> {
+    query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| bound_utf8(value, MAX_SESSION_QUERY_BYTES))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
@@ -609,6 +751,7 @@ pub(crate) fn project_sessions_page_filtered(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn project_sessions_page_filtered_with_attention(
     snapshot: &AppSnapshot,
     filter: &SessionFilterV1,
@@ -618,16 +761,35 @@ pub(crate) fn project_sessions_page_filtered_with_attention(
     attention_states: &HashMap<ThreadKey, ThreadAttentionState>,
     now_ms: i64,
 ) -> Result<SessionPageV1, String> {
-    let query = filter
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| bound_utf8(value, MAX_SESSION_QUERY_BYTES).to_lowercase());
+    project_sessions_page_filtered_with_cache(
+        snapshot,
+        filter,
+        cursor,
+        limit,
+        link_statuses,
+        attention_states,
+        &[],
+        &[],
+        now_ms,
+    )
+}
+
+pub(crate) fn project_sessions_page_filtered_with_cache(
+    snapshot: &AppSnapshot,
+    filter: &SessionFilterV1,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+    link_statuses: &HashMap<String, LinkHostCommandCenterStatusV1>,
+    attention_states: &HashMap<ThreadKey, ThreadAttentionState>,
+    cached_documents: &[SessionSearchDocumentV1],
+    search_host_states: &[SearchHostState],
+    now_ms: i64,
+) -> Result<SessionPageV1, String> {
+    let query = bounded_session_search_query(filter.query.as_deref());
     let project_label = normalized_filter_value(filter.project_label.as_deref(), MAX_TITLE_BYTES);
     let runtime_id = normalized_filter_value(filter.runtime_id.as_deref(), MAX_RUNTIME_BYTES);
     let server_id = normalized_filter_value(filter.server_id.as_deref(), MAX_TITLE_BYTES);
-    let rows = session_summaries_from_snapshot(snapshot)
+    let mut rows = session_summaries_from_snapshot(snapshot)
         .iter()
         .map(|summary| {
             session_row(
@@ -639,29 +801,59 @@ pub(crate) fn project_sessions_page_filtered_with_attention(
             )
         })
         .filter(|row| {
-            server_id
-                .as_deref()
-                .is_none_or(|selected| row.key.server_id == selected)
-                && project_label.as_deref().is_none_or(|selected| {
-                    row.project_label
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(selected))
-                })
-                && runtime_id
-                    .as_deref()
-                    .is_none_or(|selected| row.runtime_id.eq_ignore_ascii_case(selected))
-                && filter.status.is_none_or(|selected| row.status == selected)
-                && filter
-                    .attention
-                    .is_none_or(|selected| row.attention == selected)
-                && filter
-                    .updated_after_ms
-                    .is_none_or(|minimum| row.updated_at_ms.is_some_and(|value| value >= minimum))
-                && query
-                    .as_deref()
-                    .is_none_or(|needle| session_row_matches(row, needle))
+            session_row_matches_filter(
+                row,
+                filter,
+                server_id.as_deref(),
+                project_label.as_deref(),
+                runtime_id.as_deref(),
+                query.as_deref(),
+            )
         })
         .collect::<Vec<_>>();
+
+    if query.is_some() {
+        let live_keys = snapshot.threads.keys().cloned().collect::<HashSet<_>>();
+        let mut row_keys = rows
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<HashSet<_>>();
+        for document in cached_documents {
+            let key = document.key();
+            if live_keys.contains(&key) || !row_keys.insert(key.clone()) {
+                continue;
+            }
+            let row = cached_session_row(document, attention_states.get(&key), now_ms);
+            if session_row_matches_filter(
+                &row,
+                filter,
+                server_id.as_deref(),
+                project_label.as_deref(),
+                runtime_id.as_deref(),
+                query.as_deref(),
+            ) {
+                rows.push(row);
+            }
+        }
+        rows.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.key.server_id.cmp(&right.key.server_id))
+                .then_with(|| left.key.thread_id.cmp(&right.key.thread_id))
+        });
+        rows.truncate(MAX_SESSION_SEARCH_RESULTS);
+    }
+
+    let host_states = project_session_host_states(
+        snapshot,
+        server_id.as_deref(),
+        cached_documents,
+        search_host_states,
+    );
+    let is_partial = host_states
+        .iter()
+        .any(|state| state.freshness != SessionHostFreshnessV1::Live);
     let start = decode_session_cursor(cursor, rows.len())?;
     let limit = limit
         .unwrap_or(MAX_SESSION_PAGE_ROWS as u32)
@@ -671,6 +863,8 @@ pub(crate) fn project_sessions_page_filtered_with_attention(
         rows: rows[start..end].to_vec(),
         next_cursor: (end < rows.len()).then(|| format!("v1:{end}")),
         total_count: rows.len().min(u32::MAX as usize) as u32,
+        host_states,
+        is_partial,
     })
 }
 
@@ -835,6 +1029,177 @@ fn session_row(
         updated_at_ms: summary
             .updated_at
             .and_then(|seconds| seconds.checked_mul(1_000)),
+        is_cached: false,
+    }
+}
+
+fn cached_session_row(
+    document: &SessionSearchDocumentV1,
+    organization: Option<&ThreadAttentionState>,
+    now_ms: i64,
+) -> SessionListRowV1 {
+    let terminal_attention = organization
+        .and_then(|state| state.occurred_at_ms.map(|occurred| (state, occurred)))
+        .is_some_and(|(state, occurred)| {
+            state
+                .acknowledged_at_ms
+                .is_none_or(|acknowledged| acknowledged < occurred)
+        });
+    let snoozed_until_ms = organization
+        .and_then(|state| state.snoozed_until_ms)
+        .filter(|until| *until > now_ms);
+    let terminal_failed = organization.is_some_and(|state| {
+        state.terminal_event_id.is_some() && state.occurred_at_ms.is_some() && state.failed
+    });
+    SessionListRowV1 {
+        key: document.key(),
+        host_label: document.host_label.clone(),
+        project_label: document.project_label.clone(),
+        runtime_id: document.runtime_id.clone(),
+        model_label: document.model_label.clone(),
+        title: document.title.clone(),
+        preview: document.preview.clone(),
+        status: if terminal_failed {
+            SessionStatusV1::Failed
+        } else {
+            SessionStatusV1::Unknown
+        },
+        attention: if terminal_attention && snoozed_until_ms.is_none() {
+            SessionAttentionV1::NeedsYou
+        } else {
+            SessionAttentionV1::None
+        },
+        // Even acknowledgement remains in-app/live-only for cached rows so a
+        // stale result can never mutate organization state for a removed Host.
+        can_acknowledge: false,
+        snoozed_until_ms,
+        archive_availability: FeatureAvailability::unknown(
+            "Reconnect this Host before changing the session",
+        ),
+        updated_at_ms: document.updated_at_ms,
+        is_cached: true,
+    }
+}
+
+fn session_row_matches_filter(
+    row: &SessionListRowV1,
+    filter: &SessionFilterV1,
+    server_id: Option<&str>,
+    project_label: Option<&str>,
+    runtime_id: Option<&str>,
+    query: Option<&str>,
+) -> bool {
+    server_id.is_none_or(|selected| row.key.server_id == selected)
+        && project_label.is_none_or(|selected| {
+            row.project_label
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(selected))
+        })
+        && runtime_id.is_none_or(|selected| row.runtime_id.eq_ignore_ascii_case(selected))
+        && filter.status.is_none_or(|selected| row.status == selected)
+        && filter
+            .attention
+            .is_none_or(|selected| row.attention == selected)
+        && filter
+            .updated_after_ms
+            .is_none_or(|minimum| row.updated_at_ms.is_some_and(|value| value >= minimum))
+        && query.is_none_or(|needle| session_row_matches(row, needle))
+}
+
+fn project_session_host_states(
+    snapshot: &AppSnapshot,
+    selected_server_id: Option<&str>,
+    cached_documents: &[SessionSearchDocumentV1],
+    search_host_states: &[SearchHostState],
+) -> Vec<SessionHostStateV1> {
+    let indexed_at_by_host = search_host_states
+        .iter()
+        .map(|state| (state.host_id.as_str(), state.last_indexed_at_ms))
+        .collect::<HashMap<_, _>>();
+    let cached_labels = cached_documents
+        .iter()
+        .map(|document| (document.server_id.as_str(), document.host_label.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut states = snapshot
+        .servers
+        .values()
+        .filter(|server| {
+            selected_server_id.is_none_or(|selected| server.server_id.as_str() == selected)
+        })
+        .map(|server| {
+            let last_indexed_at_ms = indexed_at_by_host.get(server.server_id.as_str()).copied();
+            let (freshness, reason) = match &server.health {
+                crate::store::ServerHealthSnapshot::Connected => {
+                    (SessionHostFreshnessV1::Live, None)
+                }
+                crate::store::ServerHealthSnapshot::Connecting => host_cache_state(
+                    last_indexed_at_ms,
+                    "Host is reconnecting; showing encrypted device cache",
+                    "Host is reconnecting and has no local session cache",
+                ),
+                crate::store::ServerHealthSnapshot::Unresponsive => host_cache_state(
+                    last_indexed_at_ms,
+                    "Host is unresponsive; showing encrypted device cache",
+                    "Host is unresponsive and has no local session cache",
+                ),
+                crate::store::ServerHealthSnapshot::Disconnected
+                | crate::store::ServerHealthSnapshot::Unknown(_) => host_cache_state(
+                    last_indexed_at_ms,
+                    "Host is offline; showing encrypted device cache",
+                    "Host is offline and has no local session cache",
+                ),
+            };
+            SessionHostStateV1 {
+                legacy_server_id: bound_utf8(&server.server_id, MAX_TITLE_BYTES),
+                host_label: bound_utf8(&server.display_name, MAX_TITLE_BYTES),
+                freshness,
+                last_indexed_at_ms,
+                reason,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut included = states
+        .iter()
+        .map(|state| state.legacy_server_id.clone())
+        .collect::<HashSet<_>>();
+    for (host_id, last_indexed_at_ms) in indexed_at_by_host {
+        if selected_server_id.is_some_and(|selected| selected != host_id)
+            || included.contains(host_id)
+        {
+            continue;
+        }
+        states.push(SessionHostStateV1 {
+            legacy_server_id: bound_utf8(host_id, MAX_TITLE_BYTES),
+            host_label: bound_utf8(
+                cached_labels.get(host_id).copied().unwrap_or(host_id),
+                MAX_TITLE_BYTES,
+            ),
+            freshness: SessionHostFreshnessV1::Cached,
+            last_indexed_at_ms: Some(last_indexed_at_ms),
+            reason: Some("Host is not currently discovered; showing encrypted device cache".into()),
+        });
+        included.insert(host_id.to_string());
+    }
+    states.sort_by(|left, right| left.host_label.cmp(&right.host_label));
+    states.truncate(MAX_COMMAND_CENTER_HOSTS);
+    states
+}
+
+fn host_cache_state(
+    last_indexed_at_ms: Option<i64>,
+    cached_reason: &str,
+    unavailable_reason: &str,
+) -> (SessionHostFreshnessV1, Option<String>) {
+    if last_indexed_at_ms.is_some() {
+        (
+            SessionHostFreshnessV1::Cached,
+            Some(bound_utf8(cached_reason, MAX_REASON_BYTES)),
+        )
+    } else {
+        (
+            SessionHostFreshnessV1::Unavailable,
+            Some(bound_utf8(unavailable_reason, MAX_REASON_BYTES)),
+        )
     }
 }
 
@@ -876,7 +1241,6 @@ fn archive_availability(
     project_link_feature(matching.remove(0))
 }
 
-#[cfg(test)]
 fn unix_time_ms() -> i64 {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -915,21 +1279,19 @@ fn normalized_filter_value(value: Option<&str>, maximum: usize) -> Option<String
 }
 
 fn session_row_matches(row: &SessionListRowV1, needle: &str) -> bool {
-    row.title.to_lowercase().contains(needle)
-        || row.host_label.to_lowercase().contains(needle)
-        || row
-            .project_label
-            .as_deref()
-            .is_some_and(|value| value.to_lowercase().contains(needle))
-        || row.runtime_id.to_lowercase().contains(needle)
-        || row
-            .model_label
-            .as_deref()
-            .is_some_and(|value| value.to_lowercase().contains(needle))
-        || row
-            .preview
-            .as_deref()
-            .is_some_and(|value| value.to_lowercase().contains(needle))
+    let text = [
+        Some(row.title.as_str()),
+        Some(row.host_label.as_str()),
+        row.project_label.as_deref(),
+        Some(row.runtime_id.as_str()),
+        row.model_label.as_deref(),
+        row.preview.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    crate::device_database::search_text_matches(needle, &text)
 }
 
 fn bound_utf8(value: &str, maximum: usize) -> String {
@@ -1412,6 +1774,97 @@ mod tests {
         assert_eq!(attention_page.total_count, 1);
         assert_eq!(attention_page.rows[0].key.thread_id, "waiting");
         assert_eq!(attention_page.rows[0].status, SessionStatusV1::Waiting);
+    }
+
+    #[test]
+    fn encrypted_cached_search_rows_are_display_only_and_report_partial_hosts() {
+        let document = SessionSearchDocumentV1 {
+            schema_version: SESSION_SEARCH_DOCUMENT_VERSION,
+            server_id: "offline-host".to_string(),
+            thread_id: "thread-cached".to_string(),
+            host_label: "Travel Mac".to_string(),
+            project_label: Some("remora".to_string()),
+            runtime_id: "codex".to_string(),
+            model_label: Some("gpt-5".to_string()),
+            title: "Offline architecture review".to_string(),
+            preview: Some("Cached encrypted summary".to_string()),
+            updated_at_ms: Some(5_000),
+        };
+        let page = project_sessions_page_filtered_with_cache(
+            &AppSnapshot::default(),
+            &SessionFilterV1 {
+                query: Some("architecture".to_string()),
+                ..SessionFilterV1::default()
+            },
+            None,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[document],
+            &[SearchHostState {
+                host_id: "offline-host".to_string(),
+                last_indexed_at_ms: 6_000,
+            }],
+            7_000,
+        )
+        .expect("cached page");
+
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.rows[0].is_cached);
+        assert!(!page.rows[0].can_acknowledge);
+        assert_eq!(
+            page.rows[0].archive_availability.state,
+            AvailabilityState::Unknown
+        );
+        assert!(page.is_partial);
+        assert_eq!(page.host_states.len(), 1);
+        assert_eq!(
+            page.host_states[0].freshness,
+            SessionHostFreshnessV1::Cached
+        );
+        assert_eq!(page.host_states[0].last_indexed_at_ms, Some(6_000));
+    }
+
+    #[test]
+    fn live_session_metadata_wins_over_a_stale_encrypted_match() {
+        let store = AppStoreReducer::new();
+        store.upsert_server(&server_config("server"), ServerHealthSnapshot::Connected);
+        let mut live = thread_info(1);
+        live.id = "thread".to_string();
+        live.title = Some("Current title".to_string());
+        store.upsert_thread_list_page("server", &[live]);
+        let stale = SessionSearchDocumentV1 {
+            schema_version: SESSION_SEARCH_DOCUMENT_VERSION,
+            server_id: "server".to_string(),
+            thread_id: "thread".to_string(),
+            host_label: "Host".to_string(),
+            project_label: Some("project".to_string()),
+            runtime_id: "codex".to_string(),
+            model_label: None,
+            title: "Stale needle".to_string(),
+            preview: None,
+            updated_at_ms: Some(1),
+        };
+
+        let page = project_sessions_page_filtered_with_cache(
+            &store.snapshot(),
+            &SessionFilterV1 {
+                query: Some("needle".to_string()),
+                ..SessionFilterV1::default()
+            },
+            None,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[stale],
+            &[],
+            1,
+        )
+        .expect("page");
+
+        assert!(page.rows.is_empty());
+        assert!(!page.is_partial);
+        assert_eq!(page.host_states[0].freshness, SessionHostFreshnessV1::Live);
     }
 
     #[test]

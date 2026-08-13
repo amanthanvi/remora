@@ -33,12 +33,18 @@ authoritative acknowledgement removal, protected retention, wrong-key/tamper
 failure, monotonic relay-sequenced organization projection, encrypted
 review-note CRUD with immutable anchors, 90-day/2 GiB logical search retention,
 native device-only key handoff, and Turn-ID-idempotent event-driven
-terminal-attention metadata.
-The additive v2→v3 layout migration deliberately preserves the v2 encrypted
+terminal-attention metadata. Sessions summaries are now encrypted and indexed
+in batches of at most 500 documents, with two-second coalescing during active
+updates and an immediate terminal-state flush. Queries remain bounded to 50
+results and 200 decrypted candidates, live Host state wins stale cache state,
+and per-Host index freshness is explicit.
+The additive v2→v4 layout migrations deliberately preserve the v2 encrypted
 record envelope, so queued intents, indexed content, and review notes remain
-decryptable. Retention protects pinned Threads, queued intents, open review
-notes, and explicitly protected documents. iOS and Android rebuild only the
-exact disposable cache files and retain the secure master key.
+decryptable. Schema v4 adds only Host search-freshness metadata; searchable
+summary bodies and outbox payloads remain individually encrypted. Retention
+protects pinned Threads, queued intents, open review notes, and explicitly
+protected documents. iOS and Android rebuild only the exact disposable cache
+files and retain the secure master key.
 
 Remaining: authoritative Host delivery worker integration and end-to-end
-offline/reconnect UI coverage.
+offline compose/reconnect delivery coverage.

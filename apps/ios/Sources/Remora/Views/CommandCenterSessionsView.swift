@@ -40,6 +40,9 @@ struct CommandCenterSessionsView: View {
     @State private var rows: [SessionListRowV1] = []
     @State private var nextCursor: String?
     @State private var totalCount: UInt32 = 0
+    @State private var hostStates: [SessionHostStateV1] = []
+    @State private var isPartial = false
+    @State private var showsHostDetails = false
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var requestGeneration: UInt64 = 0
@@ -55,6 +58,9 @@ struct CommandCenterSessionsView: View {
         VStack(spacing: 0) {
             searchField
             filterBar
+            if isPartial {
+                partialResultsNotice
+            }
             Divider().opacity(0.25)
             sessionsList
         }
@@ -97,6 +103,46 @@ struct CommandCenterSessionsView: View {
         } message: {
             Text(actionError ?? "Try again after reconnecting the Host.")
         }
+    }
+
+    private var degradedHostStates: [SessionHostStateV1] {
+        hostStates.filter { $0.freshness != .live }
+    }
+
+    private var partialResultsNotice: some View {
+        DisclosureGroup(isExpanded: $showsHostDetails) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(degradedHostStates, id: \.legacyServerId) { state in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(state.hostLabel) · \(freshnessLabel(state.freshness))")
+                            .remoraMonoFont(size: 11, weight: .semibold)
+                            .foregroundStyle(RemoraTheme.textSecondary)
+                        if let reason = state.reason, !reason.isEmpty {
+                            Text(reason)
+                                .remoraFont(.caption)
+                                .foregroundStyle(RemoraTheme.textMuted)
+                        }
+                        if let indexedAt = state.lastIndexedAtMs {
+                            Text("Indexed \(relativeDate(indexedAt / 1_000))")
+                                .remoraMonoFont(size: 10, weight: .regular)
+                                .foregroundStyle(RemoraTheme.textMuted)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Label(
+                "Partial results · \(degradedHostStates.count) Host\(degradedHostStates.count == 1 ? "" : "s")",
+                systemImage: "externaldrive.badge.exclamationmark"
+            )
+            .remoraFont(.caption)
+            .foregroundStyle(RemoraTheme.warning)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(RemoraTheme.warning.opacity(0.08))
+        .accessibilityHint("Shows freshness and connection details for each unavailable Host")
     }
 
     private var searchField: some View {
@@ -228,7 +274,9 @@ struct CommandCenterSessionsView: View {
 
     private func sessionRow(_ row: SessionListRowV1) -> some View {
         Button {
-            onOpenConversation(row.key)
+            if !row.isCached {
+                onOpenConversation(row.key)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -267,7 +315,7 @@ struct CommandCenterSessionsView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(row.title), \(statusText(row))")
-        .accessibilityHint("Open session")
+        .accessibilityHint(row.isCached ? "Reconnect this Host to open the session" : "Open session")
     }
 
     private func statusLabel(_ row: SessionListRowV1) -> some View {
@@ -280,6 +328,7 @@ struct CommandCenterSessionsView: View {
     }
 
     private func statusText(_ row: SessionListRowV1) -> String {
+        if row.isCached { return "Cached" }
         if row.attention == .needsYou { return "Needs You" }
         if row.snoozedUntilMs != nil { return "Snoozed" }
         return switch row.status {
@@ -292,6 +341,7 @@ struct CommandCenterSessionsView: View {
     }
 
     private func statusColor(_ row: SessionListRowV1) -> Color {
+        if row.isCached { return RemoraTheme.textMuted }
         if row.attention == .needsYou { return RemoraTheme.warning }
         if row.snoozedUntilMs != nil { return RemoraTheme.accentForeground }
         return switch row.status {
@@ -300,6 +350,14 @@ struct CommandCenterSessionsView: View {
         case .waiting: RemoraTheme.warning
         case .idle: RemoraTheme.textSecondary
         case .unknown: RemoraTheme.textMuted
+        }
+    }
+
+    private func freshnessLabel(_ freshness: SessionHostFreshnessV1) -> String {
+        switch freshness {
+        case .live: "Live"
+        case .cached: "Cached"
+        case .unavailable: "Unavailable"
         }
     }
 
@@ -321,6 +379,8 @@ struct CommandCenterSessionsView: View {
         rows = []
         nextCursor = nil
         totalCount = 0
+        hostStates = []
+        isPartial = false
         isLoading = true
         errorMessage = nil
         return requestGeneration
@@ -358,6 +418,8 @@ struct CommandCenterSessionsView: View {
             rows.append(contentsOf: page.rows.filter { !existing.contains($0.key) })
             nextCursor = page.nextCursor
             totalCount = page.totalCount
+            hostStates = page.hostStates
+            isPartial = page.isPartial
         } catch {
             guard generation == requestGeneration, !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
