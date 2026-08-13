@@ -74,6 +74,12 @@ struct AppComposerPayload: Equatable, Sendable {
     var effort: ReasoningEffort?
     var serviceTier: ServiceTier?
 
+    var submissionContent: AppTurnSubmissionContent {
+        additionalInputs.isEmpty && fileAttachments.isEmpty
+            ? .textOnly
+            : .liveHostRequired
+    }
+
     func turnStartRequest(threadId: String) -> AppStartTurnRequest {
         var inputs = additionalInputs
         let composedText = desktopStylePromptText(text: text, fileAttachments: fileAttachments)

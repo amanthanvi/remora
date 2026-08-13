@@ -69,6 +69,9 @@ import com.remora.android.ui.WallpaperType
 import com.remora.android.ui.isNearListBottom
 import com.remora.android.ui.rememberStickyFollowTail
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import uniffi.codex_mobile_client.AppRemoraLinkThreadOutboxStatus
+import uniffi.codex_mobile_client.AppServerHealth
 import uniffi.codex_mobile_client.HydratedConversationItemContent
 import uniffi.codex_mobile_client.AppRenameThreadRequest
 import uniffi.codex_mobile_client.ThreadKey
@@ -241,10 +244,32 @@ fun ConversationScreen(
     var showSessionDiffSheet by remember(threadKey) { mutableStateOf(false) }
     var slashErrorMessage by remember(threadKey) { mutableStateOf<String?>(null) }
     var reloadErrorMessage by remember(threadKey) { mutableStateOf<String?>(null) }
+    var outboxStatus by remember(threadKey) { mutableStateOf<AppRemoraLinkThreadOutboxStatus?>(null) }
+    var refreshedUncertainCount by remember(threadKey) { mutableStateOf<UInt?>(null) }
+    var outboxActionInFlight by remember(threadKey) { mutableStateOf(false) }
+    var showDiscardUncertainConfirmation by remember(threadKey) { mutableStateOf(false) }
     var composerInteractionActive by remember(threadKey) { mutableStateOf(false) }
     var collaborationModesLoading by remember { mutableStateOf(false) }
     var collaborationModePresets by remember {
         mutableStateOf<List<uniffi.codex_mobile_client.AppCollaborationModePreset>>(emptyList())
+    }
+    fun refreshOutboxStatus() {
+        val status = runCatching {
+            appModel.remoraLinkThreadOutboxStatus(threadKey)
+        }.getOrNull()
+        outboxStatus = status
+        if (status?.outcomeUnknownCount != refreshedUncertainCount) {
+            refreshedUncertainCount = null
+        }
+    }
+    LaunchedEffect(threadKey, server?.health) {
+        refreshOutboxStatus()
+        if (server?.health == AppServerHealth.CONNECTED) {
+            listOf(250L, 750L, 1_500L).forEach { delayMillis ->
+                delay(delayMillis)
+                refreshOutboxStatus()
+            }
+        }
     }
     LaunchedEffect(
         threadKey,
@@ -771,6 +796,45 @@ fun ConversationScreen(
                     }
 
                     // Composer bar
+                    outboxStatus?.takeIf {
+                        it.queuedCount > 0u || it.outcomeUnknownCount > 0u
+                    }?.let { status ->
+                        ConversationOutboxStatusBanner(
+                            status = status,
+                            actionInFlight = outboxActionInFlight,
+                            discardReady = isUncertainOutboxDiscardReady(
+                                currentCount = status.outcomeUnknownCount,
+                                refreshedCount = refreshedUncertainCount,
+                            ),
+                            onRefresh = {
+                                if (!outboxActionInFlight) {
+                                    outboxActionInFlight = true
+                                    scope.launch {
+                                        runCatching {
+                                            appModel.forceRefreshThreadAuthoritative(threadKey)
+                                        }.onSuccess {
+                                            refreshOutboxStatus()
+                                            refreshedUncertainCount = outboxStatus
+                                                ?.outcomeUnknownCount
+                                                ?.takeIf { it > 0u }
+                                        }.onFailure { error ->
+                                            refreshedUncertainCount = null
+                                            slashErrorMessage = error.message ?: "Unable to refresh the thread"
+                                        }
+                                        outboxActionInFlight = false
+                                    }
+                                }
+                            },
+                            onDiscard = {
+                                if (isUncertainOutboxDiscardReady(
+                                        currentCount = status.outcomeUnknownCount,
+                                        refreshedCount = refreshedUncertainCount,
+                                    )) {
+                                    showDiscardUncertainConfirmation = true
+                                }
+                            },
+                        )
+                    }
                     ComposerBar(
                         threadKey = threadKey,
                         collaborationMode = thread?.collaborationMode ?: uniffi.codex_mobile_client.AppModeKind.DEFAULT,
@@ -819,6 +883,7 @@ fun ConversationScreen(
                         onDismissPendingUserInput = {
                             pendingInput?.let { dismissedUserInputs.dismiss(it.id) }
                         },
+                        onOutboxChanged = ::refreshOutboxStatus,
                         onInputFocusChanged = { composerInteractionActive = it },
                     )
 
@@ -838,6 +903,46 @@ fun ConversationScreen(
                     onDismiss = { showPermissionsSheet = false },
                 )
             }
+        }
+
+        if (showDiscardUncertainConfirmation) {
+            AlertDialog(
+                onDismissRequest = { showDiscardUncertainConfirmation = false },
+                title = { Text("Discard uncertain message copy?") },
+                text = {
+                    Text("Check the refreshed thread first. Discarding removes only the device copy; it cannot undo a message the provider already received.")
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !outboxActionInFlight && isUncertainOutboxDiscardReady(
+                            currentCount = outboxStatus?.outcomeUnknownCount ?: 0u,
+                            refreshedCount = refreshedUncertainCount,
+                        ),
+                        onClick = {
+                            showDiscardUncertainConfirmation = false
+                            outboxActionInFlight = true
+                            scope.launch {
+                                runCatching {
+                                    appModel.discardRemoraLinkOutcomeUnknown(threadKey)
+                                }.onSuccess {
+                                    refreshedUncertainCount = null
+                                }.onFailure { error ->
+                                    slashErrorMessage = error.message ?: "Unable to discard the uncertain copy"
+                                }
+                                refreshOutboxStatus()
+                                outboxActionInFlight = false
+                            }
+                        },
+                    ) {
+                        Text("Discard copy", color = RemoraTheme.danger)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDiscardUncertainConfirmation = false }) {
+                        Text("Keep it")
+                    }
+                },
+            )
         }
 
         if (showCollaborationModeSelector) {
@@ -1012,3 +1117,80 @@ fun ConversationScreen(
         }
     }
 }
+
+@Composable
+private fun ConversationOutboxStatusBanner(
+    status: AppRemoraLinkThreadOutboxStatus,
+    actionInFlight: Boolean,
+    discardReady: Boolean,
+    onRefresh: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    val isUncertain = status.outcomeUnknownCount > 0u
+    val message = if (isUncertain) {
+        val uncertain = if (status.outcomeUnknownCount == 1u) {
+            "One message may already have sent."
+        } else {
+            "${status.outcomeUnknownCount} messages may already have sent."
+        }
+        val blocked = when (status.queuedCount) {
+            0u -> ""
+            1u -> " One later queued message is paused."
+            else -> " ${status.queuedCount} later queued messages are paused."
+        }
+        "$uncertain Refresh the thread before deciding; Remora will not resend automatically.$blocked"
+    } else if (status.queuedCount == 1u) {
+        "One message is encrypted on this device and will send when the computer reconnects."
+    } else {
+        "${status.queuedCount} messages are encrypted on this device and will send in order when the computer reconnects."
+    }
+    val accent = if (isUncertain) RemoraTheme.warning else RemoraTheme.accent
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(accent.copy(alpha = 0.10f))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                text = if (isUncertain) "Delivery uncertain" else "Queued securely",
+                color = RemoraTheme.textPrimary,
+                fontSize = RemoraTextStyle.caption.scaled,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = message,
+                color = RemoraTheme.textSecondary,
+                fontSize = RemoraTextStyle.caption2.scaled,
+            )
+            if (isUncertain) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextButton(enabled = !actionInFlight, onClick = onRefresh) {
+                        Text("Refresh thread")
+                    }
+                    TextButton(enabled = !actionInFlight && discardReady, onClick = onDiscard) {
+                        Text("Discard copy", color = RemoraTheme.danger)
+                    }
+                }
+            }
+        }
+        if (actionInFlight) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                color = accent,
+                strokeWidth = 2.dp,
+            )
+        }
+    }
+}
+
+internal fun isUncertainOutboxDiscardReady(
+    currentCount: UInt,
+    refreshedCount: UInt?,
+): Boolean = currentCount > 0u && refreshedCount == currentCount

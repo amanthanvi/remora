@@ -159,12 +159,18 @@ cross-boundary validation or recovery.
 
 The device SQLite foundation encrypts outbox payloads, search documents, and
 review-note bodies per record with a device-only Keychain/Keystore master key;
-HMAC exact/prefix postings avoid plaintext search terms. It is a cache, not
-authority for live Host/provider state. Durable Host/provider Thread binding
+HMAC exact/prefix postings avoid plaintext search terms. Provider-to-Host
+Thread binding uses a separate HMAC lookup key and authenticated encrypted
+identity payload with a 20,000-row hard cap. It is a cache, not authority for
+live Host/provider state. Durable Host/provider Thread binding
 and the serialized outbox delivery worker are implemented with content-free
 Host fences; outcome-unknown dispatches remain retained and are not replayed
-automatically. Explicit recovery UX, delivered organization/review workflows,
-rich awareness APIs, browser controller/CDP integration,
+automatically. Native recovery requires authoritative refresh and explicit
+confirmation before deleting only the uncertain device copy; it never offers
+direct resend. Later messages on the same Thread remain blocked behind that
+copy, while unrelated Threads continue. Disconnected images, files, skills,
+and plugin context fail closed instead of being flattened into queueable text.
+Delivered organization/review workflows, rich awareness APIs, browser controller/CDP integration,
 worktrees/checkpoints, managed DigitalOcean lifecycle, passkey/recovery
 administration, signed Link updates, and release promotion are not yet
 implemented.
@@ -174,8 +180,6 @@ constrained to status/count projection data.
 
 ### Planned controls
 
-- Explicit in-app recovery for outcome-unknown outbox dispatches after
-  authoritative provider/Host inspection; automatic replay remains forbidden.
 - Passkey user verification, offline recovery enrollment/revocation, short
   sessions, and one-time websocket tickets.
 - Workspace confinement, argv allowlists, canonical path checks, and symlink
@@ -210,7 +214,7 @@ constrained to status/count projection data.
 | Public relay compromise | Work content and routes; disclosure, tampering, or loss | Implemented | Keep relay work state end-to-end encrypted and make authenticated durable reconciliation authoritative. | Relay ciphertext, payload-shape, replay/drift, and opaque-wake tests. | Relay operators can observe metadata and deny service. |
 | Future admin HTTPS compromise | Owner authority and managed Hosts; unauthorized administration | Planned | Require passkey verification, short sessions, one-time websocket tickets, origin checks, and auditable admin changes before admin launch. | Authentication, origin, expiry, replay, revocation, and authorization negative tests. | Admin controls do not repair compromised owner devices or Hosts. |
 | Mobile device compromise and stolen pairing material | Device authority and saved work; impersonation or disclosure | Implemented / Planned | Implemented: non-exportable P-256 signing authority, scoped grants, epochs, platform credential storage, and per-record encrypted work cache. Planned: recovery enrollment and broader revocation administration. | Key-provider tests, copied-invitation/replay tests, revoke/forget tests, encrypted-record migration, recovery, and locked-device tests. | A fully compromised unlocked device can invoke available authority and read displayed data. |
-| Offline intent replay or ambiguous provider dispatch | Duplicate owner messages, unintended provider work, or silent loss | Implemented / Planned | Implemented: encrypted device intent, credential/Thread/fingerprint-bound Host receipt, durable pre-dispatch fence, monotonic receipt states, and explicit outcome-unknown replay. Planned: durable Host/provider Thread mapping plus authoritative history reconciliation before retry or acknowledgement. | Wrong-fingerprint/credential/Thread, backwards transition, journal/snapshot failure, lost-response, forbidden-content, phase-correlation, and end-to-end reconnect tests. | A crash after the dispatch fence but before provider transmission can require explicit recovery; availability is preferred over a duplicate send. |
+| Offline intent replay or ambiguous provider dispatch | Duplicate owner messages, unintended provider work, or silent loss | Implemented | Encrypted text-only device intent; HMAC-keyed encrypted cold-launch Thread binding; credential/Thread/fingerprint-bound Host receipt; durable pre-dispatch fence; monotonic receipt states; one Rust deadline wake; no live-RPC fallback queue; terminal outcome-unknown retention; same-Thread ordering block; count-bound authoritative-refresh proof plus confirmed copy discard; live-only context rejected offline. | Wrong-fingerprint/credential/Thread, backwards transition, journal/snapshot failure, lost-response, forbidden-content, phase-correlation, live-context rejection, binding tamper/migration/cold reopen, retry wake, stale discard proof, thread-local ordering, and native presentation tests. | A crash after the dispatch fence but before provider transmission can require explicit copy discard after inspection; availability is preferred over a duplicate send. Physical paired-Host airplane-mode validation remains release QA. |
 | Malicious or compromised Host | Source, terminal, prompts, credentials, runtime authority; exfiltration or false results | Implemented / Planned | Implemented: pinned Link identity, scoped grants/runtime set, and stream closure on epoch change. Planned: workspace confinement and constrained command/provider/browser delegation. | Wrong-Host, narrowed-grant, revoke-stream, workspace escape, and capability-boundary tests. | A Host-account attacker able to replace Link controls that Host's data and behavior. |
 | ChatGPT OAuth redirect, token, account-binding, and credential custody failures | Account tokens and identity; account confusion or takeover | Implemented | Native PKCE, state validation, platform token custody, cross-account refresh rejection on both platforms, refresh-token preservation, and loopback-only bounded iOS callbacks. | Wrong-account refresh, state/PKCE, callback interface/port/path, timeout, duplicate-callback, cancellation, refresh omission, and secure-store tests. | A compromised device or provider endpoint can still misuse tokens legitimately available to it. |
 | WebRTC signaling, transcript, microphone, and audio privacy | Live audio, transcripts, presence; covert capture or unintended retention | Implemented / Planned | Implemented: platform microphone permission and native media session. Planned: explicit signaling-identity gates, bounded transcript retention, and separation from awareness/export. | Permission-denied, background/end-session, wrong-peer signaling, transcript deletion, log-redaction, and support-bundle tests. | Peers and a compromised endpoint can observe media they legitimately receive; network metadata remains visible. |

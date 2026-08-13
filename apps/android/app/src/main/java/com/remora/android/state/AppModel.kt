@@ -32,6 +32,8 @@ import uniffi.codex_mobile_client.AppStoreUpdateRecord
 import uniffi.codex_mobile_client.CommandCenterStatusV1
 import uniffi.codex_mobile_client.DiscoveryBridge
 import uniffi.codex_mobile_client.DeviceDatabaseBridge
+import uniffi.codex_mobile_client.AppRemoraLinkThreadOutboxStatus
+import uniffi.codex_mobile_client.AppTurnSubmissionOutcome
 import uniffi.codex_mobile_client.HydratedConversationItem
 import uniffi.codex_mobile_client.HydratedConversationItemContent
 import uniffi.codex_mobile_client.HandoffManager
@@ -794,6 +796,32 @@ class AppModel private constructor(
             throw e
         }
     }
+
+    suspend fun submitComposerTurn(
+        key: ThreadKey,
+        payload: AppComposerPayload,
+    ): AppTurnSubmissionOutcome {
+        restoreStoredLocalAuthIfNeeded(key.serverId, reason = "submitComposerTurn")
+
+        return try {
+            store.submitTurn(
+                key,
+                payload.toAppStartTurnRequest(key.threadId),
+                payload.submissionContent,
+            ).also {
+                _lastError.value = null
+            }
+        } catch (e: Exception) {
+            _lastError.value = e.message
+            throw e
+        }
+    }
+
+    fun remoraLinkThreadOutboxStatus(key: ThreadKey): AppRemoraLinkThreadOutboxStatus? =
+        store.remoraLinkThreadOutboxStatus(key)
+
+    fun discardRemoraLinkOutcomeUnknown(key: ThreadKey): UInt =
+        store.discardRemoraLinkOutcomeUnknown(key)
 
     suspend fun externalResumeThread(
         key: ThreadKey,

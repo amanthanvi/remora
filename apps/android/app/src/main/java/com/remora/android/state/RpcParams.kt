@@ -103,6 +103,13 @@ data class AppComposerPayload(
     val reasoningEffort: ReasoningEffort? = null,
     val serviceTier: ServiceTier? = null,
 ) {
+    val submissionContent: uniffi.codex_mobile_client.AppTurnSubmissionContent
+        get() = if (additionalInputs.isEmpty() && fileAttachments.isEmpty()) {
+            uniffi.codex_mobile_client.AppTurnSubmissionContent.TEXT_ONLY
+        } else {
+            uniffi.codex_mobile_client.AppTurnSubmissionContent.LIVE_HOST_REQUIRED
+        }
+
     fun toAppStartTurnRequest(threadId: String): AppStartTurnRequest {
         val input = additionalInputs.toMutableList()
         val composedText = desktopStylePromptText(text, fileAttachments)

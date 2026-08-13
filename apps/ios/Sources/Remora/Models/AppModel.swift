@@ -1483,6 +1483,36 @@ final class AppModel {
         }
     }
 
+    @discardableResult
+    func submitComposerTurn(
+        key: ThreadKey,
+        payload: AppComposerPayload
+    ) async throws -> AppTurnSubmissionOutcome {
+        do {
+            let outcome = try await store.submitTurn(
+                key: key,
+                params: payload.turnStartRequest(threadId: key.threadId),
+                content: payload.submissionContent
+            )
+            lastError = nil
+            return outcome
+        } catch {
+            lastError = error.localizedDescription
+            throw error
+        }
+    }
+
+    func remoraLinkThreadOutboxStatus(
+        key: ThreadKey
+    ) throws -> AppRemoraLinkThreadOutboxStatus? {
+        try store.remoraLinkThreadOutboxStatus(key: key)
+    }
+
+    @discardableResult
+    func discardRemoraLinkOutcomeUnknown(key: ThreadKey) throws -> UInt32 {
+        try store.discardRemoraLinkOutcomeUnknown(key: key)
+    }
+
     func hydrateThreadPermissions(for key: ThreadKey, appState: AppState) async -> ThreadKey? {
         if let existing = threadSnapshot(for: key) {
             appState.hydratePermissions(from: existing)

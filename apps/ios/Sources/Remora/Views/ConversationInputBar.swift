@@ -12,7 +12,14 @@ struct ConversationInputBar: View {
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @AppStorage("fastMode") private var fastMode = false
 
-    let onSend: (String, UIImage?, [ComposerFileAttachment], [SkillMentionSelection], [PluginMentionSelection]) -> Void
+    let onSend: (
+        String,
+        UIImage?,
+        [ComposerFileAttachment],
+        [SkillMentionSelection],
+        [PluginMentionSelection],
+        @escaping (Bool) -> Void
+    ) -> Void
     let onFileSearch: (String) async throws -> [FileSearchResult]
     var bottomInset: CGFloat = 0
     let showModeChip: Bool
@@ -374,7 +381,21 @@ struct ConversationInputBar: View {
         let skillMentions = collectSkillMentionsForSubmission(text)
         let pluginMentions = collectPluginMentionsForSubmission(text)
         pluginMentionSelections = []
-        onSend(text, image, files, skillMentions, pluginMentions)
+        onSend(text, image, files, skillMentions, pluginMentions) { succeeded in
+            guard !succeeded else { return }
+            if inputText.isEmpty {
+                inputText = text
+            }
+            if attachedImage == nil {
+                attachedImage = image
+            }
+            if attachedFiles.isEmpty {
+                attachedFiles = files
+            }
+            if pluginMentionSelections.isEmpty {
+                pluginMentionSelections = pluginMentions
+            }
+        }
     }
 
     private func dismissPendingUserInput() {

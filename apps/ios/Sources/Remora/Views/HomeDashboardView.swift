@@ -67,8 +67,8 @@ struct HomeDashboardView: View {
     var onRenameServer: ((String, String) -> Void)? = nil
     var onOpenRecording: ((URL) -> Void)? = nil
     /// Fires when the user commits a quick reply from the swipe action.
-    /// Caller should call `appModel.startTurn` against the thread.
-    var onSendReply: (@MainActor (ThreadKey, String) async -> Void)? = nil
+    /// Caller owns connected resume or secure offline submission.
+    var onSendReply: (@MainActor (ThreadKey, String) async throws -> Void)? = nil
     /// Cancels the active turn on the given thread. Caller looks up the
     /// thread's `activeTurnId` and calls `appModel.client.interruptTurn`.
     var onCancelThread: (@MainActor (ThreadKey) async -> Void)? = nil
@@ -341,7 +341,8 @@ struct HomeDashboardView: View {
                 QuickReplySheet(
                     thread: thread,
                     onSend: { key, text in
-                        await onSendReply?(key, text)
+                        guard let onSendReply else { return }
+                        try await onSendReply(key, text)
                     }
                 )
                 .presentationDetents([.medium, .large])

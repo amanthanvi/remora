@@ -58,7 +58,10 @@ use crate::transport::TransportError;
 use crate::types::{AgentRuntimeInfo, ThreadKey};
 
 mod outbox;
-pub use outbox::{AppRemoraLinkOfflineMessageEnqueueOutcome, AppRemoraLinkOutboxDeliveryReport};
+pub use outbox::{
+    AppRemoraLinkOfflineMessageEnqueueOutcome, AppRemoraLinkOutboxDeliveryReport,
+    AppRemoraLinkThreadOutboxStatus, AppTurnSubmissionContent, AppTurnSubmissionOutcome,
+};
 
 const NATIVE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 const HOST_START_TIMEOUT: Duration = Duration::from_secs(35);
@@ -918,6 +921,7 @@ impl AppClient {
         {
             warn!(%error, "Remora Link configured but cold restore did not complete");
         }
+        self.inner.schedule_remora_link_outbox_delivery();
         Ok(())
     }
 
@@ -961,7 +965,8 @@ impl AppClient {
             .bind_provider_thread(&host_id, &runtime_id, &provider_thread_id)
             .await
             .map_err(RemoraLinkError::from)?;
-        configured.cache_thread_binding(&host_id, &outcome);
+        self.inner
+            .cache_remora_link_thread_binding(&configured, &host_id, &outcome);
         Ok(project_thread_binding_outcome(outcome))
     }
 
@@ -979,7 +984,8 @@ impl AppClient {
             .resolve_thread_binding(&host_id, &thread_id)
             .await
             .map_err(RemoraLinkError::from)?;
-        configured.cache_thread_binding(&host_id, &outcome);
+        self.inner
+            .cache_remora_link_thread_binding(&configured, &host_id, &outcome);
         Ok(project_thread_binding_outcome(outcome))
     }
 
@@ -1444,6 +1450,34 @@ fn reconcile_command_center_status_result(
 }
 
 impl crate::MobileClient {
+    fn cache_remora_link_thread_binding(
+        &self,
+        configured: &ConfiguredRemoraLink,
+        host_id: &str,
+        outcome: &ThreadBindingOutcomeV2,
+    ) {
+        configured.cache_thread_binding(host_id, outcome);
+        let ThreadBindingOutcomeV2::Bound(binding) = outcome else {
+            return;
+        };
+        let Some(database) = self.configured_device_database() else {
+            return;
+        };
+        let updated_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let updated_at_ms = i64::try_from(updated_at_ms).unwrap_or(i64::MAX).max(1);
+        if let Err(error) = database.upsert_thread_binding(
+            host_id,
+            &binding.provider_thread_id,
+            &binding.thread_id,
+            updated_at_ms,
+        ) {
+            warn!(host_id, %error, "Remora Link Thread binding persistence failed");
+        }
+    }
+
     /// Schedule a best-effort durable Host binding after an authoritative
     /// provider start/resume/read succeeds. The provider RPC is never retried
     /// or failed because Link binding is unavailable.
@@ -1472,7 +1506,9 @@ impl crate::MobileClient {
                 .bind_provider_thread(&key.server_id, &runtime_id, &key.thread_id)
                 .await
             {
-                Ok(outcome) => configured.cache_thread_binding(&key.server_id, &outcome),
+                Ok(outcome) => {
+                    client.cache_remora_link_thread_binding(&configured, &key.server_id, &outcome)
+                }
                 Err(error) => warn!(
                     host_id = key.server_id,
                     %error,

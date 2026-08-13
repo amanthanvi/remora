@@ -12,6 +12,7 @@ use crate::ffi::command_center::{
 use crate::ffi::device_database::DeviceDatabaseBridge;
 use crate::ffi::remora_link_v2::{
     AppRemoraLinkOfflineMessageEnqueueOutcome, AppRemoraLinkOutboxDeliveryReport,
+    AppRemoraLinkThreadOutboxStatus, AppTurnSubmissionContent, AppTurnSubmissionOutcome,
 };
 use crate::ffi::shared::{blocking_async, shared_mobile_client, shared_runtime};
 use crate::store::{AppSnapshotRecord, AppStoreUpdateRecord, AppThreadSnapshot};
@@ -56,12 +57,46 @@ mod tests {
     };
     use crate::store::{AppStoreReducer, AppStoreUpdateRecord, ThreadStreamingDeltaKind};
     use crate::types::{
-        AppOperationStatus, AppSubagentStatus, ThreadInfo, ThreadKey, ThreadSummaryStatus,
+        AppOperationStatus, AppStartTurnRequest, AppSubagentStatus, AppUserInput, ThreadInfo,
+        ThreadKey, ThreadSummaryStatus,
     };
     use codex_app_server_protocol as upstream;
     use serde_json::json;
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disconnected_live_host_context_is_never_queued() {
+        let client = crate::MobileClient::new();
+        let store = super::AppStore {
+            inner: client,
+            rt: super::shared_runtime(),
+        };
+        let error = store
+            .submit_turn(
+                ThreadKey {
+                    server_id: "offline-host".to_string(),
+                    thread_id: "thread".to_string(),
+                },
+                AppStartTurnRequest {
+                    thread_id: "thread".to_string(),
+                    input: vec![AppUserInput::Text {
+                        text: "flattened file reference".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    approval_policy: None,
+                    sandbox_policy: None,
+                    model: None,
+                    service_tier: None,
+                    effort: None,
+                    output_schema: None,
+                },
+                crate::ffi::remora_link_v2::AppTurnSubmissionContent::LiveHostRequired,
+            )
+            .await
+            .expect_err("live Host context must fail before queueing");
+        assert!(matches!(error, crate::ffi::ClientError::InvalidParams(_)));
+    }
 
     #[test]
     fn opening_a_terminal_thread_acknowledges_its_persisted_attention() {
@@ -637,16 +672,44 @@ impl AppStore {
         })
     }
 
-    /// Persist one text-only send intent when its provider Thread already has
-    /// an authenticated durable Host binding. The encrypted device database
-    /// owns the draft until the Host acknowledges delivery.
-    pub async fn enqueue_remora_link_offline_message(
+    /// Use the live provider path while connected; otherwise queue one
+    /// encrypted text-only intent only when Link already has a durable Host
+    /// binding. A failed or ambiguous live RPC is never converted into an
+    /// offline retry.
+    pub async fn submit_turn(
         &self,
         key: ThreadKey,
         params: AppStartTurnRequest,
-    ) -> Result<AppRemoraLinkOfflineMessageEnqueueOutcome, ClientError> {
+        content: AppTurnSubmissionContent,
+    ) -> Result<AppTurnSubmissionOutcome, ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            c.enqueue_remora_link_offline_message(key, params).await
+            let connected = c.app_store.project_snapshot(|snapshot| {
+                snapshot.servers.get(&key.server_id).is_some_and(|server| {
+                    matches!(server.health, crate::store::ServerHealthSnapshot::Connected)
+                })
+            });
+            if connected {
+                let params = params.try_into().map_err(|error: crate::RpcClientError| {
+                    ClientError::Serialization(error.to_string())
+                })?;
+                c.start_turn(&key.server_id, params)
+                    .await
+                    .map_err(|error| ClientError::Rpc(error.to_string()))?;
+                return Ok(AppTurnSubmissionOutcome::Sent);
+            }
+            if matches!(content, AppTurnSubmissionContent::LiveHostRequired) {
+                return Err(ClientError::InvalidParams(
+                    "Attachments and referenced files require a live Host connection".to_string(),
+                ));
+            }
+            match c.enqueue_remora_link_offline_message(key, params).await? {
+                AppRemoraLinkOfflineMessageEnqueueOutcome::Queued { intent_id } => {
+                    Ok(AppTurnSubmissionOutcome::Queued { intent_id })
+                }
+                AppRemoraLinkOfflineMessageEnqueueOutcome::Unavailable { reason } => {
+                    Err(ClientError::InvalidParams(reason))
+                }
+            }
         })
     }
 
@@ -659,6 +722,27 @@ impl AppStore {
         blocking_async!(self.rt, self.inner, |c| {
             c.deliver_remora_link_outbox(limit as usize).await
         })
+    }
+
+    /// Content-free status for one provider Thread's device-owned outbox.
+    pub fn remora_link_thread_outbox_status(
+        &self,
+        key: ThreadKey,
+    ) -> Result<Option<AppRemoraLinkThreadOutboxStatus>, ClientError> {
+        self.inner.remora_link_thread_outbox_status(&key)
+    }
+
+    /// Remove only outcome-unknown copies after explicit in-app confirmation.
+    /// Queued messages that never crossed the Host fence remain untouched.
+    pub fn discard_remora_link_outcome_unknown(&self, key: ThreadKey) -> Result<u32, ClientError> {
+        let discarded = self.inner.discard_remora_link_outcome_unknown(&key)?;
+        if discarded > 0 {
+            let client = Arc::clone(&self.inner);
+            self.rt.spawn(async move {
+                client.schedule_remora_link_outbox_delivery();
+            });
+        }
+        Ok(discarded)
     }
 
     pub async fn set_thread_collaboration_mode(
@@ -733,7 +817,8 @@ impl AppStore {
         blocking_async!(self.rt, self.inner, |c| {
             c.force_refresh_thread_authoritative(&key.server_id, &key.thread_id)
                 .await
-                .map_err(|e| ClientError::Rpc(e.to_string()))
+                .map_err(|e| ClientError::Rpc(e.to_string()))?;
+            c.record_remora_link_authoritative_refresh(&key)
         })
     }
 
@@ -834,7 +919,7 @@ impl AppStore {
             .map_err(|error| ClientError::Serialization(error.to_string()))?;
         let client = Arc::clone(&self.inner);
         self.rt.spawn(async move {
-            let _ = client.deliver_remora_link_outbox(10).await;
+            client.schedule_remora_link_outbox_delivery();
         });
         Ok(())
     }

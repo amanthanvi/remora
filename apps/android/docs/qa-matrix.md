@@ -216,6 +216,18 @@ Status normalization parity:
 - `failed`, `failure`, `error`, `denied`, `cancelled`, `aborted` -> failed (red)
 - anything else/missing -> unknown (neutral)
 
+## Offline message outbox and recovery
+
+| Area | iOS | Android |
+| --- | --- | --- |
+| Connected composer send | Shared Rust `submitTurn` chooses the live provider path; failed send restores text, image, files, and plugin selections | Same; failed send restores text, image, and files |
+| Disconnected plain-text send | Encrypted device outbox; queued-count banner appears inline | Same |
+| Disconnected live-only context | Images, files, skills, and plugin context fail closed with Rust-owned guidance; nothing queues | Images and files fail closed with the same Rust-owned guidance; nothing queues |
+| Quick reply | Connected Thread resumes before live send; disconnected text uses the same secure outbox; sheet remains open on failure | Same |
+| Reconnect | One coalesced Rust task drains at most 10 × 10 messages, sleeps to the earliest persisted retry deadline, and wakes early on reconnect/enqueue; UI performs bounded status reconciliation | Same |
+| Ambiguous post-dispatch outcome | No automatic resend; later messages on that Thread pause; successful explicit authoritative refresh proves the current uncertain count before device-copy discard becomes available | Same |
+| Cold relaunch and lost response | Automated SQLite close/reopen, retry-wake, Host-fence/ambiguity, and native matching-count suites pass; physical paired-Host airplane-mode pass remains release QA | Same; Android policy suite runs on the native source set and JVM, with physical paired-Host smoke retained for release QA |
+
 ## Realtime Voice (WebRTC transport)
 
 Replaces the prior WebSocket + base64-PCM audio pump with a platform-native WebRTC peer connection on both iOS and Android. Upstream `thread/realtime/start` receives a client offer SDP via `AppRealtimeStartTransport.Webrtc`; the app-server responds with an answer SDP via `ThreadRealtimeSdpNotification`. All other realtime notifications (transcripts, item-added, handoff, closed, error) continue over the existing RPC WebSocket — only the audio byte path moved to the peer connection.

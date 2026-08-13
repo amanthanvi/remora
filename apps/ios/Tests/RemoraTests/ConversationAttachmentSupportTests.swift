@@ -3,6 +3,48 @@ import XCTest
 @testable import Remora
 
 final class ConversationAttachmentSupportTests: XCTestCase {
+    func testUncertainDiscardRequiresMatchingRefreshCount() {
+        XCTAssertFalse(isUncertainOutboxDiscardReady(currentCount: 1, refreshedCount: nil))
+        XCTAssertFalse(isUncertainOutboxDiscardReady(currentCount: 2, refreshedCount: 1))
+        XCTAssertFalse(isUncertainOutboxDiscardReady(currentCount: 0, refreshedCount: 0))
+        XCTAssertTrue(isUncertainOutboxDiscardReady(currentCount: 2, refreshedCount: 2))
+    }
+
+    func testComposerPayloadRequiresLiveHostForNonTextContext() {
+        let textOnly = AppComposerPayload(
+            text: "queue me",
+            additionalInputs: [],
+            approvalPolicy: nil,
+            sandboxPolicy: nil,
+            model: nil,
+            effort: nil,
+            serviceTier: nil
+        )
+        let image = AppComposerPayload(
+            text: "describe this",
+            additionalInputs: [.image(url: "data:image/png;base64,abc")],
+            approvalPolicy: nil,
+            sandboxPolicy: nil,
+            model: nil,
+            effort: nil,
+            serviceTier: nil
+        )
+        let file = AppComposerPayload(
+            text: "review this",
+            additionalInputs: [],
+            fileAttachments: [ComposerFileAttachment(label: "main.swift", path: "/project/main.swift")],
+            approvalPolicy: nil,
+            sandboxPolicy: nil,
+            model: nil,
+            effort: nil,
+            serviceTier: nil
+        )
+
+        XCTAssertEqual(textOnly.submissionContent, .textOnly)
+        XCTAssertEqual(image.submissionContent, .liveHostRequired)
+        XCTAssertEqual(file.submissionContent, .liveHostRequired)
+    }
+
     func testBuildTurnInputsOmitsWhitespaceOnlyTextAndKeepsAttachmentInput() {
         let attachment = AppUserInput.image(url: "data:image/png;base64,abc")
 

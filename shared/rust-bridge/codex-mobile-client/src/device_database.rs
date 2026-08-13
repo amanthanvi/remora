@@ -18,17 +18,20 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
-const SCHEMA_VERSION: i64 = 4;
-// Schema v3 and v4 add only unencrypted attention/search-freshness metadata.
+const SCHEMA_VERSION: i64 = 5;
+// Schema v3 through v5 add only metadata or new encrypted record types.
 // Keep the encrypted record envelope at v2 so additive migrations do not
 // invalidate existing outbox, review-note, or search ciphertext.
 const ENCRYPTION_RECORD_VERSION: i64 = 2;
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 const MAX_ID_BYTES: usize = 128;
+const MAX_PROVIDER_THREAD_ID_BYTES: usize =
+    remora_bridge_core::command_center::MAX_DISPLAY_LABEL_BYTES;
 const MAX_OUTBOX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_BODY_BYTES: usize = 1024 * 1024;
 const MAX_OUTBOX_ROWS: usize = 100;
+const MAX_THREAD_BINDINGS: usize = 20_000;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_CANDIDATES: usize = 200;
 const MAX_SEARCH_INDEX_BATCH: usize = 500;
@@ -93,6 +96,7 @@ impl OutboxIntentKind {
 pub enum OutboxState {
     Queued,
     Delivering,
+    OutcomeUnknown,
 }
 
 impl OutboxState {
@@ -100,6 +104,7 @@ impl OutboxState {
         match self {
             Self::Queued => 0,
             Self::Delivering => 1,
+            Self::OutcomeUnknown => 2,
         }
     }
 
@@ -107,9 +112,16 @@ impl OutboxState {
         match value {
             0 => Ok(Self::Queued),
             1 => Ok(Self::Delivering),
+            2 => Ok(Self::OutcomeUnknown),
             _ => Err(DeviceDatabaseError::Authentication),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboxThreadStatus {
+    pub queued_count: u32,
+    pub outcome_unknown_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +236,13 @@ struct EncryptedReviewNote {
     body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptedThreadBinding {
+    provider_thread_id: String,
+    host_thread_id: String,
+}
+
 pub struct DeviceDatabase {
     connection: Mutex<Connection>,
     master_key: Zeroizing<[u8; KEY_BYTES]>,
@@ -291,6 +310,15 @@ impl DeviceDatabase {
              ) STRICT;
              CREATE INDEX IF NOT EXISTS outbox_due
                  ON outbox(state, next_attempt_at_ms, created_at_ms);
+             CREATE TABLE IF NOT EXISTS thread_bindings (
+                 binding_hash BLOB PRIMARY KEY,
+                 host_id TEXT NOT NULL,
+                 nonce BLOB NOT NULL,
+                 encrypted_binding BLOB NOT NULL,
+                 updated_at_ms INTEGER NOT NULL
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS thread_bindings_updated
+                 ON thread_bindings(updated_at_ms);
              CREATE TABLE IF NOT EXISTS review_notes (
                  note_id TEXT PRIMARY KEY,
                  host_id TEXT NOT NULL,
@@ -389,25 +417,55 @@ impl DeviceDatabase {
         let mut statement = connection.prepare(
             "SELECT intent_id, host_id, thread_id, kind, nonce, encrypted_payload,
                     state, created_at_ms, attempt_count, next_attempt_at_ms
-             FROM outbox
-             WHERE next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?1
-             ORDER BY created_at_ms ASC, intent_id ASC
-             LIMIT ?2",
+             FROM outbox AS candidate
+             WHERE candidate.state = ?2
+               AND (candidate.next_attempt_at_ms IS NULL OR candidate.next_attempt_at_ms <= ?1)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM outbox AS blocker
+                   WHERE blocker.host_id = candidate.host_id
+                     AND blocker.thread_id IS candidate.thread_id
+                     AND blocker.state = ?3
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM outbox AS predecessor
+                   WHERE predecessor.host_id = candidate.host_id
+                     AND predecessor.thread_id IS candidate.thread_id
+                     AND predecessor.state = ?2
+                     AND (
+                         predecessor.created_at_ms < candidate.created_at_ms
+                         OR (
+                             predecessor.created_at_ms = candidate.created_at_ms
+                             AND predecessor.intent_id < candidate.intent_id
+                         )
+                     )
+               )
+             ORDER BY candidate.created_at_ms ASC, candidate.intent_id ASC
+             LIMIT ?4",
         )?;
-        let rows = statement.query_map(params![now_ms, limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-            ))
-        })?;
+        let rows = statement.query_map(
+            params![
+                now_ms,
+                OutboxState::Queued.as_i64(),
+                OutboxState::OutcomeUnknown.as_i64(),
+                limit,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                ))
+            },
+        )?;
 
         let mut intents = Vec::new();
         for row in rows {
@@ -440,6 +498,171 @@ impl DeviceDatabase {
         Ok(intents)
     }
 
+    /// Earliest retry deadline across deliverable Threads. A queued intent
+    /// without a deadline is due immediately; Threads fenced by an uncertain
+    /// predecessor remain excluded until the user resolves that copy.
+    pub fn next_outbox_attempt_at_ms(&self) -> Result<Option<i64>, DeviceDatabaseError> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT MIN(COALESCE(candidate.next_attempt_at_ms, 0))
+                 FROM outbox AS candidate
+                 WHERE candidate.state = ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM outbox AS blocker
+                       WHERE blocker.host_id = candidate.host_id
+                         AND blocker.thread_id IS candidate.thread_id
+                         AND blocker.state = ?2
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM outbox AS predecessor
+                       WHERE predecessor.host_id = candidate.host_id
+                         AND predecessor.thread_id IS candidate.thread_id
+                         AND predecessor.state = ?1
+                         AND (
+                             predecessor.created_at_ms < candidate.created_at_ms
+                             OR (
+                                 predecessor.created_at_ms = candidate.created_at_ms
+                                 AND predecessor.intent_id < candidate.intent_id
+                             )
+                         )
+                   )",
+                params![
+                    OutboxState::Queued.as_i64(),
+                    OutboxState::OutcomeUnknown.as_i64(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Persist only the provider-to-Host Thread correlation needed to extend
+    /// an existing offline queue after a cold launch. The lookup key is an
+    /// HMAC and both identities remain inside the authenticated ciphertext.
+    pub fn upsert_thread_binding(
+        &self,
+        host_id: &str,
+        provider_thread_id: &str,
+        host_thread_id: &str,
+        updated_at_ms: i64,
+    ) -> Result<(), DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_provider_thread_id(provider_thread_id)?;
+        validate_id("host_thread_id", host_thread_id)?;
+        validate_timestamp("updated_at_ms", updated_at_ms)?;
+        let binding_hash = self.thread_binding_hash(host_id, provider_thread_id)?;
+        let primary_key = hex::encode(binding_hash);
+        let plaintext = serde_json::to_vec(&EncryptedThreadBinding {
+            provider_thread_id: provider_thread_id.to_string(),
+            host_thread_id: host_thread_id.to_string(),
+        })
+        .map_err(|error| DeviceDatabaseError::InvalidInput(error.to_string()))?;
+        let (nonce, ciphertext) =
+            self.encrypt("thread_binding", &primary_key, host_id, &plaintext)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_bindings WHERE binding_hash = ?1)",
+            [binding_hash.as_slice()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            let count =
+                transaction.query_row("SELECT COUNT(*) FROM thread_bindings", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            if count >= MAX_THREAD_BINDINGS as i64 {
+                return Err(DeviceDatabaseError::InvalidInput(
+                    "thread binding limit reached".to_string(),
+                ));
+            }
+        }
+        transaction.execute(
+            "INSERT INTO thread_bindings (
+                 binding_hash, host_id, nonce, encrypted_binding, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(binding_hash) DO UPDATE SET
+                 host_id = excluded.host_id,
+                 nonce = excluded.nonce,
+                 encrypted_binding = excluded.encrypted_binding,
+                 updated_at_ms = excluded.updated_at_ms",
+            params![
+                binding_hash.as_slice(),
+                host_id,
+                nonce.as_slice(),
+                ciphertext,
+                updated_at_ms,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn host_thread_id_for_provider(
+        &self,
+        host_id: &str,
+        provider_thread_id: &str,
+    ) -> Result<Option<String>, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_provider_thread_id(provider_thread_id)?;
+        let binding_hash = self.thread_binding_hash(host_id, provider_thread_id)?;
+        let primary_key = hex::encode(binding_hash);
+        let connection = self.lock()?;
+        let row = connection
+            .query_row(
+                "SELECT nonce, encrypted_binding
+                 FROM thread_bindings
+                 WHERE binding_hash = ?1 AND host_id = ?2",
+                params![binding_hash.as_slice(), host_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((nonce, ciphertext)) = row else {
+            return Ok(None);
+        };
+        let plaintext =
+            self.decrypt("thread_binding", &primary_key, host_id, &nonce, &ciphertext)?;
+        let binding: EncryptedThreadBinding =
+            serde_json::from_slice(&plaintext).map_err(|_| DeviceDatabaseError::Authentication)?;
+        if binding.provider_thread_id != provider_thread_id {
+            return Err(DeviceDatabaseError::Authentication);
+        }
+        validate_id("host_thread_id", &binding.host_thread_id)?;
+        Ok(Some(binding.host_thread_id))
+    }
+
+    pub fn outbox_thread_status(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+    ) -> Result<OutboxThreadStatus, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        let connection = self.lock()?;
+        let (queued_count, outcome_unknown_count) = connection.query_row(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN state = ?3 THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN state = ?4 THEN 1 ELSE 0 END), 0)
+             FROM outbox
+             WHERE host_id = ?1 AND thread_id = ?2",
+            params![
+                host_id,
+                thread_id,
+                OutboxState::Queued.as_i64(),
+                OutboxState::OutcomeUnknown.as_i64(),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok(OutboxThreadStatus {
+            queued_count: u32::try_from(queued_count)
+                .map_err(|_| DeviceDatabaseError::Authentication)?,
+            outcome_unknown_count: u32::try_from(outcome_unknown_count)
+                .map_err(|_| DeviceDatabaseError::Authentication)?,
+        })
+    }
+
     pub fn record_outbox_attempt(
         &self,
         intent_id: &str,
@@ -450,9 +673,60 @@ impl DeviceDatabase {
         Ok(connection.execute(
             "UPDATE outbox
              SET state = ?2, attempt_count = attempt_count + 1, next_attempt_at_ms = ?3
-             WHERE intent_id = ?1",
+             WHERE intent_id = ?1 AND state = ?2",
             params![intent_id, OutboxState::Queued.as_i64(), next_attempt_at_ms],
         )? == 1)
+    }
+
+    pub fn record_outbox_outcome_unknown(
+        &self,
+        intent_id: &str,
+    ) -> Result<bool, DeviceDatabaseError> {
+        validate_id("intent_id", intent_id)?;
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE outbox
+             SET state = ?2, attempt_count = attempt_count + 1, next_attempt_at_ms = NULL
+             WHERE intent_id = ?1 AND state = ?3",
+            params![
+                intent_id,
+                OutboxState::OutcomeUnknown.as_i64(),
+                OutboxState::Queued.as_i64(),
+            ],
+        )? == 1)
+    }
+
+    /// User-confirmed removal of uncertain copies. This never deletes queued
+    /// work that has not crossed the Host dispatch fence.
+    pub fn discard_outbox_outcome_unknown(
+        &self,
+        host_id: &str,
+        thread_id: &str,
+        expected_count: u32,
+    ) -> Result<u32, DeviceDatabaseError> {
+        validate_id("host_id", host_id)?;
+        validate_id("thread_id", thread_id)?;
+        if expected_count == 0 {
+            return Ok(0);
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current = transaction.query_row(
+            "SELECT COUNT(*) FROM outbox
+             WHERE host_id = ?1 AND thread_id = ?2 AND state = ?3",
+            params![host_id, thread_id, OutboxState::OutcomeUnknown.as_i64()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if current != i64::from(expected_count) {
+            return Ok(0);
+        }
+        let deleted = transaction.execute(
+            "DELETE FROM outbox
+             WHERE host_id = ?1 AND thread_id = ?2 AND state = ?3",
+            params![host_id, thread_id, OutboxState::OutcomeUnknown.as_i64()],
+        )?;
+        transaction.commit()?;
+        Ok(deleted.min(u32::MAX as usize) as u32)
     }
 
     /// Delete only after an authoritative Host acknowledgement is reconciled.
@@ -1381,7 +1655,10 @@ impl DeviceDatabase {
             )
             .optional()?;
         if let Some(existing) = existing {
-            if existing == 2_i64.to_be_bytes() || existing == 3_i64.to_be_bytes() {
+            if [2_i64, 3, 4]
+                .into_iter()
+                .any(|version| existing == version.to_be_bytes())
+            {
                 connection.execute(
                     "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
                     [SCHEMA_VERSION.to_be_bytes().as_slice()],
@@ -1456,6 +1733,20 @@ impl DeviceDatabase {
         Ok(mac.finalize().into_bytes().into())
     }
 
+    fn thread_binding_hash(
+        &self,
+        host_id: &str,
+        provider_thread_id: &str,
+    ) -> Result<[u8; 32], DeviceDatabaseError> {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(self.master_key.as_ref())
+            .map_err(|_| DeviceDatabaseError::InvalidKey)?;
+        mac.update(b"remora-thread-binding-v1\0");
+        mac.update(host_id.as_bytes());
+        mac.update(b"\0");
+        mac.update(provider_thread_id.as_bytes());
+        Ok(mac.finalize().into_bytes().into())
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, DeviceDatabaseError> {
         self.connection
             .lock()
@@ -1509,6 +1800,18 @@ fn validate_id(name: &str, value: &str) -> Result<(), DeviceDatabaseError> {
     if value.is_empty() || value.len() > MAX_ID_BYTES || value.chars().any(char::is_control) {
         return Err(DeviceDatabaseError::InvalidInput(format!(
             "{name} must contain 1..={MAX_ID_BYTES} display-safe bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_provider_thread_id(value: &str) -> Result<(), DeviceDatabaseError> {
+    if value.is_empty()
+        || value.len() > MAX_PROVIDER_THREAD_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(DeviceDatabaseError::InvalidInput(format!(
+            "provider_thread_id must contain 1..={MAX_PROVIDER_THREAD_ID_BYTES} display-safe bytes"
         )));
     }
     Ok(())
@@ -1705,6 +2008,179 @@ mod tests {
         assert_eq!(due[0].payload, b"first");
         assert!(database.acknowledge_outbox("intent").unwrap());
         assert!(database.due_outbox(10, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retry_deadline_tracks_the_earliest_deliverable_intent() {
+        let database = DeviceDatabase::open_in_memory(key(34)).expect("open");
+        database
+            .enqueue_outbox(&intent("intent", "host", b"payload"))
+            .expect("enqueue");
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), Some(0));
+        assert!(database.record_outbox_attempt("intent", 123).unwrap());
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), Some(123));
+        assert!(database.record_outbox_outcome_unknown("intent").unwrap());
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), None);
+    }
+
+    #[test]
+    fn retry_backoff_preserves_per_thread_fifo_without_blocking_other_threads() {
+        let database = DeviceDatabase::open_in_memory(key(38)).expect("open");
+        let first = intent("intent-1", "host", b"first");
+        let mut second = intent("intent-2", "host", b"second");
+        second.created_at_ms = 2;
+        let mut other = intent("intent-3", "host", b"other");
+        other.thread_id = Some("other-thread".to_string());
+        other.created_at_ms = 3;
+        database.enqueue_outbox(&first).unwrap();
+        database.enqueue_outbox(&second).unwrap();
+        database.enqueue_outbox(&other).unwrap();
+        assert!(database.record_outbox_attempt("intent-1", 100).unwrap());
+
+        let due = database.due_outbox(10, 100).unwrap();
+        assert_eq!(
+            due.iter()
+                .map(|intent| intent.intent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["intent-3"]
+        );
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), Some(0));
+        database.acknowledge_outbox("intent-3").unwrap();
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), Some(100));
+        assert!(database.due_outbox(99, 100).unwrap().is_empty());
+        assert_eq!(
+            database.due_outbox(100, 100).unwrap()[0].intent_id,
+            "intent-1"
+        );
+        database.acknowledge_outbox("intent-1").unwrap();
+        assert_eq!(
+            database.due_outbox(100, 100).unwrap()[0].intent_id,
+            "intent-2"
+        );
+    }
+
+    #[test]
+    fn outcome_unknown_is_terminal_and_blocks_only_its_thread() {
+        let database = DeviceDatabase::open_in_memory(key(31)).expect("open");
+        let first = intent("intent-1", "host", b"first");
+        let mut second = intent("intent-2", "host", b"second");
+        second.created_at_ms = 2;
+        let mut other_thread = intent("intent-3", "host", b"other");
+        other_thread.thread_id = Some("other-thread".to_string());
+        other_thread.created_at_ms = 3;
+        database.enqueue_outbox(&first).unwrap();
+        database.enqueue_outbox(&second).unwrap();
+        database.enqueue_outbox(&other_thread).unwrap();
+
+        assert!(database.record_outbox_outcome_unknown("intent-1").unwrap());
+        assert!(!database.record_outbox_outcome_unknown("intent-1").unwrap());
+        assert!(!database.record_outbox_attempt("intent-1", 100).unwrap());
+        assert_eq!(
+            database.outbox_thread_status("host", "thread").unwrap(),
+            OutboxThreadStatus {
+                queued_count: 1,
+                outcome_unknown_count: 1,
+            }
+        );
+
+        let due = database.due_outbox(10, 100).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].intent_id, "intent-3");
+
+        assert_eq!(
+            database
+                .discard_outbox_outcome_unknown("host", "thread", 1)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            database.outbox_thread_status("host", "thread").unwrap(),
+            OutboxThreadStatus {
+                queued_count: 1,
+                outcome_unknown_count: 0,
+            }
+        );
+        assert_eq!(
+            database.due_outbox(10, 100).unwrap()[0].intent_id,
+            "intent-2"
+        );
+    }
+
+    #[test]
+    fn cold_relaunch_restores_encrypted_binding_and_outbox_fences() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("device.sqlite");
+        let database = DeviceDatabase::open(&path, key(32)).expect("open");
+        database
+            .upsert_thread_binding("host", "provider-thread", "host-thread", 1)
+            .expect("persist binding");
+        let mut uncertain = intent("intent-1", "host", b"first");
+        uncertain.thread_id = Some("host-thread".to_string());
+        let mut queued = intent("intent-2", "host", b"second");
+        queued.thread_id = Some("host-thread".to_string());
+        queued.created_at_ms = 2;
+        database.enqueue_outbox(&uncertain).expect("enqueue first");
+        database.enqueue_outbox(&queued).expect("enqueue second");
+        database
+            .record_outbox_outcome_unknown("intent-1")
+            .expect("retain uncertain copy");
+        assert_eq!(database.next_outbox_attempt_at_ms().unwrap(), None);
+        drop(database);
+
+        let raw = std::fs::read(&path).expect("read database");
+        assert!(
+            !raw.windows(b"provider-thread".len())
+                .any(|window| window == b"provider-thread"),
+            "provider identity must not be plaintext in the device database"
+        );
+
+        let reopened = DeviceDatabase::open(&path, key(32)).expect("reopen");
+        assert_eq!(
+            reopened
+                .host_thread_id_for_provider("host", "provider-thread")
+                .expect("lookup binding"),
+            Some("host-thread".to_string())
+        );
+        assert_eq!(
+            reopened
+                .outbox_thread_status("host", "host-thread")
+                .expect("cold status"),
+            OutboxThreadStatus {
+                queued_count: 1,
+                outcome_unknown_count: 1,
+            }
+        );
+        assert_eq!(
+            reopened
+                .discard_outbox_outcome_unknown("host", "host-thread", 2)
+                .expect("reject stale proof"),
+            0
+        );
+        assert_eq!(
+            reopened
+                .discard_outbox_outcome_unknown("host", "host-thread", 1)
+                .expect("discard proven copy"),
+            1
+        );
+        assert_eq!(reopened.next_outbox_attempt_at_ms().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn thread_binding_ciphertext_tampering_fails_closed() {
+        let database = DeviceDatabase::open_in_memory(key(33)).expect("open");
+        database
+            .upsert_thread_binding("host", "provider-thread", "host-thread", 1)
+            .expect("persist binding");
+        database
+            .lock()
+            .unwrap()
+            .execute("UPDATE thread_bindings SET encrypted_binding = X'00'", [])
+            .unwrap();
+
+        assert!(matches!(
+            database.host_thread_id_for_provider("host", "provider-thread"),
+            Err(DeviceDatabaseError::Authentication)
+        ));
     }
 
     #[test]
@@ -1985,6 +2461,38 @@ mod tests {
             migrated.search_host_states(1).expect("freshness")[0].host_id,
             "host"
         );
+    }
+
+    #[test]
+    fn thread_binding_layout_migrates_without_invalidating_encrypted_records() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("device.sqlite");
+        let database = DeviceDatabase::open(&path, key(35)).expect("open");
+        database
+            .enqueue_outbox(&intent("intent", "host", b"preserved"))
+            .expect("enqueue");
+        {
+            let connection = database.lock().expect("lock");
+            connection
+                .execute("DROP TABLE thread_bindings", [])
+                .expect("drop additive table");
+            connection
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                    [4_i64.to_be_bytes().as_slice()],
+                )
+                .expect("restore v4 marker");
+        }
+        drop(database);
+
+        let migrated = DeviceDatabase::open(&path, key(35)).expect("migrate");
+        assert_eq!(
+            migrated.due_outbox(10, 1).expect("read preserved")[0].payload,
+            b"preserved"
+        );
+        migrated
+            .upsert_thread_binding("host", "provider-thread", "host-thread", 1)
+            .expect("new table available");
     }
 
     #[test]

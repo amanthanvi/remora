@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, trace, warn};
@@ -199,6 +200,13 @@ pub struct MobileClient {
     /// Prevents overlapping device-outbox delivery passes. Host work-intent
     /// receipts remain the cross-device idempotency authority.
     pub(crate) outbox_delivery: Arc<tokio::sync::Mutex<()>>,
+    /// Coalesces enqueue/reconnect triggers into one Rust-owned retry task.
+    pub(crate) outbox_delivery_scheduled: AtomicBool,
+    pub(crate) outbox_delivery_wake: tokio::sync::Notify,
+    /// Successful explicit authoritative refreshes, scoped to the uncertain
+    /// count they verified. Presentation code still owns whether to reveal
+    /// the destructive confirmation.
+    pub(crate) outbox_refresh_proofs: StdMutex<HashMap<ThreadKey, u32>>,
     /// Device-owned organization state. The database remains authoritative
     /// for persistence; this bounded cache keeps synchronous UI projections
     /// free of SQLite I/O.
@@ -295,6 +303,9 @@ impl MobileClient {
                 remora_link: Arc::new(RwLock::new(None)),
                 remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
                 outbox_delivery: Arc::new(tokio::sync::Mutex::new(())),
+                outbox_delivery_scheduled: AtomicBool::new(false),
+                outbox_delivery_wake: tokio::sync::Notify::new(),
+                outbox_refresh_proofs: StdMutex::new(HashMap::new()),
                 device_database: Arc::new(RwLock::new(None)),
                 thread_attention: Arc::new(RwLock::new(HashMap::new())),
             }

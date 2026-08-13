@@ -4,9 +4,29 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.codex_mobile_client.AbsolutePath
+import uniffi.codex_mobile_client.AppTurnSubmissionContent
 import uniffi.codex_mobile_client.AppUserInput
 
 class AppComposerPayloadTest {
+    @Test
+    fun nonTextContextRequiresLiveHost() {
+        val textOnly = AppComposerPayload(text = "queue me")
+        val image =
+            AppComposerPayload(
+                text = "describe this",
+                additionalInputs = listOf(AppUserInput.Image("data:image/png;base64,abc")),
+            )
+        val file =
+            AppComposerPayload(
+                text = "review this",
+                fileAttachments = listOf(ComposerFileAttachment("main.kt", "/project/main.kt")),
+            )
+
+        assertEquals(AppTurnSubmissionContent.TEXT_ONLY, textOnly.submissionContent)
+        assertEquals(AppTurnSubmissionContent.LIVE_HOST_REQUIRED, image.submissionContent)
+        assertEquals(AppTurnSubmissionContent.LIVE_HOST_REQUIRED, file.submissionContent)
+    }
+
     @Test
     fun turnStartParamsPrependsTextAndPreservesAdditionalInputs() {
         val payload =

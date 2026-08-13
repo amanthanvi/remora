@@ -21,6 +21,7 @@ pub enum AppOutboxIntentKind {
 pub enum AppOutboxState {
     Queued,
     Delivering,
+    OutcomeUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -298,6 +299,7 @@ impl From<AppOutboxState> for OutboxState {
         match value {
             AppOutboxState::Queued => Self::Queued,
             AppOutboxState::Delivering => Self::Delivering,
+            AppOutboxState::OutcomeUnknown => Self::OutcomeUnknown,
         }
     }
 }
@@ -307,6 +309,7 @@ impl From<OutboxState> for AppOutboxState {
         match value {
             OutboxState::Queued => Self::Queued,
             OutboxState::Delivering => Self::Delivering,
+            OutboxState::OutcomeUnknown => Self::OutcomeUnknown,
         }
     }
 }

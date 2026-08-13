@@ -1223,26 +1223,25 @@ struct HomeNavigationView: View {
     }
 
     @MainActor
-    private func sendQuickReply(_ threadKey: ThreadKey, text: String) async {
+    private func sendQuickReply(_ threadKey: ThreadKey, text: String) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // The server needs the thread resumed before `startTurn` can find
-        // it — same path `openRecentSession` takes. On a cold launch the
-        // thread is in hydrated snapshot state but not yet registered with
-        // the upstream session, so a quick-reply without resume would fail
-        // with "thread cannot be found".
-        let resumeKey = await appModel.hydrateThreadPermissions(for: threadKey, appState: appState)
-            ?? threadKey
-        let activeKey: ThreadKey
-        do {
+        let connected = appModel.snapshot?
+            .serverSnapshot(for: threadKey.serverId)?
+            .isConnected == true
+        var activeKey = threadKey
+        if connected {
+            // Cold-launch snapshots are not necessarily registered with the
+            // live upstream session, so the connected path still resumes.
+            let resumeKey = await appModel.hydrateThreadPermissions(
+                for: threadKey,
+                appState: appState
+            ) ?? threadKey
             activeKey = try await appModel.resumeThread(
                 key: resumeKey,
                 launchConfig: launchConfig(for: resumeKey),
                 cwdOverride: nil
             )
-        } catch {
-            actionErrorMessage = error.localizedDescription
-            return
         }
         let payload = AppComposerPayload(
             text: trimmed,
@@ -1253,11 +1252,9 @@ struct HomeNavigationView: View {
             effort: nil,
             serviceTier: nil
         )
-        do {
-            try await appModel.startTurn(key: activeKey, payload: payload)
+        _ = try await appModel.submitComposerTurn(key: activeKey, payload: payload)
+        if connected {
             await appModel.refreshThreadSnapshot(key: activeKey)
-        } catch {
-            actionErrorMessage = error.localizedDescription
         }
     }
 

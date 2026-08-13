@@ -38,10 +38,12 @@ in batches of at most 500 documents, with two-second coalescing during active
 updates and an immediate terminal-state flush. Queries remain bounded to 50
 results and 200 decrypted candidates, live Host state wins stale cache state,
 and per-Host index freshness is explicit.
-The additive v2→v4 layout migrations deliberately preserve the v2 encrypted
+The additive v2→v5 layout migrations deliberately preserve the v2 encrypted
 record envelope, so queued intents, indexed content, and review notes remain
-decryptable. Schema v4 adds only Host search-freshness metadata; searchable
-summary bodies and outbox payloads remain individually encrypted. Retention
+decryptable. Schema v4 adds Host search-freshness metadata. Schema v5 adds a
+20,000-row provider-to-Host Thread binding table whose lookup key is an HMAC
+and whose identities are authenticated ciphertext; searchable summary bodies
+and outbox payloads remain individually encrypted. Retention
 protects pinned Threads, queued intents, open review notes, and explicitly
 protected documents. iOS and Android rebuild only the exact disposable cache
 files and retain the secure master key.
@@ -71,15 +73,55 @@ Host `Succeeded`. Reconnect and database configuration both schedule bounded
 delivery; exponential retry is capped. Post-dispatch uncertainty remains
 `OutcomeUnknown` and is never resent automatically.
 
-Remaining: native offline composer affordances, explicit user-facing recovery
-for an outcome-unknown dispatch, and device-level offline/reconnect journey
-coverage.
+Both native conversation composers and quick-reply sheets now use one Rust
+submission action: connected submissions take the existing live provider path;
+disconnected plain-text submissions use the encrypted outbox. The Rust API
+receives a typed content classification and rejects images, files, skills, and
+plugin context while disconnected, even when a platform request would flatten
+a file reference into text. A failed submission restores the complete composer
+state. Matching inline banners expose queued counts and terminal
+outcome-unknown counts. Recovery offers authoritative refresh and an explicit
+destructive confirmation that deletes only the uncertain device copy; later
+messages on that Thread remain paused until then. Reconnect drains at most ten
+batches of ten intents and both clients perform a short bounded status
+reconciliation.
+
+The pinned Improve branch review at
+`86f170192d0683121475459df25f0c1fa27c0b1b` identified three closure defects;
+all are resolved:
+
+1. Cold launches recover the provider-Thread → Host-Thread binding from the
+   encrypted device database by HMAC lookup. The plaintext pair never enters
+   SQLite, storage is hard-capped, and no second Host database was added.
+2. One coalesced Rust task now queries the earliest deliverable
+   `next_attempt_at_ms`, sleeps until that deadline, and wakes early for a new
+   enqueue/reconnect trigger. The existing serialized worker remains the only
+   delivery authority; native code has no retry timer or service.
+3. Explicit AppStore authoritative refresh records a Rust proof bound to the
+   current uncertain count. A transaction rejects stale-count discard, and
+   both current native presentations keep the destructive control disabled
+   until their matching refresh succeeds. Direct resend remains absent.
+
+The offline → queue → cold relaunch → reconnect/lost-response journey is now
+covered across executable authority seams: SQLite close/reopen restores the
+encrypted binding and Thread-local fence, the retry task advances a stored
+deadline without a lifecycle event, Link tests prove an ambiguous dispatch is
+never re-executed, provider dispatch requires Host `Execute`, and matching
+iOS/Android presentation tests require the fresh count. A physical paired-Host
+airplane-mode smoke remains release QA, not an unimplemented safety control.
+
+STOP if any fix stores plaintext provider/Host identity correlation, permits
+native retry policy, automatically discards or resends an uncertain intent, or
+blocks unrelated Threads behind one Thread's uncertain copy.
 
 Validation at Link `e5cf64ab29ed9798585b4fecb2e31a8785b0a4a3`:
 Link format, all-target/all-feature clippy with warnings denied, and the full
 locked/frozen workspace suite pass; the focused mobile Link-v2 suite passes
 97 tests. Focused outbox persistence, direct-dispatch race, payload, and native
-database-configuration tests pass. Regenerated Swift/Kotlin bindings expose
-the same typed bind, enqueue, and bounded delivery outcomes. The canonical
-native verifier passes the full shared Rust suite, 266 iOS tests, and the
-Android debug unit-test build.
+database-configuration tests pass. Rust regressions additionally prove that
+live-Host context cannot queue and that outcome-unknown is terminal, blocks
+only its own Thread, survives cold relaunch, wakes at its retry deadline, and
+is removable only after a matching authoritative-refresh proof. Regenerated
+Swift/Kotlin bindings expose the same typed submission, status, discard, bind,
+enqueue, and bounded delivery outcomes. Both native clients compile against
+that generated boundary; focused iOS simulator and Android unit suites pass.

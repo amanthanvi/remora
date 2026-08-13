@@ -4,7 +4,7 @@ import SwiftUI
 /// session row. Sends a turn on the targeted thread and dismisses.
 struct QuickReplySheet: View {
     let thread: HomeDashboardRecentSession
-    let onSend: @MainActor (ThreadKey, String) async -> Void
+    let onSend: @MainActor (ThreadKey, String) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text: String = ""
@@ -102,8 +102,13 @@ struct QuickReplySheet: View {
         guard !trimmed.isEmpty, !isSending else { return }
         isSending = true
         errorMessage = nil
-        await onSend(thread.key, trimmed)
-        isSending = false
-        dismiss()
+        do {
+            try await onSend(thread.key, trimmed)
+            isSending = false
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            isSending = false
+        }
     }
 }

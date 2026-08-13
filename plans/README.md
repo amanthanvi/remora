@@ -97,8 +97,17 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, `REJECTED`.
   focused Rust/iOS/Android tests. Durable Host/provider Thread binding and the
   bounded serialized Rust delivery worker now carry encrypted text intents
   through prepare/begin/provider acknowledgement/Host completion without
-  automatically replaying post-dispatch uncertainty. Native offline composer
-  and recovery UX remain before closure.
+  automatically replaying post-dispatch uncertainty. Matching iOS/Android
+  composers and quick replies now select live-or-queued submission through
+  Rust, preserve failed drafts and attachments, reject live-only context while
+  offline, and expose explicit refresh/discard recovery for terminal uncertain
+  copies. The pinned Improve review's three closure defects are resolved:
+  encrypted HMAC-keyed bindings survive a cold launch, one coalesced Rust task
+  wakes at the earliest persisted retry deadline, and destructive discard is
+  rejected unless explicit authoritative refresh proved the current uncertain
+  count. Cross-layer cold-relaunch, deadline, dispatch-fence, ambiguity, and
+  matching native presentation tests cover the journey; a physical paired-Host
+  airplane-mode pass remains release QA.
 - Plan 017 has its first parity journey: both Home composers derive new-Thread
   launch availability from the same Rust projection, disable every send path
   for a known-unready provider, show the bounded Host guidance inline, and

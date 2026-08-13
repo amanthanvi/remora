@@ -1,7 +1,9 @@
 //! Device-owned offline message delivery through durable Host work fences.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use crate::{OutboxDispatchAuthorization, OutboxTurnStartOutcome};
 
 const MAX_OUTBOX_DELIVERY_BATCH: usize = 100;
 const AUTOMATIC_OUTBOX_DELIVERY_BATCH: usize = 10;
+const MAX_AUTOMATIC_OUTBOX_BATCHES: usize = 10;
 const OUTBOX_RETRY_BASE_MS: i64 = 1_000;
 const OUTBOX_RETRY_MAX_MS: i64 = 5 * 60 * 1_000;
 
@@ -37,6 +40,27 @@ pub struct AppRemoraLinkOutboxDeliveryReport {
     pub failed: u32,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct AppRemoraLinkThreadOutboxStatus {
+    pub queued_count: u32,
+    pub outcome_unknown_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppTurnSubmissionOutcome {
+    Sent,
+    Queued { intent_id: String },
+}
+
+/// Describes whether a composer payload depends on live Host state that the
+/// existing start-turn wire shape flattens into text before it reaches Rust.
+/// Rust remains responsible for deciding whether the submission may queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppTurnSubmissionContent {
+    TextOnly,
+    LiveHostRequired,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OfflineTurnPayloadV1 {
@@ -46,9 +70,24 @@ struct OfflineTurnPayloadV1 {
 
 impl crate::MobileClient {
     fn cached_remora_link_host_thread_id(&self, key: &ThreadKey) -> Option<String> {
-        remora_link_read(&self.remora_link)
+        if let Some(thread_id) = remora_link_read(&self.remora_link)
             .as_ref()
             .and_then(|configured| configured.cached_host_thread_id(key))
+        {
+            return Some(thread_id);
+        }
+        let database = self.configured_device_database()?;
+        match database.host_thread_id_for_provider(&key.server_id, &key.thread_id) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                warn!(
+                    host_id = key.server_id,
+                    %error,
+                    "persisted Remora Link Thread binding unavailable"
+                );
+                None
+            }
+        }
     }
 
     fn has_remora_link_runtime_session(&self, host_id: &str, runtime_id: Option<&str>) -> bool {
@@ -78,7 +117,7 @@ impl crate::MobileClient {
             .await
         {
             Ok(outcome) => {
-                configured.cache_thread_binding(&key.server_id, &outcome);
+                self.cache_remora_link_thread_binding(&configured, &key.server_id, &outcome);
                 configured.cached_host_thread_id(key)
             }
             Err(error) => {
@@ -142,13 +181,71 @@ impl crate::MobileClient {
         if self.configured_device_database().is_none() {
             return;
         }
+        if self.outbox_delivery_scheduled.swap(true, Ordering::AcqRel) {
+            self.outbox_delivery_wake.notify_one();
+            return;
+        }
         let client = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(error) = client
-                .deliver_remora_link_outbox(AUTOMATIC_OUTBOX_DELIVERY_BATCH)
-                .await
-            {
-                warn!(%error, "automatic Remora Link outbox delivery failed");
+            let mut failed = false;
+            'worker: loop {
+                for _ in 0..MAX_AUTOMATIC_OUTBOX_BATCHES {
+                    let report = match client
+                        .deliver_remora_link_outbox(AUTOMATIC_OUTBOX_DELIVERY_BATCH)
+                        .await
+                    {
+                        Ok(report) => report,
+                        Err(error) => {
+                            warn!(%error, "automatic Remora Link outbox delivery failed");
+                            failed = true;
+                            break 'worker;
+                        }
+                    };
+                    if report.considered < AUTOMATIC_OUTBOX_DELIVERY_BATCH as u32
+                        || report.delivered == 0
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                let Some(database) = client.configured_device_database() else {
+                    break;
+                };
+                let next_attempt_at_ms = match database.next_outbox_attempt_at_ms() {
+                    Ok(Some(deadline)) => deadline,
+                    Ok(None) => break,
+                    Err(error) => {
+                        warn!(%error, "automatic Remora Link retry deadline unavailable");
+                        failed = true;
+                        break;
+                    }
+                };
+                let now_ms = unix_time_ms();
+                if next_attempt_at_ms <= now_ms {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                let delay_ms = u64::try_from(next_attempt_at_ms.saturating_sub(now_ms))
+                    .unwrap_or(OUTBOX_RETRY_MAX_MS as u64)
+                    .min(OUTBOX_RETRY_MAX_MS as u64);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                    _ = client.outbox_delivery_wake.notified() => {}
+                }
+            }
+
+            client
+                .outbox_delivery_scheduled
+                .store(false, Ordering::Release);
+            if !failed {
+                let pending = client
+                    .configured_device_database()
+                    .and_then(|database| database.next_outbox_attempt_at_ms().ok().flatten())
+                    .is_some();
+                if pending {
+                    client.schedule_remora_link_outbox_delivery();
+                }
             }
         });
     }
@@ -170,11 +267,106 @@ impl crate::MobileClient {
             considered: u32::try_from(intents.len()).unwrap_or(u32::MAX),
             ..Default::default()
         };
+        let mut blocked_threads = HashSet::new();
         for intent in intents {
+            let thread_key = intent
+                .thread_id
+                .as_ref()
+                .map(|thread_id| (intent.host_id.clone(), thread_id.clone()));
+            if thread_key
+                .as_ref()
+                .is_some_and(|thread_key| blocked_threads.contains(thread_key))
+            {
+                report.deferred = report.deferred.saturating_add(1);
+                continue;
+            }
+            let delivered_before = report.delivered;
             self.deliver_remora_link_outbox_intent(&database, intent, now_ms, &mut report)
                 .await?;
+            if report.delivered == delivered_before
+                && let Some(thread_key) = thread_key
+            {
+                blocked_threads.insert(thread_key);
+            }
         }
         Ok(report)
+    }
+
+    pub(crate) fn remora_link_thread_outbox_status(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<Option<AppRemoraLinkThreadOutboxStatus>, ClientError> {
+        let Some(database) = self.configured_device_database() else {
+            return Ok(None);
+        };
+        let Some(host_thread_id) = self.cached_remora_link_host_thread_id(key) else {
+            return Ok(None);
+        };
+        database
+            .outbox_thread_status(&key.server_id, &host_thread_id)
+            .map(|status| {
+                Some(AppRemoraLinkThreadOutboxStatus {
+                    queued_count: status.queued_count,
+                    outcome_unknown_count: status.outcome_unknown_count,
+                })
+            })
+            .map_err(map_database_error)
+    }
+
+    pub(crate) fn record_remora_link_authoritative_refresh(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<(), ClientError> {
+        let outcome_unknown_count = self
+            .remora_link_thread_outbox_status(key)?
+            .map_or(0, |status| status.outcome_unknown_count);
+        let mut proofs = self
+            .outbox_refresh_proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outcome_unknown_count == 0 {
+            proofs.remove(key);
+        } else {
+            proofs.insert(key.clone(), outcome_unknown_count);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn discard_remora_link_outcome_unknown(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<u32, ClientError> {
+        let database = self.configured_device_database().ok_or_else(|| {
+            ClientError::InvalidParams("encrypted device storage is not configured".to_string())
+        })?;
+        let host_thread_id = self.cached_remora_link_host_thread_id(key).ok_or_else(|| {
+            ClientError::InvalidParams("This Thread is not durably bound to its Host".to_string())
+        })?;
+        let expected_count = self
+            .outbox_refresh_proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .ok_or_else(|| {
+                ClientError::InvalidParams(
+                    "Refresh the Thread successfully before discarding an uncertain copy"
+                        .to_string(),
+                )
+            })?;
+        let discarded = database
+            .discard_outbox_outcome_unknown(&key.server_id, &host_thread_id, expected_count)
+            .map_err(map_database_error)?;
+        self.outbox_refresh_proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+        if discarded != expected_count {
+            return Err(ClientError::InvalidParams(
+                "The uncertain delivery state changed; refresh the Thread again".to_string(),
+            ));
+        }
+        Ok(discarded)
     }
 
     async fn deliver_remora_link_outbox_intent(
@@ -214,7 +406,8 @@ impl crate::MobileClient {
                 return defer_intent(database, &intent, now_ms);
             }
         };
-        configured.cache_thread_binding(
+        self.cache_remora_link_thread_binding(
+            &configured,
             &intent.host_id,
             &ThreadBindingOutcomeV2::Bound(binding.clone()),
         );
@@ -254,8 +447,7 @@ impl crate::MobileClient {
             }
             Ok(WorkIntentOutcomeV2::Execute | WorkIntentOutcomeV2::Reserved) => {}
             Ok(WorkIntentOutcomeV2::OutcomeUnknown) => {
-                report.outcome_unknown = report.outcome_unknown.saturating_add(1);
-                return defer_intent(database, &intent, now_ms);
+                return retain_outcome_unknown(database, &intent, report);
             }
             Ok(WorkIntentOutcomeV2::Unavailable) | Err(_) => {
                 report.deferred = report.deferred.saturating_add(1);
@@ -298,8 +490,7 @@ impl crate::MobileClient {
                 acknowledge_intent(database, &intent, report)
             }
             Ok(OutboxTurnStartOutcome::OutcomeUnknown) | Err(_) => {
-                report.outcome_unknown = report.outcome_unknown.saturating_add(1);
-                defer_intent(database, &intent, now_ms)
+                retain_outcome_unknown(database, &intent, report)
             }
             Ok(OutboxTurnStartOutcome::Accepted) => match configured
                 .lifecycle
@@ -314,10 +505,7 @@ impl crate::MobileClient {
                 Ok(WorkIntentOutcomeV2::Succeeded { .. }) => {
                     acknowledge_intent(database, &intent, report)
                 }
-                _ => {
-                    report.outcome_unknown = report.outcome_unknown.saturating_add(1);
-                    defer_intent(database, &intent, now_ms)
-                }
+                _ => retain_outcome_unknown(database, &intent, report),
             },
         }
     }
@@ -404,9 +592,125 @@ fn acknowledge_intent(
     Ok(())
 }
 
+fn retain_outcome_unknown(
+    database: &crate::device_database::DeviceDatabase,
+    intent: &OutboxIntent,
+    report: &mut AppRemoraLinkOutboxDeliveryReport,
+) -> Result<(), ClientError> {
+    if !database
+        .record_outbox_outcome_unknown(&intent.intent_id)
+        .map_err(map_database_error)?
+    {
+        return Err(ClientError::Serialization(
+            "offline intent state changed during delivery".to_string(),
+        ));
+    }
+    report.outcome_unknown = report.outcome_unknown.saturating_add(1);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_delivery_wakes_at_the_persisted_retry_deadline() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = Arc::new(
+            crate::device_database::DeviceDatabase::open(
+                &directory.path().join("device.sqlite"),
+                vec![37; 32],
+            )
+            .expect("database"),
+        );
+        let first_deadline = unix_time_ms().saturating_add(50);
+        database
+            .enqueue_outbox(&OutboxIntent {
+                intent_id: "intent".to_string(),
+                host_id: "host".to_string(),
+                thread_id: Some("host-thread".to_string()),
+                kind: OutboxIntentKind::SendMessage,
+                payload: b"invalid payload defers before dispatch".to_vec(),
+                state: OutboxState::Queued,
+                created_at_ms: 1,
+                attempt_count: 0,
+                next_attempt_at_ms: Some(first_deadline),
+            })
+            .expect("enqueue");
+        let client = crate::MobileClient::new();
+        client
+            .configure_device_database(Arc::clone(&database))
+            .expect("configure database");
+        client.schedule_remora_link_outbox_delivery();
+
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if database
+                .next_outbox_attempt_at_ms()
+                .expect("deadline")
+                .is_some_and(|deadline| deadline > first_deadline)
+            {
+                return;
+            }
+        }
+        panic!("automatic delivery did not wake at the stored retry deadline");
+    }
+
+    #[tokio::test]
+    async fn uncertain_discard_requires_a_fresh_matching_authoritative_proof() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = Arc::new(
+            crate::device_database::DeviceDatabase::open(
+                &directory.path().join("device.sqlite"),
+                vec![36; 32],
+            )
+            .expect("database"),
+        );
+        database
+            .upsert_thread_binding("host", "provider-thread", "host-thread", 1)
+            .expect("binding");
+        let intent = |intent_id: &str, created_at_ms: i64| OutboxIntent {
+            intent_id: intent_id.to_string(),
+            host_id: "host".to_string(),
+            thread_id: Some("host-thread".to_string()),
+            kind: OutboxIntentKind::SendMessage,
+            payload: b"encrypted by database".to_vec(),
+            state: OutboxState::Queued,
+            created_at_ms,
+            attempt_count: 0,
+            next_attempt_at_ms: None,
+        };
+        database.enqueue_outbox(&intent("first", 1)).unwrap();
+        database.record_outbox_outcome_unknown("first").unwrap();
+
+        let client = crate::MobileClient::new();
+        client
+            .configure_device_database(Arc::clone(&database))
+            .expect("configure database");
+        let key = ThreadKey {
+            server_id: "host".to_string(),
+            thread_id: "provider-thread".to_string(),
+        };
+        assert!(matches!(
+            client.discard_remora_link_outcome_unknown(&key),
+            Err(ClientError::InvalidParams(_))
+        ));
+
+        client
+            .record_remora_link_authoritative_refresh(&key)
+            .expect("record refresh proof");
+        database.enqueue_outbox(&intent("second", 2)).unwrap();
+        database.record_outbox_outcome_unknown("second").unwrap();
+        assert!(matches!(
+            client.discard_remora_link_outcome_unknown(&key),
+            Err(ClientError::InvalidParams(_))
+        ));
+
+        client
+            .record_remora_link_authoritative_refresh(&key)
+            .expect("refresh changed state");
+        assert_eq!(client.discard_remora_link_outcome_unknown(&key).unwrap(), 2);
+    }
 
     #[test]
     fn payload_is_text_only_thread_bound_and_fingerprinted() {

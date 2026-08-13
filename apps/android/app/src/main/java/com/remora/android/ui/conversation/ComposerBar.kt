@@ -174,6 +174,7 @@ fun ComposerBar(
     onSlashError: ((String) -> Unit)? = null,
     pendingUserInput: PendingUserInputRequest? = null,
     onDismissPendingUserInput: (() -> Unit)? = null,
+    onOutboxChanged: () -> Unit = {},
     onInputFocusChanged: (Boolean) -> Unit = {},
 ) {
     val appModel = LocalAppModel.current
@@ -473,7 +474,8 @@ fun ComposerBar(
             attachedFiles = emptyList()
             scope.launch {
                 try {
-                    appModel.startTurn(threadKey, payload)
+                    appModel.submitComposerTurn(threadKey, payload)
+                    onOutboxChanged()
                 } catch (e: Exception) {
                     textFieldValue = TextFieldValue(
                         text = payload.text,

@@ -23,6 +23,10 @@ struct ConversationView: View {
     @AppStorage("conversationTextSizeStep") private var conversationTextSizeStep = ConversationTextSize.large.rawValue
     @AppStorage("fastMode") private var fastMode = false
     @State private var messageActionError: String?
+    @State private var outboxStatus: AppRemoraLinkThreadOutboxStatus?
+    @State private var refreshedUncertainCount: UInt32?
+    @State private var showDiscardUncertainConfirmation = false
+    @State private var outboxActionInFlight = false
     @State private var hasLoggedFirstRender = false
     @State private var localSendScrollToken = 0
 
@@ -60,6 +64,10 @@ struct ConversationView: View {
             .serverSnapshot(for: activeThreadKey.serverId)?
             .capabilities
             .supportsTurnPagination ?? false
+    }
+
+    private var serverHealth: AppServerHealth? {
+        appModel.snapshot?.serverSnapshot(for: activeThreadKey.serverId)?.health
     }
 
     var body: some View {
@@ -105,17 +113,32 @@ struct ConversationView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ConversationBottomChrome(
-                pinnedContextItems: pinnedContextItems,
-                composer: composer,
-                composerInputText: $composerInputText,
-                composerAttachedImage: $composerAttachedImage,
-                onSend: sendMessage,
-                onFileSearch: searchComposerFiles,
-                bottomInset: bottomInset,
-                onOpenConversation: onOpenConversation,
-                onResumeSessions: onResumeSessions
-            )
+            VStack(spacing: 0) {
+                if let outboxStatus,
+                   outboxStatus.queuedCount > 0 || outboxStatus.outcomeUnknownCount > 0 {
+                    ConversationOutboxStatusBanner(
+                        status: outboxStatus,
+                        actionInFlight: outboxActionInFlight,
+                        discardReady: isUncertainOutboxDiscardReady(
+                            currentCount: outboxStatus.outcomeUnknownCount,
+                            refreshedCount: refreshedUncertainCount
+                        ),
+                        onRefresh: refreshUncertainDelivery,
+                        onDiscard: { showDiscardUncertainConfirmation = true }
+                    )
+                }
+                ConversationBottomChrome(
+                    pinnedContextItems: pinnedContextItems,
+                    composer: composer,
+                    composerInputText: $composerInputText,
+                    composerAttachedImage: $composerAttachedImage,
+                    onSend: sendMessage,
+                    onFileSearch: searchComposerFiles,
+                    bottomInset: bottomInset,
+                    onOpenConversation: onOpenConversation,
+                    onResumeSessions: onResumeSessions
+                )
+            }
         }
         .alert("Conversation Action Error", isPresented: Binding(
             get: { messageActionError != nil },
@@ -124,6 +147,18 @@ struct ConversationView: View {
             Button("OK", role: .cancel) { messageActionError = nil }
         } message: {
             Text(messageActionError ?? "Unknown error")
+        }
+        .confirmationDialog(
+            "Discard uncertain message copy?",
+            isPresented: $showDiscardUncertainConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Discard uncertain copy", role: .destructive) {
+                discardUncertainDelivery()
+            }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text("Check the refreshed thread first. Discarding removes only the device copy; it cannot undo a message the provider already received.")
         }
         .onAppear {
             guard !hasLoggedFirstRender else { return }
@@ -135,7 +170,19 @@ struct ConversationView: View {
             appState.hydratePermissions(from: newThread)
         }
         .task(id: activeThreadKey) {
+            refreshedUncertainCount = nil
             await loadInitialTurnsIfNeeded()
+            refreshOutboxStatus()
+        }
+        .onChange(of: serverHealth) { _, _ in
+            Task {
+                refreshOutboxStatus()
+                guard serverHealth == .connected else { return }
+                for delay in [250_000_000, 750_000_000, 1_500_000_000] as [UInt64] {
+                    try await Task.sleep(nanoseconds: delay)
+                    refreshOutboxStatus()
+                }
+            }
         }
         .onChange(of: thread.initialTurnsLoaded) { _, _ in
             Task { await loadInitialTurnsIfNeeded() }
@@ -152,7 +199,8 @@ struct ConversationView: View {
         attachmentImage: UIImage?,
         fileAttachments: [ComposerFileAttachment],
         skillMentions: [SkillMentionSelection],
-        pluginMentions: [PluginMentionSelection]
+        pluginMentions: [PluginMentionSelection],
+        completion: @escaping (Bool) -> Void
     ) {
         localSendScrollToken &+= 1
         Task {
@@ -169,16 +217,79 @@ struct ConversationView: View {
                     skillMentions: skillMentions,
                     pluginMentions: pluginMentions
                 )
-                try await appModel.startTurn(key: activeThreadKey, payload: payload)
+                let outcome = try await appModel.submitComposerTurn(
+                    key: activeThreadKey,
+                    payload: payload
+                )
+                if case .queued = outcome {
+                    refreshOutboxStatus()
+                }
+                completion(true)
                 LLog.debug("conversation", "send message turn start returned", fields: [
                     "server_id": activeThreadKey.serverId,
-                    "thread_id": activeThreadKey.threadId
+                    "thread_id": activeThreadKey.threadId,
+                    "queued": outcome.isQueued
                 ])
             } catch {
+                completion(false)
                 LLog.error("conversation", "send message failed", error: error, fields: [
                     "server_id": activeThreadKey.serverId,
                     "thread_id": activeThreadKey.threadId
                 ])
+                messageActionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshOutboxStatus() {
+        do {
+            let status = try appModel.remoraLinkThreadOutboxStatus(key: activeThreadKey)
+            outboxStatus = status
+            if status?.outcomeUnknownCount != refreshedUncertainCount {
+                refreshedUncertainCount = nil
+            }
+        } catch {
+            LLog.error("outbox", "status refresh failed", error: error, fields: [
+                "server_id": activeThreadKey.serverId,
+                "thread_id": activeThreadKey.threadId
+            ])
+        }
+    }
+
+    private func refreshUncertainDelivery() {
+        guard !outboxActionInFlight else { return }
+        outboxActionInFlight = true
+        Task {
+            defer { outboxActionInFlight = false }
+            do {
+                try await appModel.forceRefreshThreadAuthoritative(key: activeThreadKey)
+                refreshOutboxStatus()
+                let count = outboxStatus?.outcomeUnknownCount ?? 0
+                refreshedUncertainCount = count > 0 ? count : nil
+            } catch {
+                refreshedUncertainCount = nil
+                messageActionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func discardUncertainDelivery() {
+        guard !outboxActionInFlight else { return }
+        guard isUncertainOutboxDiscardReady(
+            currentCount: outboxStatus?.outcomeUnknownCount ?? 0,
+            refreshedCount: refreshedUncertainCount
+        ) else {
+            messageActionError = "Refresh the thread successfully before discarding the uncertain copy."
+            return
+        }
+        outboxActionInFlight = true
+        Task {
+            defer { outboxActionInFlight = false }
+            do {
+                _ = try appModel.discardRemoraLinkOutcomeUnknown(key: activeThreadKey)
+                refreshedUncertainCount = nil
+                refreshOutboxStatus()
+            } catch {
                 messageActionError = error.localizedDescription
             }
         }
@@ -310,6 +421,81 @@ struct ConversationView: View {
             developerInstructions: nil,
             persistExtendedHistory: true
         )
+    }
+}
+
+func isUncertainOutboxDiscardReady(
+    currentCount: UInt32,
+    refreshedCount: UInt32?
+) -> Bool {
+    currentCount > 0 && refreshedCount == currentCount
+}
+
+private extension AppTurnSubmissionOutcome {
+    var isQueued: Bool {
+        if case .queued = self { return true }
+        return false
+    }
+}
+
+private struct ConversationOutboxStatusBanner: View {
+    let status: AppRemoraLinkThreadOutboxStatus
+    let actionInFlight: Bool
+    let discardReady: Bool
+    let onRefresh: () -> Void
+    let onDiscard: () -> Void
+
+    private var isUncertain: Bool { status.outcomeUnknownCount > 0 }
+
+    private var message: String {
+        if isUncertain {
+            let uncertain = status.outcomeUnknownCount == 1
+                ? "One message may already have sent."
+                : "\(status.outcomeUnknownCount) messages may already have sent."
+            let blocked = status.queuedCount == 0
+                ? ""
+                : " \(status.queuedCount) later queued message\(status.queuedCount == 1 ? " is" : "s are") paused."
+            return "\(uncertain) Refresh the thread before deciding; Remora will not resend automatically.\(blocked)"
+        }
+        return status.queuedCount == 1
+            ? "One message is encrypted on this device and will send when the computer reconnects."
+            : "\(status.queuedCount) messages are encrypted on this device and will send in order when the computer reconnects."
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: isUncertain ? "exclamationmark.triangle.fill" : "clock.badge.checkmark")
+                .foregroundStyle(isUncertain ? RemoraTheme.warning : RemoraTheme.accent)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(isUncertain ? "Delivery uncertain" : "Queued securely")
+                    .remoraFont(.caption, weight: .semibold)
+                    .foregroundStyle(RemoraTheme.textPrimary)
+                Text(message)
+                    .remoraFont(.caption2)
+                    .foregroundStyle(RemoraTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if isUncertain {
+                    HStack(spacing: 12) {
+                        Button("Refresh thread", action: onRefresh)
+                        Button("Discard copy", role: .destructive, action: onDiscard)
+                            .disabled(!discardReady)
+                    }
+                    .remoraFont(.caption, weight: .semibold)
+                    .disabled(actionInFlight)
+                }
+            }
+            Spacer(minLength: 0)
+            if actionInFlight {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background((isUncertain ? RemoraTheme.warning : RemoraTheme.accent).opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(RemoraTheme.separator).frame(height: 0.5)
+        }
     }
 }
 

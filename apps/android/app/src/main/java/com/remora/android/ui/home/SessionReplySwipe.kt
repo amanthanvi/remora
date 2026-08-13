@@ -13,6 +13,7 @@ import com.remora.android.state.AppModel
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.common.SwipeAction
 import com.remora.android.ui.common.SwipeableRow
+import uniffi.codex_mobile_client.AppServerHealth
 import uniffi.codex_mobile_client.AppSessionSummary
 
 /**
@@ -25,9 +26,8 @@ import uniffi.codex_mobile_client.AppSessionSummary
  * swipe (trailing) — nesting two separate swipe wrappers would have the
  * inner and outer gesture handlers fighting over the same pointer stream.
  *
- * The send path mirrors iOS `RemoraApp.swift:1043-1078` — the thread is
- * resumed before `startTurn` is called so the server can find it when the
- * home list was populated from a cold-launch snapshot.
+ * The send path resumes connected cold-launch threads and otherwise uses the
+ * same secure text-only outbox as the full conversation composer.
  */
 @Composable
 fun SessionReplySwipe(
@@ -84,33 +84,42 @@ suspend fun sendQuickReplyTurn(
     threadKey: uniffi.codex_mobile_client.ThreadKey,
     text: String,
 ) {
-    // Resume the thread first so the server can find it — cold-launch
-    // snapshots have the thread hydrated locally but not yet registered
-    // with the upstream session.
-    val resumeKey = appModel.hydrateThreadPermissions(threadKey) ?: threadKey
-    try {
-        appModel.externalResumeThread(resumeKey)
-    } catch (_: Exception) {
-        val cwdOverride = appModel.threadSnapshot(resumeKey)?.info?.cwd
-        appModel.client.resumeThread(
-            resumeKey.serverId,
-            appModel.launchState.threadResumeRequest(
-                resumeKey.threadId,
-                cwdOverride = cwdOverride,
-                threadKey = resumeKey,
-            ),
-        )
+    val connected = appModel.snapshot.value?.servers
+        ?.firstOrNull { it.serverId == threadKey.serverId }
+        ?.health == AppServerHealth.CONNECTED
+    val activeKey = if (connected) {
+        // Cold-launch snapshots are not necessarily registered with the live
+        // upstream session, so the connected path still resumes.
+        val resumeKey = appModel.hydrateThreadPermissions(threadKey) ?: threadKey
+        try {
+            appModel.externalResumeThread(resumeKey)
+        } catch (_: Exception) {
+            val cwdOverride = appModel.threadSnapshot(resumeKey)?.info?.cwd
+            appModel.client.resumeThread(
+                resumeKey.serverId,
+                appModel.launchState.threadResumeRequest(
+                    resumeKey.threadId,
+                    cwdOverride = cwdOverride,
+                    threadKey = resumeKey,
+                ),
+            )
+        }
+        resumeKey
+    } else {
+        threadKey
     }
     val payload = AppComposerPayload(
         text = text,
         additionalInputs = emptyList(),
-        approvalPolicy = appModel.launchState.approvalPolicyValue(resumeKey),
-        sandboxPolicy = appModel.launchState.turnSandboxPolicy(resumeKey),
+        approvalPolicy = appModel.launchState.approvalPolicyValue(activeKey),
+        sandboxPolicy = appModel.launchState.turnSandboxPolicy(activeKey),
         model = appModel.launchState.snapshot.value.selectedModel
             .trim().ifEmpty { null },
         reasoningEffort = null,
         serviceTier = null,
     )
-    appModel.startTurn(resumeKey, payload)
-    appModel.refreshThreadSnapshot(resumeKey)
+    appModel.submitComposerTurn(activeKey, payload)
+    if (connected) {
+        appModel.refreshThreadSnapshot(activeKey)
+    }
 }
