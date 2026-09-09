@@ -30,6 +30,12 @@ struct RecorderState {
     entries: Vec<RecordedEntry>,
 }
 
+impl Default for MessageRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MessageRecorder {
     pub fn new() -> Self {
         Self {

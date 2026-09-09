@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+#[path = "wire_relay.rs"]
+mod relay;
+pub(crate) use relay::{RelayBarrierV2, RelayCommitV2, RelayEnrollmentV2};
+
 pub(crate) const PROTOCOL_VERSION: u32 = 2;
 pub(crate) const ALPN: &[u8] = b"remora-link/2";
 pub(crate) const PROOF_DOMAIN: &[u8] = b"remora-link/2/proof/v2";
@@ -79,6 +83,26 @@ pub(crate) enum RequestV2 {
         v: u32,
         credential_id: String,
         client_nonce: String,
+    },
+    RelayEnroll {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        idempotency_key: String,
+    },
+    RelayCommit {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        installation_id: String,
+        idempotency_key: String,
+    },
+    RelayBarrier {
+        v: u32,
+        credential_id: String,
+        client_nonce: String,
+        installation_id: String,
+        through_cursor: u64,
     },
     RestartAgent {
         v: u32,
@@ -151,6 +175,20 @@ pub(crate) enum RequestCorrelationV2 {
     ListAgents {
         credential_id: String,
     },
+    RelayEnroll {
+        credential_id: String,
+        idempotency_key: String,
+    },
+    RelayCommit {
+        credential_id: String,
+        installation_id: String,
+        idempotency_key: String,
+    },
+    RelayBarrier {
+        credential_id: String,
+        installation_id: String,
+        through_cursor: u64,
+    },
     RestartAgent {
         credential_id: String,
         agent: String,
@@ -185,6 +223,9 @@ impl RequestV2 {
             Self::InspectInvitation { .. } => "inspect_invitation",
             Self::Enroll { .. } => "enroll",
             Self::ListAgents { .. } => "list_agents",
+            Self::RelayEnroll { .. } => "relay_enroll",
+            Self::RelayCommit { .. } => "relay_commit",
+            Self::RelayBarrier { .. } => "relay_barrier",
             Self::RestartAgent { .. } => "restart_agent",
             Self::Connect { .. } => "connect",
             Self::RevokeSelf { .. } => "revoke_self",
@@ -196,6 +237,9 @@ impl RequestV2 {
             Self::InspectInvitation { v, .. }
             | Self::Enroll { v, .. }
             | Self::ListAgents { v, .. }
+            | Self::RelayEnroll { v, .. }
+            | Self::RelayCommit { v, .. }
+            | Self::RelayBarrier { v, .. }
             | Self::RestartAgent { v, .. }
             | Self::Connect { v, .. }
             | Self::RevokeSelf { v, .. }
@@ -207,6 +251,9 @@ impl RequestV2 {
             Self::InspectInvitation { client_nonce, .. }
             | Self::Enroll { client_nonce, .. }
             | Self::ListAgents { client_nonce, .. }
+            | Self::RelayEnroll { client_nonce, .. }
+            | Self::RelayCommit { client_nonce, .. }
+            | Self::RelayBarrier { client_nonce, .. }
             | Self::RestartAgent { client_nonce, .. }
             | Self::Connect { client_nonce, .. }
             | Self::RevokeSelf { client_nonce, .. }
@@ -217,6 +264,9 @@ impl RequestV2 {
         match self {
             Self::InspectInvitation { .. } | Self::Enroll { .. } => None,
             Self::ListAgents { credential_id, .. }
+            | Self::RelayEnroll { credential_id, .. }
+            | Self::RelayCommit { credential_id, .. }
+            | Self::RelayBarrier { credential_id, .. }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -248,6 +298,34 @@ impl RequestV2 {
             },
             Self::ListAgents { credential_id, .. } => RequestCorrelationV2::ListAgents {
                 credential_id: credential_id.clone(),
+            },
+            Self::RelayEnroll {
+                credential_id,
+                idempotency_key,
+                ..
+            } => RequestCorrelationV2::RelayEnroll {
+                credential_id: credential_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+            Self::RelayCommit {
+                credential_id,
+                installation_id,
+                idempotency_key,
+                ..
+            } => RequestCorrelationV2::RelayCommit {
+                credential_id: credential_id.clone(),
+                installation_id: installation_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+            },
+            Self::RelayBarrier {
+                credential_id,
+                installation_id,
+                through_cursor,
+                ..
+            } => RequestCorrelationV2::RelayBarrier {
+                credential_id: credential_id.clone(),
+                installation_id: installation_id.clone(),
+                through_cursor: *through_cursor,
             },
             Self::RestartAgent {
                 credential_id,
@@ -318,6 +396,19 @@ impl RequestV2 {
                 idempotency_key,
             ]),
             Self::ListAgents { .. } => operation_payload_hash(&[]),
+            Self::RelayEnroll {
+                idempotency_key, ..
+            } => operation_payload_hash(&[idempotency_key]),
+            Self::RelayCommit {
+                installation_id,
+                idempotency_key,
+                ..
+            } => operation_payload_hash(&[installation_id, idempotency_key]),
+            Self::RelayBarrier {
+                installation_id,
+                through_cursor,
+                ..
+            } => operation_payload_hash(&[installation_id, &through_cursor.to_string()]),
             Self::RestartAgent {
                 agent,
                 idempotency_key,
@@ -374,6 +465,34 @@ impl RequestV2 {
                 valid_idempotency(idempotency_key)?;
             }
             Self::ListAgents { credential_id, .. } => valid_opaque(credential_id, OPAQUE_ID_BYTES)?,
+            Self::RelayEnroll {
+                credential_id,
+                idempotency_key,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::RelayCommit {
+                credential_id,
+                installation_id,
+                idempotency_key,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                relay::validate_installation(installation_id)
+                    .map_err(|_| WireError::InvalidRequest)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::RelayBarrier {
+                credential_id,
+                installation_id,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                relay::validate_installation(installation_id)
+                    .map_err(|_| WireError::InvalidRequest)?;
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -440,6 +559,30 @@ impl RequestCorrelationV2 {
             Self::ListAgents { credential_id } => {
                 valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
             }
+            Self::RelayEnroll {
+                credential_id,
+                idempotency_key,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::RelayCommit {
+                credential_id,
+                installation_id,
+                idempotency_key,
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                relay::validate_installation(installation_id)?;
+                valid_idempotency(idempotency_key)?;
+            }
+            Self::RelayBarrier {
+                credential_id,
+                installation_id,
+                ..
+            } => {
+                valid_opaque(credential_id, OPAQUE_ID_BYTES)?;
+                relay::validate_installation(installation_id)?;
+            }
             Self::RestartAgent {
                 credential_id,
                 agent,
@@ -503,6 +646,9 @@ impl RequestCorrelationV2 {
                 true,
             ),
             Self::ListAgents { credential_id }
+            | Self::RelayEnroll { credential_id, .. }
+            | Self::RelayCommit { credential_id, .. }
+            | Self::RelayBarrier { credential_id, .. }
             | Self::RestartAgent { credential_id, .. }
             | Self::Connect { credential_id, .. }
             | Self::RevokeSelf { credential_id, .. }
@@ -948,6 +1094,12 @@ pub(crate) struct ResponseV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<SessionV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relay_enrollment: Option<RelayEnrollmentV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relay_commit: Option<RelayCommitV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relay_barrier: Option<RelayBarrierV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<ErrorCodeV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
@@ -1000,6 +1152,15 @@ impl ResponseV2 {
         if let Some(value) = &self.session {
             value.validate()?;
         }
+        if let Some(value) = &self.relay_enrollment {
+            value.validate()?;
+        }
+        if let Some(value) = &self.relay_commit {
+            value.validate()?;
+        }
+        if let Some(value) = &self.relay_barrier {
+            value.validate()?;
+        }
 
         let terminal_count = [
             self.enrolled.is_some(),
@@ -1009,6 +1170,9 @@ impl ResponseV2 {
             self.restart.is_some(),
             self.agents.is_some(),
             self.session.is_some(),
+            self.relay_enrollment.is_some(),
+            self.relay_commit.is_some(),
+            self.relay_barrier.is_some(),
         ]
         .into_iter()
         .filter(|present| *present)
@@ -1170,6 +1334,46 @@ impl ResponseV2 {
             },
             RequestCorrelationV2::ListAgents { .. } => {
                 if self.agents.is_none() {
+                    return Err(WireError::InvalidResponse);
+                }
+            }
+            RequestCorrelationV2::RelayEnroll {
+                idempotency_key, ..
+            } => {
+                let value = self
+                    .relay_enrollment
+                    .as_ref()
+                    .ok_or(WireError::InvalidResponse)?;
+                if value.command_id != *idempotency_key {
+                    return Err(WireError::InvalidResponse);
+                }
+            }
+            RequestCorrelationV2::RelayCommit {
+                installation_id,
+                idempotency_key,
+                ..
+            } => {
+                let value = self
+                    .relay_commit
+                    .as_ref()
+                    .ok_or(WireError::InvalidResponse)?;
+                if value.installation_id != *installation_id || value.command_id != *idempotency_key
+                {
+                    return Err(WireError::InvalidResponse);
+                }
+            }
+            RequestCorrelationV2::RelayBarrier {
+                installation_id,
+                through_cursor,
+                ..
+            } => {
+                let value = self
+                    .relay_barrier
+                    .as_ref()
+                    .ok_or(WireError::InvalidResponse)?;
+                if value.installation_id != *installation_id
+                    || value.through_cursor != *through_cursor
+                {
                     return Err(WireError::InvalidResponse);
                 }
             }
@@ -1547,6 +1751,9 @@ fn is_operation(value: &str) -> bool {
         "inspect_invitation"
             | "enroll"
             | "list_agents"
+            | "relay_enroll"
+            | "relay_commit"
+            | "relay_barrier"
             | "restart_agent"
             | "connect"
             | "revoke_self"

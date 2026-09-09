@@ -2,13 +2,13 @@
 
 Status: implemented mobile contract and release guardrails.
 
-Host source: the Remora-owned Git source recorded in the shared Rust manifest,
-pinned by the shared Rust lockfile.
+Host source: [`services/remora-link`](../../services/remora-link/REMORA.md),
+owned and reviewed atomically with the mobile client.
 
 ## Decision
 
 Remora Link v2 is the only active paired-host authorization path. It uses the
-`remora-link/2` ALPN and the pinned host's byte-level wire contract and golden
+`remora-link/2` ALPN and the host's byte-level wire contract and golden
 vectors. Unsupported invitation formats fail closed and require fresh pairing.
 
 Enrollment and routine access are deliberately different:
@@ -26,7 +26,7 @@ Enrollment and routine access are deliberately different:
 5. QR and paste are only encodings of the same invitation. Neither path changes
    the authorization policy.
 
-The host adapter accepts only the pinned v2 contract. It never retries another
+The host adapter accepts only the reviewed v2 contract. It never retries another
 protocol after a v2 error and never imports unsupported credentials.
 
 ## Implemented ownership boundary
@@ -88,11 +88,32 @@ shared runtime. Every host must then be paired again. No migration or
 compatibility guarantee applies to older state; direct upgrades are supported
 from 1.6.0 onward.
 
+## Background delivery
+
+The authenticated `relay_enroll`, `relay_commit`, and `relay_barrier` operations
+require both runtime inspection and connection scopes. The host keeps write
+authority; read/manage capabilities transfer to device-only secure custody.
+The same enrollment command is retried after ambiguous responses. Only a
+durable device enrollment permits host transfer-secret erasure.
+
+The host persists publication identity before relay HTTP submission and only
+certifies confirmed cursors. A repair barrier binds the installation,
+credential/epoch, host boot, and complete runtime session/revision vector.
+Rust reads authoritative projections between matching barriers and checks
+local configuration, journal generation, session and history fences before
+publication. The authenticated digest and cursor are committed before relay
+ACK. They record a verified observation, not a persisted transcript. Every
+foreground/cold start repairs even when no newer event exists.
+
+See [host delivery contract](../../services/remora-link/docs/background-relay.md)
+and [iOS custody](ios-background-relay-custody.md). Native token caches hold OS
+inputs only; they cannot assign installations or advance repair cursors.
+
 ## Verification gates
 
-Every host pin or protocol change requires:
+Every host source or protocol change requires:
 
-- host golden-vector parity and explicit review of the exact 40-character pin;
+- host golden-vector parity and review of the coordinated host/mobile diff;
 - deterministic binding generation;
 - Rust lifecycle, replay, reconnect, revocation, attachment, and shell-cleanup
   tests;
@@ -111,6 +132,6 @@ make ios-sim-fast
 cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The Remora-owned host source carries the v2 wire specification and golden
-vectors. The shared Rust manifest and lockfile record the exact reviewed source
-and revision.
+The host tree carries the v2 wire specification and golden vectors. Its
+`REMORA.md` records import provenance; local path dependencies keep bridge and
+host changes in the same reviewable source tree.

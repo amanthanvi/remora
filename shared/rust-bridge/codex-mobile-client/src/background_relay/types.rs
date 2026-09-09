@@ -267,6 +267,9 @@ pub(crate) struct SeenWake {
 pub(crate) struct RelayWakeLedger {
     pub(crate) highest_seen_cursor: u64,
     pub(crate) applied_cursor: u64,
+    /// Digest of the authenticated host/session vector observed at repair.
+    /// This is a freshness receipt, not a persisted conversation snapshot.
+    pub(crate) verified_barrier_id: Option<String>,
     pub(crate) pending_ack_cursor: Option<u64>,
     pub(crate) remote_ack_ahead_cursor: Option<u64>,
     pub(crate) recently_seen: Vec<SeenWake>,
@@ -283,9 +286,8 @@ pub(crate) struct RelayBindingEntry {
     pub(crate) staging_command_id: RelayEnrollmentCommandId,
     pub(crate) read_capability_revision: Option<u64>,
     pub(crate) manage_capability_revision: Option<u64>,
-    /// Durable, authenticated fence allocated before every native repair.
-    /// Native state accepts only a strictly greater generation and verifies
-    /// the same generation again at its authoritative commit point.
+    /// Durable, authenticated fence allocated before every Rust-owned repair.
+    /// The repair checks this exact generation before publishing its projection.
     pub(crate) repair_generation: u64,
     pub(crate) host_id: RelayHostId,
     pub(crate) origin: ValidatedRelayOrigin,
@@ -448,6 +450,7 @@ pub(crate) enum RelayRepairMode {
 pub(crate) struct RelayRepairReceipt {
     pub(crate) applied_through_cursor: u64,
     pub(crate) authoritative: bool,
+    pub(crate) verified_barrier_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

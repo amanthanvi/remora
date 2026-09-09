@@ -35,6 +35,9 @@ use super::wire::{
 };
 use crate::remote_host_pairing::identity::V2Invite;
 
+#[path = "lifecycle_relay.rs"]
+mod relay;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EnrollmentOutcomeV2 {
     Pending(PendingEnrollmentV2),
@@ -723,21 +726,21 @@ impl PairingLifecycleV2 {
         let Some(mut entry) = self.load(host_id).await? else {
             return Ok(RecoveryOutcomeV2::NoJournal);
         };
-        if matches!(entry.phase, JournalPhaseV2::Enrolled) {
-            if let Some(restart) = entry.pending_restart.as_ref() {
-                let command_sequence = restart.command_sequence;
-                if restart.disposition == RestartDispositionV2::OutcomeUnknown {
-                    return Ok(RecoveryOutcomeV2::Restart(
-                        RestartOutcomeV2::OutcomeUnknown { command_sequence },
-                    ));
-                }
-                let runtime_id = restart.runtime_id.clone();
-                drop(_operation);
-                return self
-                    .restart(host_id, runtime_id)
-                    .await
-                    .map(RecoveryOutcomeV2::Restart);
+        if matches!(entry.phase, JournalPhaseV2::Enrolled)
+            && let Some(restart) = entry.pending_restart.as_ref()
+        {
+            let command_sequence = restart.command_sequence;
+            if restart.disposition == RestartDispositionV2::OutcomeUnknown {
+                return Ok(RecoveryOutcomeV2::Restart(
+                    RestartOutcomeV2::OutcomeUnknown { command_sequence },
+                ));
             }
+            let runtime_id = restart.runtime_id.clone();
+            drop(_operation);
+            return self
+                .restart(host_id, runtime_id)
+                .await
+                .map(RecoveryOutcomeV2::Restart);
         }
         match entry.phase.clone() {
             JournalPhaseV2::RollbackPending | JournalPhaseV2::RevocationPending => self

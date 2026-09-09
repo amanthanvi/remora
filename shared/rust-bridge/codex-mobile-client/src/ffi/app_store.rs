@@ -354,6 +354,12 @@ mod tests {
     }
 }
 
+impl Default for AppStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl AppStore {
     #[uniffi::constructor]
@@ -372,7 +378,9 @@ impl AppStore {
         &self,
         key: ThreadKey,
     ) -> Result<Option<AppThreadSnapshot>, ClientError> {
-        crate::store::project_thread_snapshot(&self.inner.app_snapshot(), &key)
+        self.inner
+            .app_store
+            .project_thread_snapshot(&key)
             .map_err(ClientError::Serialization)
     }
 
@@ -516,28 +524,21 @@ impl AppStore {
         params: AppForkThreadFromMessageRequest,
     ) -> Result<ThreadKey, ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            c.fork_thread_from_message(
-                &key,
-                selected_turn_index,
-                params.cwd,
-                params.model,
-                params.approval_policy,
-                params.sandbox,
-                params.developer_instructions,
-                params.persist_extended_history,
-            )
-            .await
-            .map_err(|e| ClientError::Rpc(e.to_string()))
+            c.fork_thread_from_message(&key, selected_turn_index, params)
+                .await
+                .map_err(|e| ClientError::Rpc(e.to_string()))
         })
     }
 
     pub async fn respond_to_approval(
         &self,
+        server_id: String,
+        runtime_kind: String,
         request_id: String,
         decision: crate::types::ApprovalDecisionValue,
     ) -> Result<(), ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            c.respond_to_approval(&request_id, decision)
+            c.respond_to_approval(&server_id, &runtime_kind, &request_id, decision)
                 .await
                 .map_err(|e| ClientError::Rpc(e.to_string()))
         })
@@ -545,11 +546,13 @@ impl AppStore {
 
     pub async fn respond_to_user_input(
         &self,
+        server_id: String,
+        runtime_kind: String,
         request_id: String,
         answers: Vec<crate::types::PendingUserInputAnswer>,
     ) -> Result<(), ClientError> {
         blocking_async!(self.rt, self.inner, |c| {
-            c.respond_to_user_input(&request_id, answers)
+            c.respond_to_user_input(&server_id, &runtime_kind, &request_id, answers)
                 .await
                 .map_err(|e| ClientError::Rpc(e.to_string()))
         })
@@ -591,7 +594,7 @@ impl AppStore {
             &target_key.server_id,
             &target_key.thread_id,
         )
-        .map_err(|e| ClientError::Serialization(e))?;
+        .map_err(ClientError::Serialization)?;
         let processor = Arc::clone(&self.inner.event_processor);
         for (i, (ts_ms, server_id, notification)) in entries.iter().enumerate() {
             if i > 0 {
@@ -713,7 +716,7 @@ impl AppStoreSubscription {
                 ))?
         };
         let result = match receive_next_update(&mut state).await {
-            Ok(update) => Ok(update.into()),
+            Ok(update) => Ok(update),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 Ok(AppStoreUpdateRecord::FullResync)
             }
@@ -760,7 +763,7 @@ fn coalesce_ready_updates(
             return Ok(update);
         };
 
-        if let Err(next) = merge_app_update(&mut update, next) {
+        if let Some(next) = merge_app_update(&mut update, next) {
             state.buffered.push_front(next);
             return Ok(update);
         }
@@ -770,17 +773,17 @@ fn coalesce_ready_updates(
 fn merge_app_update(
     current: &mut AppStoreUpdateRecord,
     next: AppStoreUpdateRecord,
-) -> Result<(), AppStoreUpdateRecord> {
+) -> Option<AppStoreUpdateRecord> {
     if matches!(current, AppStoreUpdateRecord::FullResync) {
-        return Ok(());
+        return None;
     }
     if matches!(next, AppStoreUpdateRecord::FullResync) {
         *current = AppStoreUpdateRecord::FullResync;
-        return Ok(());
+        return None;
     }
     if triggers_snapshot_refresh(current) && triggers_snapshot_refresh(&next) {
         *current = AppStoreUpdateRecord::FullResync;
-        return Ok(());
+        return None;
     }
 
     match (current, next) {
@@ -803,7 +806,7 @@ fn merge_app_update(
             && text.len().saturating_add(next_text.len()) <= MAX_COALESCED_STREAMING_TEXT_BYTES =>
         {
             text.push_str(&next_text);
-            Ok(())
+            None
         }
         (
             AppStoreUpdateRecord::ThreadMetadataChanged {
@@ -820,7 +823,7 @@ fn merge_app_update(
             *state = next_state;
             *session_summary = next_summary;
             *agent_directory_version = next_version;
-            Ok(())
+            None
         }
         (
             AppStoreUpdateRecord::ThreadItemChanged {
@@ -835,7 +838,7 @@ fn merge_app_update(
             },
         ) if *key == next_key && item.id == next_item.id => {
             if should_preserve_thread_item_update_boundary(item, &next_item) {
-                return Err(AppStoreUpdateRecord::ThreadItemChanged {
+                return Some(AppStoreUpdateRecord::ThreadItemChanged {
                     key: next_key,
                     item: next_item,
                     session_summary: next_summary,
@@ -843,7 +846,7 @@ fn merge_app_update(
             }
             *item = next_item;
             *session_summary = next_summary;
-            Ok(())
+            None
         }
         (
             AppStoreUpdateRecord::ThreadUpserted {
@@ -860,16 +863,16 @@ fn merge_app_update(
             *thread = next_thread;
             *session_summary = next_summary;
             *agent_directory_version = next_version;
-            Ok(())
+            None
         }
         (
             AppStoreUpdateRecord::ActiveThreadChanged { key },
             AppStoreUpdateRecord::ActiveThreadChanged { key: next_key },
         ) => {
             *key = next_key;
-            Ok(())
+            None
         }
-        (_current, next) => Err(next),
+        (_current, next) => Some(next),
     }
 }
 

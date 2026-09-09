@@ -407,7 +407,7 @@ pub fn saved_apps_list(directory: String) -> SavedAppsSnapshot {
     migrate_missing_slugs(&mut snapshot);
     snapshot
         .apps
-        .sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        .sort_by_key(|app| std::cmp::Reverse(app.updated_at_ms));
     snapshot
 }
 
@@ -425,7 +425,7 @@ pub fn saved_apps_for_thread(directory: String, thread_id: String) -> Vec<SavedA
         .into_iter()
         .filter(|app| app.origin_thread_id.as_deref() == Some(thread_id.as_str()))
         .collect();
-    matched.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    matched.sort_by_key(|app| std::cmp::Reverse(app.updated_at_ms));
     matched
 }
 
@@ -457,6 +457,10 @@ pub fn saved_app_get(directory: String, app_id: String) -> Option<SavedAppWithPa
 /// by the `show_widget` finalize hook in `conversation.rs`. Returns the
 /// upserted (or inserted) app.
 #[uniffi::export]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native widget-finalization boundary mirrors the saved-app record fields"
+)]
 pub fn saved_app_upsert(
     directory: String,
     origin_thread_id: String,
@@ -792,8 +796,8 @@ pub fn saved_app_load_state(directory: String, app_id: String) -> Option<SavedAp
 
 // ── Internal helpers consumed by `AppClient::update_saved_app` ──────────
 
-/// Short-form description of a state blob for the model: top-level keys
-/// + a single compact example value each. Returns `None` when no state
+/// Describe a state blob's top-level keys with one compact example per key.
+/// Returns `None` when no state
 /// file exists. Designed for seeding an update prompt; never exposes the
 /// raw user data in full.
 pub(crate) fn abbreviated_state_shape(directory: &str, app_id: &str) -> Option<String> {
@@ -810,9 +814,7 @@ pub(crate) fn abbreviated_state_shape(directory: &str, app_id: &str) -> Option<S
                     .unwrap_or_else(|| "[]".into());
                 format!("[{}, ... ({} items)]", first, items.len())
             }
-            serde_json::Value::Object(_) => {
-                format!("{{...}}")
-            }
+            serde_json::Value::Object(_) => "{...}".to_string(),
             serde_json::Value::String(s) => format!("{:?}", truncate(s, 120)),
             other => truncate(&other.to_string(), 120),
         };

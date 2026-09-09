@@ -1,0 +1,53 @@
+diff --git a/codex-rs/rmcp-client/Cargo.toml b/codex-rs/rmcp-client/Cargo.toml
+index 0efd8a417..817f6dea7 100644
+--- a/codex-rs/rmcp-client/Cargo.toml
++++ b/codex-rs/rmcp-client/Cargo.toml
+@@ -7,10 +7,27 @@ license.workspace = true
+ [lints]
+ workspace = true
+ 
++[features]
++http-test-server = ["rmcp/transport-streamable-http-server"]
++
++[[bin]]
++name = "test_streamable_http_server"
++path = "src/bin/test_streamable_http_server.rs"
++required-features = ["http-test-server"]
++
++[[test]]
++name = "streamable_http_recovery"
++required-features = ["http-test-server"]
++
++[[test]]
++name = "streamable_http_remote"
++required-features = ["http-test-server"]
++
+ [dependencies]
+ anyhow = "1"
+ axum = { workspace = true, default-features = false, features = [
+     "http1",
++    "json",
+     "tokio",
+ ] }
+ base64 = { workspace = true }
+@@ -26,10 +43,10 @@ bytes = { workspace = true }
+ futures = { workspace = true, default-features = false, features = ["std"] }
+ keyring = { workspace = true, features = ["crypto-rust"] }
+ oauth2 = "5"
+-reqwest = { version = "0.12", default-features = false, features = [
++reqwest = { version = "0.13.2", default-features = false, features = [
+     "json",
+     "stream",
+-    "rustls-tls",
++    "rustls",
+ ] }
+ rmcp = { workspace = true, default-features = false, features = [
+     "auth",
+@@ -41,7 +58,6 @@ rmcp = { workspace = true, default-features = false, features = [
+     "transport-async-rw",
+     "transport-child-process",
+     "transport-streamable-http-client-reqwest",
+-    "transport-streamable-http-server",
+ ] }
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true }

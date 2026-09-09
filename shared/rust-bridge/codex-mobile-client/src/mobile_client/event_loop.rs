@@ -47,6 +47,9 @@ impl MobileClient {
                     break;
                 }
                 match event {
+                    Ok(ServerEvent::EventsLost { skipped }) => {
+                        processor.emit_events_lost(&server_id, skipped);
+                    }
                     Ok(ServerEvent::Notification {
                         runtime_kind,
                         notification,
@@ -96,7 +99,7 @@ impl MobileClient {
                         );
                     }
                     Ok(ServerEvent::LegacyNotification {
-                        runtime_kind: _,
+                        runtime_kind,
                         method,
                         params,
                     }) => {
@@ -106,7 +109,12 @@ impl MobileClient {
                             "event reader server_id={} legacy_method={}",
                             server_id, method
                         );
-                        processor.process_legacy_notification(&server_id, &method, &params);
+                        processor.process_legacy_notification(
+                            &server_id,
+                            runtime_kind,
+                            &method,
+                            &params,
+                        );
                     }
                     Ok(ServerEvent::Request {
                         runtime_kind,
@@ -119,7 +127,11 @@ impl MobileClient {
                             }
                             _ => None,
                         };
-                        processor.process_server_request(&server_id, &request);
+                        processor.process_server_request(
+                            &server_id,
+                            runtime_kind.clone(),
+                            &request,
+                        );
                         if let Some((request_id, params)) = dynamic_tool_request {
                             let server_id = server_id.clone();
                             let session = Arc::clone(&oauth_session);
@@ -134,8 +146,7 @@ impl MobileClient {
                                     app_store,
                                     widget_waiters,
                                     saved_apps_directory,
-                                    request_id,
-                                    params,
+                                    (request_id, params),
                                     runtime_kind,
                                 )
                                 .await
@@ -186,6 +197,7 @@ impl MobileClient {
                             "event reader lagged server_id={} skipped={}",
                             server_id, skipped
                         );
+                        processor.emit_events_lost(&server_id, skipped);
                     }
                 }
             }
@@ -373,7 +385,7 @@ impl MobileClient {
         );
         self.app_store.note_server_direct_request_success(server_id);
         let (parsed, legacy_permission_profile) =
-            deserialize_typed_response_with_legacy_flag(&value);
+            deserialize_typed_response_with_legacy_flag(&value, wire_method);
         if legacy_permission_profile {
             // v0.124 remotes never support turn pagination — mark the
             // capability off as soon as we recognise the legacy shape so
@@ -431,12 +443,14 @@ impl MobileClient {
             .unwrap_or("codex".to_string())
     }
 
-    pub(super) fn pending_approval(&self, request_id: &str) -> Result<PendingApproval, RpcError> {
+    pub(super) fn pending_approval(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        request_id: &str,
+    ) -> Result<PendingApproval, RpcError> {
         self.app_store
-            .snapshot()
-            .pending_approvals
-            .into_iter()
-            .find(|approval| approval.id == request_id)
+            .pending_approval(server_id, runtime_kind, request_id)
             .ok_or_else(|| {
                 RpcError::Deserialization(format!("unknown approval request {request_id}"))
             })
@@ -444,13 +458,12 @@ impl MobileClient {
 
     pub(super) fn pending_user_input(
         &self,
+        server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
     ) -> Result<PendingUserInputRequest, RpcError> {
         self.app_store
-            .snapshot()
-            .pending_user_inputs
-            .into_iter()
-            .find(|request| request.id == request_id)
+            .pending_user_input(server_id, runtime_kind, request_id)
             .ok_or_else(|| {
                 RpcError::Deserialization(format!("unknown user input request {request_id}"))
             })
@@ -475,7 +488,7 @@ fn deserialize_typed_response<R>(value: &serde_json::Value) -> Result<R, serde_j
 where
     R: serde::de::DeserializeOwned,
 {
-    let (result, _legacy) = deserialize_typed_response_with_legacy_flag(value);
+    let (result, _legacy) = deserialize_typed_response_with_legacy_flag(value, "");
     result
 }
 
@@ -486,11 +499,15 @@ where
 /// processing.
 fn deserialize_typed_response_with_legacy_flag<R>(
     value: &serde_json::Value,
+    wire_method: &str,
 ) -> (Result<R, serde_json::Error>, bool)
 where
     R: serde::de::DeserializeOwned,
 {
     let mut normalized = value.clone();
+    if wire_method == "model/list" {
+        crate::types::models::normalize_model_list_response(&mut normalized);
+    }
     let legacy_permission_profile = normalize_legacy_permission_profile_fields(&mut normalized);
     normalize_empty_cwd_fields(&mut normalized, None);
     normalize_default_service_tier(&mut normalized);
@@ -1271,6 +1288,132 @@ mod tests {
     use serde::de::Error as _;
     use serde_json::json;
 
+    fn newer_model_catalog() -> serde_json::Value {
+        json!({
+            "data": [{
+                "id": "gpt-6-astra",
+                "model": "gpt-6-astra",
+                "displayName": "GPT-6-Astra",
+                "description": "Model from the Codex 0.153.4 catalog",
+                "hidden": false,
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "Fast responses"},
+                    {"reasoningEffort": "medium", "description": "Balanced"},
+                    {"reasoningEffort": "high", "description": "Deeper reasoning"},
+                    {"reasoningEffort": "xhigh", "description": "Extra high"},
+                    {"reasoningEffort": "max", "description": "Maximum"},
+                    {"reasoningEffort": "ultra", "description": "Automatic delegation"},
+                    {"reasoningEffort": "future-effort", "description": "Future option"}
+                ],
+                "inputModalities": ["text", "image"],
+                "isDefault": true
+            }],
+            "nextCursor": "opaque-next-page"
+        })
+    }
+
+    #[test]
+    fn model_list_preserves_models_with_new_reasoning_options() {
+        use codex_protocol::openai_models::ReasoningEffort as Effort;
+        let payload = newer_model_catalog();
+        let (response, _) = deserialize_typed_response_with_legacy_flag::<
+            upstream::ModelListResponse,
+        >(&payload, "model/list");
+        let response = response.expect("new effort options must not discard the model catalog");
+        assert_eq!(response.next_cursor.as_deref(), Some("opaque-next-page"));
+        assert_eq!(response.data.len(), 1);
+        let model = &response.data[0];
+        assert_eq!(model.id, "gpt-6-astra");
+        assert!(model.is_default);
+        assert_eq!(model.default_reasoning_effort, Effort::Low);
+        assert_eq!(
+            model
+                .supported_reasoning_efforts
+                .iter()
+                .map(|option| option.reasoning_effort)
+                .collect::<Vec<_>>(),
+            [Effort::Low, Effort::Medium, Effort::High, Effort::XHigh]
+        );
+        assert_eq!(
+            payload["data"][0]["supportedReasoningEfforts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7,
+            "raw payload is not rewritten"
+        );
+        assert!(
+            deserialize_typed_response_with_legacy_flag::<upstream::ModelListResponse>(
+                &payload,
+                "thread/read"
+            )
+            .0
+            .is_err(),
+            "normalization is limited to model/list"
+        );
+        let projected = crate::types::ModelInfo::from(model.clone());
+        assert_eq!(
+            projected.default_reasoning_effort,
+            crate::types::ReasoningEffort::Low
+        );
+        assert!(
+            projected
+                .supported_reasoning_efforts
+                .iter()
+                .all(|option| option.reasoning_effort != crate::types::ReasoningEffort::Max)
+        );
+    }
+
+    #[test]
+    fn model_list_omits_unknown_defaults_without_weakening_field_validation() {
+        let mut payload = newer_model_catalog();
+        let mut future_model = payload["data"][0].clone();
+        future_model["id"] = json!("future-only-model");
+        future_model["defaultReasoningEffort"] = json!("future-effort");
+        payload["data"]
+            .as_array_mut()
+            .unwrap()
+            .push(future_model.clone());
+        let response = deserialize_typed_response_with_legacy_flag::<upstream::ModelListResponse>(
+            &payload,
+            "model/list",
+        )
+        .0
+        .unwrap();
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].id, "gpt-6-astra");
+
+        payload["data"] = json!([future_model]);
+        let response = deserialize_typed_response_with_legacy_flag::<upstream::ModelListResponse>(
+            &payload,
+            "model/list",
+        )
+        .0
+        .unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(response.next_cursor.as_deref(), Some("opaque-next-page"));
+
+        for field in [
+            "/data/0/defaultReasoningEffort",
+            "/data/0/supportedReasoningEfforts/0/reasoningEffort",
+            "/data/0/supportedReasoningEfforts/0/description",
+            "/data/0/id",
+        ] {
+            let mut malformed = newer_model_catalog();
+            *malformed.pointer_mut(field).unwrap() = json!(42);
+            assert!(
+                deserialize_typed_response_with_legacy_flag::<upstream::ModelListResponse>(
+                    &malformed,
+                    "model/list"
+                )
+                .0
+                .is_err(),
+                "malformed {field} must not be accepted"
+            );
+        }
+    }
+
     #[test]
     fn suspicious_relative_path_entries_reports_relative_values_in_known_path_fields() {
         let payload = json!({
@@ -1923,8 +2066,9 @@ mod tests {
                 "turns": []
             }
         });
-        let (parsed, legacy) =
-            deserialize_typed_response_with_legacy_flag::<upstream::ThreadResumeResponse>(&payload);
+        let (parsed, legacy) = deserialize_typed_response_with_legacy_flag::<
+            upstream::ThreadResumeResponse,
+        >(&payload, "thread/resume");
         assert!(legacy, "legacy flag should fire on v0.124 payload");
         let response = parsed.expect("legacy payload should deserialize");
         // Upstream replaced `permissionProfile` with `activePermissionProfile`;

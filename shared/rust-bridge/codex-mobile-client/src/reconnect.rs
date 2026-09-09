@@ -650,31 +650,22 @@ pub(crate) async fn execute_reconnect_plan(
                     return ReconnectResult::failed(server_id, error);
                 }
             };
+            let connection = crate::mobile_client::SshBridgeConnection {
+                server_id: server_id.clone(),
+                display_name: display_name.clone(),
+                host: host.clone(),
+                state_root,
+                runtime_kinds: selected,
+                transport: crate::ssh_bridge::SshBridgeTransport::Ephemeral,
+            };
             let reconnect = match cold_guard.clone() {
                 Some(guard) => {
                     client
-                        .reconnect_remote_over_ssh_bridges(
-                            ssh_client,
-                            server_id.clone(),
-                            display_name.clone(),
-                            host.clone(),
-                            state_root,
-                            selected,
-                            crate::ssh_bridge::SshBridgeTransport::Ephemeral,
-                            guard,
-                        )
+                        .reconnect_remote_over_ssh_bridges(ssh_client, connection, guard)
                         .await
                 }
                 None => client
-                    .connect_remote_over_ssh_bridges(
-                        ssh_client,
-                        server_id.clone(),
-                        display_name.clone(),
-                        host.clone(),
-                        state_root,
-                        selected,
-                        crate::ssh_bridge::SshBridgeTransport::Ephemeral,
-                    )
+                    .connect_remote_over_ssh_bridges(ssh_client, connection)
                     .await
                     .map(Some),
             };
@@ -796,10 +787,12 @@ pub(crate) async fn execute_reconnect_plan(
                 .connect_remote_over_slingshot(
                     server_id.clone(),
                     display_name.clone(),
-                    base_url.clone(),
+                    crate::slingshot_url::SlingshotConnectionUrl {
+                        base_url: base_url.clone(),
+                        environment_id: environment_id.clone(),
+                    },
                     credential.access_token.clone(),
                     credential.account_id.clone(),
-                    environment_id.clone(),
                     String::new(),
                 )
                 .await

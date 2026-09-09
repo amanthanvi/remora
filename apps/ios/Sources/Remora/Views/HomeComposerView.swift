@@ -31,6 +31,8 @@ struct HomeComposerView: View {
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var voiceManager = VoiceTranscriptionManager()
     @State private var isSubmitting = false
+    @State private var isRecoveringDraft = false
+    @State private var draftContextRevision = 0
     @State private var errorMessage: String?
     @State private var pluginCacheByCwd: [String: [PluginSummary]] = [:]
     @State private var pluginUnsupportedCwds: Set<String> = []
@@ -49,6 +51,9 @@ struct HomeComposerView: View {
     @State private var composerSelectionRange = NSRange(location: 0, length: 0)
 
     private var isDisabled: Bool { project == nil }
+    private var recoveryContext: ComposerDraftContext? {
+        project.map { .project(serverId: $0.serverId, cwd: $0.cwd) }
+    }
     private var resolvedTranscriptionServerId: String? {
         project?.serverId ?? transcriptionServerId
     }
@@ -70,6 +75,12 @@ struct HomeComposerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let project {
+                ComposerRecoveryMenu(store: appModel.composerRecovery,
+                                     context: .project(serverId: project.serverId, cwd: project.cwd),
+                                     onRecover: recoverDraft)
+                    .disabled(isSubmitting || isRecoveringDraft)
+            }
             if let errorMessage {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -141,6 +152,9 @@ struct HomeComposerView: View {
         }
         .onChange(of: inputText) { _, newValue in
             scheduleHomePopupRefresh(for: newValue)
+        }
+        .onChange(of: recoveryContext) { _, _ in
+            draftContextRevision += 1
         }
         .onChange(of: isActive) { _, active in
             onActiveChange?(active)
@@ -215,11 +229,13 @@ struct HomeComposerView: View {
     }
 
     private func handleSend() {
+        let editorDraft = currentDraft
+        let contextRevision = draftContextRevision
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let image = attachedImage
         let files = attachedFiles
         guard !text.isEmpty || image != nil || !files.isEmpty else { return }
-        guard !isSubmitting else { return }
+        guard !isSubmitting && !isRecoveringDraft else { return }
         guard let project else {
             errorMessage = "Pick a project before sending."
             return
@@ -227,29 +243,50 @@ struct HomeComposerView: View {
 
         isSubmitting = true
         errorMessage = nil
-
+        let mentionsToSend = collectPluginMentionsForSubmission(text)
+        let pendingModel = appState.preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelOverride = pendingModel.isEmpty ? nil : pendingModel
+        let agentRuntimeOverride = modelOverride == nil ? nil : appState.preferredAgentRuntimeKind
+        let pendingEffort = appState.preferredReasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effortOverride = ReasoningEffort(wireValue: pendingEffort.isEmpty ? nil : pendingEffort)
+        let launchConfig = AppThreadLaunchConfig(
+            agentRuntimeKind: agentRuntimeOverride,
+            model: modelOverride,
+            approvalPolicy: appState.launchApprovalPolicy(for: nil),
+            sandbox: appState.launchSandboxMode(for: nil),
+            developerInstructions: nil,
+            persistExtendedHistory: true
+        )
+        let turnSandbox = appState.turnSandboxPolicy(for: nil)
         Task {
             defer { isSubmitting = false }
+            let submission: UUID
             do {
+                submission = try await appModel.composerRecovery.begin(
+                    RecoverableComposerDraft(text: text, image: image, files: files, plugins: mentionsToSend),
+                    in: .project(serverId: project.serverId, cwd: project.cwd)
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+            if draftContextRevision == contextRevision && currentDraft.matchesEditor(editorDraft) {
                 inputText = ""
                 attachedImage = nil
                 attachedFiles = []
+                pluginMentionSelections = []
+                showPluginPopup = false
+                activeAtToken = nil
                 composerSelectionRange = NSRange(location: 0, length: 0)
                 isComposerFocused = false
-
-                let pendingModel = appState.preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                let modelOverride = pendingModel.isEmpty ? nil : pendingModel
-                let agentRuntimeOverride = modelOverride == nil ? nil : appState.preferredAgentRuntimeKind
-                let pendingEffort = appState.preferredReasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines)
-                let effortOverride = ReasoningEffort(wireValue: pendingEffort.isEmpty ? nil : pendingEffort)
-                let launchConfig = AppThreadLaunchConfig(
-                    agentRuntimeKind: agentRuntimeOverride,
-                    model: modelOverride,
-                    approvalPolicy: appState.launchApprovalPolicy(for: nil),
-                    sandbox: appState.launchSandboxMode(for: nil),
-                    developerInstructions: nil,
-                    persistExtendedHistory: true
-                )
+            }
+            var createdThread: ThreadKey?
+            do {
+                let preparedAttachment = await ConversationAttachmentSupport.prepareImage(image)
+                if image != nil && preparedAttachment == nil {
+                    throw NSError(domain: "Remora", code: 1021,
+                                  userInfo: [NSLocalizedDescriptionKey: "The attached image could not be prepared."])
+                }
                 let threadKey = try await appModel.client.startThread(
                     serverId: project.serverId,
                     params: launchConfig.threadStartRequest(
@@ -257,13 +294,10 @@ struct HomeComposerView: View {
                         dynamicTools: nil
                     )
                 )
+                try await appModel.composerRecovery.move(submission, to: .thread(threadKey))
+                createdThread = threadKey
                 RecentDirectoryStore.shared.record(path: project.cwd, for: project.serverId)
-                let preparedAttachment = image.flatMap(ConversationAttachmentSupport.prepareImage)
                 var additionalInputs: [AppUserInput] = []
-                let mentionsToSend = collectPluginMentionsForSubmission(text)
-                pluginMentionSelections = []
-                showPluginPopup = false
-                activeAtToken = nil
                 for mention in mentionsToSend {
                     additionalInputs.append(
                         AppUserInput.mention(name: mention.name, path: mention.path)
@@ -276,15 +310,71 @@ struct HomeComposerView: View {
                     text: text,
                     additionalInputs: additionalInputs,
                     fileAttachments: files,
-                    approvalPolicy: appState.launchApprovalPolicy(for: threadKey),
-                    sandboxPolicy: appState.turnSandboxPolicy(for: threadKey),
+                    approvalPolicy: launchConfig.approvalPolicy,
+                    sandboxPolicy: turnSandbox,
                     model: modelOverride,
                     effort: effortOverride,
                     serviceTier: nil
                 )
                 try await appModel.startTurn(key: threadKey, payload: payload)
+                try await appModel.composerRecovery.finish(submission)
                 await appModel.refreshThreadSnapshot(key: threadKey)
-                onThreadCreated(threadKey)
+                await openCreatedThread(threadKey, contextRevision: contextRevision)
+            } catch {
+                do { try await appModel.composerRecovery.finish(submission, error: error.localizedDescription) }
+                catch {
+                    errorMessage = error.localizedDescription
+                    return
+                }
+                errorMessage = "Submission not confirmed. Your draft is saved. Check the conversation before sending again."
+                if let createdThread {
+                    await appModel.refreshThreadSnapshot(key: createdThread)
+                    await openCreatedThread(createdThread, contextRevision: contextRevision)
+                }
+            }
+        }
+    }
+
+    private func openCreatedThread(_ key: ThreadKey, contextRevision: Int) async {
+        guard draftContextRevision == contextRevision else { return }
+        let current = currentDraft
+        do {
+            try await appModel.composerRecovery.preserve(current, in: .thread(key))
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        // Keep edits made during the durable handoff visible on Home.
+        guard draftContextRevision == contextRevision, currentDraft.matchesEditor(current) else { return }
+        inputText = ""
+        attachedImage = nil
+        attachedFiles = []
+        pluginMentionSelections = []
+        onThreadCreated(key)
+    }
+
+    private var currentDraft: RecoverableComposerDraft {
+        RecoverableComposerDraft(text: inputText, image: attachedImage,
+                                 files: attachedFiles, plugins: pluginMentionSelections)
+    }
+
+    private func recoverDraft(_ id: UUID) {
+        guard let project, !isSubmitting && !isRecoveringDraft else { return }
+        let current = currentDraft
+        let contextRevision = draftContextRevision
+        isRecoveringDraft = true
+        Task {
+            defer { isRecoveringDraft = false }
+            do {
+                guard let draft = try await appModel.composerRecovery.recover(
+                    id, in: .project(serverId: project.serverId, cwd: project.cwd), preserving: current
+                ), draftContextRevision == contextRevision, currentDraft.matchesEditor(current) else { return }
+                inputText = draft.text
+                attachedImage = draft.image
+                attachedFiles = draft.files
+                pluginMentionSelections = draft.plugins
+                composerSelectionRange = NSRange(location: (draft.text as NSString).length, length: 0)
+                isComposerFocused = true
             } catch {
                 errorMessage = error.localizedDescription
             }

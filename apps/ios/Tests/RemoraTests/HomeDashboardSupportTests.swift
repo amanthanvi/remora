@@ -72,7 +72,7 @@ final class HomeDashboardSupportTests: XCTestCase {
 
     func testHomeDashboardModelRefreshesWhenObservedSnapshotChanges() async {
         let appModel = AppModel()
-        let model = HomeDashboardModel()
+        let model = makeHomeDashboardModel()
         model.bind(appModel: appModel)
         model.activate()
 
@@ -141,7 +141,7 @@ final class HomeDashboardSupportTests: XCTestCase {
 
     func testHomeDashboardModelRefreshesRecentSessionsWhenObservedSnapshotThreadChanges() async {
         let appModel = AppModel()
-        let model = HomeDashboardModel()
+        let model = makeHomeDashboardModel()
         model.bind(appModel: appModel)
         model.activate()
 
@@ -174,7 +174,7 @@ final class HomeDashboardSupportTests: XCTestCase {
 
     func testHomeDashboardModelRefreshesRecentSessionsWhenThreadsArriveAfterBind() async {
         let appModel = AppModel()
-        let model = HomeDashboardModel()
+        let model = makeHomeDashboardModel()
         model.bind(appModel: appModel)
         model.activate()
 
@@ -240,7 +240,7 @@ final class HomeDashboardSupportTests: XCTestCase {
 
     func testHomeDashboardModelIgnoresThreadChangesWhileInactiveAndRefreshesOnReactivate() async {
         let appModel = AppModel()
-        let model = HomeDashboardModel()
+        let model = makeHomeDashboardModel()
         model.bind(appModel: appModel)
         model.activate()
 
@@ -277,6 +277,53 @@ final class HomeDashboardSupportTests: XCTestCase {
 
         XCTAssertEqual(model.recentSessions.map(\.key.threadId), ["thread-late", "thread-initial"])
         XCTAssertGreaterThan(model.rebuildCount, rebuildCountBeforeDeactivate)
+    }
+
+    func testHomeDashboardModelProjectsExplicitPinnedAndHiddenPreferences() {
+        let appModel = AppModel()
+        var preferences = emptyPreferences()
+        preferences.pinnedThreads = [
+            PinnedThreadKey(serverId: "server-a", threadId: "thread-older"),
+            PinnedThreadKey(serverId: "server-a", threadId: "thread-hidden")
+        ]
+        preferences.hiddenThreads = [
+            PinnedThreadKey(serverId: "server-a", threadId: "thread-hidden")
+        ]
+        let model = HomeDashboardModel(loadPreferences: { preferences })
+        model.bind(appModel: appModel)
+        appModel.applySnapshot(
+            makeSnapshot(
+                servers: [makeServerSnapshot(id: "server-a", name: "Server A")],
+                threads: [
+                    makeThreadSnapshot(serverId: "server-a", threadId: "thread-older", updatedAt: 20),
+                    makeThreadSnapshot(serverId: "server-a", threadId: "thread-newer", updatedAt: 80),
+                    makeThreadSnapshot(serverId: "server-a", threadId: "thread-hidden", updatedAt: 100)
+                ],
+                activeThread: nil
+            )
+        )
+        model.activate()
+
+        XCTAssertEqual(model.recentSessions.map(\.key.threadId), ["thread-older"])
+
+        model.deactivate()
+        preferences.pinnedThreads = []
+        model.activate()
+
+        XCTAssertEqual(model.recentSessions.map(\.key.threadId), ["thread-newer", "thread-older"])
+    }
+
+    private func makeHomeDashboardModel() -> HomeDashboardModel {
+        let preferences = emptyPreferences()
+        return HomeDashboardModel(loadPreferences: { preferences })
+    }
+
+    private func emptyPreferences() -> MobilePreferences {
+        MobilePreferences(
+            pinnedThreads: [],
+            hiddenThreads: [],
+            homeSelection: HomeSelection(selectedServerId: nil, selectedProjectId: nil)
+        )
     }
 
     private func makeThreadSnapshot(serverId: String, threadId: String, updatedAt: TimeInterval) -> AppThreadSnapshot {

@@ -12,7 +12,14 @@ on:
       - "shared/rust-bridge/**"
       - "shared/third_party/codex/**"
       - "shared/third_party/ghostty"
+      - "shared/third_party/rama-dns/**"
+      - "services/remora-link/crates/bridge-core/**"
+      - "services/remora-link/crates/pi-bridge/**"
+      - "services/remora-link/crates/claude-bridge/**"
+      - "services/remora-link/crates/opencode-bridge/**"
+      - "services/remora-link/Cargo.toml"
       - "tools/scripts/**"
+      - "tools/ci/**"
       - ".github/workflows/mobile-ci.yml"
   push:
     branches: [main]
@@ -26,7 +33,14 @@ on:
       - "shared/rust-bridge/**"
       - "shared/third_party/codex/**"
       - "shared/third_party/ghostty"
+      - "shared/third_party/rama-dns/**"
+      - "services/remora-link/crates/bridge-core/**"
+      - "services/remora-link/crates/pi-bridge/**"
+      - "services/remora-link/crates/claude-bridge/**"
+      - "services/remora-link/crates/opencode-bridge/**"
+      - "services/remora-link/Cargo.toml"
       - "tools/scripts/**"
+      - "tools/ci/**"
       - ".github/workflows/mobile-ci.yml"
 
 concurrency:
@@ -61,6 +75,8 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Configure sccache
         run: |
@@ -83,11 +99,20 @@ jobs:
       - name: Sync codex submodule
         run: ./apps/ios/scripts/sync-codex.sh --preserve-current
 
+      - name: Check production dependency boundaries
+        run: make dependency-boundaries-check
+
+      - name: Lint shared client
+        run: make rust-clippy
+
       - name: Test generated secret-binding hardener
         run: make bindings-hardener-test
 
       - name: Test immutable Remora Link bootstrap
         run: make bootstrap-remora-link-test
+
+      - name: Test CI helpers
+        run: make ci-tools-test
 
       - name: Restore generated mobile bindings cache
         id: mobile-bindings-cache
@@ -105,7 +130,7 @@ jobs:
           cd shared/rust-bridge
           ./generate-bindings.sh
 
-      - name: Test shared Rust host library
+      - name: Test shared Rust workspace
         run: make rust-test
 
       - name: Package shared mobile sources
@@ -165,7 +190,7 @@ jobs:
       - name: Install Android platforms and NDK
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;30.0.14904198"
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.14904198"
 
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libcap-dev clang cmake
@@ -223,11 +248,34 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Test and assemble debug
+      - name: Test, lint, and assemble debug
         run: |
           apps/android/gradlew -p apps/android \
             :app:testDebugUnitTest \
+            :app:lintDebug \
             :app:assembleDebug
+
+      - name: Reject unconfigured transitive release builds
+        run: |
+          log="${RUNNER_TEMP}/remora-release-gate.log"
+          if apps/android/gradlew -p apps/android \
+            --init-script "$PWD/tools/ci/android-release-gate.gradle" \
+            :app:remoraGateProbe > "$log" 2>&1; then
+            cat "$log"
+            echo "Unconfigured release build unexpectedly succeeded"
+            exit 1
+          fi
+          cat "$log"
+          grep -q 'Release builds require the complete REMORA_FIREBASE_\* resource injection' "$log"
+
+      - name: Test release code with non-production Firebase resources
+        env:
+          REMORA_FIREBASE_APP_ID: "1:1234567890:android:remora-ci"
+          REMORA_FIREBASE_PROJECT_ID: "remora-ci-unit-tests"
+          REMORA_FIREBASE_API_KEY: "remora-ci-not-a-provider-key"
+          REMORA_FIREBASE_SENDER_ID: "1234567890"
+        # JVM tests only. Never use these fixtures to package or publish an app.
+        run: apps/android/gradlew -p apps/android :app:testReleaseUnitTest
 
   ios:
     needs: shared-prep
@@ -313,23 +361,8 @@ jobs:
       - name: Select simulator destination
         run: |
           SIMULATOR_UDID="$(
-            xcrun simctl list devices available | awk -F '[()]' '
-              /^-- iOS / { ios=1; next }
-              /^--/ { ios=0 }
-              ios && /iPhone 17 Pro/ { print $2; exit }
-              ios && /iPhone/ && first == "" { first=$2 }
-              END {
-                if (first != "") {
-                  print first
-                }
-              }
-            '
+            xcrun simctl list devices available -j | python3 tools/ci/select_ios_simulator.py
           )"
-          if [ -z "$SIMULATOR_UDID" ]; then
-            echo "No available iPhone simulator found"
-            xcrun simctl list devices available
-            exit 1
-          fi
           echo "IOS_SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
 
       - name: Build and test (Remora)

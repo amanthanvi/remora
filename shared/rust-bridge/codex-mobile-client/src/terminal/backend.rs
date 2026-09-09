@@ -43,10 +43,13 @@ pub(crate) async fn open_backend(
             cwd,
         } => {
             super::ssh::open(
-                host,
-                port,
-                username,
-                auth,
+                crate::ssh::SshCredentials {
+                    host,
+                    port,
+                    username,
+                    auth: auth.into_ssh_auth(),
+                    unlock_macos_keychain: false,
+                },
                 shell,
                 accept_unknown_host,
                 cwd,

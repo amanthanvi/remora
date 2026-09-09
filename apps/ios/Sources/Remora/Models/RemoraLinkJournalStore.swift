@@ -84,6 +84,7 @@ final class RemoraLinkJournalStore: @unchecked Sendable {
     private let lockFileURL: URL?
     private let durabilityRootURL: URL?
     private let fileManager: FileManager
+    private let excludeFromBackup: Bool
 
     convenience init() {
         let fileManager = FileManager.default
@@ -100,9 +101,11 @@ final class RemoraLinkJournalStore: @unchecked Sendable {
     init(
         directoryURL: URL?,
         durabilityRootURL: URL? = nil,
+        excludeFromBackup: Bool = false,
         fileManager: FileManager = .default
     ) {
         self.fileManager = fileManager
+        self.excludeFromBackup = excludeFromBackup
         journalFileURL = directoryURL?.appendingPathComponent(Self.journalFileName)
         lockFileURL = directoryURL?.appendingPathComponent(Self.lockFileName)
         self.durabilityRootURL = durabilityRootURL ?? directoryURL
@@ -260,6 +263,14 @@ final class RemoraLinkJournalStore: @unchecked Sendable {
                     [.posixPermissions: 0o700],
                     ofItemAtPath: createdDirectory.path
                 )
+            }
+            if excludeFromBackup {
+                var directory = directoryURL
+                var resources = URLResourceValues()
+                resources.isExcludedFromBackup = true
+                try directory.setResourceValues(resources)
+                guard try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
+                    .isExcludedFromBackup == true else { return false }
             }
         } catch {
             return false

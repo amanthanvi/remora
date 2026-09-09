@@ -37,6 +37,7 @@ pub(crate) mod minigame;
 mod runtime_routing;
 mod slingshot;
 mod ssh_connection;
+pub(crate) use ssh_connection::SshBridgeConnection;
 mod store_listener;
 #[cfg(test)]
 mod tests;
@@ -120,6 +121,7 @@ impl PendingTurnReconciliation {
 pub struct MobileClient {
     pub(crate) sessions: Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
     pub(crate) event_processor: Arc<EventProcessor>,
+    authoritative_repair_requests: tokio::sync::mpsc::Sender<()>,
     pub app_store: Arc<AppStoreReducer>,
     pub agent_metadata: Arc<crate::store::AgentMetadataStore>,
     pub(crate) discovery: RwLock<DiscoveryService>,
@@ -167,7 +169,7 @@ pub struct MobileClient {
         Arc<RwLock<Option<Arc<crate::background_relay::ConfiguredBackgroundRelay>>>>,
     /// Serializes configuration replacement and clearing across all FFI
     /// handles, including secure integrity-key bootstrap.
-    pub(crate) background_relay_configuration: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) background_relay_configuration: Arc<tokio::sync::RwLock<()>>,
     /// Optional native persistence and hardware-custody configuration for the
     /// Rust-owned Remora Link v2 lifecycle. Shared by every AppClient handle.
     pub(crate) remora_link:
@@ -250,7 +252,7 @@ impl MobileClient {
         let app_store = Arc::new(AppStoreReducer::new());
         let sessions = Arc::new(RwLock::new(HashMap::new()));
         Arc::new_cyclic(|owner: &Weak<MobileClient>| {
-            spawn_store_listener(
+            let authoritative_repair_requests = spawn_store_listener(
                 owner.clone(),
                 Arc::clone(&app_store),
                 Arc::clone(&sessions),
@@ -259,6 +261,7 @@ impl MobileClient {
             Self {
                 sessions,
                 event_processor,
+                authoritative_repair_requests,
                 app_store,
                 agent_metadata: crate::store::AgentMetadataStore::new(),
                 discovery: RwLock::new(DiscoveryService::new(DiscoveryConfig::default())),
@@ -277,7 +280,7 @@ impl MobileClient {
                 ssh_bootstrap_flows: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 terminal_sessions: Arc::new(StdMutex::new(HashMap::new())),
                 background_relay: Arc::new(RwLock::new(None)),
-                background_relay_configuration: Arc::new(tokio::sync::Mutex::new(())),
+                background_relay_configuration: Arc::new(tokio::sync::RwLock::new(())),
                 remora_link: Arc::new(RwLock::new(None)),
                 remora_link_configuration: Arc::new(tokio::sync::RwLock::new(())),
             }
@@ -437,16 +440,6 @@ impl MobileClient {
             .into_iter()
             .filter_map(|mask| AppCollaborationModePreset::try_from(mask).ok())
             .collect())
-    }
-
-    fn discovery_write(&self) -> std::sync::RwLockWriteGuard<'_, DiscoveryService> {
-        match self.discovery.write() {
-            Ok(guard) => guard,
-            Err(error) => {
-                warn!("MobileClient: recovering poisoned discovery write lock");
-                error.into_inner()
-            }
-        }
     }
 
     fn discovery_read(&self) -> std::sync::RwLockReadGuard<'_, DiscoveryService> {
@@ -1001,7 +994,7 @@ impl MobileClient {
         mdns_results: Vec<MdnsSeed>,
         local_ipv4: Option<String>,
     ) -> Vec<DiscoveredServer> {
-        let discovery = self.discovery_write();
+        let discovery = self.discovery_read().clone_for_one_shot();
         discovery
             .scan_once_with_context(&mdns_results, local_ipv4.as_deref())
             .await

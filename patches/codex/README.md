@@ -8,6 +8,63 @@ When a patch fails to apply, prefer `git apply --3way` first (handles line-numbe
 
 ---
 
+## `dependency-security-updates.patch`
+Updates the retained runtime's `quick-xml` parser and `lru` cache to patched
+releases, addressing RUSTSEC-2026-0194/0195 and the cache soundness advisory.
+Upgrades `rmcp` to 1.8.0, including its public constructors, shared HTTP
+adapter's negotiated headers, OAuth client and token types, and native resource
+callers. MCP OAuth metadata uses reqwest 0.13 with the existing shared custom-CA
+rustls policy; other Codex HTTP clients retain reqwest 0.12.
+
+Upgrades SQLite-only SQLx to 0.9.0 to remove the old lockfile-only MySQL RSA
+dependency. SQL values remain bound; the four `AssertSqlSafe` callsites contain
+only fixed SQL fragments or generated placeholder counts. Migration metadata
+and query lifetimes follow SQLx 0.9's APIs. Both Cargo lockfiles contain no RSA.
+The retained Cargo and Bazel toolchains use Rust 1.98.1, above SQLx's 1.94 MSRV.
+
+The patch includes the submodule Cargo and Bazel lockfiles; Remora's parent
+bridge lockfile remains authoritative for mobile builds. Keep it until pinned
+Codex incorporates these dependency versions and API migrations. Verify with
+`cargo test -p codex-state -p codex-app-server-protocol` and the MCP tests below.
+It also names the core dynamic-tool JSON schema separately from the app-server
+API record, preventing a numbered schema collision, and regenerates the protocol
+fixtures against Remora's complete patch set. Schema fixtures are validation
+artifacts, not a second handwritten protocol definition.
+
+## `rmcp-test-server-host-validation.patch`
+Protects the retained rmcp streamable-HTTP test server against DNS rebinding
+(RUSTSEC-2026-0189). An outer router middleware requires exactly one Host header
+matching the bound address and port, with exact-port loopback aliases for
+loopback or wildcard binds. Missing, duplicate, foreign, and wrong-port hosts
+fail closed across MCP, control, and OAuth metadata routes. Wildcard binds do
+not implicitly authorize every interface hostname; use an explicit bind address
+for non-loopback fixture access. Bearer behavior and test payloads are unchanged.
+
+Touches `rmcp-client/src/bin/test_streamable_http_server.rs`; includes allowlist,
+loopback HTTP regression tests, and MCP 1.8 constructor migrations. Keep it
+until upstream enforces equivalent Host
+validation on the entire fixture router, not merely its MCP service.
+
+Port 80 also accepts the exact allowed authorities without the default port;
+non-default ports still require an exact match.
+
+## `rmcp-http-test-feature.patch`
+Moves the streamable HTTP server transport behind `codex-rmcp-client`'s
+`http-test-server` feature. Normal mobile builds retain outbound HTTP, stdio,
+and in-process MCP without compiling an HTTP server transport. The fixture
+binary and its recovery/remote integration tests require the explicit feature;
+the separate Host validation patch still protects the enabled fixture.
+This manifest patch also selects reqwest 0.13 for MCP's upgraded OAuth API and
+declares the fixture's Axum JSON feature explicitly.
+
+Run retained HTTP integration tests with
+`cargo test -p codex-rmcp-client --features http-test-server`. When running core
+tests that invoke the fixture, first build it with
+`cargo build -p codex-rmcp-client --features http-test-server --bin test_streamable_http_server`.
+Keep this patch until upstream separates its test-only HTTP service dependency.
+The remote HTTP integration test also needs `CARGO_BIN_EXE_codex` pointing to a
+Codex executable with `exec-server` support, or a built workspace `codex` binary.
+
 ## `ios-exec-hook.patch`
 Lets iOS install a function pointer that core's exec layer calls instead of `fork+exec` (forbidden in the App Store sandbox), and lets Android install an argv[0] resolver that maps `git` etc. to bundled `lib<tool>.so` paths in the app's nativeLibraryDir. Also installs an argv preflight that rewrites `/tmp/...` paths to the platform's real tempdir.
 

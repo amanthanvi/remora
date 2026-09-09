@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -24,6 +27,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,8 +37,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.OutlinedTextField
@@ -60,15 +67,15 @@ fun ApprovalOverlay(
     approvals: List<PendingApproval>,
     userInputs: List<PendingUserInputRequest>,
     appStore: AppStore,
-    onDismissUserInput: ((String) -> Unit)? = null,
+    onDismissUserInput: ((PendingUserInputRequest) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
-    var submittingRequestId by remember { mutableStateOf<String?>(null) }
+    var submittingRequestKey by remember { mutableStateOf<Triple<String, String?, String>?>(null) }
     var submitError by remember { mutableStateOf<String?>(null) }
 
-    fun submitResponse(requestId: String, kind: String, action: suspend () -> Unit) {
+    fun submitResponse(requestKey: Triple<String, String?, String>, kind: String, action: suspend () -> Unit) {
         scope.launch {
-            submittingRequestId = requestId
+            submittingRequestKey = requestKey
             submitError = null
             try {
                 action()
@@ -79,12 +86,12 @@ fun ApprovalOverlay(
                     TAG,
                     "$kind response failed",
                     error,
-                    fields = mapOf("requestId" to requestId),
+                    fields = mapOf("requestId" to requestKey.third),
                 )
                 submitError = responseSubmissionErrorMessage(error)
             } finally {
-                if (submittingRequestId == requestId) {
-                    submittingRequestId = null
+                if (submittingRequestKey == requestKey) {
+                    submittingRequestKey = null
                 }
             }
         }
@@ -114,28 +121,34 @@ fun ApprovalOverlay(
             }
 
             for (approval in approvals) {
-                ApprovalCard(
-                    approval = approval,
-                    isSubmitting = submittingRequestId == approval.id,
-                    onDecision = { decision ->
-                        submitResponse(approval.id, "approval") {
-                            appStore.respondToApproval(approval.id, decision)
-                        }
-                    },
-                )
+                val requestKey = Triple(approval.serverId, approval.runtimeKind, approval.id)
+                key(requestKey) {
+                    ApprovalCard(
+                        approval = approval,
+                        isSubmitting = submittingRequestKey == requestKey,
+                        onDecision = { decision ->
+                            submitResponse(requestKey, "approval") {
+                                appStore.respondToApproval(approval.serverId, approval.runtimeKind, approval.id, decision)
+                            }
+                        },
+                    )
+                }
             }
 
             for (input in userInputs) {
-                UserInputCard(
-                    request = input,
-                    isSubmitting = submittingRequestId == input.id,
-                    onSubmit = { answers ->
-                        submitResponse(input.id, "user input") {
-                            appStore.respondToUserInput(input.id, answers)
-                        }
-                    },
-                    onDismiss = { onDismissUserInput?.invoke(input.id) },
-                )
+                val requestKey = Triple(input.serverId, input.runtimeKind, input.id)
+                key(requestKey) {
+                    UserInputCard(
+                        request = input,
+                        isSubmitting = submittingRequestKey == requestKey,
+                        onSubmit = { answers ->
+                            submitResponse(requestKey, "user input") {
+                                appStore.respondToUserInput(input.serverId, input.runtimeKind, input.id, answers)
+                            }
+                        },
+                        onDismiss = { onDismissUserInput?.invoke(input) },
+                    )
+                }
             }
         }
     }
@@ -244,13 +257,15 @@ private fun ApprovalCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun UserInputCard(
+internal fun UserInputCard(
     request: PendingUserInputRequest,
     isSubmitting: Boolean,
     onSubmit: (List<PendingUserInputAnswer>) -> Unit,
     onDismiss: (() -> Unit)? = null,
 ) {
-    val answers = remember { mutableMapOf<String, String>() }
+    val answers = remember(request.serverId, request.runtimeKind, request.threadId, request.id) {
+        mutableStateMapOf<String, String>()
+    }
 
     // Bare layout (no card background) to match iOS ConversationView prompt.
     Column(
@@ -294,49 +309,54 @@ private fun UserInputCard(
         }
 
         for (question in request.questions) {
-            Text(
-                text = question.question,
-                color = RemoraTheme.textPrimary,
-                fontSize = RemoraTextStyle.body.scaled,
-            )
-
-            if (question.options.isNotEmpty()) {
-                // FlowRow so long option labels wrap to a new line instead of
-                // crushing a short option into a narrow column with character-
-                // by-character text wrapping.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    for (option in question.options) {
-                        val isSelected = answers[question.id] == option.label
-                        Text(
-                            text = option.label,
-                            color = if (isSelected) Color.Black else RemoraTheme.textPrimary,
-                            fontSize = RemoraTextStyle.caption.scaled,
-                            modifier = Modifier
-                                .background(
-                                    if (isSelected) RemoraTheme.accent else RemoraTheme.codeBackground,
-                                    RoundedCornerShape(999.dp),
-                                )
-                                .clickable { answers[question.id] = option.label }
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                        )
-                    }
-                }
-            } else {
-                // Free text input
-                var text by remember { mutableStateOf("") }
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = {
-                        text = it
-                        answers[question.id] = it
-                    },
-                    label = { Text(question.header ?: "Answer") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+            key(question.id) {
+                Text(
+                    text = question.question,
+                    color = RemoraTheme.textPrimary,
+                    fontSize = RemoraTextStyle.body.scaled,
                 )
+
+                if (question.options.isNotEmpty()) {
+                    // Keep long option labels from compressing their siblings.
+                    FlowRow(
+                        modifier = Modifier.selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        for (option in question.options) {
+                            val isSelected = answers[question.id] == option.label
+                            Text(
+                                text = option.label,
+                                color = if (isSelected) Color.Black else RemoraTheme.textPrimary,
+                                fontSize = RemoraTextStyle.caption.scaled,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .background(
+                                        if (isSelected) RemoraTheme.accent else RemoraTheme.codeBackground,
+                                        RoundedCornerShape(999.dp),
+                                    )
+                                    .selectable(
+                                        selected = isSelected,
+                                        enabled = !isSubmitting,
+                                        role = Role.RadioButton,
+                                        onClick = { answers[question.id] = option.label },
+                                    )
+                                    .heightIn(min = RemoraTheme.minimumTouchTarget)
+                                    .wrapContentHeight()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = answers[question.id].orEmpty(),
+                        onValueChange = { answers[question.id] = it },
+                        enabled = !isSubmitting,
+                        label = { Text(question.header ?: "Answer") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
 

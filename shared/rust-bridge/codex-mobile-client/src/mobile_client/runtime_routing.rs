@@ -105,11 +105,24 @@ impl MobileClient {
             return runtime_kind;
         }
 
-        if let Some(thread) = self.app_store.thread_snapshot(key) {
-            if thread.agent_runtime_kind != "codex" {
-                return thread.agent_runtime_kind;
+        let metadata = self.app_store.project_thread(key, |thread| {
+            (
+                thread.agent_runtime_kind.clone(),
+                thread.model.clone(),
+                thread.info.model.clone(),
+                thread.info.model_provider.clone(),
+            )
+        });
+        if let Some((runtime, model, info_model, provider)) = metadata {
+            if runtime != "codex" {
+                return runtime;
             }
-            if let Some(runtime_kind) = self.non_codex_runtime_for_thread_metadata(key, &thread) {
+            // Model resolution acquires the store again, after the metadata read ends.
+            if let Some(runtime_kind) = self.non_codex_runtime_for_thread_metadata(
+                key,
+                [model.as_deref(), info_model.as_deref()],
+                provider.as_deref(),
+            ) {
                 return runtime_kind;
             }
         }
@@ -145,30 +158,21 @@ impl MobileClient {
         model: &str,
     ) -> Option<ResolvedModelSelection> {
         let selected_model = non_empty_trimmed(model)?;
-        let snapshot = self.app_store.snapshot();
-        let models = snapshot.servers.get(server_id)?.available_models.as_ref()?;
-
-        let exact = models
-            .iter()
-            .find(|candidate| candidate.id == selected_model);
-        if let Some(candidate) = exact {
-            return Some(ResolvedModelSelection {
-                model: candidate.id.clone(),
-                runtime_kind: candidate.agent_runtime_kind.clone(),
-            });
-        }
-
-        if let Some(candidate) = models
-            .iter()
-            .find(|candidate| candidate.model == selected_model)
-        {
-            return Some(ResolvedModelSelection {
-                model: candidate.id.clone(),
-                runtime_kind: candidate.agent_runtime_kind.clone(),
-            });
-        }
-
-        None
+        self.app_store.project_server(server_id, |server| {
+            let models = server.available_models.as_ref()?;
+            models
+                .iter()
+                .find(|candidate| candidate.id == selected_model)
+                .or_else(|| {
+                    models
+                        .iter()
+                        .find(|candidate| candidate.model == selected_model)
+                })
+                .map(|candidate| ResolvedModelSelection {
+                    model: candidate.id.clone(),
+                    runtime_kind: candidate.agent_runtime_kind.clone(),
+                })
+        })?
     }
 
     pub(super) fn runtime_for_selected_model(
@@ -187,15 +191,17 @@ impl MobileClient {
         model: &str,
     ) -> Option<String> {
         let selected_model = non_empty_trimmed(model)?;
-        let snapshot = self.app_store.snapshot();
-        let models = snapshot.servers.get(server_id)?.available_models.as_ref()?;
-        models
-            .iter()
-            .find(|candidate| {
-                candidate.agent_runtime_kind == runtime_kind
-                    && (candidate.id == selected_model || candidate.model == selected_model)
-            })
-            .map(|candidate| candidate.id.clone())
+        self.app_store.project_server(server_id, |server| {
+            server
+                .available_models
+                .as_ref()?
+                .iter()
+                .find(|candidate| {
+                    candidate.agent_runtime_kind == runtime_kind
+                        && (candidate.id == selected_model || candidate.model == selected_model)
+                })
+                .map(|candidate| candidate.id.clone())
+        })?
     }
 
     pub(crate) fn normalize_thread_model_for_runtime(
@@ -257,12 +263,53 @@ impl MobileClient {
                 }
             }
             upstream::ClientRequest::TurnStart { params, .. } => {
-                if let Some(selected_model) = params.model.as_deref().and_then(non_empty_trimmed)
-                    && let Some(resolved) =
-                        self.resolve_model_for_runtime(server_id, runtime_kind, selected_model)
-                {
-                    params.model = Some(resolved);
+                self.normalize_thread_model_for_runtime(
+                    server_id,
+                    runtime_kind.clone(),
+                    &mut params.model,
+                );
+                if let Some(mode) = params.collaboration_mode.as_mut() {
+                    if let Some(model) = self.resolve_model_for_runtime(
+                        server_id,
+                        runtime_kind.clone(),
+                        &mode.settings.model,
+                    ) {
+                        mode.settings.model = model;
+                    }
+                    self.normalize_reasoning_effort_for_model(
+                        server_id,
+                        &runtime_kind,
+                        Some(&mode.settings.model),
+                        &mut mode.settings.reasoning_effort,
+                    );
                 }
+                let thread_model = if params.model.is_none() && params.collaboration_mode.is_none()
+                {
+                    self.app_store
+                        .project_thread(
+                            &ThreadKey {
+                                server_id: server_id.to_string(),
+                                thread_id: params.thread_id.clone(),
+                            },
+                            |thread| thread.model.clone().or_else(|| thread.info.model.clone()),
+                        )
+                        .flatten()
+                } else {
+                    None
+                };
+                // Collaboration settings take precedence over the ordinary turn overrides.
+                let model = params
+                    .collaboration_mode
+                    .as_ref()
+                    .map(|mode| mode.settings.model.as_str())
+                    .or(params.model.as_deref())
+                    .or(thread_model.as_deref());
+                self.normalize_reasoning_effort_for_model(
+                    server_id,
+                    &runtime_kind,
+                    model,
+                    &mut params.effort,
+                );
                 if !supports_permission_overrides {
                     params.approval_policy = None;
                     params.sandbox_policy = None;
@@ -272,32 +319,62 @@ impl MobileClient {
         }
     }
 
+    fn normalize_reasoning_effort_for_model(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        model: Option<&str>,
+        effort: &mut Option<codex_protocol::openai_models::ReasoningEffort>,
+    ) {
+        let Some(requested) = *effort else { return };
+        let Some(selected_model) = model.and_then(non_empty_trimmed) else {
+            return;
+        };
+        let normalized = self
+            .app_store
+            .project_server(server_id, |server| {
+                let model = server.available_models.as_ref()?.iter().find(|candidate| {
+                    candidate.agent_runtime_kind == runtime_kind
+                        && (candidate.id == selected_model || candidate.model == selected_model)
+                })?;
+                Some(if model.supported_reasoning_efforts.is_empty() {
+                    None
+                } else if model.supported_reasoning_efforts.iter().any(|option| {
+                    option.reasoning_effort == crate::types::ReasoningEffort::from(requested)
+                }) {
+                    Some(requested)
+                } else {
+                    Some(core_reasoning_effort_from_mobile(
+                        model.default_reasoning_effort.clone(),
+                    ))
+                })
+            })
+            .flatten();
+        if let Some(normalized) = normalized {
+            *effort = normalized;
+        }
+    }
+
     pub(super) fn non_codex_runtime_for_thread_metadata(
         &self,
         key: &ThreadKey,
-        thread: &ThreadSnapshot,
+        models: [Option<&str>; 2],
+        provider: Option<&str>,
     ) -> Option<AgentRuntimeKind> {
-        for model in [thread.model.as_deref(), thread.info.model.as_deref()]
-            .into_iter()
-            .flatten()
-            .filter_map(non_empty_trimmed)
-        {
+        for model in models.into_iter().flatten().filter_map(non_empty_trimmed) {
             let runtime_kind = self
                 .runtime_for_selected_model(&key.server_id, model)
                 .or_else(|| runtime_for_model_hint(model));
             if let Some(runtime_kind) = runtime_kind
-                && runtime_kind != "codex".to_string()
+                && runtime_kind != "codex"
             {
                 return Some(runtime_kind);
             }
         }
 
-        if let Some(runtime_kind) = thread
-            .info
-            .model_provider
-            .as_deref()
+        if let Some(runtime_kind) = provider
             .and_then(runtime_for_model_hint)
-            .filter(|runtime_kind| *runtime_kind != "codex".to_string())
+            .filter(|runtime_kind| *runtime_kind != "codex")
         {
             return Some(runtime_kind);
         }

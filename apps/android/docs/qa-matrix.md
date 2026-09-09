@@ -1,5 +1,22 @@
 # Android QA Matrix
 
+## Pending Request Identity
+
+Source implementation now scopes approval/input responses and dismissal state
+by `(serverId, runtimeKind, requestId)` on both mobile platforms. Rust captures
+the originating runtime from the event; neither platform guesses it from the
+active conversation. Rust and iOS regression suites and both Android JVM variants
+pass; all three `UserInputCardTest` instrumentation cases pass on API 35. Live
+multi-server/provider behavior remains manual QA, not inferred from compilation.
+
+| Check | Coverage |
+| --- | --- |
+| Same numeric/string ID on two servers and two runtimes | Rust reducer and response-routing regression tests |
+| Resolved notification and server removal preserve sibling requests/seeds | Rust reducer regression test |
+| Original numeric versus string JSON-RPC ID preserved on selected runtime | Rust response-routing regression test |
+| Dismissal does not hide another server/runtime prompt | iOS XCTest and Android `UserInputCardTest` |
+| Runtime changes reset Compose answer selection | Android `UserInputCardTest` |
+
 ## Scope
 
 This matrix covers Android app-server behavior and the mobile parity checks that
@@ -29,6 +46,137 @@ Current automated checks:
     slash commands, response errors, and text sizing
 
 ## Manual Matrix
+
+### Background relay custody and ingress
+
+Both native apps forward typed provider inputs and opaque wakes into the shared
+Rust relay coordinator. Android initializes process-owned custody from
+`RemoraApplication`, so FCM and WorkManager do not depend on an Activity or
+`AppModel`. The SDK's installation-ID mode uses `register`, `onRegistered`, and
+`onUnregistered`; the legacy `getToken` API is disabled in this mode.
+The relay addresses FCM HTTP v1 messages with `message.fid`. Legacy registration
+tokens require fresh SDK installation-ID registration; the relay does not infer
+or convert them. Provider installation IDs remain distinct from Remora relay
+installation IDs in opaque wake data.
+
+Android retains only encrypted SDK input and its local generation. Relay host
+bindings, remote registration receipts, cursors, repair and ACK decisions remain
+Rust-owned. WorkManager persists only the validated content-free wake envelope;
+appending work preserves callbacks arriving during a repair without cancelling
+that repair. Foreground, startup and completed pairing paths replay current
+provider input, including input first received before any host was enrolled.
+
+| Gate | Coverage |
+| --- | --- |
+| Opaque storage CAS, tombstones, concurrent writers and corrupt data | `RelaySecretStoreTest` |
+| App-file anchor rollback, missing file/key, real Keystore encryption | `RelayNativeCustodyInstrumentationTest` |
+| Process configuration without Activity or UI state | Run `RelayColdStartInstrumentationTest` alone |
+| Token replay, stale unregister, exact generations and zeroized buffers | `PushTokenInputStoreTest`, `BackgroundRelayIngressTest` |
+| Invalid or expired wakes do not block foreground repair | `OpaqueWakeHintDecoderTest`, `BackgroundRelayIngressTest` |
+| Custom provider without OpenAI auth stays connected, no login redirect | `ServerAccountPresentationTest` |
+
+The anchor uses independent Android Keystore commit markers to reject restoring
+older app files while the OS/Keystore remains trusted. It does not claim optional
+hardware antirollback or resistance to a compromised OS restoring the entire
+Keystore. Keystore custody is unavailable rather than reset when ciphertext
+exists but its key is missing. Emulator tests do not prove physical-device
+locked-state delivery, Firebase project credentials, or real provider delivery.
+
+#### Verified September 9, 2026
+
+After rebuilding the final Rust/JNI sources, debug and release JVM tests passed
+with 262 and 266 tests respectively, no failures or skips. Release JVM tests
+used non-provider Firebase resource fixtures; the installed debug app was built
+without those fixtures. Debug assembly, test APK assembly, and lint passed;
+lint retained three version advisories and eight allocation hints, with no errors.
+
+The installed emulator APK matched the local build's SHA-256:
+`92ded21427361747d37d6488e0e1bd490284d506fbd6b7cf8f142acf948be6e3`.
+Separate cold-start and real Keystore custody instrumentation each passed one
+test. The real SSH/background-resume runner passed one test in 22.622 seconds
+with exactly one model request. Screenshot and accessibility evidence confirmed
+the ordered user/completion messages, resumed lifecycle, and no active turn.
+Scoped runtime logs contained no crash, JNI failure, Rust panic, ANR, security
+cutover failure, or relay configuration failure. Fixture cleanup completed and
+the app was relaunched; the emulator remains available.
+
+Local evidence is in `/tmp/remora-android-final-verified-*.log`; the resume
+runner's `ARTIFACTS` line identifies its screenshot and accessibility dump.
+These gates verify emulator custody and authoritative SSH repair, not live
+FCM/APNs, hosted inference, production TLS, or physical-device wake behavior.
+
+### Remote background completion
+
+`RemoteTurnResumeJourneyTest` is opt-in because it needs disposable OpenSSH and
+a running Codex app-server. With the emulator booted, run from the repository
+root after building/installing the current app:
+
+```bash
+make android-emulator-fast
+adb -s emulator-5554 install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
+cd apps/android && ./gradlew :app:assembleDebugAndroidTest
+cd ../..
+python3 apps/android/scripts/verify-remote-resume.py
+```
+
+The runner requires Docker Desktop, `codex`, and `adb` on PATH. It starts an
+isolated real Codex app-server, a delayed local Responses provider, and a
+loopback-only disposable SSH account. The test backgrounds the real activity,
+cuts its TCP forwarding transport, then resumes and checks that authoritative
+hydration returns an inactive turn and exactly one completed message after its
+user prompt. Both messages must be visible before the screenshot is captured;
+cleanup verifies the fixture's saved host, credential, and trust pin are gone. This
+does not prove hosted-provider authentication, live push, or physical-device
+suspension. Missing fixture arguments skip the test in ordinary instrumentation
+runs; the runner requires exactly one passing execution and one model request.
+
+`--serve` exposes the same fixture for an iOS simulator for up to ten minutes.
+Read the mode-600 `connection.json` at the printed artifact path locally; do not
+copy its password into reports. iOS uses `127.0.0.1`, Android uses `10.0.2.2`.
+The runner removes its container, credential file, and app-server process on
+normal completion, timeout, or interruption; synthetic logs remain for review.
+
+### Upstream adoption regression checks
+
+These checks cover the September 2026 selective upstream pass. Automated coverage
+is listed explicitly; a passing host test is not a device-workflow verification.
+
+| Workflow | Expected behavior | Automated coverage |
+| --- | --- | --- |
+| Open an unavailable thread | Both apps return failure for the requested `ThreadKey`; neither substitutes another active conversation. | iOS `AppModelConversationObservationTests`; Android compilation and existing unit suite. |
+| Attach during an active turn | Both composers keep attachment controls available while generating. | Native compilation; manual attachment/send check still required. |
+| Change model and reasoning effort | Shared dispatch preserves supported effort, chooses the advertised default for unsupported effort, and omits effort for models without it. Runtime-scoped aliases and collaboration settings follow the same policy. | Rust `normalizes_turn_reasoning_against_runtime_scoped_model_metadata`. |
+| Load earlier messages during updates | Shared pagination rejects stale history after replacement, rollback, deletion, or session replacement; accepted pages preserve live streamed items. | Rust pagination regressions. |
+| Answer an Android question | Option selection recomposes and exposes radio semantics. Answer state resets for another server/thread/request and follows question IDs through reordering. | Android `UserInputCardTest` instrumentation against the overlay card. Inline composer integration remains a manual check. |
+
+Rust response routing now uses the same server/runtime/request identity as both
+native clients; [record 001](../../../plans/001-request-identity.md) documents the
+end-to-end change and collision tests.
+
+| Architecture regression | Automated coverage | Remaining manual check |
+| --- | --- | --- |
+| Slow request does not block events/control; loss triggers repair | Rust held-response, queue-loss, cancellation-capacity, and reconnect-retirement tests | Sustained live remote stream and background/reconnect cycle |
+| Failed or uncertain sends preserve submitted and newer drafts | Both native durable recovery-store suites; real Android Keystore restart/explicit-restore instrumentation; both native builds | Home/conversation recovery with attachments during delayed provider failure and OS process termination; no automatic resend |
+| Recovery does not block editor updates or lose cancelled submissions | Both native off-main transaction tests; Android real-Keystore 6 MiB attachment measurement; cancellation during begin/restore; separate-process journal recovery with zero sends | Physical-device latency and locked-device custody |
+| Android projection preserves current navigation and canonical empty history | Projection-owner, navigation-fence, and thread-cache JVM tests; Rust rollback regression | Rapid switching/backgrounding during live streaming |
+| Coalesced or missing activation updates do not pin navigation | JVM tests cover same-subscription resync, A/B/A, and later canonical selection | Live subscription lag under load |
+| Delayed question-response refresh cannot restore stale state | Rust session/event/history fencing and bounded worker lifecycle tests | Live response followed immediately by rollback/removal |
+
+Initial September 8 local gates: 250 debug JVM tests, 254 release JVM tests,
+3 prompt UI instrumentation tests, 1 encrypted recovery instrumentation test,
+debug assemble, and lint (0 errors, 2 SDK/version warnings, 8 hints).
+Release JVM tests use non-provider Firebase fixtures only;
+the final installed debug APK and instrumentation use normal debug configuration.
+
+The risk follow-up additionally passed full debug/release JVM suites, lint,
+assemble, the Compose recovery journey, and real-Keystore responsiveness and
+separate-process recovery instrumentation. The measured synchronous UI stall
+was 1,635 ms; the async path kept the maximum observed Main heartbeat gap at
+19 ms while the full write/reload took 2,711 ms. This is emulator evidence, not
+a physical-device claim. See the [follow-up report](../../../docs/reviews/2026-09-08-remora-follow-up.md)
+for final commands, counts, and remaining external gates.
+See [the follow-up review](../../../docs/reviews/2026-09-08-remora-follow-up.md) for exact
+commands, native build results, and validation limits.
 
 | Area                                    | Expected Android behavior                                                                                               |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |

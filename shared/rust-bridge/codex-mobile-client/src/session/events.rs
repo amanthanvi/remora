@@ -26,6 +26,10 @@ use crate::types::{
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum UiEvent {
+    EventsLost {
+        server_id: String,
+        skipped: u64,
+    },
     // ── Thread/Turn lifecycle ──────────────────────────────────────────
     ThreadStarted {
         key: ThreadKey,
@@ -94,6 +98,7 @@ pub(crate) enum UiEvent {
     },
     ServerRequestResolved {
         key: ThreadKey,
+        runtime_kind: AgentRuntimeKind,
         notification: codex_app_server_protocol::ServerRequestResolvedNotification,
     },
 
@@ -248,6 +253,7 @@ impl UiEvent {
             | Self::ContextTokensUpdated { key, .. } => Some(&key.server_id),
             Self::UserInputRequested { request, .. } => Some(&request.server_id),
             Self::AccountRateLimitsUpdated { server_id, .. }
+            | Self::EventsLost { server_id, .. }
             | Self::ConnectionStateChanged { server_id, .. }
             | Self::RawNotification { server_id, .. } => Some(server_id),
             Self::Error { key, .. } => key.as_ref().map(|key| key.server_id.as_str()),
@@ -288,9 +294,16 @@ impl EventProcessor {
     ///
     /// Returns `None` if no approval with that ID exists.
     #[cfg(test)]
-    pub fn resolve_approval(&self, request_id: &str) -> Option<PendingApproval> {
+    pub fn resolve_approval(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        request_id: &str,
+    ) -> Option<PendingApproval> {
         let mut approvals = self.pending_approvals.lock().unwrap();
-        if let Some(pos) = approvals.iter().position(|a| a.id == request_id) {
+        if let Some(pos) = approvals.iter().position(|a| {
+            a.server_id == server_id && a.runtime_kind == runtime_kind && a.id == request_id
+        }) {
             Some(approvals.remove(pos))
         } else {
             None
@@ -301,6 +314,13 @@ impl EventProcessor {
         self.emit(UiEvent::ConnectionStateChanged {
             server_id: server_id.to_string(),
             health: health.to_string(),
+        });
+    }
+
+    pub(crate) fn emit_events_lost(&self, server_id: &str, skipped: u64) {
+        self.emit(UiEvent::EventsLost {
+            server_id: server_id.to_string(),
+            skipped,
         });
     }
 
@@ -427,6 +447,7 @@ impl EventProcessor {
                 let key = Self::make_key(server_id, &n.thread_id);
                 self.emit(UiEvent::ServerRequestResolved {
                     key,
+                    runtime_kind,
                     notification: n.clone(),
                 });
             }
@@ -577,7 +598,7 @@ impl EventProcessor {
             // ── Everything else: forward as raw JSON ──────────────────
             other => {
                 let method = format!("{other}");
-                let params = serde_json::to_value(&other).unwrap_or_default();
+                let params = serde_json::to_value(other).unwrap_or_default();
                 self.emit(UiEvent::RawNotification {
                     server_id: server_id.to_string(),
                     method,
@@ -591,17 +612,19 @@ impl EventProcessor {
     pub fn process_legacy_notification(
         &self,
         server_id: &str,
+        runtime_kind: AgentRuntimeKind,
         method: &str,
         params: &serde_json::Value,
     ) {
-        if method == "item/tool/requestUserInput" {
-            if let Some(request) = pending_user_input_request_from_raw(server_id, params) {
-                self.emit(UiEvent::UserInputRequested {
-                    request,
-                    seed: None,
-                });
-                return;
-            }
+        if method == "item/tool/requestUserInput"
+            && let Some(request) =
+                pending_user_input_request_from_raw(server_id, &runtime_kind, params)
+        {
+            self.emit(UiEvent::UserInputRequested {
+                request,
+                seed: None,
+            });
+            return;
         }
         self.emit(UiEvent::RawNotification {
             server_id: server_id.to_string(),
@@ -617,7 +640,12 @@ impl EventProcessor {
     /// Creates a [`PendingApproval`], stores it, and emits
     /// [`UiEvent::ApprovalRequested`] so the platform UI can present it.
     ///
-    pub fn process_server_request(&self, server_id: &str, request: &ServerRequest) {
+    pub fn process_server_request(
+        &self,
+        server_id: &str,
+        runtime_kind: AgentRuntimeKind,
+        request: &ServerRequest,
+    ) {
         let (
             kind,
             thread_id,
@@ -680,9 +708,12 @@ impl EventProcessor {
                 )
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
-                if let Some((request, seed)) =
-                    mcp_elicitation_user_input_request_from_upstream(server_id, request_id, params)
-                {
+                if let Some((request, seed)) = mcp_elicitation_user_input_request_from_upstream(
+                    server_id,
+                    &runtime_kind,
+                    request_id,
+                    params,
+                ) {
                     self.emit(UiEvent::UserInputRequested {
                         request,
                         seed: Some(seed),
@@ -691,9 +722,12 @@ impl EventProcessor {
                 return;
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
-                if let Some(request) =
-                    pending_user_input_request_from_upstream(server_id, request_id, params)
-                {
+                if let Some(request) = pending_user_input_request_from_upstream(
+                    server_id,
+                    &runtime_kind,
+                    request_id,
+                    params,
+                ) {
                     self.emit(UiEvent::UserInputRequested {
                         request,
                         seed: Some(PendingUserInputSeed {
@@ -731,6 +765,7 @@ impl EventProcessor {
         let approval = PendingApproval {
             id,
             server_id: server_id.to_string(),
+            runtime_kind,
             kind,
             thread_id: thread_id.clone(),
             turn_id,
@@ -849,6 +884,7 @@ const MCP_URL_FINISHED_LABEL: &str = "I finished";
 
 fn pending_user_input_request_from_upstream(
     server_id: &str,
+    runtime_kind: &str,
     request_id: &codex_app_server_protocol::RequestId,
     params: &codex_app_server_protocol::ToolRequestUserInputParams,
 ) -> Option<PendingUserInputRequest> {
@@ -883,6 +919,7 @@ fn pending_user_input_request_from_upstream(
     Some(PendingUserInputRequest {
         id: request_id_to_string(request_id),
         server_id: server_id.to_string(),
+        runtime_kind: runtime_kind.to_string(),
         thread_id: params.thread_id.clone(),
         turn_id: params.turn_id.clone(),
         item_id: params.item_id.clone(),
@@ -894,6 +931,7 @@ fn pending_user_input_request_from_upstream(
 
 fn mcp_elicitation_user_input_request_from_upstream(
     server_id: &str,
+    runtime_kind: &str,
     request_id: &codex_app_server_protocol::RequestId,
     params: &codex_app_server_protocol::McpServerElicitationRequestParams,
 ) -> Option<(PendingUserInputRequest, PendingUserInputSeed)> {
@@ -906,6 +944,7 @@ fn mcp_elicitation_user_input_request_from_upstream(
     let request = PendingUserInputRequest {
         id: request_id_string.clone(),
         server_id: server_id.to_string(),
+        runtime_kind: runtime_kind.to_string(),
         thread_id: params.thread_id.clone(),
         turn_id: params.turn_id.clone().unwrap_or_default(),
         item_id: format!("mcp-elicitation:{request_id_string}"),
@@ -1221,6 +1260,7 @@ fn mcp_enum_question(
 
 fn pending_user_input_request_from_raw(
     server_id: &str,
+    runtime_kind: &str,
     payload: &serde_json::Value,
 ) -> Option<PendingUserInputRequest> {
     let request_id = match payload.get("requestId")? {
@@ -1262,6 +1302,7 @@ fn pending_user_input_request_from_raw(
     Some(PendingUserInputRequest {
         id: request_id,
         server_id: server_id.to_string(),
+        runtime_kind: runtime_kind.to_string(),
         thread_id: params.thread_id,
         turn_id: params.turn_id,
         item_id: params.item_id,
@@ -1296,7 +1337,7 @@ mod tests {
     fn request_and_recv(server_id: &str, request: &ServerRequest) -> Option<UiEvent> {
         let proc = EventProcessor::new();
         let mut rx = proc.subscribe();
-        proc.process_server_request(server_id, request);
+        proc.process_server_request(server_id, "codex".to_string(), request);
         rx.try_recv().ok()
     }
 
@@ -1585,7 +1626,9 @@ mod tests {
             });
         let evt = process_and_recv("srv1", &notification).expect("should emit");
         match evt {
-            UiEvent::ServerRequestResolved { key, notification } => {
+            UiEvent::ServerRequestResolved {
+                key, notification, ..
+            } => {
                 assert_eq!(key.thread_id, "thr_1");
                 assert_eq!(notification.thread_id, "thr_1");
                 assert_eq!(notification.request_id, proto::RequestId::Integer(7));
@@ -2019,6 +2062,7 @@ mod tests {
         let mut rx = proc.subscribe();
         proc.process_legacy_notification(
             "srv1",
+            "codex".to_string(),
             "codex/event/collab_wait_end",
             &serde_json::json!({ "receiver_agents": [{ "thread_id": "thr_2" }] }),
         );
@@ -2043,6 +2087,7 @@ mod tests {
         let mut rx = proc.subscribe();
         proc.process_legacy_notification(
             "srv1",
+            "codex".to_string(),
             "item/tool/requestUserInput",
             &serde_json::json!({
                 "requestId": "req-1",
@@ -2382,8 +2427,8 @@ mod tests {
                 grant_root: None,
             },
         };
-        proc.process_server_request("srv1", &req1);
-        proc.process_server_request("srv1", &req2);
+        proc.process_server_request("srv1", "codex".to_string(), &req1);
+        proc.process_server_request("srv1", "codex".to_string(), &req2);
         assert_eq!(proc.pending_approvals().len(), 2);
     }
 
@@ -2420,10 +2465,10 @@ mod tests {
                 grant_root: None,
             },
         };
-        proc.process_server_request("srv1", &req1);
-        proc.process_server_request("srv1", &req2);
+        proc.process_server_request("srv1", "codex".to_string(), &req1);
+        proc.process_server_request("srv1", "codex".to_string(), &req2);
 
-        let resolved = proc.resolve_approval("1");
+        let resolved = proc.resolve_approval("srv1", "codex", "1");
         assert!(resolved.is_some());
         assert_eq!(resolved.unwrap().id, "1");
         assert_eq!(proc.pending_approvals().len(), 1);
@@ -2433,7 +2478,7 @@ mod tests {
     #[test]
     fn resolve_nonexistent_approval_returns_none() {
         let proc = EventProcessor::new();
-        assert!(proc.resolve_approval("999").is_none());
+        assert!(proc.resolve_approval("srv1", "codex", "999").is_none());
     }
 
     // ── Send + Sync ────────────────────────────────────────────────────

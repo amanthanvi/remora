@@ -148,6 +148,7 @@ mod tests {
         let mut target = thread("server-a", "same-id");
         target.info.status = ThreadSummaryStatus::SystemError;
         snapshot.pending_approvals.push(PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "approval".to_string(),
             server_id: "server-a".to_string(),
             kind: ApprovalKind::Command,
@@ -161,6 +162,7 @@ mod tests {
             reason: None,
         });
         snapshot.pending_user_inputs.push(PendingUserInputRequest {
+            runtime_kind: "codex".to_string(),
             id: "input".to_string(),
             server_id: "server-a".to_string(),
             thread_id: "same-id".to_string(),
@@ -248,6 +250,7 @@ mod tests {
         let mut target = thread("server", "thread");
         target.info.status = ThreadSummaryStatus::SystemError;
         snapshot.pending_user_inputs.push(PendingUserInputRequest {
+            runtime_kind: "codex".to_string(),
             id: "input".to_string(),
             server_id: "server".to_string(),
             thread_id: "thread".to_string(),
@@ -366,6 +369,7 @@ mod tests {
 
             if case.approval {
                 snapshot.pending_approvals.push(PendingApproval {
+                    runtime_kind: "codex".to_string(),
                     id: "approval".to_string(),
                     server_id: "server".to_string(),
                     kind: ApprovalKind::Command,
@@ -381,6 +385,7 @@ mod tests {
             }
             if case.input {
                 snapshot.pending_user_inputs.push(PendingUserInputRequest {
+                    runtime_kind: "codex".to_string(),
                     id: "input".to_string(),
                     server_id: "server".to_string(),
                     thread_id: "thread".to_string(),

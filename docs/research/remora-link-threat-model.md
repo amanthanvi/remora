@@ -1,7 +1,7 @@
 # Remora Link threat model
 
 Status: release-blocking security model for the implemented v2 mobile client
-and pinned host contract.
+and co-owned host contract.
 
 ## Security objective
 
@@ -18,7 +18,7 @@ not create or widen authority.
 | Mobile → Remora Link | Pinned host identity, `remora-link/2`, opaque credential ID, fresh P-256 proof, exact authorization epoch and scope checks, bounded frames. |
 | Mobile → SSH host | Verified host key, authenticated user, encrypted channel, and Rust-owned bridge/runtime policy. |
 | Remora Link → harness | Installed-runtime allowlist, typed runtime ID, constrained launch policy, and no mobile-supplied executable or bypass flags. |
-| Client/host → relay | End-to-end ciphertext; relay metadata is never identity or authorization. |
+| Client/host → relay | Distinct read/manage/write capabilities; opaque encrypted wake markers contain no conversation data. Relay metadata never creates host authority. |
 | Relay/host → APNs or FCM | Opaque, expiring wake hints only; authenticated reconciliation before displaying content or enabling action. |
 | Host grant store → active streams | Durable revocation/epoch state closes all runtime and shell streams for the affected host/device. |
 
@@ -44,7 +44,7 @@ In scope:
 - a lost or revoked mobile device;
 - malicious or compromised harness processes;
 - stale async UI work and restored navigation state;
-- a dependency or host binary that differs from the reviewed pin.
+- a dependency or host binary that differs from the reviewed source.
 
 Explicit limits:
 
@@ -68,6 +68,8 @@ Explicit limits:
 | Duplicate mutation after response loss | Durable idempotency/receipt semantics and operation-specific retry rules. | Lost-response lifecycle tests. |
 | Wrong-machine terminal | Opaque host-ID backend, exact preferred-host fail-closed behavior, versioned restoration token, and stale-open fencing. | iOS/Android controller and route tests plus smoke tests. |
 | Notification approval replay | Push is an opaque wake hint; lock-screen payloads cannot approve, launch, grant, or revoke. | Payload-shape tests and interactive inspection. |
+| Forged freshness or premature ACK | Host-certified publication cursor and equal authenticated session vectors around Rust-owned repair; durable local generation/cursor commit precedes ACK. | Protocol, repair-fence, and journal ordering regressions. |
+| Restored relay journal | Authenticated journal plus independent platform secure-store high-water anchor, excluded from application backup. | Native CAS/rollback tests; physical restore remains a release gate. |
 | Arbitrary harness execution | Host advertises and launches only configured installed runtimes; mobile cannot provide a path or arguments. | Host compatibility matrix and negative launch tests. |
 | Unsupported invitation downgrade | Unsupported formats fail closed; v2 never retries a different protocol. | Malformed-invitation and downgrade-negative tests. |
 
@@ -106,7 +108,7 @@ from 1.6.0 onward.
 
 ## Release gates
 
-- exact host revision pin and golden-vector parity;
+- coordinated host/mobile source review and golden-vector parity;
 - Rust full suite, iOS fast simulator build, Android unit tests and debug
   assemble;
 - interactive pairing/reconnect/terminal/revoke smoke tests on both platforms;
@@ -114,5 +116,6 @@ from 1.6.0 onward.
 - residual product naming is Remora-owned;
 - branch CI green before merge.
 
-The reviewed host source is the Remora-owned Git source recorded in the shared
-Rust manifest and pinned to an exact revision by the lockfile.
+The reviewed host source lives in `services/remora-link/`; `REMORA.md` records
+its import provenance. Bridge dependencies use that tree rather than a mutable
+Cargo cache or independently unpublished host commit.

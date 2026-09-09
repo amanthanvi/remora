@@ -299,27 +299,22 @@ fn mcp_enum_answer_value(
 impl MobileClient {
     pub async fn respond_to_approval(
         &self,
+        server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
         decision: ApprovalDecisionValue,
     ) -> Result<(), RpcError> {
-        let approval = self.pending_approval(request_id)?;
-        let approval_seed = self
-            .app_store
-            .pending_approval_seed(&approval.server_id, &approval.id);
+        let approval = self.pending_approval(server_id, runtime_kind, request_id)?;
+        let approval_seed = self.app_store.pending_approval_seed(
+            &approval.server_id,
+            &approval.runtime_kind,
+            &approval.id,
+        );
         let session = self.get_session(&approval.server_id)?;
         let response_json = approval_response_json(&approval, approval_seed.as_ref(), decision)?;
         let response_request_id =
             server_request_id_json(approval_request_id(&approval, approval_seed.as_ref()));
-        let runtime_kind = approval
-            .thread_id
-            .as_ref()
-            .map(|thread_id| {
-                self.runtime_for_thread(&ThreadKey {
-                    server_id: approval.server_id.clone(),
-                    thread_id: thread_id.clone(),
-                })
-            })
-            .unwrap_or_else(|| "codex".to_string());
+        let runtime_kind = approval.runtime_kind.clone();
         let direct_command_id = self.app_store.begin_server_mutating_command(
             &approval.server_id,
             ServerMutatingCommandKind::ApprovalResponse,
@@ -339,19 +334,24 @@ impl MobileClient {
             "MobileClient: approval response sent for server={} request_id={}",
             approval.server_id, request_id
         );
-        self.app_store.resolve_approval(request_id);
+        self.app_store
+            .resolve_approval(server_id, &approval.runtime_kind, request_id);
         Ok(())
     }
 
     pub async fn respond_to_user_input(
-        &self,
+        self: &Arc<Self>,
+        server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
         answers: Vec<PendingUserInputAnswer>,
     ) -> Result<(), RpcError> {
-        let request = self.pending_user_input(request_id)?;
-        let seed = self
-            .app_store
-            .pending_user_input_seed(&request.server_id, &request.id);
+        let request = self.pending_user_input(server_id, runtime_kind, request_id)?;
+        let seed = self.app_store.pending_user_input_seed(
+            &request.server_id,
+            &request.runtime_kind,
+            &request.id,
+        );
         let normalized_answers = normalize_pending_user_input_answers(&request, &answers);
         let answered_inputs = normalized_answers.clone();
         let session = self.get_session(&request.server_id)?;
@@ -363,10 +363,7 @@ impl MobileClient {
         {
             let response_json = mcp_elicitation_response_json(seed, &answers)?;
             let response_request_id = server_request_id_json(seed.request_id.clone());
-            let runtime_kind = self.runtime_for_thread(&ThreadKey {
-                server_id: request.server_id.clone(),
-                thread_id: request.thread_id.clone(),
-            });
+            let runtime_kind = request.runtime_kind.clone();
             let direct_command_id = self.app_store.begin_server_mutating_command(
                 &request.server_id,
                 ServerMutatingCommandKind::UserInputResponse,
@@ -386,11 +383,16 @@ impl MobileClient {
                 "MobileClient: MCP elicitation response sent for server={} request_id={}",
                 request.server_id, request_id
             );
-            self.app_store
-                .resolve_pending_user_input_with_response(request_id, answered_inputs);
+            self.app_store.resolve_pending_user_input_with_response(
+                server_id,
+                &request.runtime_kind,
+                request_id,
+                answered_inputs,
+            );
             self.spawn_post_user_input_reconcile(
                 request.server_id.clone(),
                 request.thread_id.clone(),
+                request.runtime_kind.clone(),
                 Arc::clone(&session),
             );
             return Ok(());
@@ -422,10 +424,7 @@ impl MobileClient {
                 .map(|seed| seed.request_id.clone())
                 .unwrap_or_else(|| fallback_server_request_id(&request.id)),
         );
-        let runtime_kind = self.runtime_for_thread(&ThreadKey {
-            server_id: request.server_id.clone(),
-            thread_id: request.thread_id.clone(),
-        });
+        let runtime_kind = request.runtime_kind.clone();
         let direct_command_id = self.app_store.begin_server_mutating_command(
             &request.server_id,
             ServerMutatingCommandKind::UserInputResponse,
@@ -445,60 +444,297 @@ impl MobileClient {
             "MobileClient: user input response sent for server={} request_id={}",
             request.server_id, request_id
         );
-        self.app_store
-            .resolve_pending_user_input_with_response(request_id, answered_inputs);
+        self.app_store.resolve_pending_user_input_with_response(
+            server_id,
+            &request.runtime_kind,
+            request_id,
+            answered_inputs,
+        );
         self.spawn_post_user_input_reconcile(
             request.server_id.clone(),
             request.thread_id.clone(),
+            request.runtime_kind.clone(),
             Arc::clone(&session),
         );
         Ok(())
     }
 
     pub(super) fn spawn_post_user_input_reconcile(
-        &self,
+        self: &Arc<Self>,
         server_id: String,
         thread_id: String,
+        runtime_kind: AgentRuntimeKind,
         session: Arc<ServerSession>,
     ) {
-        let app_store = Arc::clone(&self.app_store);
+        let key = ThreadKey {
+            server_id,
+            thread_id,
+        };
+        let Some(epoch) = self.app_store.thread_history_epoch(&key) else {
+            return;
+        };
+        let owner = Arc::downgrade(self);
         Self::spawn_detached(async move {
             for delay_ms in USER_INPUT_RECONCILE_DELAYS_MS {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                match read_thread_response_from_app_server(Arc::clone(&session), &thread_id, true)
+                let Some(client) = owner.upgrade() else {
+                    return;
+                };
+                if !client.post_input_history_is_current(&key, &session, &epoch) {
+                    return;
+                }
+                match client
+                    .reconcile_post_user_input(&key, &runtime_kind, &session, &epoch)
                     .await
                 {
-                    Ok(response) => {
-                        if let Err(error) = upsert_thread_snapshot_from_app_server_read_response(
-                            &app_store, &server_id, response,
-                        ) {
-                            warn!(
-                                "MobileClient: failed to reconcile thread after user input for server={} thread={}: {}",
-                                server_id, thread_id, error
-                            );
-                            continue;
-                        }
-                        let key = ThreadKey {
-                            server_id: server_id.clone(),
-                            thread_id: thread_id.clone(),
-                        };
-                        let should_keep_polling = app_store
-                            .snapshot()
-                            .threads
-                            .get(&key)
-                            .is_some_and(|thread| thread.active_turn_id.is_some());
-                        if !should_keep_polling {
+                    Ok(applied) => {
+                        if applied
+                            && !client
+                                .app_store
+                                .project_thread(&key, |thread| thread.active_turn_id.is_some())
+                                .unwrap_or(false)
+                        {
                             break;
                         }
                     }
                     Err(error) => {
                         warn!(
                             "MobileClient: failed to refresh thread after user input for server={} thread={}: {}",
-                            server_id, thread_id, error
+                            key.server_id, key.thread_id, error
                         );
                     }
                 }
             }
         });
+    }
+
+    fn post_input_history_is_current(
+        &self,
+        key: &ThreadKey,
+        session: &Arc<ServerSession>,
+        epoch: &Arc<()>,
+    ) -> bool {
+        self.sessions_read()
+            .get(&key.server_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+            && self
+                .app_store
+                .thread_history_epoch(key)
+                .is_some_and(|current| Arc::ptr_eq(&current, epoch))
+    }
+
+    async fn reconcile_post_user_input(
+        &self,
+        key: &ThreadKey,
+        runtime_kind: &str,
+        session: &Arc<ServerSession>,
+        epoch: &Arc<()>,
+    ) -> Result<bool, RpcError> {
+        let generation = self.app_store.server_event_generation(&key.server_id);
+        let response = self
+            .request_typed_for_session_runtime_rpc::<upstream::ThreadReadResponse>(
+                &key.server_id,
+                Arc::clone(session),
+                runtime_kind.to_string(),
+                upstream::ClientRequest::ThreadRead {
+                    request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                    params: upstream::ThreadReadParams {
+                        thread_id: key.thread_id.clone(),
+                        include_turns: true,
+                    },
+                },
+            )
+            .await?;
+        if response.thread.id != key.thread_id {
+            return Err(RpcError::Deserialization(
+                "post-input response returned another thread".to_string(),
+            ));
+        }
+        let sessions = self.sessions_read();
+        if !sessions
+            .get(&key.server_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            return Ok(false);
+        }
+        self.app_store
+            .apply_if_server_event_generation(&key.server_id, generation, |store| {
+                store.apply_if_thread_history_current(key, epoch, || {
+                    upsert_thread_snapshot_from_app_server_read_response(
+                        store,
+                        &key.server_id,
+                        response,
+                    )
+                })
+            })
+            .flatten()
+            .transpose()
+            .map(|applied| applied.is_some())
+    }
+}
+
+#[cfg(test)]
+mod post_input_tests {
+    use super::*;
+    use crate::session::connection::TestRequestHandler;
+
+    fn completed_thread_response() -> serde_json::Value {
+        serde_json::json!({ "thread": {
+            "id": "thread", "sessionId": "thread", "preview": "stale", "ephemeral": false,
+            "modelProvider": "openai", "createdAt": 1, "updatedAt": 2,
+            "status": {"type": "idle"}, "path": "/tmp/thread", "cwd": "/tmp",
+            "cliVersion": "1.0.0", "source": "cli", "name": "old", "turns": []
+        }})
+    }
+
+    #[tokio::test]
+    async fn delayed_post_input_reads_cannot_replace_newer_state() {
+        for change in [
+            "none", "event", "remove", "server", "recreate", "rollback", "session",
+        ] {
+            let client = MobileClient::new();
+            let config = ServerConfig {
+                server_id: "server".to_string(),
+                display_name: "server".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                websocket_url: None,
+                is_local: false,
+                tls: false,
+            };
+            let key = ThreadKey {
+                server_id: config.server_id.clone(),
+                thread_id: "thread".to_string(),
+            };
+            let response = completed_thread_response();
+            let info = ThreadInfo::from(
+                serde_json::from_value::<upstream::Thread>(response["thread"].clone()).unwrap(),
+            );
+            let thread = ThreadSnapshot::from_info("server", info);
+            client.app_store.upsert_thread_snapshot(thread.clone());
+            let epoch = client.app_store.thread_history_epoch(&key).unwrap();
+            let owner = Arc::downgrade(&client);
+            let handler_key = key.clone();
+            let replacement = Arc::new(ServerSession::test_stub(config.clone()));
+            let handler: TestRequestHandler = Arc::new(move |request| {
+                assert!(matches!(
+                    request,
+                    upstream::ClientRequest::ThreadRead { .. }
+                ));
+                let client = owner.upgrade().unwrap();
+                match change {
+                    "none" => {}
+                    "event" => client
+                        .app_store
+                        .apply_ui_event(&UiEvent::ThreadNameUpdated {
+                            key: handler_key.clone(),
+                            thread_name: Some("new".to_string()),
+                        }),
+                    "remove" => client.app_store.remove_thread(&handler_key),
+                    "server" => client.app_store.remove_server("server"),
+                    "recreate" => {
+                        client.app_store.remove_thread(&handler_key);
+                        client.app_store.upsert_thread_snapshot(thread.clone());
+                    }
+                    "rollback" => client.app_store.replace_thread_history(thread.clone()),
+                    "session" => {
+                        client
+                            .sessions_write()
+                            .insert("server".to_string(), Arc::clone(&replacement));
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(response.clone())
+            });
+            let session = Arc::new(ServerSession::test_stub_with_handlers(
+                config,
+                Some(handler),
+                None,
+                None,
+            ));
+            client
+                .sessions_write()
+                .insert("server".to_string(), Arc::clone(&session));
+            let applied = client
+                .reconcile_post_user_input(&key, "codex", &session, &epoch)
+                .await
+                .unwrap();
+            assert_eq!(applied, change == "none", "change={change}");
+            if matches!(change, "remove" | "server") {
+                assert!(client.app_store.thread_snapshot(&key).is_none());
+            }
+            if change == "event" {
+                assert_eq!(
+                    client
+                        .app_store
+                        .thread_snapshot(&key)
+                        .unwrap()
+                        .info
+                        .title
+                        .as_deref(),
+                    Some("new")
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_input_worker_stops_after_completion_or_owner_drop_and_bounds_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for outcome in ["complete", "error", "owner-dropped"] {
+            let client = MobileClient::new();
+            let config = ServerConfig {
+                server_id: "server".to_string(),
+                display_name: "server".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                websocket_url: None,
+                is_local: false,
+                tls: false,
+            };
+            let response = completed_thread_response();
+            let thread = ThreadSnapshot::from_info(
+                "server",
+                ThreadInfo::from(
+                    serde_json::from_value::<upstream::Thread>(response["thread"].clone()).unwrap(),
+                ),
+            );
+            client.app_store.upsert_thread_snapshot(thread);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let handler: TestRequestHandler = Arc::new(move |_| {
+                handler_calls.fetch_add(1, Ordering::SeqCst);
+                if outcome == "error" {
+                    Err(RpcError::Deserialization("read failed".to_string()))
+                } else {
+                    Ok(response.clone())
+                }
+            });
+            let session = Arc::new(ServerSession::test_stub_with_handlers(
+                config,
+                Some(handler),
+                None,
+                None,
+            ));
+            client
+                .sessions_write()
+                .insert("server".to_string(), Arc::clone(&session));
+            client.spawn_post_user_input_reconcile(
+                "server".to_string(),
+                "thread".to_string(),
+                "codex".to_string(),
+                session,
+            );
+            let client = (outcome != "owner-dropped").then_some(client);
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            let expected = match outcome {
+                "complete" => 1,
+                "error" => 3,
+                _ => 0,
+            };
+            assert_eq!(calls.load(Ordering::SeqCst), expected, "{outcome}");
+            drop(client);
+        }
     }
 }

@@ -349,15 +349,12 @@ fileprivate struct FfiConverterOptionTypeAppRemoraLinkPairingCode: FfiConverterR
 
 func pushOne(token: AppRelaySecretValue) {}
 func pushTwo(token: AppRelaySecretValue) {}
-func backgroundRelayStageEnrollment(hostId: String, relayOrigin: String, installationId: String, commandId: String, readCapability: AppRelaySecretValue, manageCapability: AppRelaySecretValue) async throws
-
-open func backgroundRelayStageEnrollment(hostId: String, relayOrigin: String, installationId: String, commandId: String, readCapability: AppRelaySecretValue, manageCapability: AppRelaySecretValue)async throws   {
+open func ordinaryOperation()async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_codex_mobile_client_fn_method_appclient_background_relay_stage_enrollment(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(hostId),FfiConverterString.lower(relayOrigin),FfiConverterString.lower(installationId),FfiConverterString.lower(commandId),FfiConverterTypeAppRelaySecretValue_lower(readCapability),FfiConverterTypeAppRelaySecretValue_lower(manageCapability)
+                uniffi_codex_mobile_client_fn_method_appclient_ordinary_operation(
+                    self.uniffiCloneHandle()
                 )
             },
             pollFunc: ffi_codex_mobile_client_rust_future_poll_void,
@@ -549,25 +546,6 @@ internal object uniffiCallbackInterfaceAppRemoraLinkTransportIdentityBackend {
 
 fun pushOne(`token`: AppRelaySecretValue) = Unit
 fun pushTwo(`token`: AppRelaySecretValue) = Unit
-    suspend fun `backgroundRelayStageEnrollment`(`hostId`: kotlin.String, `relayOrigin`: kotlin.String, `installationId`: kotlin.String, `commandId`: kotlin.String, `readCapability`: AppRelaySecretValue, `manageCapability`: AppRelaySecretValue)
-
-    override suspend fun `backgroundRelayStageEnrollment`(`hostId`: kotlin.String, `relayOrigin`: kotlin.String, `installationId`: kotlin.String, `commandId`: kotlin.String, `readCapability`: AppRelaySecretValue, `manageCapability`: AppRelaySecretValue) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_codex_mobile_client_fn_method_appclient_background_relay_stage_enrollment(
-                uniffiHandle,
-                FfiConverterString.lower(`hostId`),FfiConverterString.lower(`relayOrigin`),FfiConverterString.lower(`installationId`),FfiConverterString.lower(`commandId`),FfiConverterTypeAppRelaySecretValue.lower(`readCapability`),FfiConverterTypeAppRelaySecretValue.lower(`manageCapability`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_codex_mobile_client_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        \n        // Error FFI converter
-        BackgroundRelayException.ErrorHandler,
-    )
-    }
 fun signMessage(`message`: AppRelaySecretValue) = Unit
 fun loadOrCreate(`candidate`: AppRelaySecretValue) = Unit
     suspend fun `inspectRemoraLinkCode`(`code`: AppRemoraLinkPairingCode)
@@ -776,54 +754,16 @@ class SecretBindingHardeningTests(unittest.TestCase):
         ):
             HARDENER.harden_kotlin_source(drifted)
 
-    def test_aliasing_multi_secret_arguments_are_copied_before_lowering(self) -> None:
-        swift = HARDENER.harden_swift_source(raw_swift_fixture())
-        self.assertIn(
-            "if manageCapability === readCapability {\n"
-            "        manageCapabilityForLowering = manageCapability.withUnsafeBytes",
-            swift,
-        )
-        self.assertIn(
-            "defer {\n"
-            "        readCapability.zeroize()\n"
-            "        manageCapabilityForLowering.zeroize()\n"
-            "    }",
-            swift,
-        )
-        self.assertIn(
-            "FfiConverterTypeAppRelaySecretValue_lower("
-            "manageCapabilityForLowering)",
-            swift,
-        )
-        self.assertNotIn(
-            "FfiConverterTypeAppRelaySecretValue_lower(readCapability),"
-            "FfiConverterTypeAppRelaySecretValue_lower(manageCapability)",
-            swift,
-        )
-
-        kotlin = HARDENER.harden_kotlin_source(raw_kotlin_fixture())
-        self.assertIn(
-            "if (`manageCapability` === `readCapability`) "
-            "`manageCapability`.copyOf()",
-            kotlin,
-        )
-        self.assertIn(
-            "finally {\n"
-            "            `readCapability`.fill(0)\n"
-            "            manageCapabilityForLowering.fill(0)\n"
-            "        }",
-            kotlin,
-        )
-        self.assertIn(
-            "FfiConverterTypeAppRelaySecretValue.lower("
-            "manageCapabilityForLowering)",
-            kotlin,
-        )
-        self.assertNotIn(
-            "FfiConverterTypeAppRelaySecretValue.lower(`readCapability`),"
-            "FfiConverterTypeAppRelaySecretValue.lower(`manageCapability`)",
-            kotlin,
-        )
+    def test_native_enrollment_capability_surface_cannot_return(self) -> None:
+        for capability in ("readCapability", "manageCapability"):
+            with self.assertRaisesRegex(SystemExit, "direct enrollment"):
+                HARDENER.harden_swift_source(
+                    raw_swift_fixture() + f"func forbidden({capability}: AppRelaySecretValue) {{}}\n"
+                )
+            with self.assertRaisesRegex(SystemExit, "direct enrollment"):
+                HARDENER.harden_kotlin_source(
+                    raw_kotlin_fixture() + f"fun forbidden(`{capability}`: AppRelaySecretValue) = Unit\n"
+                )
 
     def test_kotlin_trailing_data_rejection_wipes_decoded_secret(self) -> None:
         hardened = HARDENER.harden_kotlin_source(raw_kotlin_fixture())
@@ -1001,7 +941,7 @@ public struct FfiConverterTypeAppRemoraLinkPairingCode: FfiConverter"""
 
         self.assertEqual(hardened.count(SWIFT_ASYNC_HELPER), 1)
         self.assertEqual(
-            swift_app_client_method(hardened, "backgroundRelayStageEnrollment").count(
+            swift_app_client_method(hardened, "ordinaryOperation").count(
                 "uniffiRustCallAsync("
             ),
             1,

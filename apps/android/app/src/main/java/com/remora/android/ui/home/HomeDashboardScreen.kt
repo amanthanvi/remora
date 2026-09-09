@@ -74,7 +74,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -141,8 +141,8 @@ fun HomeDashboardScreen(
 ) {
     val appModel = LocalAppModel.current
     val context = LocalContext.current
-    val configuration = LocalConfiguration.current
-    val usesCompactHeader = configuration.screenWidthDp < 420
+    val windowWidth = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp() }
+    val usesCompactHeader = windowWidth < 420.dp
     val snapshot by appModel.snapshot.collectAsState()
     val scope = rememberCoroutineScope()
     val voiceController = remember { com.remora.android.state.VoiceRuntimeController.shared }

@@ -1,12 +1,19 @@
 #[cfg(test)]
 mod mobile_client_tests {
     use super::super::*;
-    use crate::session::connection::TestRequestHandler;
+    use crate::session::connection::{TestRequestHandler, TestResolveHandler};
     use crate::types::ThreadSummaryStatus;
     use crate::types::{PendingUserInputOption, PendingUserInputQuestion};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier, Mutex as StdMutex};
+
+    #[test]
+    fn one_shot_discovery_does_not_hold_a_sync_lock_across_await() {
+        fn requires_send(_: impl Send) {}
+        let client = MobileClient::new();
+        requires_send(client.scan_servers_with_mdns_context(Vec::new(), None));
+    }
 
     #[test]
     fn account_sync_warmup_only_runs_when_codex_runtime_is_present() {
@@ -45,6 +52,7 @@ mod mobile_client_tests {
 
     fn make_user_input_request(question: PendingUserInputQuestion) -> PendingUserInputRequest {
         PendingUserInputRequest {
+            runtime_kind: "codex".to_string(),
             id: "req-1".to_string(),
             server_id: "srv".to_string(),
             thread_id: "thread".to_string(),
@@ -54,6 +62,138 @@ mod mobile_client_tests {
             requester_agent_nickname: None,
             requester_agent_role: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pending_responses_route_by_server_and_originating_runtime() {
+        for wire_id in [
+            upstream::RequestId::Integer(42),
+            upstream::RequestId::String("42".into()),
+        ] {
+            for is_input in [false, true] {
+                let client = MobileClient::new();
+                let sent = Arc::new(StdMutex::new(Vec::new()));
+                let processor = crate::session::events::EventProcessor::new();
+                let mut events = processor.subscribe();
+                for server in ["server-a", "server-b"] {
+                    let mut handlers = Vec::new();
+                    client.app_store.upsert_server(
+                        &make_server_config(server),
+                        ServerHealthSnapshot::Connected,
+                    );
+                    for runtime in ["codex", "pi"] {
+                        let sent = Arc::clone(&sent);
+                        let handler: TestResolveHandler = Arc::new(move |id, payload| {
+                            sent.lock().unwrap().push((server, runtime, id, payload));
+                            Ok(())
+                        });
+                        handlers.push((runtime.to_string(), handler));
+                        let request = if is_input {
+                            upstream::ServerRequest::ToolRequestUserInput {
+                                request_id: wire_id.clone(),
+                                params: serde_json::from_value(json!({
+                                    "threadId": "thread", "turnId": "turn", "itemId": "item",
+                                    "questions": [{"id": "choice", "header": "Choice", "question": "Choose", "isOther": false, "isSecret": false, "options": null}]
+                                })).unwrap(),
+                            }
+                        } else {
+                            upstream::ServerRequest::CommandExecutionRequestApproval {
+                                request_id: wire_id.clone(),
+                                params: serde_json::from_value(json!({
+                                    "threadId": "thread", "turnId": "turn", "itemId": "item", "startedAtMs": 0,
+                                    "command": "echo test"
+                                })).unwrap(),
+                            }
+                        };
+                        processor.process_server_request(server, runtime.to_string(), &request);
+                        client.app_store.apply_ui_event(&events.try_recv().unwrap());
+                    }
+                    client.sessions.write().unwrap().insert(
+                        server.to_string(),
+                        Arc::new(ServerSession::test_stub_with_runtime_resolve_handlers(
+                            make_server_config(server),
+                            handlers,
+                        )),
+                    );
+                }
+                // No thread runtime metadata exists: the request itself must route to pi.
+                if is_input {
+                    assert_eq!(client.app_store.snapshot().pending_user_inputs.len(), 4);
+                    client
+                        .respond_to_user_input(
+                            "server-b",
+                            "pi",
+                            "42",
+                            vec![PendingUserInputAnswer {
+                                question_id: "choice".into(),
+                                answers: vec!["yes".into()],
+                            }],
+                        )
+                        .await
+                        .unwrap();
+                    let pending = client.app_store.snapshot().pending_user_inputs;
+                    assert_eq!(pending.len(), 3);
+                    assert!(
+                        pending.iter().all(|request| request.server_id != "server-b"
+                            || request.runtime_kind != "pi")
+                    );
+                } else {
+                    assert_eq!(client.app_store.snapshot().pending_approvals.len(), 4);
+                    client
+                        .respond_to_approval("server-b", "pi", "42", ApprovalDecisionValue::Accept)
+                        .await
+                        .unwrap();
+                    let pending = client.app_store.snapshot().pending_approvals;
+                    assert_eq!(pending.len(), 3);
+                    assert!(
+                        pending.iter().all(|request| request.server_id != "server-b"
+                            || request.runtime_kind != "pi")
+                    );
+                }
+                let responses = sent.lock().unwrap();
+                assert_eq!(responses.len(), 1);
+                assert_eq!((responses[0].0, responses[0].1), ("server-b", "pi"));
+                assert_eq!(
+                    responses[0].2, wire_id,
+                    "the original numeric/string wire ID must survive"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_response_does_not_fall_back_when_originating_runtime_is_missing() {
+        let client = MobileClient::new();
+        let sent = Arc::new(StdMutex::new(0));
+        let observed = Arc::clone(&sent);
+        client.sessions.write().unwrap().insert(
+            "srv".into(),
+            Arc::new(ServerSession::test_stub_with_handlers(
+                make_server_config("srv"),
+                None,
+                Some(Arc::new(move |_, _| {
+                    *observed.lock().unwrap() += 1;
+                    Ok(())
+                })),
+                None,
+            )),
+        );
+        let mut request = make_user_input_request(PendingUserInputQuestion {
+            id: "question".into(),
+            header: None,
+            question: "Choose".into(),
+            is_other_allowed: false,
+            is_secret: false,
+            options: vec![],
+        });
+        request.runtime_kind = "pi".into();
+        client.app_store.replace_pending_user_inputs(vec![request]);
+        let result = client
+            .respond_to_user_input("srv", "pi", "req-1", vec![])
+            .await;
+        assert!(result.is_err());
+        assert_eq!(*sent.lock().unwrap(), 0);
+        assert_eq!(client.app_store.snapshot().pending_user_inputs.len(), 1);
     }
 
     fn make_server_config(server_id: &str) -> ServerConfig {
@@ -386,6 +526,127 @@ mod mobile_client_tests {
         client.normalize_thread_model_for_runtime("srv", "pi".to_string(), &mut model);
 
         assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
+    }
+
+    #[test]
+    fn normalizes_turn_reasoning_against_runtime_scoped_model_metadata() {
+        use codex_protocol::openai_models::ReasoningEffort as Effort;
+
+        let client = MobileClient::new();
+        client
+            .app_store
+            .upsert_server(&make_server_config("srv"), ServerHealthSnapshot::Connected);
+        let mut model = make_model_info("provider/shared", "shared", "pi".to_string());
+        model.supported_reasoning_efforts = [Effort::Low, Effort::Medium]
+            .into_iter()
+            .map(|effort| crate::types::ReasoningEffortOption {
+                reasoning_effort: effort.into(),
+                description: String::new(),
+            })
+            .collect();
+        client.app_store.update_server_models(
+            "srv",
+            Some(vec![
+                make_model_info("shared", "shared", "codex".to_string()),
+                model,
+                make_model_info("fast", "fast", "pi".to_string()),
+            ]),
+        );
+        let mut thread = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+        thread.model = Some("provider/shared".to_string());
+        client.app_store.upsert_thread_snapshot(thread);
+
+        for (server, selected, requested, expected) in [
+            ("srv", Some("shared"), Some(Effort::Low), Some(Effort::Low)),
+            (
+                "srv",
+                Some("shared"),
+                Some(Effort::High),
+                Some(Effort::Medium),
+            ),
+            (
+                "srv",
+                Some("provider/shared"),
+                Some(Effort::High),
+                Some(Effort::Medium),
+            ),
+            ("srv", Some("fast"), Some(Effort::High), None),
+            ("srv", Some("shared"), None, None),
+            (
+                "srv",
+                Some("unknown"),
+                Some(Effort::High),
+                Some(Effort::High),
+            ),
+            ("srv", None, Some(Effort::High), Some(Effort::Medium)),
+            (
+                "missing",
+                Some("shared"),
+                Some(Effort::High),
+                Some(Effort::High),
+            ),
+        ] {
+            let mut request = upstream::ClientRequest::TurnStart {
+                request_id: upstream::RequestId::Integer(1),
+                params: upstream::TurnStartParams {
+                    thread_id: "thread".to_string(),
+                    model: selected.map(str::to_string),
+                    effort: requested,
+                    ..Default::default()
+                },
+            };
+            client.normalize_model_selection_for_request(server, "pi".to_string(), &mut request);
+            let upstream::ClientRequest::TurnStart { params, .. } = request else {
+                unreachable!()
+            };
+            assert_eq!(
+                params.effort, expected,
+                "server={server} model={selected:?}"
+            );
+            if server == "srv" && selected == Some("shared") {
+                assert_eq!(params.model.as_deref(), Some("provider/shared"));
+            }
+        }
+
+        for (selected, requested, expected) in [
+            ("shared", Some(Effort::High), Some(Effort::Medium)),
+            ("fast", Some(Effort::High), None),
+            ("unknown", Some(Effort::High), Some(Effort::High)),
+            ("shared", None, None),
+        ] {
+            let mut request = upstream::ClientRequest::TurnStart {
+                request_id: upstream::RequestId::Integer(1),
+                params: upstream::TurnStartParams {
+                    thread_id: "thread".to_string(),
+                    model: Some("fast".to_string()),
+                    effort: requested,
+                    collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                        mode: codex_protocol::config_types::ModeKind::Plan,
+                        settings: codex_protocol::config_types::Settings {
+                            model: selected.to_string(),
+                            reasoning_effort: requested,
+                            developer_instructions: Some("Keep these instructions".to_string()),
+                        },
+                    }),
+                    ..Default::default()
+                },
+            };
+            client.normalize_model_selection_for_request("srv", "pi".to_string(), &mut request);
+            let upstream::ClientRequest::TurnStart { params, .. } = request else {
+                unreachable!()
+            };
+            assert_eq!(params.effort, expected);
+            let mode = params.collaboration_mode.expect("mode retained");
+            assert_eq!(mode.settings.reasoning_effort, expected, "model={selected}");
+            assert_eq!(mode.mode, codex_protocol::config_types::ModeKind::Plan);
+            assert_eq!(
+                mode.settings.developer_instructions.as_deref(),
+                Some("Keep these instructions")
+            );
+            if selected == "shared" {
+                assert_eq!(mode.settings.model, "provider/shared");
+            }
+        }
     }
 
     #[test]
@@ -1824,6 +2085,7 @@ mod mobile_client_tests {
     #[test]
     fn approval_request_id_prefers_seed_type_for_local_responses() {
         let approval = PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "42".to_string(),
             server_id: "srv".to_string(),
             kind: crate::types::ApprovalKind::Permissions,
@@ -1850,6 +2112,7 @@ mod mobile_client_tests {
     #[test]
     fn approval_request_id_falls_back_to_string_for_non_numeric_ids() {
         let approval = PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "req-42".to_string(),
             server_id: "srv".to_string(),
             kind: crate::types::ApprovalKind::Permissions,

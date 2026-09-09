@@ -20,6 +20,11 @@ use super::{
 
 pub(super) type HostKeyCallback = Arc<dyn Fn(&str) -> BoxFuture<'static, bool> + Send + Sync>;
 
+enum PreparedAuth<'a> {
+    Password(&'a str),
+    PrivateKey(PrivateKeyWithHashAlg),
+}
+
 pub(super) struct ClientHandler {
     pub(super) host_key_cb: HostKeyCallback,
     /// If the callback rejects the key we store the fingerprint so we can
@@ -61,6 +66,25 @@ impl SshClient {
         credentials: SshCredentials,
         host_key_callback: Box<dyn Fn(&str) -> BoxFuture<'static, bool> + Send + Sync>,
     ) -> Result<Self, SshError> {
+        let prepared_auth = match &credentials.auth {
+            SshAuth::Password(password) => PreparedAuth::Password(password),
+            SshAuth::PrivateKey {
+                key_pem,
+                passphrase,
+            } => {
+                let key = decode_secret_key(key_pem, passphrase.as_deref())
+                    .map_err(|e| SshError::AuthFailed(format!("bad private key: {e}")))?;
+                // Reject before connecting: RSA private signing can expose timing
+                // information even to an accepted host (RUSTSEC-2023-0071).
+                if key.algorithm().is_rsa() {
+                    return Err(SshError::AuthFailed(
+                        "RSA private keys are not supported; use an Ed25519 or ECDSA key instead"
+                            .into(),
+                    ));
+                }
+                PreparedAuth::PrivateKey(PrivateKeyWithHashAlg::new(Arc::new(key), None))
+            }
+        };
         let macos_keychain_password = if credentials.unlock_macos_keychain {
             match &credentials.auth {
                 SshAuth::Password(password) => Some(password.clone()),
@@ -80,7 +104,7 @@ impl SshClient {
             rejected_fingerprint: Arc::clone(&rejected_fp),
         };
 
-        let config = client::Config {
+        let mut config = client::Config {
             keepalive_interval: Some(KEEPALIVE_INTERVAL),
             keepalive_max: 3,
             inactivity_timeout: None,
@@ -90,6 +114,12 @@ impl SshClient {
             nodelay: true,
             ..Default::default()
         };
+        // russh advertises RSA even when its cryptographic feature is disabled.
+        config
+            .preferred
+            .key
+            .to_mut()
+            .retain(|algorithm| !algorithm.clone().is_rsa());
 
         let addr = format!("{}:{}", normalize_host(&credentials.host), credentials.port);
         info!(
@@ -159,8 +189,8 @@ impl SshClient {
             }
         };
 
-        let auth_result = match &credentials.auth {
-            SshAuth::Password(pw) => handle
+        let auth_result = match prepared_auth {
+            PreparedAuth::Password(pw) => handle
                 .authenticate_password(&credentials.username, pw)
                 .await
                 .map_err(|e| {
@@ -171,36 +201,17 @@ impl SshClient {
                     ));
                     SshError::AuthFailed(format!("{e}"))
                 })?,
-            SshAuth::PrivateKey {
-                key_pem,
-                passphrase,
-            } => {
-                let key = decode_secret_key(key_pem, passphrase.as_deref())
-                    .map_err(|e| SshError::AuthFailed(format!("bad private key: {e}")))?;
-                let key = PrivateKeyWithHashAlg::new(
-                    Arc::new(key),
-                    handle.best_supported_rsa_hash().await.map_err(|e| {
-                        warn!("SSH RSA hash negotiation failed addr={} error={:?}", addr, e);
-                        append_bridge_info_log(&format!(
-                            "ssh_auth_failed addr={} method=key_hash error_display={} error_debug={:?}",
-                            addr, e, e
-                        ));
-                        SshError::AuthFailed(format!("{e}"))
-                    })?
-                    .flatten(),
-                );
-                handle
-                    .authenticate_publickey(&credentials.username, key)
-                    .await
-                    .map_err(|e| {
-                        warn!("SSH key auth failed addr={} error={:?}", addr, e);
-                        append_bridge_info_log(&format!(
-                            "ssh_auth_failed addr={} method=key error_display={} error_debug={:?}",
-                            addr, e, e
-                        ));
-                        SshError::AuthFailed(format!("{e}"))
-                    })?
-            }
+            PreparedAuth::PrivateKey(key) => handle
+                .authenticate_publickey(&credentials.username, key)
+                .await
+                .map_err(|e| {
+                    warn!("SSH key auth failed addr={} error={:?}", addr, e);
+                    append_bridge_info_log(&format!(
+                        "ssh_auth_failed addr={} method=key error_display={} error_debug={:?}",
+                        addr, e, e
+                    ));
+                    SshError::AuthFailed(format!("{e}"))
+                })?,
         };
 
         if !auth_result.success() {

@@ -1,0 +1,37 @@
+[package]
+name = "remora-claude-remote-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Typed Claude Code Remote Control protocol, API, and transport primitives for Remora apps."
+
+[lib]
+name = "remora_claude_remote_control"
+path = "src/lib.rs"
+
+[[bin]]
+name = "remora-claude-remote-control"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+hostname = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

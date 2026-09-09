@@ -170,8 +170,8 @@ pub(crate) trait RelayTransportPort: Send + Sync {
 #[async_trait]
 pub(crate) trait RelayAuthoritativeRepairPort: Send + Sync {
     /// Implementations must consume the supplied absolute operation deadline.
-    /// Native adapters additionally fence their durable commit so a callback
-    /// that outlives the Rust future cannot overwrite a newer repair.
+    /// Repair validates the owning journal generation and authenticated host
+    /// state before committing a projection. Cancellation drops read-side work.
     async fn repair(
         &self,
         host_id: &RelayHostId,

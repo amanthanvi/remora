@@ -54,7 +54,18 @@ final class AppState {
     var showModelSelector = false
     var showSettings = false
     var pendingThreadNavigation: ThreadKey?
-    private var dismissedPendingUserInputIds: Set<String> = []
+    private struct PendingInputIdentity: Hashable {
+        let serverId: String
+        let runtimeKind: String
+        let requestId: String
+
+        init(_ request: PendingUserInputRequest) {
+            serverId = request.serverId
+            runtimeKind = request.runtimeKind
+            requestId = request.id
+        }
+    }
+    private var dismissedPendingUserInputIds: Set<PendingInputIdentity> = []
     private var threadPermissionOverrides: [String: ThreadPermissionOverride] = [:]
     var approvalPolicy: String {
         didSet {
@@ -113,12 +124,12 @@ final class AppState {
         collapsedSessionFolders.contains(folderPath)
     }
 
-    func dismissPendingUserInput(id: String) {
-        dismissedPendingUserInputIds.insert(id)
+    func dismissPendingUserInput(request: PendingUserInputRequest) {
+        dismissedPendingUserInputIds.insert(PendingInputIdentity(request))
     }
 
-    func isPendingUserInputDismissed(id: String) -> Bool {
-        dismissedPendingUserInputIds.contains(id)
+    func isPendingUserInputDismissed(request: PendingUserInputRequest) -> Bool {
+        dismissedPendingUserInputIds.contains(PendingInputIdentity(request))
     }
 
     func approvalPolicy(for threadKey: ThreadKey?) -> String {

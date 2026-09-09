@@ -2,9 +2,16 @@ import Foundation
 import UniformTypeIdentifiers
 import UIKit
 
-struct PreparedImageAttachment {
+struct PreparedImageAttachment: Sendable {
     let data: Data
     let mimeType: String
+    private let dataURI: String
+
+    init(data: Data, mimeType: String) {
+        self.data = data
+        self.mimeType = mimeType
+        dataURI = "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
 
     var userInput: AppUserInput {
         .image(url: dataURI)
@@ -12,10 +19,6 @@ struct PreparedImageAttachment {
 
     var chatImage: ChatImage {
         ChatImage(data: data, mimeType: mimeType)
-    }
-
-    private var dataURI: String {
-        "data:\(mimeType);base64,\(data.base64EncodedString())"
     }
 }
 
@@ -28,9 +31,12 @@ enum ConversationAttachmentSupport {
 
     static let supportedFileContentTypes: [UTType] = [.data]
 
-    static func prepareImage(_ image: UIImage) -> PreparedImageAttachment? {
-        guard let encodedImage = encodedImageData(for: image) else { return nil }
-        return PreparedImageAttachment(data: encodedImage.data, mimeType: encodedImage.mimeType)
+    static func prepareImage(_ image: UIImage?) async -> PreparedImageAttachment? {
+        guard let image else { return nil }
+        return await Task.detached(priority: .userInitiated) { () -> PreparedImageAttachment? in
+            guard let encodedImage = encodedImageData(for: image) else { return nil }
+            return PreparedImageAttachment(data: encodedImage.data, mimeType: encodedImage.mimeType)
+        }.value
     }
 
     static func loadImageFile(at url: URL) -> UIImage? {

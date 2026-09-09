@@ -232,16 +232,19 @@ impl MobileClient {
         }
     }
 
-    pub async fn connect_remote_over_slingshot(
+    pub(crate) async fn connect_remote_over_slingshot(
         &self,
         server_id: String,
         display_name: String,
-        base_url: String,
+        endpoint: crate::slingshot_url::SlingshotConnectionUrl,
         access_token: String,
         account_id: String,
-        environment_id: String,
         step_up_token: String,
     ) -> Result<String, TransportError> {
+        let crate::slingshot_url::SlingshotConnectionUrl {
+            base_url,
+            environment_id,
+        } = endpoint;
         if self.existing_active_session(server_id.as_str()).is_some() {
             info!("MobileClient: reusing existing Slingshot server session {server_id}");
             return Ok(server_id);

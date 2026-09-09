@@ -14,10 +14,10 @@ pub(super) async fn handle_dynamic_tool_call_request(
     app_store: Arc<AppStoreReducer>,
     widget_waiters: Arc<StdMutex<HashMap<String, WidgetWaiter>>>,
     saved_apps_directory: Arc<StdMutex<Option<String>>>,
-    request_id: upstream::RequestId,
-    params: upstream::DynamicToolCallParams,
+    request: (upstream::RequestId, upstream::DynamicToolCallParams),
     runtime_kind: AgentRuntimeKind,
 ) -> Result<(), RpcError> {
+    let (request_id, params) = request;
     // `show_widget` routing: if a `widget_waiter` is registered for the
     // thread (the Update-overlay path), fulfill it and skip auto-save —
     // the waiter owns this call. Otherwise, run the auto-save upsert so
@@ -91,7 +91,7 @@ pub(super) fn snapshot_dynamic_tool_sessions(
             config: session.config().clone(),
         })
         .collect::<Vec<_>>();
-    targets.sort_by(|lhs, rhs| dynamic_tool_server_name(lhs).cmp(&dynamic_tool_server_name(rhs)));
+    targets.sort_by_key(dynamic_tool_server_name);
     targets
 }
 

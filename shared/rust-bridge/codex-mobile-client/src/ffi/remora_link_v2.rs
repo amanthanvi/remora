@@ -73,6 +73,10 @@ const JOURNAL_ENVELOPE_SCHEMA: u32 = 1;
 const CLOSE_CODE: u32 = 0x22;
 const DEFAULT_HOST_DISPLAY_NAME: &str = "Remote Host";
 
+#[path = "remora_link_relay.rs"]
+mod relay;
+pub(crate) use relay::PairedHostRelayRepair;
+
 // MARK: - Native callback boundaries
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -797,18 +801,17 @@ impl ConfiguredRemoraLink {
         cache
             .by_offer
             .retain(|_, cached| cached.offer.host_id != offer.host_id);
-        if cache.by_offer.len() >= MAX_CACHED_INVITATIONS {
-            if let Some(evicted) = cache.by_offer.keys().next().cloned() {
-                if let Some(evicted) = cache.by_offer.remove(&evicted) {
-                    let evicted_host_id = evicted.offer.host_id;
-                    if !cache
-                        .by_offer
-                        .values()
-                        .any(|cached| cached.offer.host_id == evicted_host_id)
-                    {
-                        cache.by_host.remove(&evicted_host_id);
-                    }
-                }
+        if cache.by_offer.len() >= MAX_CACHED_INVITATIONS
+            && let Some(evicted) = cache.by_offer.keys().next().cloned()
+            && let Some(evicted) = cache.by_offer.remove(&evicted)
+        {
+            let evicted_host_id = evicted.offer.host_id;
+            if !cache
+                .by_offer
+                .values()
+                .any(|cached| cached.offer.host_id == evicted_host_id)
+            {
+                cache.by_host.remove(&evicted_host_id);
             }
         }
         cache.by_host.insert(offer.host_id.clone(), invite.clone());
@@ -1164,6 +1167,8 @@ impl AppClient {
         )
         .await;
         configured.remove_invitation(&host_id).await;
+        drop(_configuration);
+        self.inner.retire_paired_relay(&host_id).await;
         let outcome = outcome?;
         match outcome {
             MutationOutcomeV2::Revoked => Ok(AppRemoraLinkRevocationOutcome::Revoked),
@@ -1185,6 +1190,8 @@ impl AppClient {
         )
         .await;
         configured.remove_invitation(&host_id).await;
+        drop(_configuration);
+        self.inner.retire_paired_relay(&host_id).await;
         let outcome = outcome?;
         Ok(outcome.into())
     }
@@ -1307,7 +1314,7 @@ impl crate::MobileClient {
         project_remora_link_disconnected(&self.app_store, host_id);
     }
 
-    async fn disconnect_all_remora_link_sessions(&self) {
+    pub(crate) async fn disconnect_all_remora_link_sessions(&self) {
         if let Some(configured) = remora_link_read(&self.remora_link).clone() {
             configured.host.shell_connections.close_all();
         }

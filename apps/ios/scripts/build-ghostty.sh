@@ -65,7 +65,36 @@ ZIG_CACHE_DIR="${GHOSTTY_ZIG_CACHE_DIR:-$STAGING_DIR/zig-cache}"
 MACOS_SDK_SHIM_DIR="$ZIG_CACHE_DIR/macos-sdk-shim/MacOSX.sdk"
 
 mkdir -p "$GENERATED_DIR/Headers" "$GENERATED_DIR/ios-device" "$GENERATED_DIR/ios-sim" "$GENERATED_DIR/ios-macabi" "$STAGING_DIR/bin"
-rm -rf "$ZIG_CACHE_DIR"
+
+# Zig tracks source/options, but Ghostty's Metal run steps inherit their Xcode
+# environment without hashing it. Retain warm builds only for the same tools/SDKs.
+TOOLCHAIN_FINGERPRINT="$(
+    set -e
+    {
+        printf '%s\n' "$XCODE_DEVELOPER_DIR" "$CLT_DEVELOPER_DIR" "$METAL_TOOLCHAINS" "$METAL_TOOLCHAIN_DIR"
+        shasum -a 256 "$ZIG_BIN"
+        env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" /usr/bin/xcodebuild -version
+        for sdk in iphoneos iphonesimulator macosx; do
+            env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" /usr/bin/xcrun --sdk "$sdk" --show-sdk-path
+            env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" /usr/bin/xcrun --sdk "$sdk" --show-sdk-build-version
+        done
+        for settings in "$CLT_DEVELOPER_DIR"/SDKs/MacOSX.sdk/SDKSettings.{json,plist}; do
+            if [ -f "$settings" ]; then shasum -a 256 "$settings"; fi
+        done
+        for tool in metal metallib; do
+            if [ -n "$METAL_TOOLCHAIN_DIR" ]; then
+                tool_path="$METAL_TOOLCHAIN_DIR/usr/bin/$tool"
+            else
+                tool_path="$(env DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" TOOLCHAINS="$METAL_TOOLCHAINS" \
+                    /usr/bin/xcrun --sdk iphoneos --find "$tool")"
+            fi
+            shasum -a 256 "$tool_path"
+        done
+    } | shasum -a 256 | cut -d ' ' -f 1
+)"
+if [ "$(cat "$ZIG_CACHE_DIR/toolchain-fingerprint" 2>/dev/null || true)" != "$TOOLCHAIN_FINGERPRINT" ]; then
+    rm -rf "$ZIG_CACHE_DIR"
+fi
 mkdir -p "$ZIG_CACHE_DIR/global" "$ZIG_CACHE_DIR/local"
 
 if [ ! -d "$XCODE_DEVELOPER_DIR/Platforms/iPhoneOS.platform" ]; then
@@ -249,6 +278,7 @@ build_slice "ios-sim" "aarch64-ios.18.0-simulator" "apple_a17" "$GENERATED_DIR/i
 build_slice "ios-macabi-arm64" "aarch64-ios.18.0-macabi" "apple_m1" "$GENERATED_DIR/ios-macabi/libghostty.a"
 
 cp "$GHOSTTY_DIR/include/ghostty.h" "$GENERATED_DIR/Headers/ghostty.h"
+printf '%s\n' "$TOOLCHAIN_FINGERPRINT" > "$ZIG_CACHE_DIR/toolchain-fingerprint"
 
 echo "==> Ghostty iOS artifacts installed:"
 echo "    $GENERATED_DIR/Headers/ghostty.h"

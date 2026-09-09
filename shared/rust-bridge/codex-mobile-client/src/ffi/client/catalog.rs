@@ -88,7 +88,7 @@ pub(super) fn append_missing_amp_mode_models(models: &mut Vec<types::ModelInfo>)
         let mode_name = mode.id.clone();
         let prefixed_mode = format!("amp/{mode_name}");
         let exists = models.iter().any(|existing| {
-            if existing.agent_runtime_kind != "amp".to_string() {
+            if existing.agent_runtime_kind != "amp" {
                 return false;
             }
             let id = existing.id.trim().to_ascii_lowercase();

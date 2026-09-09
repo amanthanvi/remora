@@ -1,9 +1,8 @@
 package com.remora.android.state
 
-import com.remora.android.BuildConfig
-import com.remora.android.core.bridge.UniffiInit
 import com.remora.android.util.LLog
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -13,6 +12,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
@@ -38,7 +41,6 @@ import uniffi.codex_mobile_client.MessageParser
 import uniffi.codex_mobile_client.ReconnectController
 import uniffi.codex_mobile_client.ServerBridge
 import uniffi.codex_mobile_client.SshBridge
-import uniffi.codex_mobile_client.TerminalSshTrustStore
 import uniffi.codex_mobile_client.ThreadKey
 import uniffi.codex_mobile_client.AppListThreadsRequest
 import uniffi.codex_mobile_client.AppLoginAccountRequest
@@ -46,7 +48,6 @@ import uniffi.codex_mobile_client.AppRefreshModelsRequest
 import uniffi.codex_mobile_client.AppReadThreadRequest
 import uniffi.codex_mobile_client.AppStartThreadRequest
 import uniffi.codex_mobile_client.registerAndroidTools
-import uniffi.codex_mobile_client.registerSshHostTrustStore
 import uniffi.codex_mobile_client.threadPermissionsAreAuthoritative
 
 class LocalAccountLoginRequiredException(val serverId: String) :
@@ -93,6 +94,7 @@ class AppModel private constructor(context: android.content.Context) {
         val shared: AppModel
             get() = _instance ?: throw IllegalStateException("AppModel not initialized — call init(context) first")
 
+        @Synchronized
         fun init(context: android.content.Context): AppModel {
             if (_instance == null) {
                 val appContext = context.applicationContext
@@ -129,86 +131,42 @@ class AppModel private constructor(context: android.content.Context) {
     val remoraLinkJournalBackend: AndroidRemoraLinkJournalBackend
     val remoraLinkTransportIdentityBackend: AndroidRemoraLinkTransportIdentityBackend
     val remoraLinkDeviceKeyBackend: AndroidRemoraLinkDeviceKeyBackend
-    private val remoraLinkConfigurationScope =
-        CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private lateinit var remoraLinkConfigurationGate: RemoraLinkConfigurationGate
+    private val runtime = AndroidRelayRuntime.get(context)
     val remoraLinkAvailable: StateFlow<Boolean>
-        get() = remoraLinkConfigurationGate.available
+        get() = runtime.available
     val appContext: android.content.Context = context
     init {
-        UniffiInit.ensure(context)
-        // Every Rust SSH path (app-server connect, SSH bridge, background
-        // reconnect) verifies host keys against this store. The terminal
-        // hands its own store in per session; these paths have no such seam,
-        // so register the same encrypted backend once per process.
-        registerSshHostTrustStore(TerminalSshTrustStore(SshTrustStore(context)))
-        registerBundledCliTools()
-        LLog.bootstrap(context)
         store = AppStore()
-        client = AppClient()
-        // The show_widget auto-save hook on the Rust side persists to this
-        // directory. Without setting it at launch the hook is a silent no-op.
-        client.setSavedAppsDirectory(SavedAppsDirectory.path(context))
-        client.setSlingshotCredentialsDirectory(MobilePreferencesDirectory.path(context))
+        client = runtime.client
         discovery = DiscoveryBridge()
         serverBridge = ServerBridge()
         ssh = SshBridge()
         sshSessionStore = SshSessionStore(ssh)
         parser = MessageParser()
-        reconnectController = ReconnectController()
-        reconnectController.setCredentialProvider(
-            KotlinSshCredentialProvider(SshCredentialStore(context))
-        )
-        reconnectController.setSlingshotCredentialProvider(
-            KotlinSlingshotCredentialProvider(ChatGPTOAuthTokenStore(context))
-        )
+        reconnectController = runtime.reconnectController
         launchState = AppLaunchState(context)
         reachability = NetworkReachabilityObserver(context, this)
         reachability.start()
 
-        remoraLinkJournalBackend = AndroidRemoraLinkJournalBackend(context)
-        remoraLinkTransportIdentityBackend = AndroidRemoraLinkTransportIdentityBackend(context)
-        remoraLinkDeviceKeyBackend = AndroidRemoraLinkDeviceKeyBackend(
-            RemoraLinkDeviceKeyProvider(
-                // The provider additionally checks BuildConfig.DEBUG and emulator identity;
-                // passing false in release makes software custody impossible by construction.
-                allowDebugEmulatorSoftwareAssurance = BuildConfig.DEBUG,
-            ),
-        )
-        remoraLinkConfigurationGate = RemoraLinkConfigurationGate(remoraLinkConfigurationScope) {
-            client.configureRemoraLink(
-                journal = remoraLinkJournalBackend,
-                transportIdentity = remoraLinkTransportIdentityBackend,
-                deviceKeys = remoraLinkDeviceKeyBackend,
-            )
-        }
+        remoraLinkJournalBackend = runtime.journal
+        remoraLinkTransportIdentityBackend = runtime.transportIdentity
+        remoraLinkDeviceKeyBackend = runtime.deviceKeys
         retryRemoraLinkConfiguration()
 
     }
 
     /** Retry-safe process-lifetime setup; callers may retry after a fail-closed preflight. */
     fun retryRemoraLinkConfiguration(): Job =
-        remoraLinkConfigurationGate.configureInSeparateJob().also { job ->
-            job.invokeOnCompletion {
-                remoraLinkConfigurationGate.lastFailure?.let { failure ->
-                    LLog.w(
-                        "AppModel",
-                        "Remora Link v2 configuration unavailable",
-                        fields = mapOf(
-                            "errorType" to failure.javaClass.simpleName,
-                            "error" to failure.message,
-                        ),
-                    )
-                }
-            }
-        }
+        runtime.retryLinkConfiguration()
 
     /** All Remora Link operations must pass the configured v2 gate. */
     suspend fun <T> withRemoraLinkV2(operation: suspend (AppClient) -> T): T =
-        remoraLinkConfigurationGate.runWhileAvailable { operation(client) }
+        runtime.withLink(operation)
 
     // --- Observable state ----------------------------------------------------
 
+    private val projectionOwner = AppModelProjectionOwner()
+    private val navigationIntent = AppModelNavigationIntent()
     private val _snapshot = MutableStateFlow<AppSnapshotRecord?>(null)
     val snapshot: StateFlow<AppSnapshotRecord?> = _snapshot.asStateFlow()
 
@@ -217,7 +175,8 @@ class AppModel private constructor(context: android.content.Context) {
     private val loadingModelServerIds = mutableSetOf<String>()
     private val loadingRateLimitServerIds = mutableSetOf<String>()
     private val recentConversationMetadataLoads = mutableMapOf<String, Long>()
-    private val cachedThreadSnapshots = mutableMapOf<ThreadKey, AppThreadSnapshot>()
+    private val cachedThreadSnapshots = AppModelThreadSnapshotCache()
+    private val removedThreadKeys = mutableSetOf<ThreadKey>()
     private val sessionListMutex = Mutex()
     private var pendingActiveThreadHydrationKey: ThreadKey? = null
     private var pendingActiveThreadHydrationJob: Job? = null
@@ -246,6 +205,79 @@ class AppModel private constructor(context: android.content.Context) {
 
     private val _composerDrafts = MutableStateFlow<Map<ThreadKey, ComposerDraft>>(emptyMap())
     val composerDrafts: StateFlow<Map<ThreadKey, ComposerDraft>> = _composerDrafts.asStateFlow()
+    val recoverableComposerDrafts = ComposerDraftRecoveryStore(
+        persistenceFactory = { androidComposerDraftRecoveryPersistence(appContext) },
+    )
+    private val homeComposerDrafts = MutableStateFlow<Map<ComposerDraftDestination.Home, ComposerDraft>>(emptyMap())
+
+    fun homeComposerDraft(destination: ComposerDraftDestination.Home): ComposerDraft =
+        homeComposerDrafts.value[destination] ?: ComposerDraft.EMPTY
+
+    fun setHomeComposerDraft(destination: ComposerDraftDestination.Home, draft: ComposerDraft) {
+        homeComposerDrafts.update { current ->
+            if (draft.isEmpty) current - destination else current + (destination to draft)
+        }
+    }
+
+    suspend fun beginComposerSubmission(
+        destination: ComposerDraftDestination,
+        draft: ComposerDraft,
+        payload: AppComposerPayload,
+        threadStartRequest: AppStartThreadRequest? = null,
+    ): Long? = try {
+        recoverableComposerDrafts.begin(destination, draft, payload, threadStartRequest)
+    } catch (_: ComposerDraftPersistenceException) {
+        _lastError.value = COMPOSER_RECOVERY_STORAGE_ERROR
+        null
+    }
+
+    suspend fun restoreComposerDraft(id: Long, current: ComposerDraft): ComposerDraft? = try {
+        recoverableComposerDrafts.restore(id, current)
+    } catch (_: ComposerDraftPersistenceException) {
+        _lastError.value = COMPOSER_RECOVERY_STORAGE_ERROR
+        null
+    }
+
+    fun discardComposerDraft(id: Long) = launchComposerRecovery {
+        try {
+            recoverableComposerDrafts.discard(id)
+        } catch (_: ComposerDraftPersistenceException) {
+            _lastError.value = COMPOSER_RECOVERY_STORAGE_ERROR
+        }
+    }
+
+    /** Preparation and restore survive a composer's navigation or teardown. */
+    fun launchComposerRecovery(operation: suspend () -> Unit): Job = scope.launch(Dispatchers.Main.immediate) {
+        operation()
+    }
+
+    fun replaceComposerDraftIfUnchanged(
+        destination: ComposerDraftDestination,
+        expected: ComposerDraft,
+        replacement: ComposerDraft,
+    ): Boolean {
+        when (destination) {
+            is ComposerDraftDestination.Conversation -> {
+                if (composerDraft(destination.key) != expected) return false
+                setComposerDraft(destination.key, replacement)
+            }
+            is ComposerDraftDestination.Home -> {
+                if (homeComposerDraft(destination) != expected) return false
+                setHomeComposerDraft(destination, replacement)
+            }
+        }
+        return true
+    }
+
+    /** The submission owns its attachment handles even after its composer disappears. */
+    fun submitComposerDraft(id: Long, operation: suspend () -> Unit): Job = scope.launch {
+        try {
+            withContext(Dispatchers.IO) { recoverableComposerDrafts.submit(id, operation) }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            _lastError.value = e.message
+        }
+    }
 
     fun composerDraft(threadKey: ThreadKey): ComposerDraft =
         _composerDrafts.value[threadKey] ?: ComposerDraft.EMPTY
@@ -261,7 +293,10 @@ class AppModel private constructor(context: android.content.Context) {
     }
 
     fun updateComposerDraft(threadKey: ThreadKey, transform: (ComposerDraft) -> ComposerDraft) {
-        setComposerDraft(threadKey, transform(composerDraft(threadKey)))
+        _composerDrafts.update { current ->
+            val draft = transform(current[threadKey] ?: ComposerDraft.EMPTY)
+            if (draft.isEmpty) current - threadKey else current + (threadKey to draft)
+        }
     }
 
     fun clearComposerDraft(threadKey: ThreadKey) {
@@ -319,56 +354,98 @@ class AppModel private constructor(context: android.content.Context) {
     // --- Subscription lifecycle ----------------------------------------------
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var subscriptionJob: Job? = null
-    private val lifecycleLock = Any()
-    private var activeClients: Int = 0
-
-    fun start() {
-        if (!remoraLinkAvailable.value) retryRemoraLinkConfiguration()
-        val shouldStart = synchronized(lifecycleLock) {
-            activeClients += 1
-            subscriptionJob?.isActive != true
+    init {
+        scope.launch { recoverableComposerDrafts.load() }
+    }
+    private val activeThreadRequests = Channel<AppModelActivationRequest>(Channel.CONFLATED).also { requests ->
+        scope.launch {
+            for (request in requests) {
+                if (!projectionOwner.read { navigationIntent.beginDispatch(request) }) continue
+                try {
+                    withContext(Dispatchers.IO) { store.setActiveThread(request.key) }
+                    projectionOwner.write { navigationIntent.completed(request) }
+                    snapshotRefreshRequests.trySend(Unit)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    projectionOwner.read { navigationIntent.failed(request) }
+                    snapshotRefreshRequests.trySend(Unit)
+                    _lastError.value = e.message
+                }
+            }
         }
-        if (!shouldStart) return
-        subscriptionJob = scope.launch {
+    }
+    private val snapshotRefreshRequests = Channel<Unit>(Channel.CONFLATED).also { requests ->
+        scope.launch {
+            for (request in requests) {
+                delay(100)
+                refreshSnapshot()
+                val activeKey = projectionOwner.read { _snapshot.value?.activeThread }
+                if (activeKey != null && threadSnapshot(activeKey) == null) {
+                    refreshThreadSnapshot(activeKey)
+                }
+                scheduleDeferredActiveThreadHydrationIfNeeded(activeKey)
+            }
+        }
+    }
+    private val subscriptionOwner = AppModelSubscriptionOwner(
+        projection = projectionOwner,
+        scope = scope,
+        onStop = {
+            pendingActiveThreadHydrationJob?.cancel()
+            pendingActiveThreadHydrationJob = null
+            pendingActiveThreadHydrationKey = null
+        },
+        collect = {
             try {
                 val subscription: AppStoreSubscription = store.subscribeUpdates()
                 refreshSnapshot()
                 while (true) {
                     try {
                         val update: AppStoreUpdateRecord = subscription.nextUpdate()
+                        currentCoroutineContext().ensureActive()
                         handleUpdate(update)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         LLog.e("AppModel", "AppStore subscription loop failed", e)
                         throw e
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 LLog.e("AppModel", "AppModel.start() subscription failed", e)
                 _lastError.value = e.message
             }
-        }
+        },
+    )
+
+    fun start() {
+        if (!remoraLinkAvailable.value) retryRemoraLinkConfiguration()
+        subscriptionOwner.start()
     }
 
     fun stop() {
-        val shouldStop = synchronized(lifecycleLock) {
-            activeClients = (activeClients - 1).coerceAtLeast(0)
-            activeClients == 0
-        }
-        if (!shouldStop) return
-        subscriptionJob?.cancel()
-        subscriptionJob = null
-        pendingActiveThreadHydrationJob?.cancel()
-        pendingActiveThreadHydrationJob = null
-        pendingActiveThreadHydrationKey = null
+        subscriptionOwner.stop()
     }
 
     // --- Snapshot refresh -----------------------------------------------------
 
     suspend fun refreshSnapshot() {
         try {
-            val snap = store.snapshot()
-            applySnapshot(snap)
+            val (ticket, navigationFence) = projectionOwner.read {
+                projectionOwner.readTicket() to navigationIntent.snapshotFence()
+            }
+            val snap = withContext(Dispatchers.IO) { store.snapshot() }
+            val adjusted = applySavedServerNames(snap)
+            if (!projectionOwner.commitIfCurrent(ticket) { applySnapshot(adjusted, navigationFence) }) {
+                // Retry off the caller's path, with one bounded pending refresh.
+                // Navigation and stream updates must not starve an awaiting UI action.
+                snapshotRefreshRequests.trySend(Unit)
+                return
+            }
+            persistWakeMacs(adjusted)
             val serverSummary = snap.servers.joinToString(separator = " | ") { server ->
                 "${server.serverId}:${server.displayName}:${server.host}:${server.port}:${server.health}"
             }
@@ -377,20 +454,31 @@ class AppModel private constructor(context: android.content.Context) {
                 "snapshot refreshed",
                 fields = mapOf("servers" to snap.servers.size, "summary" to serverSummary),
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             _lastError.value = e.message
         }
     }
 
-    private fun applySnapshot(snapshot: AppSnapshotRecord?) {
-        val merged = snapshot
-            ?.let(::applySavedServerNames)
-            ?.let(::mergeCachedThreadSnapshots)
-        _snapshot.value = merged
-        if (merged != null) {
-            persistWakeMacs(merged)
-            merged.threads.forEach(::cacheThreadSnapshot)
-            _lastError.value = null
+    private fun applySnapshot(snapshot: AppSnapshotRecord?, navigationFence: Long) {
+        return projectionOwner.write {
+            val liveKeys = snapshot?.let { state ->
+                (state.threads.map { it.key } + state.sessionSummaries.map { it.key }).toSet()
+            }.orEmpty()
+            val missingKeys = cachedThreadSnapshots.prune(liveKeys)
+            removedThreadKeys.addAll(missingKeys)
+            missingKeys.forEach(navigationIntent::removed)
+            snapshot?.threads?.forEach { removedThreadKeys.remove(it.key) }
+            val merged = snapshot?.let(::mergeCachedThreadSnapshots)?.let {
+                it.copy(activeThread = navigationIntent.projectSnapshot(it.activeThread, navigationFence)
+                    ?.takeUnless(removedThreadKeys::contains))
+            }
+            _snapshot.value = merged
+            if (merged != null) {
+                merged.threads.forEach(::cacheThreadSnapshot)
+                _lastError.value = null
+            }
         }
     }
 
@@ -451,17 +539,19 @@ class AppModel private constructor(context: android.content.Context) {
     /// so home-list derived fields track streaming items without waiting
     /// for a full snapshot rebuild.
     private fun applySessionSummary(summary: AppSessionSummary) {
-        val current = _snapshot.value ?: return
         val adjusted = applySavedServerName(summary)
-        val existingIndex = current.sessionSummaries.indexOfFirst { it.key == adjusted.key }
-        val updatedSummaries = current.sessionSummaries.toMutableList().apply {
-            if (existingIndex >= 0) {
-                this[existingIndex] = adjusted
-            } else {
-                add(adjusted)
+        return projectionOwner.write {
+            val current = _snapshot.value ?: return@write
+            val existingIndex = current.sessionSummaries.indexOfFirst { it.key == adjusted.key }
+            val updatedSummaries = current.sessionSummaries.toMutableList().apply {
+                if (existingIndex >= 0) {
+                    this[existingIndex] = adjusted
+                } else {
+                    add(adjusted)
+                }
             }
+            _snapshot.value = current.copy(sessionSummaries = updatedSummaries)
         }
-        _snapshot.value = current.copy(sessionSummaries = updatedSummaries)
     }
 
     suspend fun restartLocalServer() {
@@ -578,14 +668,14 @@ class AppModel private constructor(context: android.content.Context) {
         if (hasFreshConversationMetadata(serverId)) return
         loadAvailableModelsIfNeeded(serverId)
         loadRateLimitsIfNeeded(serverId)
-        recentConversationMetadataLoads[serverId] = System.currentTimeMillis()
+        projectionOwner.read { recentConversationMetadataLoads[serverId] = System.currentTimeMillis() }
     }
 
     suspend fun loadAvailableModelsIfNeeded(serverId: String) {
         val server = snapshot.value?.servers?.firstOrNull { it.serverId == serverId } ?: return
         if (!server.isConnected) return
         if (server.availableModels != null) return
-        if (!loadingModelServerIds.add(serverId)) return
+        if (!projectionOwner.read { loadingModelServerIds.add(serverId) }) return
         try {
             client.refreshModels(
                 serverId,
@@ -595,7 +685,7 @@ class AppModel private constructor(context: android.content.Context) {
         } catch (e: Exception) {
             _lastError.value = e.message
         } finally {
-            loadingModelServerIds.remove(serverId)
+            projectionOwner.read { loadingModelServerIds.remove(serverId) }
         }
     }
 
@@ -604,14 +694,14 @@ class AppModel private constructor(context: android.content.Context) {
         if (!server.isConnected) return
         if (server.account == null) return
         if (server.rateLimits != null) return
-        if (!loadingRateLimitServerIds.add(serverId)) return
+        if (!projectionOwner.read { loadingRateLimitServerIds.add(serverId) }) return
         try {
             client.refreshRateLimits(serverId)
             refreshSnapshot()
         } catch (e: Exception) {
             _lastError.value = e.message
         } finally {
-            loadingRateLimitServerIds.remove(serverId)
+            projectionOwner.read { loadingRateLimitServerIds.remove(serverId) }
         }
     }
 
@@ -630,7 +720,7 @@ class AppModel private constructor(context: android.content.Context) {
     suspend fun ensureLocalAuthForThreadStart(serverId: String): Boolean {
         val server = snapshot.value?.servers?.firstOrNull { it.serverId == serverId } ?: return true
         if (!server.isLocal) return true
-        if (server.account != null) return true
+        if (!server.needsAccountLogin) return true
 
         if (restoreStoredLocalAuthIfNeeded(serverId, reason = "startThread")) {
             return true
@@ -641,7 +731,7 @@ class AppModel private constructor(context: android.content.Context) {
 
     private suspend fun restoreStoredLocalAuthIfNeeded(serverId: String, reason: String): Boolean {
         val server = snapshot.value?.servers?.firstOrNull { it.serverId == serverId } ?: return false
-        if (!server.isLocal || server.account != null) return false
+        if (!server.isLocal || !server.needsAccountLogin) return false
 
         val apiKeyStore = OpenAIApiKeyStore(appContext)
         val storedApiKey = apiKeyStore.load()?.trim().orEmpty()
@@ -658,7 +748,7 @@ class AppModel private constructor(context: android.content.Context) {
         )
         restoreStoredLocalAuthState(serverId)
         refreshSnapshot()
-        return snapshot.value?.servers?.firstOrNull { it.serverId == serverId }?.account != null
+        return snapshot.value?.servers?.firstOrNull { it.serverId == serverId }?.needsAccountLogin == false
     }
 
     suspend fun restoreStoredLocalChatGptAuth(serverId: String): Boolean {
@@ -758,9 +848,8 @@ class AppModel private constructor(context: android.content.Context) {
                     includeTurns = false,
                 ),
             )
-            val threadSnapshot = store.threadSnapshot(nextKey)
+            val threadSnapshot = readAndApplyThreadSnapshot(nextKey)
             if (threadSnapshot != null) {
-                applyThreadSnapshot(threadSnapshot)
                 launchState.syncFromThread(threadSnapshot)
             } else {
                 refreshSnapshot()
@@ -774,10 +863,13 @@ class AppModel private constructor(context: android.content.Context) {
     }
 
     fun activateThread(key: ThreadKey?) {
-        restoreCachedThreadSnapshotIfNeeded(key)
-        updateActiveThread(key)
-        store.setActiveThread(key)
-        scheduleDeferredActiveThreadHydrationIfNeeded(key)
+        projectionOwner.read {
+            val request = navigationIntent.request(key)
+            restoreCachedThreadSnapshotIfNeeded(key)
+            updateActiveThread(key)
+            scheduleDeferredActiveThreadHydrationIfNeeded(key)
+            activeThreadRequests.trySend(request)
+        }
     }
 
     suspend fun startThread(
@@ -871,10 +963,8 @@ class AppModel private constructor(context: android.content.Context) {
                     ),
                 )
             }
-            val threadSnapshot = store.threadSnapshot(nextKey)
-            if (threadSnapshot != null) {
-                applyThreadSnapshot(threadSnapshot)
-            } else {
+            val threadSnapshot = readAndApplyThreadSnapshot(nextKey)
+            if (threadSnapshot == null) {
                 refreshThreadSnapshot(nextKey)
             }
             _lastError.value = null
@@ -902,7 +992,7 @@ class AppModel private constructor(context: android.content.Context) {
      * store reconciliation always complete.
      */
     fun loadInitialTurns(key: ThreadKey, limit: UInt = INITIAL_TURN_PAGE_LIMIT) {
-        if (!initialTurnsLoadingKeys.add(key)) return
+        if (!projectionOwner.read { initialTurnsLoadingKeys.add(key) }) return
         scope.launch {
             try {
                 val outcome = store.loadThreadTurnsPage(key, null, limit)
@@ -928,7 +1018,7 @@ class AppModel private constructor(context: android.content.Context) {
                 )
                 _lastError.value = e.message
             } finally {
-                initialTurnsLoadingKeys.remove(key)
+                projectionOwner.read { initialTurnsLoadingKeys.remove(key) }
             }
         }
     }
@@ -948,7 +1038,7 @@ class AppModel private constructor(context: android.content.Context) {
      */
     fun loadOlderTurns(key: ThreadKey, limit: UInt = OLDER_TURN_PAGE_LIMIT): Job {
         val cursor = threadSnapshot(key)?.olderTurnsCursor
-        if (cursor == null || !olderTurnsLoadingKeys.add(key)) {
+        if (cursor == null || !projectionOwner.read { olderTurnsLoadingKeys.add(key) }) {
             return scope.launch { /* no-op */ }
         }
         return scope.launch {
@@ -977,7 +1067,7 @@ class AppModel private constructor(context: android.content.Context) {
                 )
                 _lastError.value = e.message
             } finally {
-                olderTurnsLoadingKeys.remove(key)
+                projectionOwner.read { olderTurnsLoadingKeys.remove(key) }
             }
         }
     }
@@ -995,7 +1085,9 @@ class AppModel private constructor(context: android.content.Context) {
             var readSucceeded = false
             try {
                 externalResumeThread(currentKey, null)
-                store.setActiveThread(currentKey)
+                projectionOwner.read {
+                    if (_snapshot.value?.activeThread == currentKey) activateThread(currentKey)
+                }
                 readSucceeded = true
             } catch (e: Exception) {
                 _lastError.value = e.message
@@ -1039,23 +1131,13 @@ class AppModel private constructor(context: android.content.Context) {
             }
         }
 
-        val activeKey = _snapshot.value?.activeThread
-        if (activeKey != null &&
-            activeKey.serverId == currentKey.serverId &&
-            threadSnapshot(activeKey) != null
-        ) {
-            return activeKey
-        }
-
         return null
     }
 
     private suspend fun refreshLoadedThreadSnapshot(key: ThreadKey) {
         try {
-            val thread = store.threadSnapshot(key)
-            if (thread != null) {
-                applyThreadSnapshot(thread)
-            } else {
+            val thread = readAndApplyThreadSnapshot(key)
+            if (thread == null) {
                 refreshSnapshot()
             }
         } catch (e: Exception) {
@@ -1091,11 +1173,9 @@ class AppModel private constructor(context: android.content.Context) {
             is AppStoreUpdateRecord.ThreadRemoved ->
                 removeThreadSnapshot(update.key, update.agentDirectoryVersion)
             is AppStoreUpdateRecord.ActiveThreadChanged -> {
-                updateActiveThread(update.key)
-                if (update.key != null && threadSnapshot(update.key) == null) {
-                    refreshThreadSnapshot(update.key)
-                }
-                scheduleDeferredActiveThreadHydrationIfNeeded(update.key)
+                // This event can coalesce multiple setters; its payload may
+                // already be stale. Refresh the canonical selection instead.
+                snapshotRefreshRequests.trySend(Unit)
             }
             is AppStoreUpdateRecord.PendingApprovalsChanged -> refreshSnapshot()
             is AppStoreUpdateRecord.PendingUserInputsChanged -> refreshSnapshot()
@@ -1136,42 +1216,44 @@ class AppModel private constructor(context: android.content.Context) {
         itemId: String,
         widget: uniffi.codex_mobile_client.HydratedWidgetData,
     ) {
-        val current = _snapshot.value ?: return
-        val threadIndex = current.threads.indexOfFirst { it.key == key }
-        if (threadIndex < 0) return
-        val thread = current.threads[threadIndex]
-        val itemIndex = thread.hydratedConversationItems.indexOfFirst { it.id == itemId }
-        val updatedItems = thread.hydratedConversationItems.toMutableList()
-        if (itemIndex >= 0) {
-            val item = updatedItems[itemIndex]
-            val content = item.content
-            // Before the first delta the item is a generic DynamicToolCall
-            // (no args → hydration returns None → item stays as tool-call).
-            // Replace its content unconditionally with the hydrated widget,
-            // except when it's already a finalized widget (stale delta).
-            if (content is HydratedConversationItemContent.Widget) {
-                if (content.v1.isFinalized) return
-                if (content.v1 == widget) return
-            }
-            updatedItems[itemIndex] = item.copy(
-                content = HydratedConversationItemContent.Widget(widget),
-            )
-        } else {
-            // First delta raced ThreadItemStarted. Synthesize a placeholder
-            // so the bubble appears now; the later ThreadItemStarted/Changed
-            // will overwrite with the canonical hydrated item.
-            updatedItems.add(
-                HydratedConversationItem(
-                    id = itemId,
+        return projectionOwner.write {
+            val current = _snapshot.value ?: return@write
+            val threadIndex = current.threads.indexOfFirst { it.key == key }
+            if (threadIndex < 0) return@write
+            val thread = current.threads[threadIndex]
+            val itemIndex = thread.hydratedConversationItems.indexOfFirst { it.id == itemId }
+            val updatedItems = thread.hydratedConversationItems.toMutableList()
+            if (itemIndex >= 0) {
+                val item = updatedItems[itemIndex]
+                val content = item.content
+                // Before the first delta the item is a generic DynamicToolCall
+                // (no args → hydration returns None → item stays as tool-call).
+                // Replace its content unconditionally with the hydrated widget,
+                // except when it's already a finalized widget (stale delta).
+                if (content is HydratedConversationItemContent.Widget) {
+                    if (content.v1.isFinalized) return@write
+                    if (content.v1 == widget) return@write
+                }
+                updatedItems[itemIndex] = item.copy(
                     content = HydratedConversationItemContent.Widget(widget),
-                    sourceTurnId = thread.activeTurnId,
-                    sourceTurnIndex = null,
-                    timestamp = null,
-                    isFromUserTurnBoundary = false,
-                ),
-            )
+                )
+            } else {
+                // First delta raced ThreadItemStarted. Synthesize a placeholder
+                // so the bubble appears now; the later ThreadItemStarted/Changed
+                // will overwrite with the canonical hydrated item.
+                updatedItems.add(
+                    HydratedConversationItem(
+                        id = itemId,
+                        content = HydratedConversationItemContent.Widget(widget),
+                        sourceTurnId = thread.activeTurnId,
+                        sourceTurnIndex = null,
+                        timestamp = null,
+                        isFromUserTurnBoundary = false,
+                    ),
+                )
+            }
+            applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
         }
-        applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
     }
 
     private suspend fun recoverThreadDeltaApplication(key: ThreadKey) {
@@ -1192,18 +1274,26 @@ class AppModel private constructor(context: android.content.Context) {
         }
 
         try {
-            val threadSnapshot = store.threadSnapshot(key)
+            val threadSnapshot = readAndApplyThreadSnapshot(key)
             if (threadSnapshot == null) {
-                if (cachedThreadSnapshots[key] == null) {
-                    removeThreadSnapshot(key, clearCache = false)
+                projectionOwner.read {
+                    if (cachedThreadSnapshots[key] == null) {
+                        removeThreadSnapshot(key, clearCache = false)
+                    }
                 }
                 return
             }
-            applyThreadSnapshot(threadSnapshot)
         } catch (e: Exception) {
             _lastError.value = e.message
             refreshSnapshot()
         }
+    }
+
+    private suspend fun readAndApplyThreadSnapshot(key: ThreadKey): AppThreadSnapshot? {
+        val ticket = projectionOwner.readTicket()
+        val thread = withContext(Dispatchers.IO) { store.threadSnapshot(key) } ?: return null
+        projectionOwner.commitIfCurrent(ticket) { applyThreadSnapshot(thread) }
+        return threadSnapshot(key)
     }
 
     private fun scheduleBackgroundThreadPermissionHydration(key: ThreadKey) {
@@ -1216,9 +1306,8 @@ class AppModel private constructor(context: android.content.Context) {
                         includeTurns = false,
                     ),
                 )
-                val threadSnapshot = store.threadSnapshot(nextKey)
+                val threadSnapshot = readAndApplyThreadSnapshot(nextKey)
                 if (threadSnapshot != null) {
-                    applyThreadSnapshot(threadSnapshot)
                     launchState.syncFromThread(threadSnapshot)
                 } else {
                     refreshSnapshot()
@@ -1231,32 +1320,34 @@ class AppModel private constructor(context: android.content.Context) {
     }
 
     private fun scheduleDeferredActiveThreadHydrationIfNeeded(key: ThreadKey?) {
-        if (key == null) {
-            pendingActiveThreadHydrationJob?.cancel()
-            pendingActiveThreadHydrationJob = null
-            pendingActiveThreadHydrationKey = null
-            return
-        }
-
-        val thread = threadSnapshot(key)
-        if (thread == null || !shouldAttemptDeferredHydration(thread)) {
-            if (pendingActiveThreadHydrationKey == key) {
+        return projectionOwner.read {
+            if (key == null) {
                 pendingActiveThreadHydrationJob?.cancel()
                 pendingActiveThreadHydrationJob = null
                 pendingActiveThreadHydrationKey = null
+                return@read
             }
-            return
-        }
 
-        if (pendingActiveThreadHydrationKey == key && pendingActiveThreadHydrationJob != null) {
-            return
-        }
+            val thread = threadSnapshot(key)
+            if (thread == null || !shouldAttemptDeferredHydration(thread)) {
+                if (pendingActiveThreadHydrationKey == key) {
+                    pendingActiveThreadHydrationJob?.cancel()
+                    pendingActiveThreadHydrationJob = null
+                    pendingActiveThreadHydrationKey = null
+                }
+                return@read
+            }
 
-        pendingActiveThreadHydrationJob?.cancel()
-        pendingActiveThreadHydrationKey = key
-        pendingActiveThreadHydrationJob = scope.launch {
-            delay(300)
-            hydrateActiveThreadIfNeeded(key)
+            if (pendingActiveThreadHydrationKey == key && pendingActiveThreadHydrationJob != null) {
+                return@read
+            }
+
+            pendingActiveThreadHydrationJob?.cancel()
+            pendingActiveThreadHydrationKey = key
+            pendingActiveThreadHydrationJob = scope.launch {
+                delay(300)
+                hydrateActiveThreadIfNeeded(key)
+            }
         }
     }
 
@@ -1275,18 +1366,19 @@ class AppModel private constructor(context: android.content.Context) {
                     includeTurns = false,
                 ),
             )
-            val threadSnapshot = store.threadSnapshot(nextKey)
-            if (threadSnapshot != null) {
-                applyThreadSnapshot(threadSnapshot)
-            } else {
+            val threadSnapshot = readAndApplyThreadSnapshot(nextKey)
+            if (threadSnapshot == null) {
                 refreshThreadSnapshot(nextKey)
             }
         } catch (e: Exception) {
             _lastError.value = e.message
         } finally {
-            if (pendingActiveThreadHydrationKey == key) {
-                pendingActiveThreadHydrationJob = null
-                pendingActiveThreadHydrationKey = null
+            val hydrationJob = currentCoroutineContext()[Job]
+            projectionOwner.read {
+                if (pendingActiveThreadHydrationJob === hydrationJob) {
+                    pendingActiveThreadHydrationJob = null
+                    pendingActiveThreadHydrationKey = null
+                }
             }
         }
     }
@@ -1299,23 +1391,26 @@ class AppModel private constructor(context: android.content.Context) {
     }
 
     private fun applyThreadSnapshot(thread: AppThreadSnapshot) {
-        val mergedThread = mergedThreadSnapshotPreservingHydratedItems(thread)
-        val current = _snapshot.value
-        if (current == null) {
-            cacheThreadSnapshot(mergedThread)
-            return
-        }
-        val existingIndex = current.threads.indexOfFirst { it.key == thread.key }
-        val updatedThreads = current.threads.toMutableList().apply {
-            if (existingIndex >= 0) {
-                this[existingIndex] = mergedThread
-            } else {
-                add(mergedThread)
+        return projectionOwner.write {
+            if (thread.key in removedThreadKeys) return@write
+            val mergedThread = mergedThreadSnapshotPreservingHydratedItems(thread)
+            val current = _snapshot.value
+            if (current == null) {
+                cacheThreadSnapshot(mergedThread)
+                return@write
             }
+            val existingIndex = current.threads.indexOfFirst { it.key == thread.key }
+            val updatedThreads = current.threads.toMutableList().apply {
+                if (existingIndex >= 0) {
+                    this[existingIndex] = mergedThread
+                } else {
+                    add(mergedThread)
+                }
+            }
+            _snapshot.value = current.copy(threads = updatedThreads)
+            cacheThreadSnapshot(mergedThread)
+            _lastError.value = null
         }
-        _snapshot.value = current.copy(threads = updatedThreads)
-        cacheThreadSnapshot(mergedThread)
-        _lastError.value = null
     }
 
     private fun applyThreadUpsert(
@@ -1323,52 +1418,55 @@ class AppModel private constructor(context: android.content.Context) {
         sessionSummary: AppSessionSummary,
         agentDirectoryVersion: ULong,
     ) {
-        val mergedThread = mergedThreadSnapshotPreservingHydratedItems(thread)
-        val current = _snapshot.value ?: return
-        val existingThreadIndex = current.threads.indexOfFirst { it.key == thread.key }
+        val adjustedSummary = applySavedServerName(sessionSummary)
+        return projectionOwner.write {
+            removedThreadKeys.remove(thread.key)
+            val mergedThread = mergedThreadSnapshotPreservingHydratedItems(thread)
+            val current = _snapshot.value ?: return@write
+            val existingThreadIndex = current.threads.indexOfFirst { it.key == thread.key }
 
-        // Race condition guard: during active streaming, if the old thread has
-        // longer assistant text that starts with the new text, preserve the old
-        // (more complete) text to avoid flickering backwards.
-        val finalThread = if (existingThreadIndex >= 0) {
-            val oldThread = current.threads[existingThreadIndex]
-            if (oldThread.hasActiveTurn) {
-                preserveStreamingText(oldThread, mergedThread)
+            // Race condition guard: during active streaming, if the old thread has
+            // longer assistant text that starts with the new text, preserve the old
+            // (more complete) text to avoid flickering backwards.
+            val finalThread = if (existingThreadIndex >= 0) {
+                val oldThread = current.threads[existingThreadIndex]
+                if (oldThread.hasActiveTurn) {
+                    preserveStreamingText(oldThread, mergedThread)
+                } else {
+                    mergedThread
+                }
             } else {
                 mergedThread
             }
-        } else {
-            mergedThread
-        }
 
-        val updatedThreads = current.threads.toMutableList().apply {
-            if (existingThreadIndex >= 0) {
-                this[existingThreadIndex] = finalThread
-            } else {
-                add(finalThread)
+            val updatedThreads = current.threads.toMutableList().apply {
+                if (existingThreadIndex >= 0) {
+                    this[existingThreadIndex] = finalThread
+                } else {
+                    add(finalThread)
+                }
             }
-        }
 
-        val adjustedSummary = applySavedServerName(sessionSummary)
-        val existingSummaryIndex = current.sessionSummaries.indexOfFirst { it.key == adjustedSummary.key }
-        val updatedSummaries = current.sessionSummaries.toMutableList().apply {
-            if (existingSummaryIndex >= 0) {
-                this[existingSummaryIndex] = adjustedSummary
-            } else {
-                add(adjustedSummary)
+            val existingSummaryIndex = current.sessionSummaries.indexOfFirst { it.key == adjustedSummary.key }
+            val updatedSummaries = current.sessionSummaries.toMutableList().apply {
+                if (existingSummaryIndex >= 0) {
+                    this[existingSummaryIndex] = adjustedSummary
+                } else {
+                    add(adjustedSummary)
+                }
+                sortWith(compareByDescending<AppSessionSummary> { it.updatedAt ?: Long.MIN_VALUE }
+                    .thenBy { it.key.serverId }
+                    .thenBy { it.key.threadId })
             }
-            sortWith(compareByDescending<AppSessionSummary> { it.updatedAt ?: Long.MIN_VALUE }
-                .thenBy { it.key.serverId }
-                .thenBy { it.key.threadId })
-        }
 
-        _snapshot.value = current.copy(
-            threads = updatedThreads,
-            sessionSummaries = updatedSummaries,
-            agentDirectoryVersion = agentDirectoryVersion,
-        )
-        cacheThreadSnapshot(finalThread)
-        _lastError.value = null
+            _snapshot.value = current.copy(
+                threads = updatedThreads,
+                sessionSummaries = updatedSummaries,
+                agentDirectoryVersion = agentDirectoryVersion,
+            )
+            cacheThreadSnapshot(finalThread)
+            _lastError.value = null
+        }
     }
 
     private fun preserveStreamingText(
@@ -1410,75 +1508,79 @@ class AppModel private constructor(context: android.content.Context) {
         sessionSummary: AppSessionSummary,
         agentDirectoryVersion: ULong,
     ) {
-        val current = _snapshot.value ?: return
-        val existingThreadIndex = current.threads.indexOfFirst { it.key == state.key }
-        if (existingThreadIndex < 0) return
-
-        val existingThread = current.threads[existingThreadIndex]
-        val updatedThread = existingThread.copy(
-            info = state.info,
-            collaborationMode = state.collaborationMode,
-            model = state.model,
-            reasoningEffort = state.reasoningEffort,
-            effectiveApprovalPolicy = state.effectiveApprovalPolicy,
-            effectiveSandboxPolicy = state.effectiveSandboxPolicy,
-            queuedFollowUps = state.queuedFollowUps,
-            activeTurnId = state.activeTurnId,
-            activePlanProgress = state.activePlanProgress,
-            pendingPlanImplementationPrompt = state.pendingPlanImplementationPrompt,
-            contextTokensUsed = state.contextTokensUsed,
-            modelContextWindow = state.modelContextWindow,
-            rateLimits = state.rateLimits,
-            realtimeSessionId = state.realtimeSessionId,
-            goal = state.goal,
-            olderTurnsCursor = state.olderTurnsCursor,
-            initialTurnsLoaded = state.initialTurnsLoaded,
-        )
-        val updatedThreads = current.threads.toMutableList().apply {
-            this[existingThreadIndex] = updatedThread
-        }
-
         val adjustedSummary = applySavedServerName(sessionSummary)
-        val existingSummaryIndex = current.sessionSummaries.indexOfFirst { it.key == adjustedSummary.key }
-        val updatedSummaries = current.sessionSummaries.toMutableList().apply {
-            if (existingSummaryIndex >= 0) {
-                this[existingSummaryIndex] = adjustedSummary
-            } else {
-                add(adjustedSummary)
-            }
-            sortWith(compareByDescending<AppSessionSummary> { it.updatedAt ?: Long.MIN_VALUE }
-                .thenBy { it.key.serverId }
-                .thenBy { it.key.threadId })
-        }
+        return projectionOwner.write {
+            val current = _snapshot.value ?: return@write
+            val existingThreadIndex = current.threads.indexOfFirst { it.key == state.key }
+            if (existingThreadIndex < 0) return@write
 
-        _snapshot.value = current.copy(
-            threads = updatedThreads,
-            sessionSummaries = updatedSummaries,
-            agentDirectoryVersion = agentDirectoryVersion,
-        )
-        cacheThreadSnapshot(updatedThread)
-        _lastError.value = null
+            val existingThread = current.threads[existingThreadIndex]
+            val updatedThread = existingThread.copy(
+                info = state.info,
+                collaborationMode = state.collaborationMode,
+                model = state.model,
+                reasoningEffort = state.reasoningEffort,
+                effectiveApprovalPolicy = state.effectiveApprovalPolicy,
+                effectiveSandboxPolicy = state.effectiveSandboxPolicy,
+                queuedFollowUps = state.queuedFollowUps,
+                activeTurnId = state.activeTurnId,
+                activePlanProgress = state.activePlanProgress,
+                pendingPlanImplementationPrompt = state.pendingPlanImplementationPrompt,
+                contextTokensUsed = state.contextTokensUsed,
+                modelContextWindow = state.modelContextWindow,
+                rateLimits = state.rateLimits,
+                realtimeSessionId = state.realtimeSessionId,
+                goal = state.goal,
+                olderTurnsCursor = state.olderTurnsCursor,
+                initialTurnsLoaded = state.initialTurnsLoaded,
+            )
+            val updatedThreads = current.threads.toMutableList().apply {
+                this[existingThreadIndex] = updatedThread
+            }
+
+            val existingSummaryIndex = current.sessionSummaries.indexOfFirst { it.key == adjustedSummary.key }
+            val updatedSummaries = current.sessionSummaries.toMutableList().apply {
+                if (existingSummaryIndex >= 0) {
+                    this[existingSummaryIndex] = adjustedSummary
+                } else {
+                    add(adjustedSummary)
+                }
+                sortWith(compareByDescending<AppSessionSummary> { it.updatedAt ?: Long.MIN_VALUE }
+                    .thenBy { it.key.serverId }
+                    .thenBy { it.key.threadId })
+            }
+
+            _snapshot.value = current.copy(
+                threads = updatedThreads,
+                sessionSummaries = updatedSummaries,
+                agentDirectoryVersion = agentDirectoryVersion,
+            )
+            cacheThreadSnapshot(updatedThread)
+            _lastError.value = null
+        }
     }
 
     private fun applyThreadItemChanged(
         key: ThreadKey,
         item: HydratedConversationItem,
     ): Boolean {
-        val current = _snapshot.value ?: return false
-        val threadIndex = current.threads.indexOfFirst { it.key == key }
-        if (threadIndex < 0) return false
+        return projectionOwner.write {
+            val current = _snapshot.value ?: return@write false
+            val threadIndex = current.threads.indexOfFirst { it.key == key }
+            if (threadIndex < 0) return@write false
 
-        val thread = current.threads[threadIndex]
-        val updatedItems = thread.hydratedConversationItems.toMutableList()
-        val existingItemIndex = updatedItems.indexOfFirst { it.id == item.id }
-        if (existingItemIndex >= 0) {
-            updatedItems[existingItemIndex] = item
-        } else {
-            val insertionIndex = insertionIndexForItem(updatedItems, item)
-            updatedItems.add(insertionIndex, item)
+            val thread = current.threads[threadIndex]
+            val updatedItems = thread.hydratedConversationItems.toMutableList()
+            val existingItemIndex = updatedItems.indexOfFirst { it.id == item.id }
+            if (existingItemIndex >= 0) {
+                updatedItems[existingItemIndex] = item
+            } else {
+                val insertionIndex = insertionIndexForItem(updatedItems, item)
+                updatedItems.add(insertionIndex, item)
+            }
+            applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
+            return@write true
         }
-        applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
-        return true
     }
 
     private fun applyThreadStreamingDelta(
@@ -1487,21 +1589,23 @@ class AppModel private constructor(context: android.content.Context) {
         kind: ThreadStreamingDeltaKind,
         text: String,
     ): Boolean {
-        val current = _snapshot.value ?: return false
-        val threadIndex = current.threads.indexOfFirst { it.key == key }
-        if (threadIndex < 0) return false
+        return projectionOwner.write {
+            val current = _snapshot.value ?: return@write false
+            val threadIndex = current.threads.indexOfFirst { it.key == key }
+            if (threadIndex < 0) return@write false
 
-        val thread = current.threads[threadIndex]
-        val itemIndex = thread.hydratedConversationItems.indexOfFirst { it.id == itemId }
-        if (itemIndex < 0) return false
+            val thread = current.threads[threadIndex]
+            val itemIndex = thread.hydratedConversationItems.indexOfFirst { it.id == itemId }
+            if (itemIndex < 0) return@write false
 
-        val updatedContent = applyStreamingDelta(kind, text, thread.hydratedConversationItems[itemIndex].content)
-            ?: return false
-        val updatedItems = thread.hydratedConversationItems.toMutableList().apply {
-            this[itemIndex] = this[itemIndex].copy(content = updatedContent)
+            val updatedContent = applyStreamingDelta(kind, text, thread.hydratedConversationItems[itemIndex].content)
+                ?: return@write false
+            val updatedItems = thread.hydratedConversationItems.toMutableList().apply {
+                this[itemIndex] = this[itemIndex].copy(content = updatedContent)
+            }
+            applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
+            return@write true
         }
-        applyThreadSnapshot(thread.copy(hydratedConversationItems = updatedItems))
-        return true
     }
 
     private fun applyStreamingDelta(
@@ -1580,25 +1684,39 @@ class AppModel private constructor(context: android.content.Context) {
         agentDirectoryVersion: ULong? = null,
         clearCache: Boolean = true,
     ) {
-        val current = _snapshot.value ?: return
-        _snapshot.value = current.copy(
-            threads = current.threads.filterNot { it.key == key },
-            sessionSummaries = current.sessionSummaries.filterNot { it.key == key },
-            agentDirectoryVersion = agentDirectoryVersion ?: current.agentDirectoryVersion,
-            activeThread = if (current.activeThread == key) null else current.activeThread,
-        )
-        if (clearCache) {
-            cachedThreadSnapshots.remove(key)
+        return projectionOwner.write {
+            if (clearCache) {
+                cachedThreadSnapshots.remove(key)
+                removedThreadKeys.add(key)
+                navigationIntent.removed(key)
+                if (pendingActiveThreadHydrationKey == key) {
+                    pendingActiveThreadHydrationJob?.cancel()
+                    pendingActiveThreadHydrationJob = null
+                    pendingActiveThreadHydrationKey = null
+                }
+            }
+            val current = _snapshot.value ?: return@write
+            _snapshot.value = current.copy(
+                threads = current.threads.filterNot { it.key == key },
+                sessionSummaries = current.sessionSummaries.filterNot { it.key == key },
+                agentDirectoryVersion = agentDirectoryVersion ?: current.agentDirectoryVersion,
+                activeThread = if (current.activeThread == key) null else current.activeThread,
+            )
         }
     }
 
-    private fun updateActiveThread(key: ThreadKey?) {
-        val current = _snapshot.value ?: return
-        _snapshot.value = current.copy(activeThread = key)
+    private fun updateActiveThread(key: ThreadKey?): ThreadKey? {
+        return projectionOwner.write {
+            val activeKey = navigationIntent.project(key)?.takeUnless(removedThreadKeys::contains)
+            _snapshot.value = _snapshot.value?.copy(activeThread = activeKey)
+            activeKey
+        }
     }
 
     fun threadSnapshot(key: ThreadKey): AppThreadSnapshot? =
-        _snapshot.value?.threads?.firstOrNull { it.key == key } ?: cachedThreadSnapshots[key]
+        projectionOwner.read {
+            _snapshot.value?.threads?.firstOrNull { it.key == key } ?: cachedThreadSnapshots[key]
+        }
 
     private fun hasFreshConversationMetadata(serverId: String): Boolean {
         val server = snapshot.value?.servers?.firstOrNull { it.serverId == serverId } ?: return false
@@ -1606,15 +1724,17 @@ class AppModel private constructor(context: android.content.Context) {
         val hasRateLimits = server.account == null || server.rateLimits != null
         if (hasModels && hasRateLimits) return true
 
-        val lastLoad = recentConversationMetadataLoads[serverId] ?: return false
+        val lastLoad = projectionOwner.read { recentConversationMetadataLoads[serverId] } ?: return false
         return System.currentTimeMillis() - lastLoad < 10_000L
     }
 
     private fun restoreCachedThreadSnapshotIfNeeded(key: ThreadKey?) {
-        if (key == null) return
-        if (_snapshot.value?.threads?.any { it.key == key } == true) return
-        val cached = cachedThreadSnapshots[key] ?: return
-        applyThreadSnapshot(cached)
+        return projectionOwner.write {
+            if (key == null) return@write
+            if (_snapshot.value?.threads?.any { it.key == key } == true) return@write
+            val cached = cachedThreadSnapshots[key] ?: return@write
+            applyThreadSnapshot(cached)
+        }
     }
 
     private fun cacheThreadSnapshot(thread: AppThreadSnapshot) {
@@ -1622,10 +1742,7 @@ class AppModel private constructor(context: android.content.Context) {
     }
 
     private fun mergedThreadSnapshotPreservingHydratedItems(thread: AppThreadSnapshot): AppThreadSnapshot {
-        if (thread.hydratedConversationItems.isNotEmpty()) return thread
-        val cached = cachedThreadSnapshots[thread.key] ?: return thread
-        if (cached.hydratedConversationItems.isEmpty()) return thread
-        return thread.copy(hydratedConversationItems = cached.hydratedConversationItems)
+        return cachedThreadSnapshots.preserveHydration(thread)
     }
 
     private fun mergeCachedThreadSnapshots(snapshot: AppSnapshotRecord): AppSnapshotRecord {
@@ -1633,7 +1750,8 @@ class AppModel private constructor(context: android.content.Context) {
             .map(::mergedThreadSnapshotPreservingHydratedItems)
             .toMutableList()
 
-        cachedThreadSnapshots.forEach { (key, cached) ->
+        cachedThreadSnapshots.values().forEach { cached ->
+            val key = cached.key
             val alreadyPresent = mergedThreads.any { it.key == key }
             val shouldInclude = snapshot.activeThread == key || snapshot.sessionSummaries.any { it.key == key }
             if (!alreadyPresent && shouldInclude) {
@@ -1645,7 +1763,7 @@ class AppModel private constructor(context: android.content.Context) {
     }
 }
 
-private fun registerBundledCliTools() {
+internal fun registerBundledCliTools() {
     val tools = emptyMap<String, String>()
     try {
         registerAndroidTools(tools)

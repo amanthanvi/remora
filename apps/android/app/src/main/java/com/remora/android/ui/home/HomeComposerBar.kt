@@ -63,6 +63,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.remora.android.state.AppComposerPayload
+import com.remora.android.state.AppModel
+import com.remora.android.state.ComposerDraftDestination
+import com.remora.android.state.ComposerDraftRecoveryStatus
 import com.remora.android.state.ComposerFileAttachment
 import com.remora.android.state.ComposerImageAttachment
 import com.remora.android.state.LocalAccountLoginRequiredException
@@ -72,8 +75,11 @@ import com.remora.android.ui.LocalAppModel
 import com.remora.android.ui.RemoraTheme
 import com.remora.android.ui.scaled
 import com.remora.android.ui.conversation.ComposerTextInputChrome
+import com.remora.android.ui.conversation.RecoverableDraftsRow
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import uniffi.codex_mobile_client.AppProject
 import uniffi.codex_mobile_client.AuthStatusRequest
 import uniffi.codex_mobile_client.ReasoningEffort
@@ -106,12 +112,29 @@ fun HomeComposerBar(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var textFieldValue by remember { mutableStateOf(TextFieldValue("")) }
+    val draftDestination = remember(project?.serverId, project?.cwd) {
+        ComposerDraftDestination.Home(project?.serverId, project?.cwd)
+    }
+    val recoverableDrafts by appModel.recoverableComposerDrafts.entries.collectAsState()
+    val recoveryStorageError by appModel.recoverableComposerDrafts.storageError.collectAsState()
+    val destinationDrafts = recoverableDrafts.filter { it.destination == draftDestination }
+    var textFieldValue by remember(draftDestination) {
+        val saved = appModel.homeComposerDraft(draftDestination).text
+        mutableStateOf(TextFieldValue(saved, selection = TextRange(saved.length)))
+    }
     val text = textFieldValue.text
-    var attachedImage by remember { mutableStateOf<ComposerImageAttachment?>(null) }
-    var attachedFiles by remember { mutableStateOf<List<ComposerFileAttachment>>(emptyList()) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isSubmitting by remember { mutableStateOf(false) }
+    var attachedImage by remember(draftDestination) {
+        mutableStateOf(appModel.homeComposerDraft(draftDestination).attachment)
+    }
+    var attachedFiles by remember(draftDestination) {
+        mutableStateOf(appModel.homeComposerDraft(draftDestination).fileAttachments)
+    }
+    LaunchedEffect(draftDestination, text, attachedImage, attachedFiles) {
+        appModel.setHomeComposerDraft(draftDestination, AppModel.ComposerDraft(text, attachedImage, attachedFiles))
+    }
+    var errorMessage by remember(draftDestination) { mutableStateOf<String?>(null) }
+    var isSavingRecovery by remember(draftDestination) { mutableStateOf(false) }
+    val isSubmitting = isSavingRecovery || destinationDrafts.any { it.status == ComposerDraftRecoveryStatus.SUBMITTING }
     var isFocused by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var showExpanded by remember { mutableStateOf(false) }
@@ -178,6 +201,7 @@ fun HomeComposerBar(
         text.isNotBlank() ||
         attachedImage != null ||
         attachedFiles.isNotEmpty() ||
+        destinationDrafts.isNotEmpty() ||
         isRecording ||
         isTranscribing
     // Only propagate `false` once the composer has actually become active
@@ -196,75 +220,98 @@ fun HomeComposerBar(
 
     // Single send path used by both the inline send button and the expanded
     // dialog. Keep in sync if you change thread startup or payload shape.
-    val sendCurrent: () -> Unit = {
+    val sendCurrent: () -> Unit = send@{
         val currentProject = project
         if (currentProject == null) {
             errorMessage = "Pick a project before sending."
-        } else {
+        } else if (!isSavingRecovery && !isSubmitting && hasSendContent) {
             val payloadText = text.trim()
             val attachmentToSend = attachedImage
             val filesToSend = attachedFiles
-            textFieldValue = TextFieldValue("")
-            attachedImage = null
-            attachedFiles = emptyList()
-            isSubmitting = true
-            errorMessage = null
-            scope.launch {
+            val draftToSend = AppModel.ComposerDraft(text, attachmentToSend, filesToSend)
+            val serverIsLocal = appModel.snapshot.value
+                ?.servers
+                ?.firstOrNull { it.serverId == currentProject.serverId }
+                ?.isLocal == true
+            val launchSnapshot = appModel.launchState.snapshot.value
+            val selectedModel = launchSnapshot.selectedModel.trim().ifEmpty { null }
+            val selectedEffort = launchSnapshot.reasoningEffort.trim().ifEmpty { null }
+                ?.let(::reasoningEffortFromServerValue)
+            val threadStartRequest = appModel.launchState.threadStartRequest(
+                currentProject.cwd,
+                serverIsLocal = serverIsLocal,
+            )
+            val payload = AppComposerPayload(
+                text = payloadText,
+                fileAttachments = filesToSend,
+                model = selectedModel,
+                reasoningEffort = selectedEffort,
+            )
+            appModel.setHomeComposerDraft(draftDestination, draftToSend)
+            isSavingRecovery = true
+            appModel.launchComposerRecovery {
                 try {
-                    val serverIsLocal = appModel.snapshot.value
-                        ?.servers
-                        ?.firstOrNull { it.serverId == currentProject.serverId }
-                        ?.isLocal == true
-                    val launchSnapshot = appModel.launchState.snapshot.value
-                    val selectedModel = launchSnapshot.selectedModel.trim().ifEmpty { null }
-                    val selectedEffort = launchSnapshot.reasoningEffort.trim().ifEmpty { null }
-                        ?.let(::reasoningEffortFromServerValue)
-                    val threadKey = appModel.startThread(
-                        currentProject.serverId,
-                        appModel.launchState.threadStartRequest(
-                            currentProject.cwd,
-                            serverIsLocal = serverIsLocal,
-                        ),
-                    )
-                    com.remora.android.ui.RecentDirectoryStore(context)
-                        .record(currentProject.serverId, currentProject.cwd)
-                    val payload = AppComposerPayload(
-                        text = payloadText,
-                        additionalInputs = listOfNotNull(attachmentToSend?.toUserInput()),
-                        fileAttachments = filesToSend,
-                        approvalPolicy = appModel.launchState.approvalPolicyValue(threadKey),
-                        sandboxPolicy = appModel.launchState.turnSandboxPolicy(threadKey),
-                        model = selectedModel,
-                        reasoningEffort = selectedEffort,
-                        serviceTier = null,
-                    )
-                    appModel.startTurn(threadKey, payload)
-                    appModel.refreshThreadSnapshot(threadKey)
-                    onThreadCreated(threadKey)
-                } catch (e: LocalAccountLoginRequiredException) {
-                    onLoginRequired(e.serverId)
-                    textFieldValue = TextFieldValue(
-                        text = payloadText,
-                        selection = TextRange(payloadText.length),
-                    )
-                    attachedImage = attachmentToSend
-                    attachedFiles = filesToSend
-                } catch (e: Exception) {
-                    errorMessage = e.message ?: "Failed to start thread"
-                    textFieldValue = TextFieldValue(
-                        text = payloadText,
-                        selection = TextRange(payloadText.length),
-                    )
-                    attachedImage = attachmentToSend
-                    attachedFiles = filesToSend
+                    val preparedPayload = withContext(Dispatchers.IO) {
+                        payload.copy(additionalInputs = listOfNotNull(attachmentToSend?.toUserInput()))
+                    }
+                    val submissionId = appModel.beginComposerSubmission(
+                        destination = draftDestination,
+                        draft = draftToSend,
+                        payload = preparedPayload,
+                        threadStartRequest = threadStartRequest,
+                    ) ?: return@launchComposerRecovery
+                    if (AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles) == draftToSend &&
+                        appModel.replaceComposerDraftIfUnchanged(draftDestination, draftToSend, AppModel.ComposerDraft.EMPTY)) {
+                        textFieldValue = TextFieldValue("")
+                        attachedImage = null
+                        attachedFiles = emptyList()
+                    }
+                    errorMessage = null
+                    appModel.submitComposerDraft(submissionId) {
+                        try {
+                            val threadKey = appModel.startThread(
+                                currentProject.serverId,
+                                threadStartRequest,
+                            )
+                            appModel.recoverableComposerDrafts.threadCreated(submissionId, threadKey)
+                            com.remora.android.ui.RecentDirectoryStore(context)
+                                .record(currentProject.serverId, currentProject.cwd)
+                            appModel.startTurn(threadKey, preparedPayload)
+                            appModel.recoverableComposerDrafts.complete(submissionId)
+                            appModel.refreshThreadSnapshot(threadKey)
+                            withContext(Dispatchers.Main) { onThreadCreated(threadKey) }
+                        } catch (e: LocalAccountLoginRequiredException) {
+                            withContext(Dispatchers.Main) { onLoginRequired(e.serverId) }
+                            throw e
+                        }
+                    }
                 } finally {
-                    isSubmitting = false
+                    isSavingRecovery = false
                 }
             }
         }
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
+        RecoverableDraftsRow(
+            drafts = destinationDrafts,
+            storageError = recoveryStorageError,
+            onDiscard = { appModel.discardComposerDraft(it) },
+            onRestore = { id ->
+                val current = AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles)
+                appModel.setHomeComposerDraft(draftDestination, current)
+                appModel.launchComposerRecovery {
+                    appModel.restoreComposerDraft(id, current)?.let { draft ->
+                        if (AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles) == current &&
+                            appModel.replaceComposerDraftIfUnchanged(draftDestination, current, draft)) {
+                            textFieldValue = TextFieldValue(draft.text, selection = TextRange(draft.text.length))
+                            attachedImage = draft.attachment
+                            attachedFiles = draft.fileAttachments
+                        }
+                    }
+                }
+            },
+        )
         if (errorMessage != null) {
             Row(
                 modifier = Modifier

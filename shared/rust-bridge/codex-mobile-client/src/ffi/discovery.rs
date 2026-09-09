@@ -86,6 +86,12 @@ pub struct DiscoveryScanSubscription {
     >,
 }
 
+impl Default for DiscoveryBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl DiscoveryBridge {
     #[uniffi::constructor]
@@ -135,6 +141,12 @@ impl DiscoveryBridge {
         .into_iter()
         .map(AppDiscoveredServer::from)
         .collect()
+    }
+}
+
+impl Default for ServerBridge {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -274,10 +286,9 @@ impl ServerBridge {
             c.connect_remote_over_slingshot(
                 server_id,
                 display_name,
-                slingshot.base_url,
+                slingshot,
                 access_token,
                 account_id,
-                slingshot.environment_id,
                 step_up_token,
             )
             .await

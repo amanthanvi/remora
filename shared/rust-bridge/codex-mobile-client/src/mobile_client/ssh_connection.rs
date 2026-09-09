@@ -1,65 +1,49 @@
 use super::*;
 
+pub(crate) struct SshBridgeConnection {
+    pub server_id: String,
+    pub display_name: String,
+    pub host: String,
+    pub state_root: String,
+    pub runtime_kinds: Vec<AgentRuntimeKind>,
+    pub transport: crate::ssh_bridge::SshBridgeTransport,
+}
+
 impl MobileClient {
-    pub async fn connect_remote_over_ssh_bridges(
+    pub(crate) async fn connect_remote_over_ssh_bridges(
         &self,
         ssh_client: Arc<SshClient>,
-        server_id: String,
-        display_name: String,
-        host: String,
-        state_root: String,
-        runtime_kinds: Vec<AgentRuntimeKind>,
-        transport: crate::ssh_bridge::SshBridgeTransport,
+        connection: SshBridgeConnection,
     ) -> Result<SshBridgeConnectOutcome, TransportError> {
-        self.connect_remote_over_ssh_bridges_inner(
-            ssh_client,
-            server_id,
-            display_name,
-            host,
-            state_root,
-            runtime_kinds,
-            transport,
-            None,
-        )
-        .await?
-        .ok_or_else(|| TransportError::ConnectionFailed("cold reconnect deferred".to_string()))
+        self.connect_remote_over_ssh_bridges_inner(ssh_client, connection, None)
+            .await?
+            .ok_or_else(|| TransportError::ConnectionFailed("cold reconnect deferred".to_string()))
     }
 
     pub(crate) async fn reconnect_remote_over_ssh_bridges(
         &self,
         ssh_client: Arc<SshClient>,
-        server_id: String,
-        display_name: String,
-        host: String,
-        state_root: String,
-        runtime_kinds: Vec<AgentRuntimeKind>,
-        transport: crate::ssh_bridge::SshBridgeTransport,
+        connection: SshBridgeConnection,
         cold_guard: ColdReconnectGuard,
     ) -> Result<Option<SshBridgeConnectOutcome>, TransportError> {
-        self.connect_remote_over_ssh_bridges_inner(
-            ssh_client,
+        self.connect_remote_over_ssh_bridges_inner(ssh_client, connection, Some(cold_guard))
+            .await
+    }
+
+    async fn connect_remote_over_ssh_bridges_inner(
+        &self,
+        ssh_client: Arc<SshClient>,
+        connection: SshBridgeConnection,
+        cold_guard: Option<ColdReconnectGuard>,
+    ) -> Result<Option<SshBridgeConnectOutcome>, TransportError> {
+        let SshBridgeConnection {
             server_id,
             display_name,
             host,
             state_root,
             runtime_kinds,
             transport,
-            Some(cold_guard),
-        )
-        .await
-    }
-
-    async fn connect_remote_over_ssh_bridges_inner(
-        &self,
-        ssh_client: Arc<SshClient>,
-        server_id: String,
-        display_name: String,
-        host: String,
-        state_root: String,
-        runtime_kinds: Vec<AgentRuntimeKind>,
-        transport: crate::ssh_bridge::SshBridgeTransport,
-        cold_guard: Option<ColdReconnectGuard>,
-    ) -> Result<Option<SshBridgeConnectOutcome>, TransportError> {
+        } = connection;
         if runtime_kinds.is_empty() {
             return Err(TransportError::ConnectionFailed(
                 "no SSH runtime kinds selected".to_string(),

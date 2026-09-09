@@ -72,6 +72,7 @@ final class RemoraLinkPairingModel {
     static let maximumDeviceNameByteCount = 80
 
     private let operations: RemoraLinkPairingOperations
+    private let didPair: @MainActor () -> Void
     private(set) var state: RemoraLinkPairingState
     private(set) var selectedRuntimeIds: Set<String> = []
     private(set) var selectedScopes: Set<AppRemoraLinkScope> = []
@@ -83,9 +84,11 @@ final class RemoraLinkPairingModel {
     init(
         operations: RemoraLinkPairingOperations,
         initialState: RemoraLinkPairingState = .availability(.configuring),
-        deviceDisplayName: String? = nil
+        deviceDisplayName: String? = nil,
+        didPair: @escaping @MainActor () -> Void = {}
     ) {
         self.operations = operations
+        self.didPair = didPair
         self.state = initialState
         self.deviceDisplayName = Self.truncatedUTF8(
             deviceDisplayName ?? Self.defaultDeviceDisplayName,
@@ -94,7 +97,9 @@ final class RemoraLinkPairingModel {
     }
 
     convenience init(client: AppClient) {
-        self.init(operations: RemoraLinkPairingOperations(client: client))
+        self.init(operations: RemoraLinkPairingOperations(client: client), didPair: {
+            Task { _ = await BackgroundAwarenessController.shared.reconcile() }
+        })
     }
 
     deinit {
@@ -343,6 +348,7 @@ final class RemoraLinkPairingModel {
                     wasAlreadyPaired: false
                 )
             )
+            didPair()
         case let .alreadyPaired(hostId, runtimeIds, scopes):
             state = .success(
                 RemoraLinkPairingSuccess(
@@ -353,6 +359,7 @@ final class RemoraLinkPairingModel {
                     wasAlreadyPaired: true
                 )
             )
+            didPair()
         }
     }
 

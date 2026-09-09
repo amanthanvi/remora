@@ -18,23 +18,20 @@ ownership, and interop terminology.
   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
   ```
 
-- **meson** + **ninja** (required by `webrtc-audio-processing-sys`):
-
-  ```bash
-  brew install meson
-  ```
-
 - **xcodegen** (for regenerating `Remora.xcodeproj`):
 
   ```bash
   brew install xcodegen
   ```
 
-- **Zig** (required to build the Ghostty renderer; CI pins 0.15.2):
+- **Zig 0.15.2** for Ghostty. Build scripts use `tools/scripts/resolve-zig.sh`
+  to select this version or download it into the project-local tool cache.
+  A different system Zig version does not satisfy this requirement.
 
-  ```bash
-  brew install zig
-  ```
+Check `xcode-select -p` before an iOS build. It must resolve to the full Xcode
+developer directory, not `/Library/Developer/CommandLineTools`. The Makefile
+prepends the rustup toolchain to `PATH`; standalone script invocations must
+also resolve `cargo` and `rustc` through rustup.
 
 ## Connect Your Mac to Remora Over SSH
 
@@ -62,6 +59,11 @@ Use this flow to make Codex sessions from your Mac visible in the iOS/Android ap
 
    - Keep phone and Mac on the same LAN (or same Tailnet).
    - In Discovery: tap a host showing `codex running` to connect directly, or tap an `SSH` host and enter credentials.
+
+   SSH requires an Ed25519 or ECDSA host key. RSA cryptography is excluded from
+   supported builds because its implementation has an unresolved timing advisory.
+   Use Ed25519, ECDSA, or password authentication; RSA-only hosts must enable a
+   supported host key. Existing host trust remains fail-closed.
 
 4. Fallback: run app-server manually bound to loopback and forward the port over SSH.
 
@@ -94,18 +96,36 @@ Pass `--recorded-gitlink` to reset the submodule to the commit recorded in the s
 
 ## Build the Rust Bridge
 
+The fast iOS lanes link raw static libraries from `apps/ios/GeneratedRust/`.
+The package lane builds device and simulator libraries and creates
+`apps/ios/Frameworks/codex_mobile_client.xcframework`. These outputs and
+generated bindings are local build artifacts.
+
 ```bash
 ./apps/ios/scripts/build-rust.sh              # package mode (device + sim + xcframework)
 ./apps/ios/scripts/build-rust.sh --fast-device # raw device staticlib only
+./apps/ios/scripts/build-rust.sh --fast-sim    # raw simulator staticlib only
 ```
+
+Prefer `make ios-sim-fast`, `make ios-device-fast`, and
+`make android-emulator-fast` for iteration. Package targets disable incremental
+compilation. Fast targets unset `CARGO_INCREMENTAL` because explicitly enabling
+it conflicts with the repository's sccache setup. Run `make rebuild-bindings`
+when the generated UniFFI output needs to be rebuilt without its stamp cache.
 
 ## Build and Run iOS
 
-Regenerate project if `apps/ios/project.yml` changed:
+Regenerate the project after changing its spec or adding/removing source files:
 
 ```bash
 make xcgen
 ```
+
+Use this target or `apps/ios/scripts/regenerate-project.sh`. Passing
+`--project Remora.xcodeproj` to XcodeGen from inside `apps/ios` creates an
+unwanted nested project. XcodeGen's native cache in `.build-stamps` tracks the
+source inventory and skips unchanged projects; Make does not use a spec-only
+timestamp to decide whether new sources are included.
 
 Open in Xcode:
 
@@ -119,10 +139,20 @@ CLI build:
 xcodebuild -project apps/ios/Remora.xcodeproj -scheme Remora -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
+Install the app from that build's DerivedData directory before testing. An
+older installed copy is not evidence for the current source:
+
+```bash
+xcrun simctl install booted <DerivedData>/Build/Products/Debug-iphonesimulator/Remora.app
+xcrun simctl launch booted com.remora.app
+```
+
 ## Build and Run Android
 
-Prerequisites: Java 17 or newer, Android SDK + build tools for API 35, the
-Android NDK, `cargo-ndk`, Rust via rustup, and Zig.
+Prerequisites: JDK 21, Android SDK platform 37.0, build tools 36.0.0, the
+Android NDK, `cargo-ndk`, Rust via rustup, and Zig. The build uses AGP 9.4 with
+built-in Kotlin and the committed Gradle 9.6 wrapper. Generated bindings belong
+to the Android Kotlin source set, not the Java source set.
 
 ```bash
 make android-emulator-fast                              # Rust JNI + debug APK
@@ -130,15 +160,57 @@ cd apps/android && ./gradlew :app:testDebugUnitTest    # unit tests
 cd apps/android && ./gradlew :app:assembleDebug        # Gradle-only debug assemble
 ```
 
-## Verification
+Use the committed Gradle wrapper. On macOS, the Makefile detects SDK, NDK, and
+JDK paths when possible. Override `ANDROID_SDK_ROOT`, `ANDROID_NDK_HOME`, and
+`JAVA_HOME` for other installations. `apps/android/app/build.gradle.kts` defines
+the SDK/NDK versions; `.github/workflows/mobile-ci.yml` defines CI provisioning.
 
-Run the same core checks used for mobile changes:
+After building, install and launch the exact APK:
 
 ```bash
-make rebuild-bindings
-make rust-test
-make ios-sim-fast
-cd apps/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug
+adb -e install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
+adb -e shell am start -n com.remora.android/com.remora.android.MainActivity
+```
+
+Keep a simulator and emulator available for shared runtime validation. Inspect
+iOS logs in Xcode/device console, Android logs with Logcat, and Rust `tracing`
+output locally. There is no log collector or spool directory.
+
+## Verification
+
+For the real paired-host relay path, build the co-owned host and relay, then run
+the disposable fixture:
+
+```bash
+cargo build --locked --manifest-path services/remora-link/Cargo.toml -p remora-link
+cargo build --locked --manifest-path services/remora-relay/Cargo.toml --release
+python3 tools/scripts/verify-paired-relay.py
+```
+
+The runner uses an isolated HOME/CODEX_HOME, actual Codex and Iroh pairing,
+loopback SQLite relay, and synthetic model/push providers. Set
+`REMORA_CODEX_BINARY` to the actual package executable when the `codex` launcher
+depends on the normal HOME. Fixture processes, invitation, keys, and database
+are removed on exit. Failure logs are retained in the system temporary
+directory; the runner reports their path. The opt-in Rust test fails when its
+fixture is absent, and the runner rejects zero-test success.
+
+Production host settings are documented in
+[`services/remora-link/docs/background-relay.md`](../services/remora-link/docs/background-relay.md).
+Provider acceptance, device wake scheduling, authoritative repair, and durable
+ACK are separate gates. This local runner does not establish physical secure
+storage or live APNs/FCM delivery.
+
+Shared client Clippy runs with warnings denied through `make rust-clippy`.
+The host has separate macOS, Linux, and Windows CI in
+`.github/workflows/host-ci.yml`; Windows ACL tests require native Windows
+execution, not only a cross-compile on macOS.
+
+Run the cross-platform gates listed in [CONTEXT.md](../CONTEXT.md). Cheap build
+helper checks can run before any native compilation:
+
+```bash
+make ci-tools-test bootstrap-remora-link-test bindings-hardener-test rust-shellcheck
 ```
 
 The branch CI definition is [`.github/workflows/mobile-ci.yml`](../.github/workflows/mobile-ci.yml).

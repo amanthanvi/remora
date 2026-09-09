@@ -1,6 +1,8 @@
 package com.remora.android.background
 
 import java.nio.charset.StandardCharsets
+import uniffi.codex_mobile_client.AppRelayEventClass
+import uniffi.codex_mobile_client.AppRelayWakeHint
 
 /**
  * Platform ingress envelope for a content-free FCM data message.
@@ -16,6 +18,16 @@ internal data class OpaqueWakeHint(
     val cursor: Long,
     val eventClass: OpaqueWakeEventClass,
     val expiresAtMs: Long,
+)
+
+internal fun OpaqueWakeHint.toRelayHint() = AppRelayWakeHint(
+    schemaVersion.toUShort(), installationId, eventId, cursor.toULong(),
+    when (eventClass) {
+        OpaqueWakeEventClass.STATE_CHANGED -> AppRelayEventClass.STATE_CHANGED
+        OpaqueWakeEventClass.ACTIVITY_CHANGED -> AppRelayEventClass.ACTIVITY_CHANGED
+        OpaqueWakeEventClass.CONNECTION_CHANGED -> AppRelayEventClass.CONNECTION_CHANGED
+        OpaqueWakeEventClass.SECURITY_CHANGED -> AppRelayEventClass.SECURITY_CHANGED
+    }, expiresAtMs.toULong(),
 )
 
 internal enum class OpaqueWakeEventClass(val wireValue: String) {

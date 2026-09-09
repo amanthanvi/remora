@@ -99,13 +99,26 @@ pub(super) fn spawn_store_listener(
     app_store: Arc<AppStoreReducer>,
     sessions: Arc<RwLock<HashMap<String, Arc<ServerSession>>>>,
     mut rx: broadcast::Receiver<UiEvent>,
-) {
+) -> tokio::sync::mpsc::Sender<()> {
     let lag_reconcile_gate = Arc::new(LagReconcileGate::default());
+    let (repair_tx, mut repair_rx) = tokio::sync::mpsc::channel(1);
     MobileClient::spawn_detached(async move {
         loop {
-            match rx.recv().await {
+            let event = tokio::select! {
+                event = rx.recv() => event,
+                Some(()) = repair_rx.recv() => {
+                    schedule_lag_reconcile(&owner, &lag_reconcile_gate);
+                    continue;
+                }
+            };
+            match event {
                 Ok(event) => {
                     app_store.apply_ui_event(&event);
+                    if let UiEvent::EventsLost { server_id, skipped } = &event {
+                        warn!("MobileClient: lost {skipped} upstream events on {server_id}");
+                        schedule_lag_reconcile(&owner, &lag_reconcile_gate);
+                        continue;
+                    }
                     maybe_hydrate_collab_agent_metadata(
                         Arc::clone(&app_store),
                         Arc::clone(&sessions),
@@ -128,22 +141,22 @@ pub(super) fn spawn_store_listener(
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!("MobileClient: lagged {skipped} UI events");
-                    if !lag_reconcile_gate.request_pass() {
-                        continue;
-                    }
-                    let owner = owner.clone();
-                    let lag_reconcile_gate = Arc::clone(&lag_reconcile_gate);
-                    MobileClient::spawn_detached(async move {
-                        run_lag_reconcile_worker(
-                            owner,
-                            lag_reconcile_gate,
-                            reconcile_after_store_listener_lag,
-                        )
-                        .await;
-                    });
+                    schedule_lag_reconcile(&owner, &lag_reconcile_gate);
                 }
             }
         }
+    });
+    repair_tx
+}
+
+fn schedule_lag_reconcile(owner: &std::sync::Weak<MobileClient>, gate: &Arc<LagReconcileGate>) {
+    if !gate.request_pass() {
+        return;
+    }
+    let owner = owner.clone();
+    let gate = Arc::clone(gate);
+    MobileClient::spawn_detached(async move {
+        run_lag_reconcile_worker(owner, gate, reconcile_after_store_listener_lag).await;
     });
 }
 
@@ -1124,6 +1137,545 @@ mod tests {
             "nextCursor": null,
             "backwardsCursor": null
         })
+    }
+
+    #[tokio::test]
+    async fn loading_page_fences_history_and_legacy_fallback_events() {
+        for (intervening_change, fallback) in [
+            ("rollback", false),
+            ("session", false),
+            ("sibling", false),
+            ("rollback", true),
+            ("session", true),
+            ("sibling", true),
+        ] {
+            let client = MobileClient::new();
+            let config = make_server_config("srv");
+            let key = ThreadKey {
+                server_id: "srv".to_string(),
+                thread_id: "thread-1".to_string(),
+            };
+            client
+                .app_store
+                .upsert_server(&config, ServerHealthSnapshot::Connected);
+            client
+                .app_store
+                .upsert_thread_snapshot(make_thread_snapshot("srv", "thread-1"));
+            let replacement = Arc::new(ServerSession::test_stub_with_handlers(
+                config.clone(),
+                None,
+                None,
+                None,
+            ));
+            let owner = Arc::downgrade(&client);
+            let handler: TestRequestHandler = Arc::new(move |request| {
+                if fallback && matches!(request, upstream::ClientRequest::ThreadTurnsList { .. }) {
+                    return Err(RpcError::Deserialization("method not found".to_string()));
+                }
+                assert!(matches!(
+                    request,
+                    upstream::ClientRequest::ThreadTurnsList { .. }
+                        | upstream::ClientRequest::ThreadResume { .. }
+                ));
+                let client = owner.upgrade().expect("client remains alive");
+                // Apply the change after the page request is sent but before its response arrives.
+                match intervening_change {
+                    "rollback" => {
+                        client
+                            .apply_thread_rollback_response(
+                                "srv",
+                                "thread-1",
+                                &upstream::ThreadRollbackResponse {
+                                    thread: serde_json::from_value(upstream_thread_response(
+                                        "thread-1",
+                                    ))
+                                    .unwrap(),
+                                },
+                            )
+                            .expect("rollback commits before old page");
+                    }
+                    "session" => {
+                        client
+                            .sessions
+                            .write()
+                            .expect("sessions lock")
+                            .insert("srv".to_string(), Arc::clone(&replacement));
+                    }
+                    "sibling" => client
+                        .app_store
+                        .apply_ui_event(&UiEvent::ThreadNameUpdated {
+                            key: ThreadKey {
+                                server_id: "srv".to_string(),
+                                thread_id: "sibling".to_string(),
+                            },
+                            thread_name: Some("unrelated update".to_string()),
+                        }),
+                    _ => unreachable!(),
+                }
+                if fallback {
+                    return Ok(completed_thread_resume_response(
+                        "thread-1",
+                        "page-turn",
+                        "page-item",
+                        "page text",
+                    ));
+                }
+                Ok(completed_thread_turns_list_response(
+                    "page-turn",
+                    "page-item",
+                    "page text",
+                    false,
+                    Some("older"),
+                ))
+            });
+            client.sessions.write().expect("sessions lock").insert(
+                "srv".to_string(),
+                Arc::new(ServerSession::test_stub_with_handlers(
+                    config,
+                    Some(handler),
+                    None,
+                    None,
+                )),
+            );
+
+            let outcome = client
+                .load_thread_turns_page("srv", "thread-1", None, None)
+                .await
+                .expect("page load completes");
+            let expected_loaded = intervening_change == "sibling" && !fallback;
+            assert_eq!(
+                outcome.loaded, expected_loaded,
+                "change: {intervening_change}"
+            );
+            assert_eq!(outcome.has_more, expected_loaded && !fallback);
+            let thread = client
+                .app_store
+                .thread_snapshot(&key)
+                .expect("thread remains");
+            assert_eq!(
+                thread.items.iter().any(|item| item.id == "page-item"),
+                expected_loaded
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_loading_rejects_live_delta_then_repairs_without_another_page_request() {
+        for initially_supports_pagination in [true, false] {
+            let client = MobileClient::new();
+            let config = make_server_config("srv");
+            let key = ThreadKey {
+                server_id: "srv".to_string(),
+                thread_id: "thread-1".to_string(),
+            };
+            client
+                .app_store
+                .upsert_server(&config, ServerHealthSnapshot::Connected);
+            client
+                .app_store
+                .set_server_supports_turn_pagination("srv", initially_supports_pagination);
+            client
+                .app_store
+                .upsert_thread_snapshot(make_thread_snapshot("srv", "thread-1"));
+            if initially_supports_pagination {
+                client.app_store.apply_ui_event(&UiEvent::MessageDelta {
+                    key: key.clone(),
+                    item_id: "page-item".to_string(),
+                    delta: "old".to_string(),
+                });
+            }
+            let owner = Arc::downgrade(&client);
+            let resumes = Arc::new(AtomicUsize::new(0));
+            let handler_resumes = Arc::clone(&resumes);
+            let handler_key = key.clone();
+            let handler: TestRequestHandler =
+                Arc::new(move |request| match request {
+                    upstream::ClientRequest::ThreadTurnsList { .. } => {
+                        Err(RpcError::Deserialization("method not found".to_string()))
+                    }
+                    upstream::ClientRequest::ThreadList { .. } => {
+                        Ok(successful_thread_list_response(&["thread-1"]))
+                    }
+                    upstream::ClientRequest::ThreadResume { .. } => {
+                        let first = handler_resumes.fetch_add(1, Ordering::SeqCst) == 0;
+                        if first {
+                            owner.upgrade().unwrap().app_store.apply_ui_event(
+                                &UiEvent::MessageDelta {
+                                    key: handler_key.clone(),
+                                    item_id: "page-item".to_string(),
+                                    delta: if initially_supports_pagination {
+                                        " new"
+                                    } else {
+                                        "old new"
+                                    }
+                                    .to_string(),
+                                },
+                            );
+                        }
+                        let mut response = completed_thread_resume_response(
+                            "thread-1",
+                            "page-turn",
+                            "page-item",
+                            "unused",
+                        );
+                        response["thread"]["turns"][0]["items"][0] = serde_json::json!({
+                            "id": "page-item", "type": "agentMessage",
+                            "text": if first { "old" } else { "old new" }
+                        });
+                        Ok(response)
+                    }
+                    other => panic!("unexpected repair request: {}", other.method()),
+                });
+            client.sessions.write().unwrap().insert(
+                "srv".to_string(),
+                Arc::new(ServerSession::test_stub_with_handlers(
+                    config,
+                    Some(handler),
+                    None,
+                    None,
+                )),
+            );
+            let mut updates = client.app_store.subscribe();
+            let outcome = client
+                .load_thread_turns_page("srv", "thread-1", None, None)
+                .await
+                .unwrap();
+            assert!(!outcome.loaded);
+            let after_stale = client.app_store.thread_snapshot(&key).unwrap();
+            assert!(!after_stale.initial_turns_loaded);
+            assert!(
+                serde_json::to_string(&after_stale.items)
+                    .unwrap()
+                    .contains("old new")
+            );
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if client
+                        .app_store
+                        .project_thread(&key, |thread| thread.initial_turns_loaded)
+                        == Some(true)
+                    {
+                        break;
+                    }
+                    updates.recv().await.unwrap();
+                }
+            })
+            .await
+            .expect("scheduled repair must finish the initial load");
+            let repaired = client.app_store.thread_snapshot(&key).unwrap();
+            assert_eq!(resumes.load(Ordering::SeqCst), 2);
+            assert_eq!(repaired.items.len(), 1);
+            assert_eq!(
+                repaired.items[0].source_turn_id.as_deref(),
+                Some("page-turn")
+            );
+            assert!(
+                serde_json::to_string(&repaired.items)
+                    .unwrap()
+                    .contains("old new")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_legacy_repair_rejects_history_from_before_rollback() {
+        let client = MobileClient::new();
+        let config = make_server_config("srv");
+        let key = ThreadKey {
+            server_id: "srv".to_string(),
+            thread_id: "thread-1".to_string(),
+        };
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination("srv", false);
+        client
+            .app_store
+            .upsert_thread_snapshot(make_thread_snapshot("srv", "thread-1"));
+        let owner = Arc::downgrade(&client);
+        let resumes = Arc::new(AtomicUsize::new(0));
+        let handler_resumes = Arc::clone(&resumes);
+        let handler_key = key.clone();
+        let handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadList { .. } => {
+                Ok(successful_thread_list_response(&["thread-1"]))
+            }
+            upstream::ClientRequest::ThreadResume { .. } => {
+                let index = handler_resumes.fetch_add(1, Ordering::SeqCst);
+                let client = owner.upgrade().unwrap();
+                if index == 0 {
+                    client.app_store.apply_ui_event(&UiEvent::MessageDelta {
+                        key: handler_key.clone(),
+                        item_id: "removed-item".to_string(),
+                        delta: "concurrent delta".to_string(),
+                    });
+                } else if index == 1 {
+                    // The repair request was sent before this local rollback committed.
+                    client
+                        .apply_thread_rollback_response(
+                            "srv",
+                            "thread-1",
+                            &upstream::ThreadRollbackResponse {
+                                thread: serde_json::from_value(upstream_thread_response(
+                                    "thread-1",
+                                ))
+                                .unwrap(),
+                            },
+                        )
+                        .unwrap();
+                } else {
+                    let thread = client.app_store.thread_snapshot(&handler_key).unwrap();
+                    assert!(
+                        thread.items.iter().all(|item| item.id != "removed-item"),
+                        "the stale repair must never reinstall rolled-back items"
+                    );
+                }
+                Ok(completed_thread_resume_response(
+                    "thread-1",
+                    if index < 2 {
+                        "removed-turn"
+                    } else {
+                        "current-turn"
+                    },
+                    if index < 2 {
+                        "removed-item"
+                    } else {
+                        "current-item"
+                    },
+                    "authoritative text",
+                ))
+            }
+            other => panic!("unexpected repair request: {}", other.method()),
+        });
+        client.sessions.write().unwrap().insert(
+            "srv".to_string(),
+            Arc::new(ServerSession::test_stub_with_handlers(
+                config,
+                Some(handler),
+                None,
+                None,
+            )),
+        );
+        let mut updates = client.app_store.subscribe();
+        assert!(
+            !client
+                .load_thread_turns_page("srv", "thread-1", None, None)
+                .await
+                .unwrap()
+                .loaded
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let repaired = client.app_store.thread_snapshot(&key).unwrap();
+                if repaired.items.iter().any(|item| item.id == "current-item") {
+                    assert!(repaired.items.iter().all(|item| item.id != "removed-item"));
+                    break;
+                }
+                updates.recv().await.unwrap();
+            }
+        })
+        .await
+        .expect("stale repair must retry against post-rollback history");
+        assert_eq!(resumes.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn authoritative_probe_rejects_rollback_before_success_or_fallback() {
+        for method_not_found in [false, true] {
+            let client = MobileClient::new();
+            let config = make_server_config("srv");
+            let key = ThreadKey {
+                server_id: "srv".to_string(),
+                thread_id: "thread-1".to_string(),
+            };
+            client
+                .app_store
+                .upsert_server(&config, ServerHealthSnapshot::Connected);
+            client
+                .app_store
+                .upsert_thread_snapshot(make_thread_snapshot("srv", "thread-1"));
+            let owner = Arc::downgrade(&client);
+            let resumes = Arc::new(AtomicUsize::new(0));
+            let handler_resumes = Arc::clone(&resumes);
+            let handler: TestRequestHandler = Arc::new(move |request| match request {
+                upstream::ClientRequest::ThreadResume { .. } => {
+                    handler_resumes.fetch_add(1, Ordering::SeqCst);
+                    Ok(successful_thread_resume_response("thread-1"))
+                }
+                upstream::ClientRequest::ThreadTurnsList { .. } => {
+                    owner
+                        .upgrade()
+                        .unwrap()
+                        .apply_thread_rollback_response(
+                            "srv",
+                            "thread-1",
+                            &upstream::ThreadRollbackResponse {
+                                thread: serde_json::from_value(upstream_thread_response(
+                                    "thread-1",
+                                ))
+                                .unwrap(),
+                            },
+                        )
+                        .unwrap();
+                    if method_not_found {
+                        Err(RpcError::Deserialization("method not found".to_string()))
+                    } else {
+                        Ok(successful_active_thread_turns_list_response())
+                    }
+                }
+                other => panic!("unexpected request: {}", other.method()),
+            });
+            client.sessions.write().unwrap().insert(
+                "srv".to_string(),
+                Arc::new(ServerSession::test_stub_with_handlers(
+                    config,
+                    Some(handler),
+                    None,
+                    None,
+                )),
+            );
+            let generation = client.app_store.server_event_generation("srv");
+            assert!(
+                !client
+                    .force_refresh_thread_authoritative_if_ui_generation(
+                        "srv", "thread-1", generation,
+                    )
+                    .await
+                    .unwrap()
+            );
+            let thread = client.app_store.thread_snapshot(&key).unwrap();
+            assert!(thread.items.is_empty());
+            assert!(thread.active_turn_id.is_none());
+            assert!(client.app_store.server_supports_turn_pagination("srv"));
+            assert_eq!(resumes.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn loading_page_preserves_overlapping_delta_after_dispatch() {
+        for concurrent_delta in [false, true] {
+            let client = MobileClient::new();
+            let config = make_server_config("srv");
+            let key = ThreadKey {
+                server_id: "srv".to_string(),
+                thread_id: "thread-1".to_string(),
+            };
+            client
+                .app_store
+                .upsert_server(&config, ServerHealthSnapshot::Connected);
+            client
+                .app_store
+                .upsert_thread_snapshot(make_thread_snapshot("srv", "thread-1"));
+            client.app_store.apply_ui_event(&UiEvent::MessageDelta {
+                key: key.clone(),
+                item_id: "page-item".to_string(),
+                delta: "old".to_string(),
+            });
+            let owner = Arc::downgrade(&client);
+            let handler: TestRequestHandler = Arc::new(move |request| {
+                assert!(matches!(
+                    request,
+                    upstream::ClientRequest::ThreadTurnsList { .. }
+                ));
+                if concurrent_delta {
+                    owner
+                        .upgrade()
+                        .unwrap()
+                        .app_store
+                        .apply_ui_event(&UiEvent::MessageDelta {
+                            key: ThreadKey {
+                                server_id: "srv".to_string(),
+                                thread_id: "thread-1".to_string(),
+                            },
+                            item_id: "page-item".to_string(),
+                            delta: " new".to_string(),
+                        });
+                }
+                let mut response = completed_thread_turns_list_response(
+                    "page-turn",
+                    "page-item",
+                    "old",
+                    false,
+                    None,
+                );
+                response["data"][0]["items"][0] = serde_json::json!({
+                    "id": "page-item", "type": "agentMessage", "text": "old"
+                });
+                Ok(response)
+            });
+            client.sessions.write().unwrap().insert(
+                "srv".to_string(),
+                Arc::new(ServerSession::test_stub_with_handlers(
+                    config,
+                    Some(handler),
+                    None,
+                    None,
+                )),
+            );
+            assert!(
+                client
+                    .load_thread_turns_page("srv", "thread-1", None, None)
+                    .await
+                    .unwrap()
+                    .loaded
+            );
+            let thread = client.app_store.thread_snapshot(&key).unwrap();
+            assert_eq!(thread.items.len(), 1);
+            let serialized = serde_json::to_value(&thread.items[0]).unwrap();
+            assert!(serialized.to_string().contains(if concurrent_delta {
+                "old new"
+            } else {
+                "old"
+            }));
+            assert_eq!(
+                thread.items[0].source_turn_id.as_deref(),
+                if concurrent_delta {
+                    None
+                } else {
+                    Some("page-turn")
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_broadcast_loss_reaches_ui_repair_route() {
+        let client = MobileClient::new();
+        let session = Arc::new(ServerSession::test_stub(make_server_config("srv")));
+        client
+            .sessions
+            .write()
+            .unwrap()
+            .insert("srv".to_string(), Arc::clone(&session));
+        let mut ui_events = client.event_processor.subscribe();
+        client.spawn_event_reader("srv".to_string(), Arc::clone(&session));
+        // The current-thread runtime cannot poll the reader before this synchronous burst.
+        for _ in 0..300 {
+            session.test_publish_event(ServerEvent::EventsLost { skipped: 1 });
+        }
+        let mut saw_loss = false;
+        for _ in 0..300 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), ui_events.recv())
+                .await
+                .unwrap()
+            {
+                Ok(UiEvent::EventsLost { server_id, skipped }) => {
+                    assert_eq!(server_id, "srv");
+                    assert!(
+                        skipped > 1,
+                        "session broadcast overflow must produce its own loss marker"
+                    );
+                    saw_loss = true;
+                    break;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                other => panic!("expected typed loss event, got {other:?}"),
+            }
+        }
+        assert!(saw_loss);
     }
 
     fn successful_active_thread_turns_list_response() -> serde_json::Value {

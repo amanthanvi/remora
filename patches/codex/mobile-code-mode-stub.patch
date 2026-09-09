@@ -130,13 +130,14 @@ index 0000000000..11285658a1
 +}
 diff --git a/codex-rs/code-mode/src/service_stub.rs b/codex-rs/code-mode/src/service_stub.rs
 new file mode 100644
-index 0000000000..f943591fb3
+index 000000000..de7a32c31
 --- /dev/null
 +++ b/codex-rs/code-mode/src/service_stub.rs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,94 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
-+use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::atomic::AtomicU64;
++use std::sync::atomic::Ordering;
 +
 +use async_trait::async_trait;
 +use serde_json::Value as JsonValue;

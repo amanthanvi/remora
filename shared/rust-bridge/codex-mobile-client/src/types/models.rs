@@ -728,11 +728,6 @@ impl From<codex_protocol::openai_models::ReasoningEffort> for ReasoningEffort {
             codex_protocol::openai_models::ReasoningEffort::Medium => Self::Medium,
             codex_protocol::openai_models::ReasoningEffort::High => Self::High,
             codex_protocol::openai_models::ReasoningEffort::XHigh => Self::XHigh,
-            // Newer/local codex checkouts may expose Max before the pinned
-            // submodule advances. Do not name that upstream variant here, so
-            // clean checkouts at the committed gitlink still compile.
-            #[allow(unreachable_patterns)]
-            _ => Self::Max,
         }
     }
 }
@@ -1148,6 +1143,40 @@ impl From<upstream::ExperimentalFeature> for ExperimentalFeature {
             default_enabled: value.default_enabled,
         }
     }
+}
+
+/// Discard only catalog reasoning choices the retained protocol cannot send.
+pub(crate) fn normalize_model_list_response(value: &mut serde_json::Value) {
+    fn unknown_effort(value: Option<&serde_json::Value>) -> bool {
+        value
+            .filter(|value| value.is_string())
+            .is_some_and(|value| {
+                serde_json::from_value::<codex_protocol::openai_models::ReasoningEffort>(
+                    value.clone(),
+                )
+                .is_err()
+            })
+    }
+
+    let Some(models) = value
+        .get_mut("data")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    models.retain_mut(|model| {
+        // An unknown default cannot be replaced without changing turn semantics.
+        if unknown_effort(model.get("defaultReasoningEffort")) {
+            return false;
+        }
+        if let Some(options) = model
+            .get_mut("supportedReasoningEfforts")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            options.retain(|option| !unknown_effort(option.get("reasoningEffort")));
+        }
+        true
+    });
 }
 
 /// Public model metadata shown in mobile model pickers.

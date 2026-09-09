@@ -128,19 +128,21 @@ diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/
              }
              ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index e941cac..8676c17 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
-@@ -202,6 +202,10 @@
+@@ -203,7 +203,11 @@ use codex_app_server_protocol::ThreadRealtimeAppendAudioParams;
+ use codex_app_server_protocol::ThreadRealtimeAppendAudioResponse;
+ use codex_app_server_protocol::ThreadRealtimeAppendTextParams;
+ use codex_app_server_protocol::ThreadRealtimeAppendTextResponse;
++use codex_app_server_protocol::ThreadRealtimeFinalizeHandoffParams;
++use codex_app_server_protocol::ThreadRealtimeFinalizeHandoffResponse;
+ use codex_app_server_protocol::ThreadRealtimeListVoicesResponse;
++use codex_app_server_protocol::ThreadRealtimeResolveHandoffParams;
++use codex_app_server_protocol::ThreadRealtimeResolveHandoffResponse;
  use codex_app_server_protocol::ThreadRealtimeStartParams;
  use codex_app_server_protocol::ThreadRealtimeStartResponse;
  use codex_app_server_protocol::ThreadRealtimeStartTransport;
-+use codex_app_server_protocol::ThreadRealtimeFinalizeHandoffParams;
-+use codex_app_server_protocol::ThreadRealtimeFinalizeHandoffResponse;
-+use codex_app_server_protocol::ThreadRealtimeResolveHandoffParams;
-+use codex_app_server_protocol::ThreadRealtimeResolveHandoffResponse;
- use codex_app_server_protocol::ThreadRealtimeStopParams;
- use codex_app_server_protocol::ThreadRealtimeStopResponse;
- use codex_app_server_protocol::ThreadResumeParams;
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs

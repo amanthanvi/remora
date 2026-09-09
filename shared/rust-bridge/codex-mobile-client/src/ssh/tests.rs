@@ -1,6 +1,119 @@
 use super::probes::format_process_logs;
 use super::*;
 
+fn rsa_policy_test_key() -> russh::keys::PrivateKey {
+    use russh::keys::ssh_key::Mpint;
+    use russh::keys::ssh_key::private::{RsaKeypair, RsaPrivateKey};
+    use russh::keys::ssh_key::public::RsaPublicKey;
+
+    // Textbook RSA components: a deterministic parser fixture, never a signing key.
+    let integer = |value: u16| Mpint::from_positive_bytes(&value.to_be_bytes());
+    let public = RsaPublicKey::new(integer(17), integer(3233)).unwrap();
+    let private = RsaPrivateKey::new(integer(2753), integer(38), integer(61), integer(53)).unwrap();
+    RsaKeypair::new(public, private).unwrap().into()
+}
+
+#[tokio::test]
+async fn rsa_private_key_auth_is_rejected_before_host_verification() {
+    use russh::keys::ssh_key::LineEnding;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let server = test_server::TestSshServer::start(test_server::test_host_key()).await;
+    let host_checks = Arc::new(AtomicUsize::new(0));
+    for line_ending in [LineEnding::LF, LineEnding::CRLF] {
+        let credentials = SshCredentials {
+            host: server.host.clone(),
+            port: server.port,
+            username: "rsa-policy-test".into(),
+            auth: SshAuth::PrivateKey {
+                key_pem: rsa_policy_test_key()
+                    .to_openssh(line_ending)
+                    .unwrap()
+                    .to_string(),
+                passphrase: None,
+            },
+            unlock_macos_keychain: false,
+        };
+        let host_checks = Arc::clone(&host_checks);
+        let result = SshClient::connect(
+            credentials,
+            Box::new(move |_| {
+                host_checks.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { true })
+            }),
+        )
+        .await;
+        let Err(SshError::AuthFailed(message)) = result else {
+            panic!("RSA private key must fail preflight authentication policy");
+        };
+        assert_eq!(
+            message,
+            "RSA private keys are not supported; use an Ed25519 or ECDSA key instead"
+        );
+    }
+    assert_eq!(host_checks.load(Ordering::SeqCst), 0);
+    assert_eq!(server.auth_attempts(), 0);
+}
+
+#[tokio::test]
+async fn ed25519_private_key_auth_still_succeeds() {
+    use russh::keys::ssh_key::{LineEnding, private::Ed25519Keypair};
+
+    let key: russh::keys::PrivateKey = Ed25519Keypair::from_seed(&[42; 32]).into();
+    let server = test_server::TestSshServer::start(test_server::test_host_key()).await;
+    let expected_fingerprint = server.fingerprint.clone();
+    let client = SshClient::connect(
+        SshCredentials {
+            host: server.host.clone(),
+            port: server.port,
+            username: "ed25519-policy-test".into(),
+            auth: SshAuth::PrivateKey {
+                key_pem: key.to_openssh(LineEnding::LF).unwrap().to_string(),
+                passphrase: None,
+            },
+            unlock_macos_keychain: false,
+        },
+        Box::new(move |fingerprint| {
+            let matches = fingerprint == expected_fingerprint;
+            Box::pin(async move { matches })
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("Ed25519 authentication must remain supported"));
+    assert!(client.is_connected());
+    assert!(server.auth_attempts() > 0);
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn rsa_only_host_is_rejected_before_authentication() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let server = test_server::TestSshServer::start(rsa_policy_test_key()).await;
+    let host_checks = Arc::new(AtomicUsize::new(0));
+    let callback_checks = Arc::clone(&host_checks);
+    let result = SshClient::connect(
+        SshCredentials {
+            host: server.host.clone(),
+            port: server.port,
+            username: "rsa-host-policy-test".into(),
+            auth: SshAuth::Password("unused-test-password".into()),
+            unlock_macos_keychain: false,
+        },
+        Box::new(move |_| {
+            callback_checks.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { true })
+        }),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(SshError::ConnectionFailed(message)) if message.starts_with("No common Key algorithm")),
+        "RSA-only hosts must fail key negotiation before verification or signing"
+    );
+    assert_eq!(host_checks.load(Ordering::SeqCst), 0);
+    assert_eq!(server.auth_attempts(), 0);
+}
+
 #[test]
 fn test_normalize_host_simple() {
     assert_eq!(normalize_host("example.com"), "example.com");
@@ -141,7 +254,10 @@ fn test_ssh_error_display() {
         fingerprint: "SHA256:new".into(),
         pinned: Some("SHA256:old".into()),
     };
-    assert!(e.to_string().starts_with("host-key-changed:host.example:22"));
+    assert!(
+        e.to_string()
+            .starts_with("host-key-changed:host.example:22")
+    );
 
     let e = SshError::HostKeyStoreUnavailable {
         host: "host.example".into(),

@@ -446,19 +446,18 @@ fn project_diff_inputs(snapshot: &crate::store::ThreadSnapshot) -> DiffInputProj
                 }
             }
             HydratedConversationItemContent::TurnDiff(data)
-                if bounded_has_non_whitespace(&data.diff) =>
+                if bounded_has_non_whitespace(&data.diff)
+                    && !projection.push(
+                        &mut remaining_bytes,
+                        None,
+                        None,
+                        None,
+                        workspace_root.clone(),
+                        &data.diff,
+                        DiffInputKind::Unified,
+                    ) =>
             {
-                if !projection.push(
-                    &mut remaining_bytes,
-                    None,
-                    None,
-                    None,
-                    workspace_root.clone(),
-                    &data.diff,
-                    DiffInputKind::Unified,
-                ) {
-                    break 'items;
-                }
+                break 'items;
             }
             _ => {}
         }
@@ -679,12 +678,8 @@ fn normalize_trusted_diffs(thread_key: ThreadKey, inputs: &[DiffInput<'_>]) -> D
             }
             let (file, file_rows, file_hunks, file_truncated) = parse_diff_file(
                 &thread_key,
-                input.path_hint.as_deref(),
-                input.new_path_hint.as_deref(),
-                input.private_path_identity.as_deref(),
-                input.workspace_root.as_deref(),
+                input,
                 chunk,
-                input.kind,
                 occurrence,
                 MAX_DIFF_ROWS.saturating_sub(rows_seen),
                 MAX_DIFF_HUNKS.saturating_sub(hunks_seen),
@@ -1023,16 +1018,17 @@ fn parse_raw_file_content(
 
 fn parse_diff_file(
     thread_key: &ThreadKey,
-    path_hint: Option<&str>,
-    new_path_hint: Option<&str>,
-    private_path_identity: Option<&str>,
-    workspace_root: Option<&str>,
+    input: &DiffInput<'_>,
     patch: &str,
-    input_kind: DiffInputKind,
     occurrence: usize,
     row_budget: usize,
     hunk_budget: usize,
 ) -> (DiffReviewFile, usize, usize, bool) {
+    let path_hint = input.path_hint.as_deref();
+    let new_path_hint = input.new_path_hint.as_deref();
+    let private_path_identity = input.private_path_identity.as_deref();
+    let workspace_root = input.workspace_root.as_deref();
+    let input_kind = input.kind;
     let hint = path_hint.and_then(canonical_decoded_path);
     let hinted_new_path = new_path_hint.and_then(canonical_decoded_path);
     let mut old_path = hinted_new_path.as_ref().and(hint.clone());
@@ -1276,9 +1272,7 @@ fn parse_diff_file(
             != new_path.as_ref().map(|path| &path.identity)
     {
         DiffFileChangeKind::Renamed
-    } else if !hunks.is_empty() {
-        DiffFileChangeKind::Modified
-    } else if matches!(input_kind, DiffInputKind::UpdatedPatch) {
+    } else if !hunks.is_empty() || matches!(input_kind, DiffInputKind::UpdatedPatch) {
         DiffFileChangeKind::Modified
     } else {
         DiffFileChangeKind::Unknown

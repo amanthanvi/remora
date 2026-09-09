@@ -473,10 +473,8 @@ pub(super) async fn perform_update_saved_app(
             &server_id,
             &thread_id,
             &directory,
-            &app_id,
+            &current.app,
             &html_path,
-            current.app.width,
-            current.app.height,
             initial_html,
         ),
     )
@@ -509,12 +507,12 @@ async fn wait_for_saved_app_update_turn_and_sync(
     server_id: &str,
     thread_id: &str,
     directory: &str,
-    app_id: &str,
+    app: &crate::saved_apps::SavedApp,
     html_path: &std::path::Path,
-    width: f64,
-    height: f64,
     initial_html: String,
 ) -> Result<Option<crate::saved_apps::SavedApp>, String> {
+    let app_id = app.id.as_str();
+    let (width, height) = (app.width, app.height);
     let mut saw_active = false;
     let mut last_synced_html = initial_html;
     let mut latest_app: Option<crate::saved_apps::SavedApp> = None;

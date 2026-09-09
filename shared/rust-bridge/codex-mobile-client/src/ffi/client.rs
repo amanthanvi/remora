@@ -123,6 +123,12 @@ pub struct AppClient {
     pub(crate) rt: Arc<tokio::runtime::Runtime>,
 }
 
+impl Default for AppClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl AppClient {
     #[uniffi::constructor]
@@ -413,9 +419,7 @@ impl AppClient {
             let mut runtime_kinds = match requested_runtime_kinds {
                 Some(requested) if !requested.is_empty() => requested
                     .into_iter()
-                    .filter(|kind| {
-                        *kind == "codex".to_string() || available_runtime_kinds.contains(kind)
-                    })
+                    .filter(|kind| kind == "codex" || available_runtime_kinds.contains(kind))
                     .collect::<Vec<_>>(),
                 _ => available_runtime_kinds,
             };
@@ -442,14 +446,14 @@ impl AppClient {
             let mut codex_visited = false;
             let mut tasks = Vec::new();
             for runtime_kind in runtime_kinds {
-                if runtime_kind == "codex".to_string() {
+                if runtime_kind == "codex" {
                     if codex_visited {
                         continue;
                     }
                     codex_visited = true;
                 }
 
-                let client = std::sync::Arc::clone(&c);
+                let client = std::sync::Arc::clone(c);
                 let server_id = server_id.clone();
                 let initial_params = params.clone();
                 tasks.push(async move {
@@ -1095,12 +1099,11 @@ impl AppClient {
                 Some("/tmp"),
             )
             .await
+                && resp.exit_code == 0
             {
-                if resp.exit_code == 0 {
-                    let home = resp.stdout.trim().to_string();
-                    if !home.is_empty() {
-                        return Ok(home);
-                    }
+                let home = resp.stdout.trim().to_string();
+                if !home.is_empty() {
+                    return Ok(home);
                 }
             }
             // Fallback: Windows
@@ -1111,12 +1114,11 @@ impl AppClient {
                 None,
             )
             .await
+                && resp.exit_code == 0
             {
-                if resp.exit_code == 0 {
-                    let home = resp.stdout.trim().to_string();
-                    if !home.is_empty() && home != "%USERPROFILE%" {
-                        return Ok(home);
-                    }
+                let home = resp.stdout.trim().to_string();
+                if !home.is_empty() && home != "%USERPROFILE%" {
+                    return Ok(home);
                 }
             }
             Ok("/".to_string())

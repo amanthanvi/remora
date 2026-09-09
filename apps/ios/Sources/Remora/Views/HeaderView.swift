@@ -236,9 +236,9 @@ struct HeaderView: View {
             return .orange
         case .connected:
             if observation.isLocal {
-                return observation.hasAccount ? RemoraTheme.success : RemoraTheme.danger
+                return observation.needsAuthentication ? RemoraTheme.danger : RemoraTheme.success
             }
-            return observation.hasAccount ? RemoraTheme.success : .orange
+            return observation.needsAuthentication ? .orange : RemoraTheme.success
         case .disconnected:
             return RemoraTheme.danger
         case .unknown:
@@ -490,8 +490,8 @@ struct ConversationToolbarControls: View {
             InAppSafariView(url: session.url)
                 .ignoresSafeArea()
         }
-        .onChange(of: serverObservation.hasAccount) { _, isLoggedIn in
-            if isLoggedIn {
+        .onChange(of: serverObservation.needsAuthentication) { _, needsAuthentication in
+            if !needsAuthentication {
                 remoteAuthSession = nil
             }
         }
@@ -505,7 +505,7 @@ struct ConversationToolbarControls: View {
                 if await handleRemoteLoginIfNeeded() {
                     return
                 }
-                if !serverObservation.hasAccount {
+                if serverObservation.needsAuthentication {
                     appState.showSettings = true
                 } else {
                     do {
@@ -558,7 +558,7 @@ struct ConversationToolbarControls: View {
         guard observation.exists, !observation.isLocal else {
             return false
         }
-        guard !observation.hasAccount else {
+        guard observation.needsAuthentication else {
             return false
         }
         do {

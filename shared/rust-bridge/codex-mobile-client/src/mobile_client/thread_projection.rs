@@ -1,4 +1,216 @@
 use super::*;
+use crate::store::reducer::RelayHistoryMode;
+
+/// Read-side projection held until the host's authenticated freshness fence
+/// has been checked. No partially repaired state is published to native UI.
+pub(crate) struct RelayProjectionRepair {
+    session: Arc<ServerSession>,
+    generation: u64,
+    runtime_pages: Vec<(AgentRuntimeKind, Vec<ThreadInfo>)>,
+    incoming_ids: HashSet<String>,
+    history_epochs: Vec<(ThreadKey, Arc<()>)>,
+    threads: Vec<(
+        AgentRuntimeKind,
+        upstream::ThreadReadResponse,
+        RelayHistoryMode,
+        HashMap<String, u64>,
+    )>,
+}
+
+impl MobileClient {
+    pub(crate) async fn read_relay_projection(
+        &self,
+        server_id: &str,
+    ) -> Result<RelayProjectionRepair, RpcError> {
+        let session = self.get_session(server_id)?;
+        let generation = self.app_store.server_event_generation(server_id);
+        let history = self.app_store.server_history_snapshot(server_id);
+        let history_epochs = history
+            .iter()
+            .map(|(thread, epoch)| (thread.key.clone(), Arc::clone(epoch)))
+            .collect();
+        let loaded = history
+            .into_iter()
+            .map(|(thread, _)| thread)
+            .filter(|thread| {
+                thread.is_resumed || !thread.items.is_empty() || thread.active_turn_id.is_some()
+            })
+            .collect::<Vec<_>>();
+        let (runtime_pages, incoming_ids) =
+            read_thread_list_from_app_server(Arc::clone(&session), server_id).await?;
+        let mut threads = Vec::new();
+        for thread in loaded {
+            if !incoming_ids.contains(&thread.key.thread_id) {
+                continue;
+            }
+            let runtime = thread.agent_runtime_kind;
+            let dispatched_items = thread
+                .items
+                .iter()
+                .map(|item| {
+                    (
+                        item.id.clone(),
+                        crate::store::reducer::item_fingerprint(item),
+                    )
+                })
+                .collect();
+            let paginated =
+                self.app_store.server_supports_turn_pagination(server_id) && runtime == "codex";
+            let mut response = self
+                .request_typed_for_session_runtime_rpc::<upstream::ThreadReadResponse>(
+                    server_id,
+                    Arc::clone(&session),
+                    runtime.clone(),
+                    upstream::ClientRequest::ThreadRead {
+                        request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                        params: upstream::ThreadReadParams {
+                            thread_id: thread.key.thread_id.clone(),
+                            include_turns: !paginated,
+                        },
+                    },
+                )
+                .await?;
+            let mut history_mode = RelayHistoryMode::Replace { older_cursor: None };
+            if paginated {
+                let anchor = thread.active_turn_id.as_deref().or_else(|| {
+                    thread
+                        .items
+                        .iter()
+                        .rev()
+                        .find_map(|item| item.source_turn_id.as_deref())
+                });
+                let mut cursor = None;
+                let mut seen_cursors = HashSet::new();
+                let mut turns = Vec::new();
+                loop {
+                    let page = self
+                        .request_typed_for_session_runtime_rpc::<upstream::ThreadTurnsListResponse>(
+                            server_id,
+                            Arc::clone(&session),
+                            runtime.clone(),
+                            upstream::ClientRequest::ThreadTurnsList {
+                                request_id: upstream::RequestId::Integer(crate::next_request_id()),
+                                params: upstream::ThreadTurnsListParams {
+                                    thread_id: thread.key.thread_id.clone(),
+                                    cursor: cursor.clone(),
+                                    limit: Some(50),
+                                    sort_direction: Some(upstream::SortDirection::Desc),
+                                    items_view: Some(upstream::TurnItemsView::Full),
+                                },
+                            },
+                        )
+                        .await?;
+                    if page.data.len() > 50
+                        || page
+                            .next_cursor
+                            .as_ref()
+                            .is_some_and(|next| !seen_cursors.insert(next.clone()))
+                    {
+                        return Err(RpcError::Deserialization(
+                            "invalid relay turn history pagination".into(),
+                        ));
+                    }
+                    if anchor.is_none() && thread.items.is_empty() {
+                        turns.extend(page.data);
+                        history_mode = RelayHistoryMode::Replace {
+                            older_cursor: page.next_cursor,
+                        };
+                        break;
+                    }
+                    let overlap = anchor
+                        .and_then(|anchor| page.data.iter().position(|turn| turn.id == anchor));
+                    cursor = page.next_cursor;
+                    if let Some(overlap) = overlap {
+                        if thread.initial_turns_loaded && !thread.items.is_empty() {
+                            // Stop at the newest cached turn: older cached pages
+                            // remain authoritative, and only newer turns append.
+                            turns.extend(page.data.into_iter().take(overlap + 1));
+                            history_mode = RelayHistoryMode::Merge;
+                        } else {
+                            turns.extend(page.data);
+                            history_mode = RelayHistoryMode::Replace {
+                                older_cursor: cursor,
+                            };
+                        }
+                        break;
+                    }
+                    turns.extend(page.data);
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                response.thread.turns = turns.into_iter().rev().collect();
+            }
+            threads.push((runtime, response, history_mode, dispatched_items));
+        }
+        Ok(RelayProjectionRepair {
+            session,
+            generation,
+            runtime_pages,
+            incoming_ids,
+            history_epochs,
+            threads,
+        })
+    }
+
+    pub(crate) fn apply_relay_projection(
+        &self,
+        server_id: &str,
+        repair: RelayProjectionRepair,
+    ) -> Result<bool, RpcError> {
+        let sessions = self.sessions_read();
+        if !sessions
+            .get(server_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &repair.session))
+        {
+            return Ok(false);
+        }
+        let projections = repair
+            .threads
+            .into_iter()
+            .map(|(runtime, response, cursor, fingerprints)| {
+                let turns = response.thread.turns.clone();
+                let mut snapshot = thread_snapshot_from_upstream_thread_with_overrides(
+                    server_id,
+                    response.thread,
+                    None,
+                    None,
+                    response.approval_policy.map(Into::into),
+                    response.sandbox.map(Into::into),
+                )
+                .map_err(RpcError::Deserialization)?;
+                snapshot.agent_runtime_kind = runtime;
+                Ok((snapshot, turns, cursor, fingerprints))
+            })
+            .collect::<Result<Vec<_>, RpcError>>()?;
+        Ok(self
+            .app_store
+            .apply_if_server_event_generation(server_id, repair.generation, |store| {
+                store
+                    .apply_relay_history_if_current(
+                        server_id,
+                        &repair.history_epochs,
+                        repair.runtime_pages,
+                        &repair.incoming_ids,
+                        |store| {
+                            for (snapshot, turns, cursor, fingerprints) in projections {
+                                let key = snapshot.key.clone();
+                                let runtime = snapshot.agent_runtime_kind.clone();
+                                store.upsert_relay_thread_snapshot(
+                                    snapshot,
+                                    &turns,
+                                    cursor,
+                                    &fingerprints,
+                                );
+                                self.thread_runtime_routes().insert(key, runtime);
+                            }
+                        },
+                    )
+                    .is_some()
+            })
+            .unwrap_or(false))
+    }
+}
 
 pub fn thread_info_from_upstream_thread(thread: upstream::Thread) -> Option<ThreadInfo> {
     thread_info_from_upstream_thread_list_item(thread, None, None)
@@ -750,6 +962,421 @@ mod authoritative_thread_list_tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn relay_projection_fixture() -> (Arc<MobileClient>, ThreadKey, ServerConfig) {
+        relay_projection_fixture_with_pages(|params| {
+            if params.cursor.is_some() {
+                return serde_json::json!({"data": [], "nextCursor": null});
+            }
+            serde_json::json!({"data": [{
+                "id": "turn-1", "items": [{"type": "agentMessage", "id": "answer", "text": "REMOTE_COMPLETE"}],
+                "itemsView": "full", "status": "completed", "error": null
+            }], "nextCursor": "older"})
+        })
+    }
+
+    fn relay_projection_fixture_with_pages(
+        pages: impl Fn(upstream::ThreadTurnsListParams) -> serde_json::Value + Send + Sync + 'static,
+    ) -> (Arc<MobileClient>, ThreadKey, ServerConfig) {
+        let client = MobileClient::new();
+        let config = ServerConfig {
+            server_id: "relay-host".into(),
+            display_name: "Host".into(),
+            host: "localhost".into(),
+            port: 0,
+            websocket_url: None,
+            is_local: false,
+            tls: false,
+        };
+        client
+            .app_store
+            .upsert_server(&config, ServerHealthSnapshot::Connected);
+        client
+            .app_store
+            .set_server_supports_turn_pagination("relay-host", true);
+        let mut stale = ThreadSnapshot::from_info("relay-host", cached_thread_info("thread-1"));
+        stale.active_turn_id = Some("turn-1".into());
+        stale.info.status = ThreadSummaryStatus::Active;
+        stale.is_resumed = true;
+        let key = stale.key.clone();
+        client.app_store.upsert_thread_snapshot(stale);
+        let thread = serde_json::json!({
+            "id": "thread-1", "sessionId": "session-1", "preview": "complete", "ephemeral": false,
+            "modelProvider": "openai", "createdAt": 1, "updatedAt": 2,
+            "status": {"type": "idle"}, "path": "/tmp/thread", "cwd": "/tmp",
+            "cliVersion": "1", "source": "cli", "turns": []
+        });
+        let handler: TestRequestHandler = Arc::new(move |request| match request {
+            upstream::ClientRequest::ThreadList { .. } => {
+                Ok(serde_json::json!({"data": [thread], "nextCursor": null}))
+            }
+            upstream::ClientRequest::ThreadRead { params, .. } => {
+                assert!(!params.include_turns);
+                Ok(serde_json::json!({"thread": thread}))
+            }
+            upstream::ClientRequest::ThreadTurnsList { params, .. } => {
+                assert_eq!(params.limit, Some(50));
+                assert_eq!(params.items_view, Some(upstream::TurnItemsView::Full));
+                Ok(pages(params))
+            }
+            _ => panic!(
+                "repair must not issue mutating/subscription RPCs: {}",
+                request.method()
+            ),
+        });
+        let session = Arc::new(ServerSession::test_stub_with_handlers(
+            config.clone(),
+            Some(handler),
+            None,
+            None,
+        ));
+        client
+            .sessions
+            .write()
+            .unwrap()
+            .insert("relay-host".into(), session);
+        (client, key, config)
+    }
+
+    #[tokio::test]
+    async fn relay_projection_is_read_only_bounded_and_commits_only_to_the_current_session() {
+        let (client, key, config) = relay_projection_fixture();
+        let projection = client.read_relay_projection("relay-host").await.unwrap();
+        assert_eq!(
+            client
+                .app_store
+                .thread_snapshot(&key)
+                .unwrap()
+                .active_turn_id
+                .as_deref(),
+            Some("turn-1")
+        );
+        assert!(
+            client
+                .apply_relay_projection("relay-host", projection)
+                .unwrap()
+        );
+        let complete = client.app_store.thread_snapshot(&key).unwrap();
+        assert_eq!(complete.active_turn_id, None);
+        assert_eq!(complete.older_turns_cursor.as_deref(), Some("older"));
+        assert!(complete.items.iter().any(|item| matches!(
+            &item.content,
+            crate::conversation_uniffi::HydratedConversationItemContent::Assistant(message)
+                if message.text == "REMOTE_COMPLETE"
+        )));
+        let event_stale_projection = client.read_relay_projection("relay-host").await.unwrap();
+        client
+            .app_store
+            .apply_ui_event(&UiEvent::ThreadArchived { key: key.clone() });
+        assert!(
+            !client
+                .apply_relay_projection("relay-host", event_stale_projection)
+                .unwrap()
+        );
+        let stale_projection = client.read_relay_projection("relay-host").await.unwrap();
+        client.sessions.write().unwrap().insert(
+            "relay-host".into(),
+            Arc::new(ServerSession::test_stub(config)),
+        );
+        assert!(
+            !client
+                .apply_relay_projection("relay-host", stale_projection)
+                .unwrap()
+        );
+    }
+
+    fn relay_history_page(
+        turn_id: &str,
+        text: &str,
+        cursor: &str,
+    ) -> crate::types::AppListThreadTurnsResponse {
+        let turn: upstream::Turn = serde_json::from_value(serde_json::json!({
+            "id": turn_id, "items": [{"type": "agentMessage", "id": format!("item-{turn_id}"), "text": text}],
+            "itemsView": "full", "status": "completed", "error": null
+        })).unwrap();
+        crate::types::AppListThreadTurnsResponse {
+            turns: crate::conversation::hydrate_turns(&[turn], &Default::default()),
+            next_cursor: Some(cursor.into()),
+            backwards_cursor: None,
+        }
+    }
+
+    fn numbered_relay_turn(index: usize) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("turn-{index}"),
+            "items": [{"type": "agentMessage", "id": format!("item-{index}"), "text": format!("MESSAGE_{index}")}],
+            "itemsView": "full", "status": "completed", "error": null
+        })
+    }
+
+    fn numbered_relay_page(
+        total: usize,
+        params: upstream::ThreadTurnsListParams,
+    ) -> serde_json::Value {
+        let end = params
+            .cursor
+            .map(|cursor| cursor.parse::<usize>().unwrap())
+            .unwrap_or(total);
+        let start = end.saturating_sub(50);
+        serde_json::json!({
+            "data": (start..end).rev().map(numbered_relay_turn).collect::<Vec<_>>(),
+            "nextCursor": (start > 0).then(|| start.to_string()),
+        })
+    }
+
+    #[tokio::test]
+    async fn relay_projection_fills_more_than_fifty_intervening_turns_through_cached_overlap() {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let (client, key, _) = relay_projection_fixture_with_pages(move |params| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            numbered_relay_page(130, params)
+        });
+        let mut cached = client.app_store.thread_snapshot(&key).unwrap();
+        let turns: Vec<upstream::Turn> = (0..20)
+            .map(|index| serde_json::from_value(numbered_relay_turn(index)).unwrap())
+            .collect();
+        cached.items = crate::conversation::hydrate_turns(&turns, &Default::default());
+        cached.active_turn_id = None;
+        cached.initial_turns_loaded = true;
+        cached.older_turns_cursor = Some("before-cached".into());
+        client.app_store.upsert_thread_snapshot(cached);
+        let repair = client.read_relay_projection("relay-host").await.unwrap();
+        assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert!(client.apply_relay_projection("relay-host", repair).unwrap());
+        let current = client.app_store.thread_snapshot(&key).unwrap();
+        assert_eq!(
+            current
+                .items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            (0..130)
+                .map(|index| format!("item-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(current.older_turns_cursor.as_deref(), Some("before-cached"));
+    }
+
+    #[tokio::test]
+    async fn relay_projection_initial_history_reads_one_bounded_page() {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let (client, key, _) = relay_projection_fixture_with_pages(move |params| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            numbered_relay_page(130, params)
+        });
+        let mut unloaded = client.app_store.thread_snapshot(&key).unwrap();
+        unloaded.active_turn_id = None;
+        client.app_store.upsert_thread_snapshot(unloaded);
+        let repair = client.read_relay_projection("relay-host").await.unwrap();
+        assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(client.apply_relay_projection("relay-host", repair).unwrap());
+        let current = client.app_store.thread_snapshot(&key).unwrap();
+        assert_eq!(
+            current
+                .items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            (80..130)
+                .map(|index| format!("item-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(current.older_turns_cursor.as_deref(), Some("80"));
+    }
+
+    #[tokio::test]
+    async fn relay_projection_reads_to_end_without_overlap_and_replaces_obsolete_history() {
+        for total in [120, 0] {
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = Arc::clone(&requests);
+            let (client, key, _) = relay_projection_fixture_with_pages(move |params| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                numbered_relay_page(total, params)
+            });
+            let mut cached = client.app_store.thread_snapshot(&key).unwrap();
+            cached.items = relay_history_page("obsolete", "OBSOLETE", "stale-cursor").turns;
+            cached.active_turn_id = Some("obsolete".into());
+            cached.initial_turns_loaded = true;
+            cached.older_turns_cursor = Some("stale-cursor".into());
+            client.app_store.upsert_thread_snapshot(cached);
+            let epoch = client.app_store.thread_history_epoch(&key).unwrap();
+            let repair = client.read_relay_projection("relay-host").await.unwrap();
+            assert_eq!(
+                requests.load(std::sync::atomic::Ordering::Relaxed),
+                if total == 0 { 1 } else { 3 }
+            );
+            assert!(client.apply_relay_projection("relay-host", repair).unwrap());
+            let current = client.app_store.thread_snapshot(&key).unwrap();
+            assert_eq!(
+                current
+                    .items
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..total)
+                    .map(|index| format!("item-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(current.older_turns_cursor, None);
+            assert_eq!(current.active_turn_id, None);
+            let stale_page = relay_history_page("obsolete", "OBSOLETE", "stale-cursor");
+            assert!(
+                !client
+                    .app_store
+                    .apply_thread_turns_pages(
+                        &key,
+                        Some(&epoch),
+                        [&stale_page],
+                        crate::types::AppTurnsSortDirection::Descending
+                    )
+                    .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_projection_rejects_repeated_cursor_without_publishing_partial_pages() {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let (client, key, _) = relay_projection_fixture_with_pages(move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            serde_json::json!({"data": [numbered_relay_turn(999)], "nextCursor": "repeated"})
+        });
+        let before = client.app_store.thread_snapshot(&key).unwrap();
+        assert!(client.read_relay_projection("relay-host").await.is_err());
+        assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let after = client.app_store.thread_snapshot(&key).unwrap();
+        assert_eq!(after.items, before.items);
+        assert_eq!(after.active_turn_id, before.active_turn_id);
+    }
+
+    #[tokio::test]
+    async fn relay_projection_merges_older_page_completed_during_delayed_repair() {
+        let (client, key, _) = relay_projection_fixture();
+        let first = client.read_relay_projection("relay-host").await.unwrap();
+        assert!(client.apply_relay_projection("relay-host", first).unwrap());
+        let old = relay_history_page("old", "OLD", "before-old");
+        client
+            .app_store
+            .apply_thread_turns_pages(
+                &key,
+                None,
+                [&old],
+                crate::types::AppTurnsSortDirection::Descending,
+            )
+            .unwrap();
+        client
+            .app_store
+            .mutate_thread_history(&key, None, |thread| {
+                if let crate::conversation_uniffi::HydratedConversationItemContent::Assistant(
+                    message,
+                ) = &mut thread
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == "answer")
+                    .unwrap()
+                    .content
+                {
+                    message.text = "STALE_CACHED".into();
+                }
+            })
+            .unwrap();
+        let delayed = client.read_relay_projection("relay-host").await.unwrap();
+        let older = relay_history_page("older", "OLDER", "before-older");
+        client
+            .app_store
+            .apply_thread_turns_pages(
+                &key,
+                None,
+                [&older],
+                crate::types::AppTurnsSortDirection::Descending,
+            )
+            .unwrap();
+        assert!(
+            client
+                .apply_relay_projection("relay-host", delayed)
+                .unwrap()
+        );
+        let current = client.app_store.thread_snapshot(&key).unwrap();
+        assert_eq!(
+            current
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["item-older", "item-old", "answer"]
+        );
+        assert_eq!(current.older_turns_cursor.as_deref(), Some("before-older"));
+        assert!(current.items.iter().any(|item| matches!(
+            &item.content,
+            crate::conversation_uniffi::HydratedConversationItemContent::Assistant(message)
+                if message.text == "REMOTE_COMPLETE"
+        )));
+        let delayed = client.read_relay_projection("relay-host").await.unwrap();
+        client
+            .app_store
+            .mutate_thread_history(&key, None, |thread| {
+                if let crate::conversation_uniffi::HydratedConversationItemContent::Assistant(
+                    message,
+                ) = &mut thread
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == "answer")
+                    .unwrap()
+                    .content
+                {
+                    message.text = "LOCALLY_NEWER".into();
+                }
+            })
+            .unwrap();
+        assert!(
+            client
+                .apply_relay_projection("relay-host", delayed)
+                .unwrap()
+        );
+        assert!(
+            client
+                .app_store
+                .thread_snapshot(&key)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| matches!(
+                    &item.content,
+                    crate::conversation_uniffi::HydratedConversationItemContent::Assistant(message)
+                        if message.text == "LOCALLY_NEWER"
+                ))
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_projection_rejects_local_reset_and_removal_after_read() {
+        let (client, key, _) = relay_projection_fixture();
+        let delayed = client.read_relay_projection("relay-host").await.unwrap();
+        let mut reset = client.app_store.thread_snapshot(&key).unwrap();
+        reset.items.clear();
+        reset.active_turn_id = None;
+        reset.info.preview = Some("reset locally".into());
+        client.app_store.replace_thread_history(reset);
+        assert!(
+            !client
+                .apply_relay_projection("relay-host", delayed)
+                .unwrap()
+        );
+        let current = client.app_store.thread_snapshot(&key).unwrap();
+        assert!(current.items.is_empty());
+        assert_eq!(current.info.preview.as_deref(), Some("reset locally"));
+        let delayed = client.read_relay_projection("relay-host").await.unwrap();
+        client.app_store.remove_thread(&key);
+        assert!(
+            !client
+                .apply_relay_projection("relay-host", delayed)
+                .unwrap()
+        );
+        assert!(client.app_store.thread_snapshot(&key).is_none());
     }
 
     #[tokio::test]

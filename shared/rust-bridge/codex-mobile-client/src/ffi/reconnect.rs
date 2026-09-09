@@ -505,6 +505,12 @@ impl ReconnectController {
     }
 }
 
+impl Default for ReconnectController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl ReconnectController {
     #[uniffi::constructor]
@@ -625,7 +631,7 @@ impl ReconnectController {
         // websocket connect path does not execute on Swift's smaller stack.
         self.rt
             .spawn(async move {
-                let result = reconnect_server_inner(
+                reconnect_server_inner(
                     Arc::clone(&inner),
                     saved_servers,
                     credential_provider,
@@ -633,8 +639,7 @@ impl ReconnectController {
                     reconnect_coordinator,
                     server_id,
                 )
-                .await;
-                result
+                .await
             })
             .await
             .unwrap_or_else(|error| {
@@ -872,7 +877,7 @@ async fn reconnect_server_inner(
             server_id: server_id.clone(),
             display_name: resolved_local_display_name(
                 &snapshot,
-                saved_server.as_ref().map_or(&[], std::slice::from_ref),
+                saved_server.as_slice(),
                 &server_id,
             ),
         };

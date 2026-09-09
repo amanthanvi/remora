@@ -600,7 +600,10 @@ impl BackgroundRelay {
                 .await?;
         }
         let starting_cursor = binding.wake.applied_cursor;
-        let mut target_cursor = binding.wake.highest_seen_cursor;
+        // Push hints trigger discovery; only durable applied/ACK receipts and
+        // authenticated relay responses can establish the repair target.
+        let mut target_cursor =
+            starting_cursor.max(binding.wake.remote_ack_ahead_cursor.unwrap_or(0));
         let authorization = self
             .read_capability(
                 &binding.read_capability_alias,
@@ -609,7 +612,10 @@ impl BackgroundRelay {
             )
             .await?;
 
-        let first_page = if discover_high_watermark || target_cursor > starting_cursor {
+        let first_page = if discover_high_watermark
+            || binding.wake.highest_seen_cursor > starting_cursor
+            || target_cursor > starting_cursor
+        {
             Some(
                 self.fetch_page(
                     &binding,
@@ -632,11 +638,23 @@ impl BackgroundRelay {
                 operation.page_limit,
                 now_ms,
             )?;
+            if binding.wake.highest_seen_cursor > target_cursor {
+                binding = self
+                    .cas_bounded(binding, &operation, |mut entry| {
+                        entry.wake.highest_seen_cursor = target_cursor;
+                        entry
+                            .wake
+                            .recently_seen
+                            .retain(|seen| seen.cursor <= target_cursor);
+                        entry
+                    })
+                    .await?;
+            }
         }
 
         if target_cursor <= starting_cursor {
             if discover_high_watermark {
-                let (repair, _) = self
+                let (repair, mut repaired_binding) = self
                     .run_repair(
                         &operation,
                         binding.clone(),
@@ -648,6 +666,9 @@ impl BackgroundRelay {
                 if !repair.authoritative || repair.applied_through_cursor != starting_cursor {
                     return Err(RelayError::RepairFailed);
                 }
+                repaired_binding.wake.verified_barrier_id = repair.verified_barrier_id;
+                self.cas_bounded(repaired_binding, &operation, |entry| entry)
+                    .await?;
             }
             return Ok(RelayReconcileReceipt {
                 host_id: binding.host_id,
@@ -723,6 +744,7 @@ impl BackgroundRelay {
         // repair, then durable local cursor commit, then remote ACK.
         binding.wake.highest_seen_cursor = binding.wake.highest_seen_cursor.max(target_cursor);
         binding.wake.applied_cursor = target_cursor;
+        binding.wake.verified_barrier_id = repair.verified_barrier_id;
         binding.wake.pending_ack_cursor = Some(target_cursor);
         // A remote-ahead ACK is only a divergence marker until authoritative
         // repair reaches that cursor. Clear it in the same durable commit that
@@ -978,8 +1000,8 @@ impl BackgroundRelay {
         mut binding: RelayBindingEntry,
         mode: RelayRepairMode,
     ) -> Result<(RelayRepairReceipt, RelayBindingEntry), RelayError> {
-        // Allocate the native commit fence in the authenticated journal before
-        // invoking native code. Retrying a journal conflict reloads the latest
+        // Allocate the repair fence in the authenticated journal before
+        // reading the host. Retrying a journal conflict reloads the latest
         // per-host generation, so separate AppClient instances and process
         // restarts share one strictly monotonic sequence.
         let mut allocated = false;
@@ -1025,11 +1047,8 @@ impl BackgroundRelay {
         if !allocated || binding.repair_generation == 0 {
             return Err(RelayError::JournalUnavailable);
         }
-        // The repair port owns deadline enforcement because native callbacks
-        // may continue after their Rust future is dropped. Its native request
-        // carries the same deadline plus a commit fence; wrapping it in a
-        // second timeout here could drop the adapter before it establishes
-        // that fence.
+        // One absolute deadline covers connection, both authenticated barriers,
+        // read-side hydration, and the fenced projection commit.
         match self
             .repair
             .repair(

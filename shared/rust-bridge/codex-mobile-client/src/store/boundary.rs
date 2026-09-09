@@ -149,7 +149,7 @@ fn merged_hydrated_items(
     local_overlay_items: &[crate::conversation_uniffi::HydratedConversationItem],
 ) -> Vec<HydratedConversationItem> {
     let mut merged = Vec::with_capacity(items.len() + local_overlay_items.len());
-    merged.extend(items.iter().cloned().map(Into::into));
+    merged.extend(items.iter().cloned());
 
     let mut selected_overlays: Vec<&crate::conversation_uniffi::HydratedConversationItem> =
         Vec::new();
@@ -165,7 +165,7 @@ fn merged_hydrated_items(
         }
     }
     for overlay in selected_overlays {
-        insert_overlay_item(&mut merged, overlay.clone().into());
+        insert_overlay_item(&mut merged, overlay.clone());
     }
     merged
 }
@@ -888,7 +888,7 @@ fn compute_server_usage_stats(
         *model_counts.entry(model).or_insert(0) += 1;
     }
 
-    tokens_by_thread.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    tokens_by_thread.sort_by_key(|thread| std::cmp::Reverse(thread.tokens));
 
     let mut activity_by_day: Vec<AppActivityByDayEntry> = day_buckets
         .into_iter()
@@ -906,7 +906,7 @@ fn compute_server_usage_stats(
             thread_count,
         })
         .collect();
-    model_usage.sort_by(|a, b| b.thread_count.cmp(&a.thread_count));
+    model_usage.sort_by_key(|model| std::cmp::Reverse(model.thread_count));
 
     Some(AppServerUsageStats {
         total_threads,
@@ -1695,6 +1695,7 @@ mod tests {
         );
 
         snapshot.pending_user_inputs.push(PendingUserInputRequest {
+            runtime_kind: "codex".to_string(),
             id: "req-1".to_string(),
             server_id: "srv".to_string(),
             thread_id: "thread-a".to_string(),

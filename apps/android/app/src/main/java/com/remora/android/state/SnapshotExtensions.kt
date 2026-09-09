@@ -58,6 +58,9 @@ val AppServerTransportState.accentColor: Color
 val AppServerSnapshot.isConnected: Boolean
     get() = transportState == AppServerTransportState.CONNECTED
 
+val AppServerSnapshot.needsAccountLogin: Boolean
+    get() = requiresOpenaiAuth && account == null
+
 val AppServerSnapshot.canUseTransportActions: Boolean
     get() = capabilities.canUseTransportActions
 
@@ -96,7 +99,7 @@ val AppServerSnapshot.connectionProgressDetail: String?
 val AppServerSnapshot.statusLabel: String
     get() = when {
         connectionProgressLabel != null -> connectionProgressLabel!!
-        transportState == AppServerTransportState.CONNECTED && !isLocal && account == null -> "Sign in required"
+        transportState == AppServerTransportState.CONNECTED && !isLocal && needsAccountLogin -> "Sign in required"
         else -> transportState.displayLabel
     }
 
@@ -109,7 +112,7 @@ val AppServerSnapshot.statusColor: Color
         } else {
             WarningOrange
         }
-        transportState == AppServerTransportState.CONNECTED && !isLocal && account == null -> WarningOrange
+        transportState == AppServerTransportState.CONNECTED && !isLocal && needsAccountLogin -> WarningOrange
         else -> transportState.accentColor
     }
 
@@ -123,9 +126,13 @@ val AppServerSnapshot.statusDotState: com.remora.android.ui.common.StatusDotStat
             com.remora.android.ui.common.StatusDotState.ERROR
         currentConnectionStep?.state == AppConnectionStepState.AWAITING_USER_INPUT ->
             com.remora.android.ui.common.StatusDotState.PENDING
+        currentConnectionStep?.kind == AppConnectionStepKind.CONNECTED &&
+            currentConnectionStep?.state == AppConnectionStepState.COMPLETED &&
+            (isLocal || !needsAccountLogin) ->
+            com.remora.android.ui.common.StatusDotState.OK
         connectionProgressLabel != null ->
             com.remora.android.ui.common.StatusDotState.PENDING
-        transportState == AppServerTransportState.CONNECTED && !isLocal && account == null ->
+        transportState == AppServerTransportState.CONNECTED && !isLocal && needsAccountLogin ->
             com.remora.android.ui.common.StatusDotState.PENDING
         transportState == AppServerTransportState.CONNECTED ->
             com.remora.android.ui.common.StatusDotState.OK
