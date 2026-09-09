@@ -5,6 +5,44 @@ import Foundation
 
 final class AppModelConversationObservationTests: XCTestCase {
     @MainActor
+    func testHeaderAuthenticationProjectionTracksCanonicalRequirement() {
+        let observation = AppModelServerObservation(serverId: "server")
+        var server = makeServer()
+        observation.refresh(snapshot: makeSnapshot(threads: [], servers: [server]))
+        XCTAssertFalse(observation.hasAccount)
+        XCTAssertFalse(observation.needsAuthentication)
+        let revision = observation.revision
+
+        server.requiresOpenaiAuth = true
+        observation.refresh(snapshot: makeSnapshot(threads: [], servers: [server]))
+        XCTAssertTrue(observation.needsAuthentication)
+        XCTAssertEqual(observation.revision, revision + 1)
+
+        server.requiresOpenaiAuth = false
+        observation.refresh(snapshot: makeSnapshot(threads: [], servers: [server]))
+        XCTAssertFalse(observation.needsAuthentication)
+        XCTAssertEqual(observation.revision, revision + 2)
+    }
+
+    @MainActor
+    func testEnsureThreadLoadedDoesNotSubstituteActiveThreadAfterExhaustingAttempts() async {
+        let activeKey = ThreadKey(serverId: "server", threadId: "active")
+        let requestedKey = ThreadKey(serverId: "server", threadId: "requested")
+        let appModel = AppModel()
+        appModel.applySnapshot(makeSnapshot(
+            threads: [makeThread(key: activeKey, title: "Active")],
+            activeThread: activeKey
+        ))
+
+        let unavailableKey = await appModel.ensureThreadLoaded(key: requestedKey, maxAttempts: 0)
+        XCTAssertNil(unavailableKey)
+        XCTAssertEqual(appModel.snapshot?.activeThread, activeKey)
+
+        let loadedKey = await appModel.ensureThreadLoaded(key: activeKey, maxAttempts: 0)
+        XCTAssertEqual(loadedKey, activeKey)
+    }
+
+    @MainActor
     func testChromeProjectionIgnoresStreamingPayloadButPublishesChromeChanges() {
         let selectedKey = ThreadKey(serverId: "server", threadId: "selected")
         let otherKey = ThreadKey(serverId: "server", threadId: "other")
@@ -442,6 +480,7 @@ final class AppModelConversationObservationTests: XCTestCase {
             PendingUserInputRequest(
                 id: "server-input",
                 serverId: key.serverId,
+                runtimeKind: "codex",
                 threadId: "",
                 turnId: "turn",
                 itemId: "item",
@@ -655,6 +694,7 @@ private func makePendingInput(key: ThreadKey, id: String) -> PendingUserInputReq
     PendingUserInputRequest(
         id: id,
         serverId: key.serverId,
+        runtimeKind: "codex",
         threadId: key.threadId,
         turnId: "turn",
         itemId: "item",
@@ -668,6 +708,7 @@ private func makePendingApproval(id: String) -> PendingApproval {
     PendingApproval(
         id: id,
         serverId: "server",
+        runtimeKind: "codex",
         kind: .command,
         threadId: "selected",
         turnId: "turn",

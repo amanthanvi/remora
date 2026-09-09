@@ -18,17 +18,6 @@ pub(crate) use client::{
     ControlExchangeError, read_response_frame, write_proof_frame, write_request_frame,
 };
 #[allow(unused_imports)]
-pub(crate) use wire::{
-    ALPN, AgentCapabilitiesV2, AgentInfoV2, AgentPresentationV2, AgentWireV2, AttachKindV2,
-    ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
-    EnrollmentTranscriptInput, ErrorCodeV2, InvitationInspectionV2, PendingEnrollmentV2,
-    ProofChallengeV2, ProofTranscriptInput, ProofV2, RequestCorrelationV2, RequestV2, ResponseV2,
-    RestartResultV2, RestartStatusV2, RevocationReceiptV2, RuntimeOfferV2, SessionV2, WireError,
-    derive_sas, encode_enrollment_transcript, encode_host_policy_transcript,
-    encode_proof_transcript, encode_prospective_credential_material, enrollment_transcript_hash,
-    host_policy_digest, operation_payload_hash, prospective_credential_id, validate_policy,
-};
-#[allow(unused_imports)]
 pub(crate) use lifecycle::{
     EnrollmentOutcomeV2, ForgetOutcomeV2, LifecycleErrorV2, MutationOutcomeV2, PairingLifecycleV2,
     ReconnectOutcomeV2, RecoveryOutcomeV2, RestartOutcomeV2,
@@ -49,6 +38,17 @@ pub(crate) use v2_journal::{
 pub(crate) use v2_ports::{
     CredentialCustodyPortV2, CredentialPortError, EntropyPortV2, FinishedExchangeV2, HardwareKeyV2,
     HostPortErrorV2, HostPortV2, HostRouteV2, StartedExchangeV2,
+};
+#[allow(unused_imports)]
+pub(crate) use wire::{
+    ALPN, AgentCapabilitiesV2, AgentInfoV2, AgentPresentationV2, AgentWireV2, AttachKindV2,
+    ConfirmationModeV2, DeviceScopeV2, EnrolledDeviceV2, EnrollmentConfirmationV2,
+    EnrollmentTranscriptInput, ErrorCodeV2, InvitationInspectionV2, PendingEnrollmentV2,
+    ProofChallengeV2, ProofTranscriptInput, ProofV2, RequestCorrelationV2, RequestV2, ResponseV2,
+    RestartResultV2, RestartStatusV2, RevocationReceiptV2, RuntimeOfferV2, SessionV2, WireError,
+    derive_sas, encode_enrollment_transcript, encode_host_policy_transcript,
+    encode_proof_transcript, encode_prospective_credential_material, enrollment_transcript_hash,
+    host_policy_digest, operation_payload_hash, prospective_credential_id, validate_policy,
 };
 
 #[cfg(test)]

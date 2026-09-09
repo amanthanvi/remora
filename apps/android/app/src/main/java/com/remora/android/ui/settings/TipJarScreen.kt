@@ -181,7 +181,7 @@ fun TipJarScreen(onBack: () -> Unit) {
                     .setProductList(productList)
                     .build()
 
-                billingClient.queryProductDetailsAsync(params) { result, detailsList ->
+                billingClient.queryProductDetailsAsync(params) { result, details ->
                     if (result.responseCode != BillingClient.BillingResponseCode.OK) {
                         LLog.w(TIP_JAR_TAG, "Product detail query failed")
                         LLog.debug(TIP_JAR_TAG) {
@@ -194,7 +194,7 @@ fun TipJarScreen(onBack: () -> Unit) {
                         return@queryProductDetailsAsync
                     }
 
-                    val detailsMap = detailsList.associateBy { it.productId }
+                    val detailsMap = details.productDetailsList.associateBy { it.productId }
                     LLog.i(TIP_JAR_TAG, "Tip products resolved")
                     LLog.debug(TIP_JAR_TAG) {
                         "Resolved tip products=${detailsMap.keys.sorted()} requested=$requestedProductIds"

@@ -2,6 +2,7 @@ package com.remora.android
 
 import android.app.Application
 import com.remora.android.state.CurrentSecurityCutover
+import com.remora.android.state.AndroidRelayRuntime
 import com.remora.android.util.LLog
 
 /**
@@ -16,6 +17,8 @@ class RemoraApplication : Application() {
         super.onCreate()
         if (!CurrentSecurityCutover.apply(this)) {
             LLog.e("RemoraApplication", "Remora 1.6 security cutover did not complete")
+        } else {
+            AndroidRelayRuntime.start(this)
         }
     }
 }

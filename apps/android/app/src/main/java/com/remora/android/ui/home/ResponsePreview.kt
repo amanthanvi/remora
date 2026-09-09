@@ -21,7 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.SubcomposeLayout
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
@@ -48,9 +48,9 @@ fun ResponsePreview(
 ) {
     if (text.length <= 20) return
 
-    val configuration = LocalConfiguration.current
+    val windowHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
     val capFraction = if (zoomLevel >= 4) 0.5f else 0.25f
-    val capDp = (configuration.screenHeightDp * capFraction).dp
+    val capDp = windowHeight * capFraction
     // Pass the unscaled base size — StreamingMarkdownText reads
     // LocalTextScale itself and applies it. Passing a pre-scaled value
     // would double-scale the preview (17 × scale × scale).

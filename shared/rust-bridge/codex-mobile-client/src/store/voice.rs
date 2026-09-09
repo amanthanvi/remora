@@ -254,10 +254,8 @@ impl VoiceRealtimeThreadState {
             self.set_pending_item_id(speaker, Some(id.to_string()));
             return id.to_string();
         }
-        if !force_new {
-            if let Some(id) = self.pending_item_id(speaker) {
-                return id.clone();
-            }
+        if !force_new && let Some(id) = self.pending_item_id(speaker) {
+            return id.clone();
         }
         let label = match speaker {
             AppVoiceSpeaker::User => "user",

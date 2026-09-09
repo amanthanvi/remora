@@ -731,9 +731,8 @@ async fn resolve_remote_cli(
         .collect::<Vec<_>>()
         .join(" ");
     let script = format!(
-        "{PROFILE_INIT}\n{}",
-        format!(
-            r#"for cmd in {candidate_list}; do
+        r#"{PROFILE_INIT}
+for cmd in {candidate_list}; do
   case "$cmd" in
     */*)
       if [ -x "$cmd" ]; then
@@ -751,7 +750,6 @@ async fn resolve_remote_cli(
   esac
 done
 exit 127"#
-        )
     );
     let result = ssh.exec_shell(&script, shell).await?;
     if result.exit_code == 0 {

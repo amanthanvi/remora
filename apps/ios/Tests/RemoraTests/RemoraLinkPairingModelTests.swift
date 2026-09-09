@@ -78,6 +78,7 @@ final class RemoraLinkPairingModelTests: XCTestCase {
 
     func testAcceptShowsPendingSASThenCompletesPairing() async {
         var receivedAcceptance: AppRemoraLinkAcceptance?
+        var didPairCount = 0
         let releaseAwait = AsyncGate()
         let model = makeModel(
             inspect: { _ in .ready(offer: Self.offer) },
@@ -102,7 +103,8 @@ final class RemoraLinkPairingModelTests: XCTestCase {
                     grantedScopes: [.inspectRuntimes, .connectRuntime],
                     createdAtUnixMs: 10_001
                 )
-            }
+            },
+            didPair: { didPairCount += 1 }
         )
 
         model.inspect(codeText: "code")
@@ -117,12 +119,27 @@ final class RemoraLinkPairingModelTests: XCTestCase {
         XCTAssertEqual(receivedAcceptance?.deviceDisplayName, "Aman's iPhone")
         XCTAssertEqual(receivedAcceptance?.selectedRuntimeIds, ["codex"])
         XCTAssertEqual(receivedAcceptance?.requestedScopes, [.inspectRuntimes, .connectRuntime])
+        XCTAssertEqual(didPairCount, 0)
 
         releaseAwait.open()
         await waitUntil {
             if case .success = model.state { return true }
             return false
         }
+        XCTAssertEqual(didPairCount, 1)
+    }
+
+    func testAlreadyPairedNotifiesRelayReplayAfterAuthoritativeOutcome() async {
+        var didPairCount = 0
+        let model = makeModel(didPair: { didPairCount += 1 })
+        model.inspect(codeText: "code")
+        await waitUntil { model.state == .offer(Self.offer) }
+        model.acceptOffer()
+        await waitUntil {
+            if case .success = model.state { return true }
+            return false
+        }
+        XCTAssertEqual(didPairCount, 1)
     }
 
     func testCancellationOutcomeUnknownIsExplicit() async {
@@ -170,7 +187,8 @@ final class RemoraLinkPairingModelTests: XCTestCase {
         awaitPairing: @escaping @MainActor (String, AppRemoraLinkPairingCode?) async throws -> AppRemoraLinkPairingOutcome = { hostId, _ in
             .alreadyPaired(hostId: hostId, selectedRuntimeIds: ["codex"], grantedScopes: [.connectRuntime])
         },
-        cancel: @escaping @MainActor (String) async throws -> AppRemoraLinkPairingCancellationOutcome = { _ in .cancelled }
+        cancel: @escaping @MainActor (String) async throws -> AppRemoraLinkPairingCancellationOutcome = { _ in .cancelled },
+        didPair: @escaping @MainActor () -> Void = {}
     ) -> RemoraLinkPairingModel {
         RemoraLinkPairingModel(
             operations: RemoraLinkPairingOperations(
@@ -180,7 +198,8 @@ final class RemoraLinkPairingModelTests: XCTestCase {
                 cancel: cancel
             ),
             initialState: .availability(.configuring),
-            deviceDisplayName: "iPhone"
+            deviceDisplayName: "iPhone",
+            didPair: didPair
         )
     }
 

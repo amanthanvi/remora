@@ -1,0 +1,39 @@
+[package]
+name = "remora-droid-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Codex app-server facade over Factory Droid's stream-jsonrpc exec mode."
+
+[[bin]]
+name = "remora-droid-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-droid"
+path = "tests/support/fake_droid.rs"
+
+[lib]
+name = "remora_droid_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+remora-bridge-core = { workspace = true }
+remora-codex-proto = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

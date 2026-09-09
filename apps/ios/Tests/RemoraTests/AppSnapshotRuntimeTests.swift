@@ -2,6 +2,42 @@ import XCTest
 @testable import Remora
 
 final class AppSnapshotRuntimeTests: XCTestCase {
+    func testRemoteStatusRequiresAuthenticationOnlyWhenServerRequiresIt() {
+        var server = makeSnapshot(threads: []).servers[0]
+        XCTAssertEqual(server.statusLabel, "Connected")
+        XCTAssertEqual(server.statusDotState, .ok)
+        XCTAssertEqual(server.statusColor, AppServerHealth.connected.accentColor)
+
+        server.requiresOpenaiAuth = true
+        XCTAssertEqual(server.statusLabel, "Sign in required")
+        XCTAssertEqual(server.statusDotState, .pending)
+        XCTAssertEqual(server.statusColor, AppServerHealth.connecting.accentColor)
+    }
+
+    @MainActor
+    func testPendingInputDismissalIsScopedToServerAndRuntime() {
+        let state = AppState()
+        let request = PendingUserInputRequest(
+            id: "42",
+            serverId: "server-a",
+            runtimeKind: "codex",
+            threadId: "thread",
+            turnId: "turn",
+            itemId: "item",
+            questions: [],
+            requesterAgentNickname: nil,
+            requesterAgentRole: nil
+        )
+        var otherServer = request
+        otherServer.serverId = "server-b"
+        var otherRuntime = request
+        otherRuntime.runtimeKind = "pi"
+        state.dismissPendingUserInput(request: request)
+        XCTAssertTrue(state.isPendingUserInputDismissed(request: request))
+        XCTAssertFalse(state.isPendingUserInputDismissed(request: otherServer))
+        XCTAssertFalse(state.isPendingUserInputDismissed(request: otherRuntime))
+    }
+
     func testThreadHasTrackedTurnWhenThreadHasActiveTurn() {
         let key = ThreadKey(serverId: "srv", threadId: "thread-1")
         let snapshot = makeSnapshot(
@@ -21,6 +57,7 @@ final class AppSnapshotRuntimeTests: XCTestCase {
             PendingApproval(
                 id: "approval-1",
                 serverId: key.serverId,
+                runtimeKind: "codex",
                 kind: .command,
                 threadId: key.threadId,
                 turnId: "turn-1",
@@ -46,6 +83,7 @@ final class AppSnapshotRuntimeTests: XCTestCase {
             PendingUserInputRequest(
                 id: "input-1",
                 serverId: key.serverId,
+                runtimeKind: "codex",
                 threadId: key.threadId,
                 turnId: "turn-1",
                 itemId: "item-1",
@@ -68,6 +106,7 @@ final class AppSnapshotRuntimeTests: XCTestCase {
             PendingUserInputRequest(
                 id: "input-1",
                 serverId: key.serverId,
+                runtimeKind: "codex",
                 threadId: "",
                 turnId: "turn-1",
                 itemId: "item-1",
@@ -94,6 +133,7 @@ final class AppSnapshotRuntimeTests: XCTestCase {
             PendingApproval(
                 id: "approval-1",
                 serverId: otherKey.serverId,
+                runtimeKind: "codex",
                 kind: .command,
                 threadId: otherKey.threadId,
                 turnId: "turn-2",

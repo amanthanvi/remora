@@ -1,7 +1,7 @@
 //! Narrow UniFFI seam for the Rust-owned background relay coordinator.
 //!
-//! Native code supplies only atomic persistence, secure custody, and an
-//! authoritative host-repair hook. HTTP protocol handling, enrollment,
+//! Native code supplies only atomic persistence and secure custody.
+//! Authenticated host repair, HTTP protocol handling, enrollment,
 //! provider-token aliasing, wake ordering, reconciliation, and cleanup stay in
 //! Rust. Secret-bearing values cross only direct command/custody calls; they
 //! never enter status records, AppStore snapshots, diagnostics, or logs.
@@ -24,15 +24,13 @@ use crate::{
     background_relay::{
         BackgroundRelay, ConfiguredBackgroundRelay, MAX_RETIRED_TOKEN_ALIASES, OpaqueRelaySecret,
         OpaqueRelaySecretPort, OpaqueWakeHint, PushTokenObservation, PushTokenTombstone,
-        RelayAuthoritativeRepairPort, RelayBindingEntry, RelayBindingJournalPort,
-        RelayBindingState, RelayBindingStatus, RelayEnrollment, RelayEnrollmentCommandId,
-        RelayError, RelayEventClass, RelayEventId, RelayHostId, RelayInstallationId,
-        RelayJournalError, RelayOperationContext, RelayPreviousProviderRegistration,
-        RelayProviderRegistration, RelayProviderTombstoneFence, RelayPushEnvironment,
-        RelayPushProvider, RelayReconcileOutcome, RelayReconcileReceipt,
-        RelayRegistrationDisposition, RelayRegistrationId, RelayRepairError, RelayRepairMode,
-        RelayRepairReceipt, RelaySecretAlias, RelaySecretCasOutcome, RelaySecretCreateOutcome,
-        RelaySecretRevision, RelaySecretStoreError, RelayWakeLedger, RemoteRelayEnrollmentPort,
+        RelayBindingEntry, RelayBindingJournalPort, RelayBindingState, RelayBindingStatus,
+        RelayEnrollmentCommandId, RelayError, RelayEventClass, RelayEventId, RelayHostId,
+        RelayInstallationId, RelayJournalError, RelayOperationContext,
+        RelayPreviousProviderRegistration, RelayProviderRegistration, RelayProviderTombstoneFence,
+        RelayPushEnvironment, RelayPushProvider, RelayReconcileOutcome, RelayReconcileReceipt,
+        RelayRegistrationDisposition, RelayRegistrationId, RelaySecretAlias, RelaySecretCasOutcome,
+        RelaySecretCreateOutcome, RelaySecretRevision, RelaySecretStoreError, RelayWakeLedger,
         ReqwestRelayTransport, SeenWake,
     },
     ffi::AppClient,
@@ -52,6 +50,10 @@ const MAX_BINDINGS: usize = 256;
 const MAX_REGISTRATIONS_PER_BINDING: usize = 3;
 const MAX_RECENT_WAKES: usize = 32;
 const MAX_HOST_ID_BYTES: usize = 256;
+
+#[cfg(test)]
+#[path = "remora_link_relay_live_tests.rs"]
+mod relay_live_tests;
 
 // ── Native persistence/custody callbacks ────────────────────────────────
 
@@ -228,64 +230,6 @@ pub trait AppRelaySecretBackend: Send + Sync {
     async fn delete(&self, alias: String) -> AppRelaySecretWriteOutcome;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum AppRelayRepairMode {
-    Incremental {
-        after_cursor: u64,
-        through_cursor: u64,
-    },
-    Snapshot {
-        revision: u64,
-        through_cursor: u64,
-    },
-    Full {
-        through_cursor: u64,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum AppRelayRepairResult {
-    /// Return only after authenticated authoritative host state has been
-    /// applied durably through the exact cursor.
-    Applied {
-        through_cursor: u64,
-    },
-    Unavailable,
-    RePairRequired,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct AppRelayRepairRequest {
-    pub host_id: String,
-    pub mode: AppRelayRepairMode,
-    /// Authenticated, journal-backed per-host generation allocated before the
-    /// native call. Native code must atomically accept it only when it is
-    /// strictly greater than its persisted generation, then compare the same
-    /// generation again in the durable repair commit transaction.
-    pub generation: u64,
-    /// Absolute Unix deadline. A callback that reaches its commit point at or
-    /// after this time must return `Cancelled` without changing state.
-    pub deadline_unix_ms: u64,
-}
-
-/// Native hook into the existing authenticated host lifecycle.
-///
-/// The callback selects the already-paired host by `host_id`; relay contents
-/// are never passed to it. Before doing work, it atomically persists
-/// `generation` only when it is strictly greater than the host's current
-/// generation. Otherwise it returns `Cancelled`. Immediately before its
-/// durable commit it must atomically verify both that the same generation is
-/// still current and that `deadline_unix_ms` has not elapsed. Thus an older
-/// queued callback cannot replace a newer fence even if it starts later.
-/// Returning `Applied` asserts that canonical Rust/AppStore state is durably
-/// authoritative through the requested cursor.
-#[uniffi::export(callback_interface)]
-#[async_trait]
-pub trait AppRelayRepairBackend: Send + Sync {
-    async fn repair(&self, request: AppRelayRepairRequest) -> AppRelayRepairResult;
-}
-
 // ── Public command and projection types ─────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -422,6 +366,8 @@ pub struct AppRelayStatusSnapshot {
 pub enum BackgroundRelayError {
     #[error("background relay is not configured")]
     NotConfigured,
+    #[error("relay custody remains in use; retire its bindings before replacing or clearing it")]
+    CustodyInUse,
     #[error("relay origin is invalid")]
     InvalidRelayOrigin,
     #[error("relay origin must use HTTPS")]
@@ -509,24 +455,27 @@ impl AppClient {
     /// Install or atomically replace the optional relay adapters.
     ///
     /// The journal is loaded and validated before the new configuration
-    /// becomes visible. Existing in-flight calls retain the old configuration
-    /// until they finish.
+    /// becomes visible. Existing custody cannot be replaced until every
+    /// binding is durably tombstoned, including interrupted transfers.
     pub async fn configure_background_relay(
         &self,
         journal: Box<dyn AppRelayJournalBackend>,
         secrets: Box<dyn AppRelaySecretBackend>,
-        repair: Box<dyn AppRelayRepairBackend>,
         allow_loopback_http: bool,
     ) -> Result<(), BackgroundRelayError> {
-        let _configuration = self.inner.background_relay_configuration.lock().await;
+        let _configuration = self.inner.background_relay_configuration.write().await;
         // One absolute deadline covers every callback while the configuration
         // lock is held. Individual callback timeouts consume, rather than
         // reset, this shared budget.
         let operation = RelayOperationContext::with_timeout(OPERATION_TIMEOUT);
+        let previous = relay_read(&self.inner.background_relay).clone();
+        if let Some(previous) = previous {
+            validate_custody_retired(&previous, &operation).await?;
+        }
         let configured = build_background_relay_configuration(
             journal,
             secrets,
-            repair,
+            Arc::downgrade(&self.inner),
             allow_loopback_http,
             &operation,
         )
@@ -535,11 +484,15 @@ impl AppClient {
         Ok(())
     }
 
-    /// Remove callback references. In-flight operations keep their cloned
-    /// configuration and remain bounded by the operation deadline.
-    pub async fn clear_background_relay(&self) {
-        let _configuration = self.inner.background_relay_configuration.lock().await;
+    /// Remove callback references only after every binding is durably retired.
+    pub async fn clear_background_relay(&self) -> Result<(), BackgroundRelayError> {
+        let _configuration = self.inner.background_relay_configuration.write().await;
+        let previous = relay_read(&self.inner.background_relay).clone();
+        if let Some(previous) = previous {
+            validate_custody_retired(&previous, &operation()).await?;
+        }
         *relay_write(&self.inner.background_relay) = None;
+        Ok(())
     }
 
     pub async fn background_relay_status(
@@ -569,6 +522,7 @@ impl AppClient {
         observation: AppRelayPushTokenObservation,
         token: AppRelaySecretValue,
     ) -> Result<AppRelayFanoutReceipt, BackgroundRelayError> {
+        self.inner.synchronize_paired_relays().await;
         let configured = self.configured_background_relay()?;
         let provider: RelayPushProvider = observation.provider.into();
         let observation = PushTokenObservation {
@@ -628,6 +582,7 @@ impl AppClient {
     pub async fn background_relay_reconcile(
         &self,
     ) -> Result<Vec<AppRelayReconcileOutcome>, BackgroundRelayError> {
+        self.inner.synchronize_paired_relays().await;
         let configured = self.configured_background_relay()?;
         Ok(configured
             .relay
@@ -637,77 +592,12 @@ impl AppClient {
             .map(AppRelayReconcileOutcome::from)
             .collect())
     }
-
-    /// Stage an optional authenticated relay enrollment. Capabilities are
-    /// direct custom-type arguments so inbound transfer buffers immediately
-    /// move into zeroizing Rust custody.
-    pub async fn background_relay_stage_enrollment(
-        &self,
-        host_id: String,
-        relay_origin: String,
-        installation_id: String,
-        command_id: String,
-        read_capability: AppRelaySecretValue,
-        manage_capability: AppRelaySecretValue,
-    ) -> Result<(), BackgroundRelayError> {
-        let configured = self.configured_background_relay()?;
-        let enrollment = RelayEnrollment {
-            host_id: parse_host_id(host_id)?,
-            origin: crate::background_relay::ValidatedRelayOrigin::parse(
-                &relay_origin,
-                configured.allow_loopback_http,
-            )?,
-            installation_id: RelayInstallationId::parse(installation_id)?,
-            command_id: RelayEnrollmentCommandId::parse(command_id)?,
-            read_capability: OpaqueRelaySecret::new(read_capability.into_bytes())?,
-            manage_capability: OpaqueRelaySecret::new(manage_capability.into_bytes())?,
-        };
-        configured
-            .relay
-            .stage_enrollment(enrollment, operation())
-            .await?;
-        Ok(())
-    }
-
-    pub async fn background_relay_commit_enrollment(
-        &self,
-        host_id: String,
-        command_id: String,
-    ) -> Result<(), BackgroundRelayError> {
-        let configured = self.configured_background_relay()?;
-        configured
-            .relay
-            .commit_enrollment(
-                &parse_host_id(host_id)?,
-                &RelayEnrollmentCommandId::parse(command_id)?,
-                operation(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn background_relay_rollback_enrollment(
-        &self,
-        host_id: String,
-        command_id: String,
-    ) -> Result<(), BackgroundRelayError> {
-        let configured = self.configured_background_relay()?;
-        configured
-            .relay
-            .rollback_enrollment(
-                &parse_host_id(host_id)?,
-                &RelayEnrollmentCommandId::parse(command_id)?,
-                operation(),
-            )
-            .await?;
-        Ok(())
-    }
 }
 
 async fn build_background_relay_configuration(
     journal: Box<dyn AppRelayJournalBackend>,
     secrets: Box<dyn AppRelaySecretBackend>,
-    repair: Box<dyn AppRelayRepairBackend>,
+    client: std::sync::Weak<crate::MobileClient>,
     allow_loopback_http: bool,
     operation: &RelayOperationContext,
 ) -> Result<Arc<ConfiguredBackgroundRelay>, BackgroundRelayError> {
@@ -731,12 +621,23 @@ async fn build_background_relay_configuration(
     // Fail closed on corrupt or unavailable durable state. Configuration is
     // not published until the complete journal can be authenticated/decoded.
     validate_journal_before_publish(journal.as_ref(), operation).await?;
-    let repair = Arc::new(NativeRepairAdapter::new(Arc::from(repair)));
+    let journal: Arc<dyn RelayBindingJournalPort> = journal;
+    let repair = Arc::new(super::remora_link_v2::PairedHostRelayRepair::new(
+        client,
+        Arc::clone(&journal),
+    ));
     let transport = Arc::new(ReqwestRelayTransport::new()?);
-    let relay = Arc::new(BackgroundRelay::new(journal, secrets, transport, repair));
+    let relay = Arc::new(BackgroundRelay::new(
+        Arc::clone(&journal),
+        secrets,
+        transport,
+        repair,
+    ));
     Ok(Arc::new(ConfiguredBackgroundRelay {
         relay,
+        journal,
         allow_loopback_http,
+        provisioning: tokio::sync::Mutex::new(()),
     }))
 }
 
@@ -768,6 +669,22 @@ fn relay_write(
 
 fn operation() -> RelayOperationContext {
     RelayOperationContext::with_timeout(OPERATION_TIMEOUT)
+}
+
+async fn validate_custody_retired(
+    configured: &ConfiguredBackgroundRelay,
+    operation: &RelayOperationContext,
+) -> Result<(), BackgroundRelayError> {
+    let bindings = run_preflight_callback(operation, configured.journal.list())
+        .await?
+        .map_err(|_| BackgroundRelayError::JournalUnavailable)?;
+    if bindings
+        .iter()
+        .any(|binding| binding.state != RelayBindingState::Tombstoned)
+    {
+        return Err(BackgroundRelayError::CustodyInUse);
+    }
+    Ok(())
 }
 
 async fn validate_journal_before_publish(
@@ -1461,93 +1378,6 @@ impl OpaqueRelaySecretPort for NativeSecretAdapter {
     }
 }
 
-struct NativeRepairAdapter {
-    backend: Arc<dyn AppRelayRepairBackend>,
-}
-
-impl NativeRepairAdapter {
-    fn new(backend: Arc<dyn AppRelayRepairBackend>) -> Self {
-        Self { backend }
-    }
-}
-
-#[async_trait]
-impl RelayAuthoritativeRepairPort for NativeRepairAdapter {
-    async fn repair(
-        &self,
-        host_id: &RelayHostId,
-        generation: u64,
-        mode: RelayRepairMode,
-        operation: RelayOperationContext,
-    ) -> Result<RelayRepairReceipt, RelayRepairError> {
-        if generation == 0 || operation.cancellation.is_cancelled() {
-            return Err(RelayRepairError::Cancelled);
-        }
-        let remaining = operation
-            .remaining()
-            .map_err(|_| RelayRepairError::DeadlineExceeded)?;
-        let remaining_ms =
-            u64::try_from(remaining.as_millis()).map_err(|_| RelayRepairError::DeadlineExceeded)?;
-        let deadline_unix_ms = repair_unix_time_ms()?
-            .checked_add(remaining_ms)
-            .ok_or(RelayRepairError::DeadlineExceeded)?;
-        let request = AppRelayRepairRequest {
-            host_id: host_id.0.clone(),
-            mode: AppRelayRepairMode::from(mode),
-            generation,
-            deadline_unix_ms,
-        };
-        let result = tokio::select! {
-            biased;
-            _ = operation.cancellation.cancelled() => {
-                return Err(RelayRepairError::Cancelled);
-            }
-            result = tokio::time::timeout(remaining, self.backend.repair(request)) => {
-                result.map_err(|_| RelayRepairError::DeadlineExceeded)?
-            }
-        };
-        match result {
-            AppRelayRepairResult::Applied { through_cursor } => Ok(RelayRepairReceipt {
-                applied_through_cursor: through_cursor,
-                authoritative: true,
-            }),
-            AppRelayRepairResult::Unavailable => Err(RelayRepairError::Unavailable),
-            AppRelayRepairResult::RePairRequired => Err(RelayRepairError::RePairRequired),
-            AppRelayRepairResult::Cancelled => Err(RelayRepairError::Cancelled),
-        }
-    }
-}
-
-fn repair_unix_time_ms() -> Result<u64, RelayRepairError> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| RelayRepairError::DeadlineExceeded)?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| RelayRepairError::DeadlineExceeded)
-}
-
-impl From<RelayRepairMode> for AppRelayRepairMode {
-    fn from(value: RelayRepairMode) -> Self {
-        match value {
-            RelayRepairMode::Incremental {
-                after_cursor,
-                through_cursor,
-            } => Self::Incremental {
-                after_cursor,
-                through_cursor,
-            },
-            RelayRepairMode::Snapshot {
-                revision,
-                through_cursor,
-            } => Self::Snapshot {
-                revision,
-                through_cursor,
-            },
-            RelayRepairMode::Full { through_cursor } => Self::Full { through_cursor },
-        }
-    }
-}
-
 // ── Opaque non-secret journal codec ─────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -1655,6 +1485,8 @@ enum PersistedRegistrationDisposition {
 struct PersistedWakeLedger {
     highest_seen_cursor: u64,
     applied_cursor: u64,
+    #[serde(default)]
+    verified_barrier_id: Option<String>,
     pending_ack_cursor: Option<u64>,
     remote_ack_ahead_cursor: Option<u64>,
     recently_seen: Vec<PersistedSeenWake>,
@@ -2185,6 +2017,7 @@ impl From<&RelayWakeLedger> for PersistedWakeLedger {
         Self {
             highest_seen_cursor: value.highest_seen_cursor,
             applied_cursor: value.applied_cursor,
+            verified_barrier_id: value.verified_barrier_id.clone(),
             pending_ack_cursor: value.pending_ack_cursor,
             remote_ack_ahead_cursor: value.remote_ack_ahead_cursor,
             recently_seen: value
@@ -2202,6 +2035,12 @@ impl From<&RelayWakeLedger> for PersistedWakeLedger {
 impl PersistedWakeLedger {
     fn into_relay(self) -> Result<RelayWakeLedger, RelayJournalError> {
         if self.recently_seen.len() > MAX_RECENT_WAKES
+            || self.verified_barrier_id.as_ref().is_some_and(|value| {
+                value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
             || self.applied_cursor > self.highest_seen_cursor
             || self
                 .pending_ack_cursor
@@ -2245,6 +2084,7 @@ impl PersistedWakeLedger {
         Ok(RelayWakeLedger {
             highest_seen_cursor: self.highest_seen_cursor,
             applied_cursor: self.applied_cursor,
+            verified_barrier_id: self.verified_barrier_id,
             pending_ack_cursor: self.pending_ack_cursor,
             remote_ack_ahead_cursor: self.remote_ack_ahead_cursor,
             recently_seen,
@@ -2275,13 +2115,13 @@ fn parse_alias(value: String, prefix: &str) -> Result<RelaySecretAlias, RelayJou
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct MemoryJournalBackend {
+    pub(crate) struct MemoryJournalBackend {
         value: Mutex<Option<AppRelayJournalSnapshot>>,
         fail_writes: Mutex<bool>,
     }
@@ -2316,7 +2156,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemorySecretBackend {
+    pub(crate) struct MemorySecretBackend {
         values: Mutex<HashMap<String, Vec<u8>>>,
         revisions: Mutex<HashMap<String, u64>>,
         unavailable: Mutex<bool>,
@@ -2461,81 +2301,6 @@ mod tests {
             self.values.lock().unwrap().remove(&alias);
             self.revisions.lock().unwrap().remove(&alias);
             AppRelaySecretWriteOutcome::Applied
-        }
-    }
-
-    struct AppliedRepair;
-
-    #[async_trait]
-    impl AppRelayRepairBackend for AppliedRepair {
-        async fn repair(&self, request: AppRelayRepairRequest) -> AppRelayRepairResult {
-            let through_cursor = match request.mode {
-                AppRelayRepairMode::Incremental { through_cursor, .. }
-                | AppRelayRepairMode::Snapshot { through_cursor, .. }
-                | AppRelayRepairMode::Full { through_cursor } => through_cursor,
-            };
-            AppRelayRepairResult::Applied { through_cursor }
-        }
-    }
-
-    #[derive(Default)]
-    struct FencedLateRepair {
-        current_fence: Arc<Mutex<HashMap<String, u64>>>,
-        applied_cursor: Arc<Mutex<HashMap<String, u64>>>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait]
-    impl AppRelayRepairBackend for FencedLateRepair {
-        async fn repair(&self, request: AppRelayRepairRequest) -> AppRelayRepairResult {
-            use std::sync::atomic::Ordering;
-
-            {
-                let mut fences = self.current_fence.lock().unwrap();
-                if fences
-                    .get(&request.host_id)
-                    .is_some_and(|current| request.generation <= *current)
-                {
-                    return AppRelayRepairResult::Cancelled;
-                }
-                fences.insert(request.host_id.clone(), request.generation);
-            }
-            let delay = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Duration::from_millis(50)
-            } else {
-                Duration::ZERO
-            };
-            let cursor = match request.mode {
-                AppRelayRepairMode::Incremental { through_cursor, .. }
-                | AppRelayRepairMode::Snapshot { through_cursor, .. }
-                | AppRelayRepairMode::Full { through_cursor } => through_cursor,
-            };
-            let current_fence = self.current_fence.clone();
-            let applied_cursor = self.applied_cursor.clone();
-            let (sent, received) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let is_current = current_fence
-                    .lock()
-                    .unwrap()
-                    .get(&request.host_id)
-                    .is_some_and(|generation| *generation == request.generation);
-                let before_deadline =
-                    repair_unix_time_ms().is_ok_and(|now_ms| now_ms < request.deadline_unix_ms);
-                let result = if is_current && before_deadline {
-                    applied_cursor
-                        .lock()
-                        .unwrap()
-                        .insert(request.host_id, cursor);
-                    AppRelayRepairResult::Applied {
-                        through_cursor: cursor,
-                    }
-                } else {
-                    AppRelayRepairResult::Cancelled
-                };
-                let _ = sent.send(result);
-            });
-            received.await.unwrap_or(AppRelayRepairResult::Cancelled)
         }
     }
 
@@ -2733,6 +2498,7 @@ mod tests {
             provider_tombstone_fences: Vec::new(),
             retired_token_aliases: Vec::new(),
             wake: RelayWakeLedger {
+                verified_barrier_id: Some("a".repeat(64)),
                 highest_seen_cursor: 2,
                 applied_cursor: 1,
                 pending_ack_cursor: Some(1),
@@ -2760,6 +2526,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_repair_rejects_stale_generation_configuration_and_deadline() {
+        use crate::background_relay::{
+            RelayAuthoritativeRepairPort, RelayRepairError, RelayRepairMode,
+        };
+        use crate::ffi::remora_link_v2::PairedHostRelayRepair;
+
+        let client = crate::MobileClient::new();
+        let configured = build_background_relay_configuration(
+            Box::new(MemoryJournalBackend::default()),
+            Box::new(MemorySecretBackend::default()),
+            Arc::downgrade(&client),
+            false,
+            &operation(),
+        )
+        .await
+        .unwrap();
+        *relay_write(&client.background_relay) = Some(configured.clone());
+        let mut entry = binding();
+        entry.repair_generation = 7;
+        configured
+            .journal
+            .compare_and_swap(&entry.host_id, None, entry.clone())
+            .await
+            .unwrap();
+        let repair =
+            PairedHostRelayRepair::new(Arc::downgrade(&client), configured.journal.clone());
+        let mode = RelayRepairMode::Full { through_cursor: 2 };
+        assert_eq!(
+            repair
+                .repair(&entry.host_id, 6, mode.clone(), operation())
+                .await,
+            Err(RelayRepairError::Cancelled)
+        );
+        assert_eq!(
+            repair
+                .repair(&entry.host_id, 7, mode.clone(), operation())
+                .await,
+            Err(RelayRepairError::Unavailable)
+        );
+        let shared_configuration = client.background_relay_configuration.read().await;
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                repair.repair(&entry.host_id, 7, mode.clone(), operation())
+            )
+            .await
+            .expect("another host's repair must not monopolize configuration"),
+            Err(RelayRepairError::Unavailable)
+        );
+        drop(shared_configuration);
+        assert_eq!(
+            repair
+                .repair(
+                    &entry.host_id,
+                    7,
+                    mode.clone(),
+                    RelayOperationContext::with_timeout(Duration::ZERO)
+                )
+                .await,
+            Err(RelayRepairError::DeadlineExceeded)
+        );
+        *relay_write(&client.background_relay) = None;
+        assert_eq!(
+            repair.repair(&entry.host_id, 7, mode, operation()).await,
+            Err(RelayRepairError::Cancelled)
+        );
+    }
+
+    #[tokio::test]
     async fn opaque_journal_round_trip_preserves_state_without_secret_bytes() {
         let backend = Arc::new(MemoryJournalBackend::default());
         let adapter = NativeJournalAdapter::new(
@@ -2779,6 +2614,20 @@ mod tests {
         assert!(!text.contains("read-capability-secret"));
         assert!(!text.contains("provider-token-secret"));
         assert!(text.contains("relay_capability_"));
+    }
+
+    #[test]
+    fn persisted_repair_receipt_rejects_invalid_barrier_and_accepts_pre_receipt_journals() {
+        let mut wake = PersistedWakeLedger::from(&binding().wake);
+        wake.verified_barrier_id = Some("unverified-cursor-echo".into());
+        assert_eq!(wake.into_relay(), Err(RelayJournalError::Unavailable));
+        let mut legacy = serde_json::to_value(PersistedWakeLedger::from(&binding().wake)).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("verified_barrier_id");
+        let decoded: PersistedWakeLedger = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.into_relay().unwrap().verified_barrier_id.is_none());
     }
 
     #[tokio::test]
@@ -3076,57 +2925,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repair_callback_must_report_the_exact_authoritative_cursor() {
-        let adapter = NativeRepairAdapter::new(Arc::new(AppliedRepair));
-        let receipt = adapter
-            .repair(
-                &RelayHostId("host-a".to_owned()),
-                1,
-                RelayRepairMode::Full { through_cursor: 42 },
-                operation(),
-            )
-            .await
-            .unwrap();
-        assert!(receipt.authoritative);
-        assert_eq!(receipt.applied_through_cursor, 42);
-    }
-
-    #[tokio::test]
-    async fn late_repair_callback_cannot_overwrite_newer_fenced_generation() {
-        let backend = Arc::new(FencedLateRepair::default());
-        let adapter = NativeRepairAdapter::new(backend.clone());
-        let host = RelayHostId("host-a".to_owned());
-
-        assert_eq!(
-            adapter
-                .repair(
-                    &host,
-                    1,
-                    RelayRepairMode::Full { through_cursor: 1 },
-                    RelayOperationContext::with_timeout(Duration::from_millis(10)),
-                )
-                .await,
-            Err(RelayRepairError::DeadlineExceeded)
-        );
-        let newer = adapter
-            .repair(
-                &host,
-                2,
-                RelayRepairMode::Full { through_cursor: 2 },
-                operation(),
-            )
-            .await
-            .expect("newer fenced repair applies");
-        assert_eq!(newer.applied_through_cursor, 2);
-        tokio::time::sleep(Duration::from_millis(60)).await;
-
-        assert_eq!(
-            backend.applied_cursor.lock().unwrap().get(&host.0),
-            Some(&2)
-        );
-    }
-
-    #[tokio::test]
     async fn configuration_preflight_is_bounded_and_not_published_per_handle() {
         let delayed = NativeJournalAdapter::new(
             Arc::new(DelayedJournalBackend),
@@ -3157,14 +2955,113 @@ mod tests {
             .configure_background_relay(
                 Box::new(MemoryJournalBackend::default()),
                 Box::new(MemorySecretBackend::default()),
-                Box::new(AppliedRepair),
                 false,
             )
             .await
             .unwrap();
         assert!(second.background_relay_status().await.unwrap().configured);
-        second.clear_background_relay().await;
+        second.clear_background_relay().await.unwrap();
         assert!(!first.background_relay_status().await.unwrap().configured);
+    }
+
+    #[tokio::test]
+    async fn custody_replacement_rejects_every_unretired_state_before_new_callbacks() {
+        struct UnreachableJournal;
+        #[async_trait]
+        impl AppRelayJournalBackend for UnreachableJournal {
+            async fn load(&self) -> AppRelayJournalLoad {
+                panic!("replacement must reject occupied custody before reading new adapters")
+            }
+            async fn compare_and_swap(
+                &self,
+                _: Option<u64>,
+                _: AppRelayJournalSnapshot,
+            ) -> AppRelayJournalWriteOutcome {
+                panic!("replacement must not mutate new adapters")
+            }
+        }
+
+        for state in [
+            RelayBindingState::Preparing,
+            RelayBindingState::RollbackPending,
+            RelayBindingState::Staged,
+            RelayBindingState::Active,
+            RelayBindingState::TombstonePending,
+            RelayBindingState::CleanupPending,
+            RelayBindingState::NeedsRepair,
+        ] {
+            let app = AppClient {
+                inner: crate::MobileClient::new(),
+                rt: crate::ffi::shared::shared_runtime(),
+            };
+            app.configure_background_relay(
+                Box::new(MemoryJournalBackend::default()),
+                Box::new(MemorySecretBackend::default()),
+                false,
+            )
+            .await
+            .unwrap();
+            let configured = app.configured_background_relay().unwrap();
+            let mut entry = binding();
+            entry.state = state;
+            entry.registrations.clear();
+            entry.wake = RelayWakeLedger::default();
+            if matches!(
+                state,
+                RelayBindingState::Preparing | RelayBindingState::RollbackPending
+            ) {
+                entry.read_capability_revision = None;
+                entry.manage_capability_revision = None;
+            }
+            configured
+                .journal
+                .compare_and_swap(&entry.host_id, None, entry.clone())
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    app.configure_background_relay(
+                        Box::new(UnreachableJournal),
+                        Box::new(MemorySecretBackend::default()),
+                        false,
+                    )
+                    .await,
+                    Err(BackgroundRelayError::CustodyInUse)
+                ),
+                "{state:?}"
+            );
+            assert!(
+                matches!(
+                    app.clear_background_relay().await,
+                    Err(BackgroundRelayError::CustodyInUse)
+                ),
+                "{state:?}"
+            );
+            assert!(Arc::ptr_eq(
+                &app.configured_background_relay().unwrap(),
+                &configured
+            ));
+
+            entry.state = RelayBindingState::Tombstoned;
+            entry.revision += 1;
+            configured
+                .journal
+                .compare_and_swap(&entry.host_id, Some(1), entry.clone())
+                .await
+                .unwrap();
+            app.configure_background_relay(
+                Box::new(MemoryJournalBackend::default()),
+                Box::new(MemorySecretBackend::default()),
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(!Arc::ptr_eq(
+                &app.configured_background_relay().unwrap(),
+                &configured
+            ));
+            app.clear_background_relay().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -3176,7 +3073,7 @@ mod tests {
         let result = build_background_relay_configuration(
             Box::new(DelayedJournalBackend),
             Box::new(secrets),
-            Box::new(AppliedRepair),
+            std::sync::Weak::new(),
             false,
             &operation,
         )

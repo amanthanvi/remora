@@ -1,0 +1,63 @@
+[package]
+name = "remora-pi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Codex app-server façade over a `pi-coding-agent --mode rpc` process pool, used by the remora daemon."
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.wix]
+upgrade-guid = "2226CC1C-1185-432A-8108-2D030A149E7B"
+path-guid = "B3A615C4-26FB-4520-B259-2FA7DCA66C00"
+license = false
+eula = false
+
+[[bin]]
+name = "remora-pi-bridge"
+path = "src/main.rs"
+
+# Test-only stand-in for `pi-coding-agent --mode rpc`. Reads RpcCommand JSON
+# lines on stdin, emits responses + scripted events on stdout. Used by the
+# verification matrix to drive `PiPool` without depending on a real pi build.
+[[bin]]
+name = "fake-pi"
+path = "tests/support/fake_pi.rs"
+
+[lib]
+name = "remora_pi_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+remora-bridge-core = { workspace = true }
+remora-codex-proto = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+dashmap = "6"
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+directories = { workspace = true }
+
+[features]
+# Exposes `crate::index::testing` (and any future `crate::*::testing` modules)
+# so downstream test crates can build against the helper types without going
+# through `#[cfg(test)]`-only items. Always on under `cargo test`.
+test-helpers = []
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

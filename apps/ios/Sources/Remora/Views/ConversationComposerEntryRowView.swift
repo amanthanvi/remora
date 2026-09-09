@@ -75,7 +75,7 @@ struct ConversationComposerEntryRowView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            if !voiceManager.isRecording && !voiceManager.isTranscribing && !isTurnActive {
+            if !voiceManager.isRecording && !voiceManager.isTranscribing {
                 Button {
                     showAttachMenu = true
                 } label: {

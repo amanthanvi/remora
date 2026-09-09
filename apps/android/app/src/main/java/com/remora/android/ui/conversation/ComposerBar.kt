@@ -29,10 +29,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -61,6 +65,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,6 +80,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -93,6 +99,8 @@ import com.remora.android.state.ampReasoningEffortLocked
 import com.remora.android.util.LLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import uniffi.codex_mobile_client.AuthStatusRequest
 import uniffi.codex_mobile_client.AppSearchFilesRequest
@@ -180,6 +188,12 @@ fun ComposerBar(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val composerPrefillRequest by appModel.composerPrefillRequest.collectAsState()
+    val draftDestination = remember(threadKey) {
+        com.remora.android.state.ComposerDraftDestination.Conversation(threadKey)
+    }
+    val recoverableDrafts by appModel.recoverableComposerDrafts.entries.collectAsState()
+    val recoveryStorageError by appModel.recoverableComposerDrafts.storageError.collectAsState()
+    val pendingUserInputKey = pendingUserInput?.let { Triple(it.serverId, it.runtimeKind, it.id) }
     // Hydrate the live composer state from `AppModel`'s per-thread draft so
     // it survives ComposerBar recomposition / view-tree teardown when the
     // user backgrounds the app. `remember(threadKey)` re-initializes when
@@ -195,6 +209,7 @@ fun ComposerBar(
     var attachedFiles by remember(threadKey) {
         mutableStateOf(appModel.composerDraft(threadKey).fileAttachments)
     }
+    var isSavingRecovery by remember(threadKey) { mutableStateOf(false) }
     LaunchedEffect(threadKey, text, attachedImage, attachedFiles) {
         appModel.setComposerDraft(
             threadKey,
@@ -208,7 +223,7 @@ fun ComposerBar(
     var showAttachMenu by remember(threadKey) { mutableStateOf(false) }
     var showExpanded by remember(threadKey) { mutableStateOf(false) }
     var isInlineInputFocused by remember(threadKey) { mutableStateOf(false) }
-    var isPendingInputFocused by remember(pendingUserInput?.id) { mutableStateOf(false) }
+    var isPendingInputFocused by remember(pendingUserInputKey) { mutableStateOf(false) }
     var isGoalPanelInteractionActive by remember(threadKey) { mutableStateOf(false) }
     val inlineFocusRequester = remember { FocusRequester() }
     val transcriptionManager = remember { VoiceTranscriptionManager() }
@@ -284,9 +299,9 @@ fun ComposerBar(
     }
 
     // Pending user input answers
-    var userInputAnswers by remember { mutableStateOf(mapOf<String, String>()) }
-    var pendingUserInputSubmitError by remember(pendingUserInput?.id) { mutableStateOf<String?>(null) }
-    var isSubmittingPendingUserInput by remember(pendingUserInput?.id) { mutableStateOf(false) }
+    var userInputAnswers by remember(pendingUserInputKey) { mutableStateOf(mapOf<String, String>()) }
+    var pendingUserInputSubmitError by remember(pendingUserInputKey) { mutableStateOf<String?>(null) }
+    var isSubmittingPendingUserInput by remember(pendingUserInputKey) { mutableStateOf(false) }
 
     LaunchedEffect(
         isInlineInputFocused,
@@ -433,7 +448,8 @@ fun ComposerBar(
     // Single send path used by both the inline send button and the expanded
     // dialog. Keep this in sync if you change slash-command dispatch or
     // payload shape.
-    val sendCurrent: () -> Unit = {
+    val sendCurrent: () -> Unit = send@{
+        if (isSavingRecovery) return@send
         if (pendingUserInput != null) {
             onDismissPendingUserInput?.invoke()
         }
@@ -445,7 +461,7 @@ fun ComposerBar(
                 true
             } else false
         } ?: false
-        if (!handledAsSlash && (text.isNotBlank() || attachedImage != null || attachedFiles.isNotEmpty())) {
+        if (!isSavingRecovery && !handledAsSlash && (text.isNotBlank() || attachedImage != null || attachedFiles.isNotEmpty())) {
             val launchState = appModel.launchState.snapshot.value
             val pendingModel = launchState.selectedModel.trim().ifEmpty { null }
             val thread = appModel.snapshot.value?.threads?.find { it.key == threadKey }
@@ -458,9 +474,9 @@ fun ComposerBar(
             val tier = if (HeaderOverrides.pendingFastMode) ServiceTier.FAST else null
             val attachmentToSend = attachedImage
             val filesToSend = attachedFiles
+            val draftToSend = AppModel.ComposerDraft(text, attachmentToSend, filesToSend)
             val payload = AppComposerPayload(
                 text = text.trim(),
-                additionalInputs = listOfNotNull(attachmentToSend?.toUserInput()),
                 fileAttachments = filesToSend,
                 approvalPolicy = appModel.launchState.approvalPolicyValue(threadKey),
                 sandboxPolicy = appModel.launchState.turnSandboxPolicy(threadKey),
@@ -468,24 +484,34 @@ fun ComposerBar(
                 reasoningEffort = effort,
                 serviceTier = tier,
             )
-            textFieldValue = TextFieldValue("")
-            attachedImage = null
-            attachedFiles = emptyList()
-            scope.launch {
+            appModel.setComposerDraft(threadKey, draftToSend)
+            isSavingRecovery = true
+            appModel.launchComposerRecovery {
                 try {
-                    appModel.startTurn(threadKey, payload)
-                } catch (e: Exception) {
-                    textFieldValue = TextFieldValue(
-                        text = payload.text,
-                        selection = TextRange(payload.text.length),
-                    )
-                    attachedImage = attachmentToSend
-                    attachedFiles = filesToSend
+                    val preparedPayload = withContext(Dispatchers.IO) {
+                        payload.copy(additionalInputs = listOfNotNull(attachmentToSend?.toUserInput()))
+                    }
+                    val submissionId = appModel.beginComposerSubmission(
+                        destination = draftDestination,
+                        draft = draftToSend,
+                        payload = preparedPayload,
+                    ) ?: return@launchComposerRecovery
+                    if (AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles) == draftToSend &&
+                        appModel.replaceComposerDraftIfUnchanged(draftDestination, draftToSend, AppModel.ComposerDraft.EMPTY)) {
+                        textFieldValue = TextFieldValue("")
+                        attachedImage = null
+                        attachedFiles = emptyList()
+                    }
+                    appModel.submitComposerDraft(submissionId) {
+                        appModel.startTurn(threadKey, preparedPayload)
+                    }
+                } finally {
+                    isSavingRecovery = false
                 }
             }
         }
     }
-    val canSend = text.isNotBlank() || attachedImage != null || attachedFiles.isNotEmpty()
+    val canSend = !isSavingRecovery && (text.isNotBlank() || attachedImage != null || attachedFiles.isNotEmpty())
 
     Column(
         modifier = Modifier
@@ -493,6 +519,25 @@ fun ComposerBar(
             .background(RemoraTheme.surface)
             .imePadding(),
     ) {
+        RecoverableDraftsRow(
+            drafts = recoverableDrafts.filter { it.destination == draftDestination },
+            storageError = recoveryStorageError,
+            onDiscard = { appModel.discardComposerDraft(it) },
+            onRestore = { id ->
+                val current = AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles)
+                appModel.setComposerDraft(threadKey, current)
+                appModel.launchComposerRecovery {
+                    appModel.restoreComposerDraft(id, current)?.let { draft ->
+                        if (AppModel.ComposerDraft(textFieldValue.text, attachedImage, attachedFiles) == current &&
+                            appModel.replaceComposerDraftIfUnchanged(draftDestination, current, draft)) {
+                            textFieldValue = TextFieldValue(draft.text, selection = TextRange(draft.text.length))
+                            attachedImage = draft.attachment
+                            attachedFiles = draft.fileAttachments
+                        }
+                    }
+                }
+            },
+        )
         if (attachedImage != null) {
             val previewBitmap = remember(attachedImage?.data) {
                 attachedImage?.data?.let { bytes -> BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
@@ -738,49 +783,54 @@ fun ComposerBar(
                     }
                 }
                 for (question in pendingUserInput.questions) {
-                    Text(question.question, color = RemoraTheme.textPrimary, fontSize = RemoraTextStyle.footnote.scaled)
-                    if (question.options.isNotEmpty()) {
-                        // FlowRow so long option labels wrap to a new line
-                        // instead of crushing a short option into a narrow
-                        // column with character-by-character text wrapping.
-                        @OptIn(ExperimentalLayoutApi::class)
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            for (option in question.options) {
-                                val selected = userInputAnswers[question.id] == option.label
-                                Text(
-                                    text = option.label,
-                                    color = if (selected) Color.Black else RemoraTheme.textPrimary,
-                                    fontSize = RemoraTextStyle.caption.scaled,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                    modifier = Modifier
-                                        .background(
-                                            if (selected) RemoraTheme.accent else RemoraTheme.surface,
-                                            RoundedCornerShape(12.dp),
-                                        )
-                                        .clickable { userInputAnswers = userInputAnswers + (question.id to option.label) }
-                                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                                )
+                    key(pendingUserInputKey, question.id) {
+                        Text(question.question, color = RemoraTheme.textPrimary, fontSize = RemoraTextStyle.footnote.scaled)
+                        if (question.options.isNotEmpty()) {
+                            // Keep long option labels from compressing their siblings.
+                            @OptIn(ExperimentalLayoutApi::class)
+                            FlowRow(
+                                modifier = Modifier.selectableGroup(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                for (option in question.options) {
+                                    val selected = userInputAnswers[question.id] == option.label
+                                    Text(
+                                        text = option.label,
+                                        color = if (selected) Color.Black else RemoraTheme.textPrimary,
+                                        fontSize = RemoraTextStyle.caption.scaled,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        modifier = Modifier
+                                            .background(
+                                                if (selected) RemoraTheme.accent else RemoraTheme.surface,
+                                                RoundedCornerShape(12.dp),
+                                            )
+                                            .selectable(
+                                                selected = selected,
+                                                enabled = !isSubmittingPendingUserInput,
+                                                role = Role.RadioButton,
+                                                onClick = { userInputAnswers = userInputAnswers + (question.id to option.label) },
+                                            )
+                                            .heightIn(min = RemoraTheme.minimumTouchTarget)
+                                            .wrapContentHeight()
+                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                    )
+                                }
                             }
+                        } else {
+                            BasicTextField(
+                                value = userInputAnswers[question.id].orEmpty(),
+                                onValueChange = { userInputAnswers = userInputAnswers + (question.id to it) },
+                                enabled = !isSubmittingPendingUserInput,
+                                textStyle = TextStyle(color = RemoraTheme.textPrimary, fontSize = RemoraTextStyle.footnote.scaled),
+                                cursorBrush = SolidColor(RemoraTheme.accent),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(RemoraTheme.surface, RoundedCornerShape(8.dp))
+                                    .onFocusChanged { isPendingInputFocused = it.isFocused }
+                                    .padding(8.dp),
+                            )
                         }
-                    } else {
-                        var answer by remember(pendingUserInput.id, question.id) { mutableStateOf("") }
-                        BasicTextField(
-                            value = answer,
-                            onValueChange = {
-                                answer = it
-                                userInputAnswers = userInputAnswers + (question.id to it)
-                            },
-                            textStyle = TextStyle(color = RemoraTheme.textPrimary, fontSize = RemoraTextStyle.footnote.scaled),
-                            cursorBrush = SolidColor(RemoraTheme.accent),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(RemoraTheme.surface, RoundedCornerShape(8.dp))
-                                .onFocusChanged { isPendingInputFocused = it.isFocused }
-                                .padding(8.dp),
-                        )
                     }
                 }
                 pendingUserInputSubmitError?.let { message ->
@@ -811,7 +861,7 @@ fun ComposerBar(
                                             answers = listOfNotNull(userInputAnswers[q.id]),
                                         )
                                     }
-                                    appModel.store.respondToUserInput(pendingUserInput.id, answers)
+                                    appModel.store.respondToUserInput(pendingUserInput.serverId, pendingUserInput.runtimeKind, pendingUserInput.id, answers)
                                     userInputAnswers = emptyMap()
                                 } catch (error: CancellationException) {
                                     throw error

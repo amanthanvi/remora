@@ -59,11 +59,18 @@ final class HomeDashboardModel {
     private var userClearedSelection = false
     @ObservationIgnored private var preferencesObserver: NSObjectProtocol?
     @ObservationIgnored private var savedServersObserver: NSObjectProtocol?
+    @ObservationIgnored private let loadPreferences: @MainActor () -> MobilePreferences
 
-    init() {
+    init(
+        loadPreferences: @escaping @MainActor () -> MobilePreferences = {
+            preferencesLoad(directory: MobilePreferencesDirectory.path)
+        }
+    ) {
+        self.loadPreferences = loadPreferences
         selectedServerId = SavedProjectStore.selectedServerId
-        pinnedKeys = SavedThreadsStore.pinnedKeys()
-        hiddenKeys = SavedThreadsStore.hiddenKeys()
+        let preferences = loadPreferences()
+        pinnedKeys = preferences.pinnedThreads
+        hiddenKeys = preferences.hiddenThreads
         preferencesObserver = NotificationCenter.default.addObserver(
             forName: .remoraThreadPreferencesDidChange,
             object: nil,
@@ -240,8 +247,9 @@ final class HomeDashboardModel {
     }
 
     private func reloadThreadPreferences() {
-        pinnedKeys = SavedThreadsStore.pinnedKeys()
-        hiddenKeys = SavedThreadsStore.hiddenKeys()
+        let preferences = loadPreferences()
+        pinnedKeys = preferences.pinnedThreads
+        hiddenKeys = preferences.hiddenThreads
     }
 
     private func reconcileSelectedProject() {

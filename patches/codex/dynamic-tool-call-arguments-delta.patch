@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index d687a79ec9..c899c1d66a 100644
+index f35066f55..c8be1d5de 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
-@@ -1445,6 +1445,9 @@ server_notification_definitions! {
+@@ -1491,6 +1491,9 @@ server_notification_definitions! {
      /// This event is internal-only. Used by Codex Cloud.
      RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
      AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
@@ -12,6 +12,42 @@ index d687a79ec9..c899c1d66a 100644
      /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
      PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
      /// Stream base64-encoded stdout/stderr chunks for a running `command/exec` session.
+@@ -2799,6 +2802,8 @@ mod tests {
+                 realtime_session_id: Some("sess_456".to_string()),
+                 transport: None,
+                 voice: Some(RealtimeVoice::Marin),
++                dynamic_tools: None,
++                client_controlled_handoff: false,
+             },
+         };
+         assert_eq!(
+@@ -2830,6 +2835,8 @@ mod tests {
+                 realtime_session_id: None,
+                 transport: None,
+                 voice: None,
++                dynamic_tools: None,
++                client_controlled_handoff: false,
+             },
+         };
+         assert_eq!(
+@@ -2856,6 +2863,8 @@ mod tests {
+                 realtime_session_id: None,
+                 transport: None,
+                 voice: None,
++                dynamic_tools: None,
++                client_controlled_handoff: false,
+             },
+         };
+         assert_eq!(
+@@ -3025,6 +3034,8 @@ mod tests {
+                 realtime_session_id: None,
+                 transport: None,
+                 voice: None,
++                dynamic_tools: None,
++                client_controlled_handoff: false,
+             },
+         };
+         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
 diff --git a/codex-rs/app-server-protocol/src/protocol/event_mapping.rs b/codex-rs/app-server-protocol/src/protocol/event_mapping.rs
 index 609ca83a5d..6d80d22038 100644
 --- a/codex-rs/app-server-protocol/src/protocol/event_mapping.rs
@@ -43,10 +79,10 @@ index 609ca83a5d..6d80d22038 100644
              thread_id,
              turn_id,
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-index 2c3a926c91..7dcf5e0837 100644
+index 7c0f8159b..eee4af6ba 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
-@@ -1150,6 +1150,20 @@ pub struct AgentMessageDeltaNotification {
+@@ -1162,6 +1162,20 @@ pub struct AgentMessageDeltaNotification {
      pub delta: String,
  }
  
@@ -59,7 +95,7 @@ index 2c3a926c91..7dcf5e0837 100644
 +    pub turn_id: String,
 +    pub item_id: String,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
-+    #[ts(optional = nullable)]
++    #[ts(optional)]
 +    pub call_id: Option<String>,
 +    pub delta: String,
 +}
@@ -289,16 +325,38 @@ diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.
              }
              ResponseEvent::ReasoningSummaryDelta {
 diff --git a/codex-rs/mcp-server/src/codex_tool_runner.rs b/codex-rs/mcp-server/src/codex_tool_runner.rs
+index 9e3ac1bae..8576c56c5 100644
 --- a/codex-rs/mcp-server/src/codex_tool_runner.rs
 +++ b/codex-rs/mcp-server/src/codex_tool_runner.rs
-@@ -362,6 +362,7 @@
-                     | EventMsg::HookStarted(_)
-                     | EventMsg::HookCompleted(_)
+@@ -46,8 +46,6 @@ pub(crate) fn create_call_tool_result_with_thread_id(
+     });
+-    CallToolResult {
+-        content,
+-        is_error,
+-        structured_content: Some(structured_content),
+-        meta: None,
+-    }
++    let mut result = CallToolResult::success(content);
++    result.is_error = is_error;
++    result.structured_content = Some(structured_content);
++    result
+ }
+@@ -73,8 +71,5 @@ pub async fn run_codex_tool_session(
+         Err(e) => {
+-            let result = CallToolResult {
+-                content: vec![Content::text(format!("Failed to start Codex session: {e}"))],
+-                is_error: Some(true),
+-                structured_content: None,
+-                meta: None,
+-            };
++            let result = CallToolResult::error(vec![Content::text(format!(
++                "Failed to start Codex session: {e}"
++            ))]);
+             outgoing.send_response(id.clone(), result).await;
+@@ -364,2 +359,3 @@ async fn run_codex_tool_session_inner(
                      | EventMsg::AgentMessageContentDelta(_)
 +                    | EventMsg::DynamicToolCallArgumentsDelta(_)
                      | EventMsg::ReasoningContentDelta(_)
-                     | EventMsg::ReasoningRawContentDelta(_)
-                     | EventMsg::ExitedReviewMode(_)
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs

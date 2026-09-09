@@ -25,10 +25,10 @@ pub use background_relay::{
     AppRelayFanoutReceipt, AppRelayJournalBackend, AppRelayJournalLoad, AppRelayJournalSnapshot,
     AppRelayJournalWriteOutcome, AppRelayPushEnvironment, AppRelayPushProvider,
     AppRelayPushTokenObservation, AppRelayPushTokenTombstone, AppRelayReconcileOutcome,
-    AppRelayReconcileReceipt, AppRelayRepairBackend, AppRelayRepairMode, AppRelayRepairResult,
-    AppRelaySecretBackend, AppRelaySecretCasOutcome, AppRelaySecretCreateOutcome,
-    AppRelaySecretReadError, AppRelaySecretRevision, AppRelaySecretValue,
-    AppRelaySecretWriteOutcome, AppRelayStatusSnapshot, AppRelayWakeHint, BackgroundRelayError,
+    AppRelayReconcileReceipt, AppRelaySecretBackend, AppRelaySecretCasOutcome,
+    AppRelaySecretCreateOutcome, AppRelaySecretReadError, AppRelaySecretRevision,
+    AppRelaySecretValue, AppRelaySecretWriteOutcome, AppRelayStatusSnapshot, AppRelayWakeHint,
+    BackgroundRelayError,
 };
 pub use client::AppClient;
 pub use discovery::{

@@ -1,216 +1,79 @@
-# Repository Guidelines
+# Remora agent guide
 
-## Project Structure & Module Organization
+## Read before changing code
 
-- `apps/ios/Sources/Remora/` contains the iOS app code.
-- `apps/ios/Sources/Remora/Views/` holds SwiftUI screens, `Models/` contains app state/session logic, and `Bridge/` contains UniFFI helpers plus Ghostty Objective-C/C interop.
-- `apps/android/app/src/main/java/com/remora/android/ui/` contains Android Compose shell/screens.
-- `apps/android/app/src/main/java/com/remora/android/state/` contains Android app state, server/session manager, SSH, and websocket transport.
-- `apps/android/core/bridge/` contains Android UniFFI bootstrap and generated Rust bindings.
-- `apps/android/app/src/test/java/` contains Android unit tests.
-- `apps/android/docs/qa-matrix.md` tracks Android parity QA coverage.
-- `shared/rust-bridge/codex-mobile-client/` is the single shared Rust client library consumed by both iOS and Android. It owns the public UniFFI surface, generated upstream RPC coverage, canonical store/reducer state, hydration, discovery, SSH, and shared runtime logic. `MobileClient` is the top-level internal Rust facade.
-- `apps/ios/Sources/Remora/Bridge/Rust*.swift` — iOS bridge files mapping Swift to the shared Rust layer.
-- `apps/android/core/bridge/` — Android bridge module: `UniffiInit.kt` (native library bootstrap) and `GhosttyRendererBridge.kt` (Ghostty JNI interop). UniFFI Kotlin sources are generated into `shared/rust-bridge/generated/kotlin/` and consumed directly from there; do not maintain copied binding files under Android source roots.
-- `shared/third_party/codex/` is the upstream Codex submodule.
-- `apps/ios/GeneratedRust/` contains local generated Rust artifacts for iOS builds: UniFFI headers/modulemap plus raw device/simulator staticlibs. These artifacts are not committed.
-- `apps/ios/Frameworks/` contains package-lane iOS XCFrameworks such as `codex_mobile_client.xcframework`. These artifacts are not committed.
-- `apps/ios/project.yml` is the source of truth for project generation; regenerate `apps/ios/Remora.xcodeproj` instead of hand-editing project files.
+- Read [CONTEXT.md](CONTEXT.md) for product scope, domain names, runtime
+  ownership, and the Remora 1.6 security cutover.
+- For UI work, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.md).
+  Keep iOS and Android workflows equivalent while using native controls.
+- For builds, generated bindings, device runs, or toolchain failures, read
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). `make help` lists build targets;
+  the root `Makefile` defines their commands and configuration defaults.
+- For pairing or relay changes, read
+  [pairing security](docs/research/pairing-v2-security.md) and the
+  [threat model](docs/research/remora-link-threat-model.md).
 
-## Architecture
+## Put changes in the owning module
 
-- **iOS root layout:** `ContentView` is a thin `ZStack` root: background gradient, `HomeNavigationView` as the single content root, and overlays (`ApprovalPromptView`, `ConversationWarmupView`) plus sheets (`DiscoveryView`, `SettingsView`, `CommandPaletteView`). `HomeNavigationView` owns real navigation — a `NavigationStack` on compact widths, and a `NavigationSplitView` on regular widths whose sidebar column is `sidebarDashboard` (the same dashboard data/callbacks as the primary `homeDashboard`).
-- **iOS state management:** `AppStore` (Rust, via UniFFI) is the canonical runtime state owner. `AppModel` is the thin Swift observation shell over Rust snapshots and updates. `AppState` is UI-only state.
-- **iOS server flow:** discovery and SSH are separate utility bridges; thread/session/account operations come from generated Rust RPC plus store updates.
-- **Android root layout:** `RemoraApp(appModel:)` in `ui/RemoraApp.kt` is the Compose entry, called from `MainActivity.setContent` inside `RemoraAppTheme`. Backend state reaches the UI through `state/AppModel`, a thin singleton wrapper over the Rust `AppStore` that republishes Rust snapshots as a `snapshot: StateFlow<AppSnapshotRecord?>` (plus sibling flows such as `lastError` and `composerDrafts`); screens observe it with `collectAsState`.
-- **Android state/transport:** Android should use the same Rust-owned runtime model as iOS instead of re-implementing shared session/thread/account logic in Kotlin.
-- **Android server flow:** discovery seeds come from Android NSD, but discovery merge/probe policy lives in Rust; connection, auth, and thread/account flows go through Rust RPC + store updates.
-- **Message rendering parity:** both platforms support reasoning/system sections, code block rendering, and inline image handling.
+| Work | Location |
+| --- | --- |
+| Canonical state, reducers, reconciliation | `shared/rust-bridge/codex-mobile-client/src/store/` |
+| Direct server operations | `src/ffi/client.rs` and `src/mobile_client/` within that crate |
+| Hydration and typed conversation items | `src/conversation.rs`, `src/conversation_uniffi.rs`, `src/ffi/shared.rs` |
+| Discovery policy | `src/discovery.rs`, `src/discovery_uniffi.rs` |
+| SSH trust, connection, and bootstrap policy | `src/ssh/`, `src/ssh_bridge.rs`, `src/ssh_scripts/` |
+| Pairing and paired-host transport | `src/remote_host_pairing/remora_link_v2/`, `src/ffi/remora_link_v2.rs` |
+| Relay custody, registration, and repair | `src/background_relay/`, `src/ffi/background_relay.rs`, `src/ffi/remora_link_relay.rs` |
+| Voice transcript and handoff state | `src/store/voice.rs` and reducer types |
+| iOS UI and platform adapters | `apps/ios/Sources/Remora/Views/`, `Models/`, `Bridge/` |
+| Android UI and platform adapters | `apps/android/app/src/main/java/com/remora/android/ui/`, `state/`, `apps/android/core/bridge/` |
+| Self-hosted relay | `services/remora-relay/` |
+| Remora Link host and runtime bridges | `services/remora-link/` |
 
-### Shared Rust Layer
+`MobileClient` is the internal Rust facade. `AppClient` owns direct server
+operations. `AppStore` owns snapshots, subscriptions, and composite actions.
+Use authoritative events, then targeted reconciliation where events are
+insufficient. Swift and Kotlin project that state; they do not parse upstream
+wire strings or maintain a second reducer, status model, or runtime cache.
 
-- `codex-mobile-client` is the single public Rust mobile crate. Keep one generated Swift/Kotlin binding surface; do not split UniFFI across multiple mobile crates again.
-- Realtime voice uses libwebrtc (Google WebRTC.framework on iOS via stasel/WebRTC SPM, `io.github.webrtc-sdk:android` on Android). The peer connection runs natively on each platform; AEC/NS/VAD are handled by libwebrtc's audio processing module. The Rust layer only owns signaling, session lifecycle, transcript state, and handoff orchestration.
-- `AppStore` is the Rust-owned state surface. It owns snapshots, typed updates, and the small set of truly composite/store-local actions.
-- `AppClient` is the public UniFFI client surface for direct server operations and typed results.
-- `DiscoveryBridge` and `SshBridge` are separate Rust utility surfaces. Do not move discovery/SSH policy back into Swift/Kotlin.
-- iOS uses UniFFI-generated Swift plus thin bridge helpers; Android uses UniFFI-generated Kotlin plus thin bridge helpers.
-- iOS Debug/device links the raw static library in `apps/ios/GeneratedRust/ios-device/libcodex_mobile_client.a`. The package lane may still create `apps/ios/Frameworks/codex_mobile_client.xcframework`, but that is not the default debug/device artifact.
+Keep one handwritten UniFFI interface in `codex-mobile-client`. Expose shared
+statuses and payloads as typed Rust records or enums. Generate Swift and Kotlin
+bindings with `make bindings`; generated `*.generated.rs` files stay untracked.
+Android consumes generated Kotlin directly from
+`shared/rust-bridge/generated/kotlin/`, not copied source files.
 
-## Feature Placement Rules
+Host/mobile protocol changes belong in the same checkout. The host import's
+`REMORA.md` records provenance; edit that source, not Cargo's Git cache.
 
-- Prefer Rust first. If logic is about session state, thread state, streaming, hydration, approvals, auth/account, discovery merge policy, voice transcript/handoff normalization, or status normalization, it belongs in `shared/rust-bridge/codex-mobile-client/`.
-- Keep Swift/Kotlin thin. Platform code should only own UI, platform persistence, platform permissions, native audio/session APIs, Android services, and render-only projections.
-- Do not parse upstream wire-format strings in Swift/Kotlin. If a status, event kind, or payload shape matters to both platforms, expose it as a typed UniFFI enum/record from Rust.
-- Do not duplicate merge/reducer/state-machine logic in iOS or Android. Shared reconciliation belongs in Rust reducer/store code.
-- If shared Rust needs a direct server operation, expose it on `AppClient` with a mobile-owned request/result shape instead of adding a handwritten wrapper on `AppStore`.
-- Keep the public UniFFI surface handwritten and narrow. Put reconciliation policy in handwritten Rust reducer/reconcile code.
-- `AppStore` should stay minimal: snapshots, subscriptions, and truly composite/store-local actions only. Direct server operations belong on `AppClient`.
-- Prefer authoritative updates. Store state should be populated from upstream events first, then targeted refresh/reconcile when upstream events are insufficient. Do not hand-patch platform state after RPC success.
-- New boundary types that cross into Swift/Kotlin should be UniFFI-safe Rust records/enums. Internal Rust-only state can stay richer and non-UniFFI.
-- Generated Rust sources must stay local-only. Use `*.generated.rs` filenames and do not commit generated Rust files; regenerate them via `./shared/rust-bridge/generate-bindings.sh`.
+Native WebRTC owns peer connections and audio processing. Rust owns voice
+signaling, lifecycle, transcript state, and handoff. Ghostty renders remote
+terminals; the embedded app-server is not an on-device shell.
 
-## Where To Implement New Work
+## Preserve local work and trust
 
-- Add or change direct server coverage:
-  - update `shared/rust-bridge/codex-mobile-client/src/ffi/client.rs`
-  - update the internal `MobileClient` facade under `shared/rust-bridge/codex-mobile-client/src/mobile_client/` (`mod.rs`, `thread_operations.rs`, `user_input.rs`, `event_loop.rs`, …) and/or reconciliation code as needed
-  - regenerate bindings
-- Add canonical runtime state, reducer logic, or reconciliation:
-  - `shared/rust-bridge/codex-mobile-client/src/store/`
-- Add conversation hydration, typed item shaping, or shared status normalization:
-  - `shared/rust-bridge/codex-mobile-client/src/conversation.rs`
-  - `shared/rust-bridge/codex-mobile-client/src/conversation_uniffi.rs`
-  - `shared/rust-bridge/codex-mobile-client/src/ffi/shared.rs`
-- Add discovery ranking/dedupe/reconciliation:
-  - `shared/rust-bridge/codex-mobile-client/src/discovery.rs`
-  - `shared/rust-bridge/codex-mobile-client/src/discovery_uniffi.rs`
-- Add voice transcript/handoff/shared realtime normalization:
-  - `shared/rust-bridge/codex-mobile-client/src/store/voice.rs`
-  - reducer/update boundary types in `store/`
-- Add iOS-only behavior:
-  - `apps/ios/Sources/Remora/Models/` for controllers/platform services
-  - `apps/ios/Sources/Remora/Views/` for SwiftUI
-  - keep those files free of shared protocol parsing and shared business rules
-- Add Android-only behavior:
-  - `apps/android/app/` and `apps/android/core/bridge/`
-  - keep those files free of duplicated Rust-owned state/reducer logic
+- Accommodate concurrent changes. Never revert work you did not author.
+- Keep `shared/third_party/codex` edits local unless the user explicitly asks
+  for a separate submodule commit or push. A parent-repo push does not include
+  dirty submodule contents. Document patch changes in `patches/codex/README.md`.
+- Keep bundle identifiers and signing identities unchanged unless approved.
+- Preserve fail-closed pairing, SSH trust, secret cleanup, and ambiguous-send
+  handling. A timeout does not prove a remote mutation failed.
+- Preserve semantic success colors, accessibility scaling, and user-selected
+  terminal palettes. Apply the app's design tokens only to app chrome.
 
-## Drift Guardrails
+## Verification and delivery
 
-- Default to mobile parity. When a change affects shared mobile behavior or a user-facing mobile workflow, implement and verify it for both iOS and Android in the same pass unless it is truly platform-specific.
-- If a mobile change intentionally ships on only one platform, document the reason in your summary and note the follow-up needed for the other platform.
-- Before adding new Swift/Kotlin logic, ask: would Android/iOS both need this behavior? If yes, put it in Rust.
-- Before adding a new `String` status field to Swift/Kotlin models, ask: should this be a Rust enum instead? Usually yes.
-- Before adding a new `AppStore` method, ask: is this a real composite/store action, or should it live on `AppClient` instead?
-- Before adding a new platform cache, ask: is this canonical runtime data that should live in the Rust store instead?
-- When in doubt, prefer one shared Rust implementation plus a thin platform projection over two parallel native implementations.
-- Do not push `shared/third_party/codex` as part of normal repo work. Keep submodule edits local-only unless the user explicitly asks for a separate submodule commit/push, and do not assume a top-level `git push` captures dirty submodule contents.
-
-## Dependencies
-
-### iOS (SPM via `apps/ios/project.yml`)
-
-- **Hairball** (`HairballUI` product, `dnakov/hairball`, revision `fbb4282ca428e4a76f6a4379d4ae844e9bfea95a`) — Renders Markdown in assistant/system messages with custom theming (`MarkdownTheme` / `HeadingStyleSet` in `MessageBubbleView.swift`).
-- **WebRTC** (`stasel/WebRTC`, exact `147.0.0`) — Google libwebrtc binary framework backing realtime voice.
-- **Nuke** / **NukeUI** (`kean/Nuke`, from `12.8.0`) — image loading and caching for inline/remote images.
-
-### Android (Gradle)
-
-- **Compose Material3** — primary Android UI toolkit.
-- **Markwon** — Markdown rendering for assistant/system text.
-- **androidx.security:security-crypto** — encrypted credential storage.
-
-### Rust Shared Layer (Cargo)
-
-- **codex-app-server-protocol**, **codex-app-server-client**, **codex-protocol**, **codex-core** — upstream Codex crates.
-- **tokio-tungstenite** — async WebSocket transport.
-- **russh** — SSH client (shared Rust SSH, replacing platform-native SSH libs).
-- **uniffi** — generates Swift/Kotlin bindings from Rust.
-- **lru**, **base64**, **regex** — utility crates.
-
-## Fresh Checkout Prerequisites
-
-Before building on a new machine, verify:
-
-1. `xcode-select -p` must print `/Applications/Xcode.app/Contents/Developer`, not `/Library/Developer/CommandLineTools`. Fix with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`. The Command Line Tools do not include iOS simulator SDKs.
-2. `cargo` and `rustc` must come from **rustup**, not Homebrew's `rust` formula. If `which cargo` points to `/opt/homebrew/bin/cargo` (a Homebrew standalone binary, not a rustup proxy), cross-compilation targets like `aarch64-apple-ios-sim` will fail even if `rustup target list` shows them installed. The Makefile prepends the rustup toolchain bin to PATH automatically, but standalone script runs and CI environments must also ensure the correct resolution. Either `brew uninstall rust` or put `~/.cargo/bin` (or the rustup toolchain bin from `rustup which cargo`) before `/opt/homebrew/bin` in PATH.
-3. `xcodegen` must be installed (`brew install xcodegen`). Required for Xcode project generation.
-4. _(Optional)_ `pymobiledevice3` enables `make ios-device-run` over Tailscale when the device is not on the local network. Install with `pipx install pymobiledevice3` (or `uv tool install pymobiledevice3`). Also requires Tailscale on both the Mac and the iOS device.
-
-## Build System
-
-The root `Makefile` is the primary build interface. It orchestrates submodule sync, patching, UniFFI binding generation, Rust cross-compilation, raw staticlib generation, optional xcframework packaging, Xcode project generation, and platform builds — with stamp-file caching in `.build-stamps/` so repeated runs skip completed steps. If `sccache` is installed it is used automatically via `RUSTC_WRAPPER=sccache`.
-
-There are two distinct iOS Rust lanes:
-
-- Fast dev lane: raw staticlib + generated headers in `apps/ios/GeneratedRust/`, used by Debug/device builds (`make rust-ios-device-fast`, `make ios-device-fast`).
-- Fast simulator lane: raw simulator staticlib + generated headers in `apps/ios/GeneratedRust/ios-sim`, used by Debug/simulator builds (`make rust-ios-sim-fast`, `make ios-sim-fast`).
-- Package lane: device+sim Rust build plus `codex_mobile_client.xcframework` packaging (`make rust-ios-package`, `make ios`, `make ios-device`, `make ios-sim`).
-
-Incremental policy:
-
-- Package targets run with `CARGO_INCREMENTAL=0`.
-- Dev targets intentionally unset `CARGO_INCREMENTAL` rather than forcing it on, because this repo’s `sccache` setup rejects explicit incremental compilation.
-
-### Common targets
-
-| Target                       | Description                                                                                                                        |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `make ios`                   | Full iOS package lane: sync → patch → bindings → Rust (device+sim) → xcframework → xcgen → simulator build                         |
-| `make ios-sim`               | Full iOS package lane + simulator build                                                                                            |
-| `make ios-sim-fast`          | Fast iOS simulator lane using raw simulator staticlib outputs in `GeneratedRust/ios-sim`                                           |
-| `make ios-device`            | Full iOS package lane + device build                                                                                               |
-| `make ios-device-fast`       | Fast iOS device lane using raw staticlib outputs in `GeneratedRust/`                                                               |
-| `make ios-run`               | Full iOS build then opens Xcode                                                                                                    |
-| `make android`               | Full Android pipeline: sync → Kotlin bindings → Rust JNI → Gradle debug assemble                                                   |
-| `make android-emulator-fast` | Fast Android dev build using the host-appropriate emulator ABI (`arm64-v8a` on Apple Silicon, `x86_64` on Intel)                   |
-| `make android-install`       | Build + install the debug APK on a connected device                                                                                |
-| `make all`                   | Both platforms                                                                                                                     |
-| `make rust-ios`              | Alias for the full Rust iOS package lane                                                                                           |
-| `make rust-ios-package`      | Build/package Rust for iOS (device+sim + xcframework)                                                                              |
-| `make rust-ios-sim-fast`     | Build raw Rust simulator staticlib + headers only                                                                                  |
-| `make rust-ios-device-fast`  | Build raw Rust device staticlib + headers only                                                                                     |
-| `make rust-android`          | Just the Android JNI `.so` files                                                                                                   |
-| `make rust-check`            | Host `cargo check` for shared Rust crates                                                                                          |
-| `make rust-test`             | Host `cargo test` for shared Rust crates                                                                                           |
-| `make bindings`              | Regenerate UniFFI Swift + Kotlin bindings                                                                                          |
-| `make xcgen`                 | Regenerate `Remora.xcodeproj` from `project.yml`                                                                                   |
-| `make test`                  | Run Rust + iOS + Android tests                                                                                                     |
-| `make clean`                 | Remove all build artifacts + stamp cache                                                                                           |
-
-### Cache invalidation
-
-- `make rebuild-bindings` — force-rebuild UniFFI bindings.
-- `make clean-rust` / `make clean-ios` / `make clean-android` — remove platform-specific artifacts.
-
-### Configuration overrides (env vars)
-
-- `IOS_SIM_DEVICE` — simulator name (default: `iPhone 17 Pro`)
-- `XCODE_CONFIG` — Xcode build configuration (default: `Debug`)
-- `IOS_SCHEME` — Xcode scheme (default: `Remora`)
-- `IOS_DEPLOYMENT_TARGET` — minimum iOS version (default: `18.0`)
-- `ANDROID_SDK_ROOT` / `ANDROID_NDK_HOME` / `JAVA_HOME` — required for Android builds in bare shells; typical local values are `$HOME/Library/Android/sdk`, `$HOME/Library/Android/sdk/ndk/<version>`, and `/Applications/Android Studio.app/Contents/jbr/Contents/Home`
-
-### Individual scripts (called by Make, can also be run standalone)
-
-- `./apps/ios/scripts/build-rust.sh` — cross-compile Rust for iOS; in fast mode it emits raw staticlibs + headers to `apps/ios/GeneratedRust/`, and in package mode it also creates `codex_mobile_client.xcframework`
-- `./apps/ios/scripts/sync-codex.sh` — sync codex submodule + apply patches
-- `./apps/ios/scripts/regenerate-project.sh` — regenerate Xcode project via xcodegen; this is the safe path because it removes any accidental nested `apps/ios/Remora.xcodeproj/Remora.xcodeproj` before regenerating
-- `./shared/rust-bridge/generate-bindings.sh` — generate UniFFI Swift/Kotlin bindings
-- `./tools/scripts/build-android-rust.sh` — cross-compile Rust JNI libs for Android via `cargo-ndk`
-
-## Autonomous Debugging Runbook
-
-- Prefer the fast lanes for local iteration before package lanes: `make ios-sim-fast`, `make ios-device-fast`, and `make android-emulator-fast`.
-- For iOS simulator debugging, install the latest built app directly from DerivedData instead of trusting an older installed simulator copy: `xcrun simctl install booted <.../Build/Products/Debug-iphonesimulator/Remora.app>` then `xcrun simctl launch booted com.remora.app`.
-- For Xcode project regeneration, use `make xcgen` or `./apps/ios/scripts/regenerate-project.sh`. Do not run `xcodegen generate --spec project.yml --project Remora.xcodeproj` from inside `apps/ios`; that produces a nested `apps/ios/Remora.xcodeproj/Remora.xcodeproj`.
-- For Android emulator debugging, build with `make android-emulator-fast`, install with `adb -e install -r apps/android/app/build/outputs/apk/debug/app-debug.apk`, then launch with `adb -e shell am start -n com.remora.android/com.remora.android.MainActivity`.
-- Keep both runtimes available when validating shared Rust changes: boot a simulator with `xcrun simctl boot <device>` or through Simulator.app, and verify an emulator is visible with `adb devices -l`.
-- Mobile logs now stay local: use Xcode/device console for iOS, Logcat for Android, and normal Rust `tracing` output instead of a collector or spool directory.
-
-## Coding Style & Naming Conventions
-
-- Swift style follows standard Xcode defaults: 4-space indentation, `UpperCamelCase` for types, `lowerCamelCase` for properties/functions.
-- Kotlin style follows standard Android/Kotlin conventions: 4-space indentation, `UpperCamelCase` types, `lowerCamelCase` members.
-- Default theme: icon-derived deep navy (`#02082C`) surfaces with an ocean-cyan
-  (`#0DD5F0`) accent and `SFMono-Regular` typography. Preserve green for
-  semantic success and leave user-selectable terminal palettes unchanged.
-- Keep concurrency boundaries explicit (`actor`, `@MainActor`) and avoid cross-actor mutable state.
-- Group iOS files by layer (`Views`, `Models`, `Bridge`) and Android files by module (`app/ui`, `app/state`, `core/*`).
-- No repository-local SwiftLint/SwiftFormat config is currently committed; keep formatting consistent with existing files.
-
-## Testing Guidelines
-
-- iOS tests: prefer XCTest under `apps/ios/Tests/RemoraTests/` with files named `*Tests.swift`.
-- Android tests: place unit tests under `apps/android/app/src/test/java/`.
-- iOS test command: `xcodebuild test` using the same project/scheme/destination pattern as build commands.
-- Android test command: `cd apps/android && ./gradlew :app:testDebugUnitTest`.
-- Keep `apps/android/docs/qa-matrix.md` updated when parity scope changes.
-
-## Commit & Pull Request Guidelines
-
-- Use concise, imperative commit subjects with optional scope (example: `bridge: retry initialize handshake`).
-- PRs should include: purpose, key changes, verification steps (commands/device), and screenshots for UI changes.
-- If project structure changes, include updates to `apps/ios/project.yml` and mention whether project regeneration was run.
-- If using XcodeBuildMCP, use the installed XcodeBuildMCP skill before calling XcodeBuildMCP tools.
+- Trace callers before changing shared behavior. Add regression coverage at
+  the owning Rust interface; verify both native consumers for shared changes.
+- Use XCTest in `apps/ios/Tests/RemoraTests/` and Android unit tests in
+  `apps/android/app/src/test/java/`. Follow existing four-space formatting and
+  explicit actor/coroutine ownership.
+- Use the verification commands in [CONTEXT.md](CONTEXT.md). Match the checks
+  to the change; report commands, results, and any unrun gates.
+- Update `apps/android/docs/qa-matrix.md` when workflow parity changes. Explain
+  any intentional one-platform change and the other platform's follow-up.
+- Edit `apps/ios/project.yml`, then run `make xcgen` for target or source-layout
+  changes. Never hand-edit the generated Xcode project.
+- Use concise imperative commit subjects. PRs describe purpose, changes,
+  verification, and screenshots for UI changes. Do not commit or push unless
+  requested.

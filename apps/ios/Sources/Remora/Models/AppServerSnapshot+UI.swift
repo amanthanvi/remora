@@ -54,7 +54,7 @@ extension AppServerSnapshot {
         if let connectionProgressLabel {
             return connectionProgressLabel
         }
-        if transportState == .connected, !isLocal, account == nil {
+        if transportState == .connected, !isLocal, requiresOpenaiAuth, account == nil {
             return "Sign in required"
         }
         return transportState.displayLabel
@@ -72,7 +72,7 @@ extension AppServerSnapshot {
                 ? RemoraTheme.success
                 : RemoraTheme.warning
         }
-        if transportState == .connected, !isLocal, account == nil {
+        if transportState == .connected, !isLocal, requiresOpenaiAuth, account == nil {
             return .orange
         }
         return transportState.accentColor
@@ -90,7 +90,7 @@ extension AppServerSnapshot {
         if connectionProgressLabel != nil {
             return .pending
         }
-        if transportState == .connected, !isLocal, account == nil {
+        if transportState == .connected, !isLocal, requiresOpenaiAuth, account == nil {
             return .pending
         }
         switch transportState {

@@ -147,13 +147,14 @@ fn lookup_pin(
 /// same address both observe "no pin" and both record, so the loser can
 /// overwrite the winner's pin with a different key. Connections that already
 /// have a pin never take this lock — they only compare, never write.
-static TOFU_LOCKS: LazyLock<StdMutex<HashMap<(String, u16), Weak<Mutex<()>>>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
+type HostLocks<T> = LazyLock<StdMutex<HashMap<(String, u16), Weak<T>>>>;
+
+static TOFU_LOCKS: HostLocks<Mutex<()>> = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Per-host mutation generations shared by first-use recording and platform
 /// pin removal. A verifier retains its fence across authentication, so an
 /// intervening forget/unpin cannot be followed by that verifier's stale write.
-static TRUST_MUTATION_FENCES: LazyLock<StdMutex<HashMap<(String, u16), Weak<StdMutex<u64>>>>> =
+static TRUST_MUTATION_FENCES: HostLocks<StdMutex<u64>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 fn tofu_lock(host: &str, port: u16) -> Arc<Mutex<()>> {

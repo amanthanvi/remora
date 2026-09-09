@@ -346,8 +346,8 @@ impl PairingJournalEntryV2 {
                     return Err(JournalValidationError::Corrupt);
                 }
             }
-            if let Some(pending) = &enrollment.pending_claim {
-                if enrollment.prospective_credential_id.as_deref()
+            if let Some(pending) = &enrollment.pending_claim
+                && (enrollment.prospective_credential_id.as_deref()
                     != Some(pending.credential_id.as_str())
                     || !valid_opaque_16(&pending.claim_id)
                     || pending.display_name != normalize_device_name(&enrollment.display_name)
@@ -361,10 +361,9 @@ impl PairingJournalEntryV2 {
                         .iter()
                         .filter(|candidate| candidate.transcript_hash == pending.transcript_hash)
                         .count()
-                        .eq(&1)
-                {
-                    return Err(JournalValidationError::Corrupt);
-                }
+                        .eq(&1))
+            {
+                return Err(JournalValidationError::Corrupt);
             }
         }
 
@@ -407,8 +406,8 @@ impl PairingJournalEntryV2 {
             }
         }
 
-        if let Some(mutation) = &self.mutation {
-            if !valid_opaque_16(&mutation.credential_id)
+        if let Some(mutation) = &self.mutation
+            && (!valid_opaque_16(&mutation.credential_id)
                 || !valid_idempotency(&mutation.idempotency_key)
                 || mutation.receipt.as_ref().is_some_and(|receipt| {
                     receipt.credential_id != mutation.credential_id
@@ -421,10 +420,9 @@ impl PairingJournalEntryV2 {
                         .as_deref()
                         .is_none_or(|value| !valid_idempotency(value)),
                     MutationKindV2::RevokeSelf => mutation.enrollment_idempotency_key.is_some(),
-                }
-            {
-                return Err(JournalValidationError::Corrupt);
-            }
+                })
+        {
+            return Err(JournalValidationError::Corrupt);
         }
 
         if let Some(restart) = &self.pending_restart {

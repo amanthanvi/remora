@@ -7,7 +7,7 @@ struct ConversationBottomChrome: View {
     let composer: ConversationComposerSnapshot
     @Binding var composerInputText: String
     @Binding var composerAttachedImage: UIImage?
-    let onSend: (String, UIImage?, [ComposerFileAttachment], [SkillMentionSelection], [PluginMentionSelection]) -> Void
+    let onSend: (String, UIImage?, [ComposerFileAttachment], [SkillMentionSelection], [PluginMentionSelection]) async throws -> Void
     let onFileSearch: (String) async throws -> [FileSearchResult]
     var bottomInset: CGFloat = 0
     let onOpenConversation: ((ThreadKey) -> Void)?

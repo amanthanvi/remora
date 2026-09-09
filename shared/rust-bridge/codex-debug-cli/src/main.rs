@@ -291,10 +291,12 @@ enum AppSessionCommand {
         selected_turn_index: u32,
     },
     RespondToApproval {
+        runtime_kind: String,
         request_id: String,
         decision: ApprovalDecisionValue,
     },
     RespondToUserInput {
+        runtime_kind: String,
         request_id: String,
         answers: Vec<PendingUserInputAnswer>,
     },
@@ -1705,9 +1707,13 @@ async fn run_app_session(args: &AppArgs) -> Result<(), String> {
                 }
             }
             AppSessionCommand::RespondToApproval {
+                runtime_kind,
                 request_id,
                 decision,
-            } => match client.respond_to_approval(&request_id, decision).await {
+            } => match client
+                .respond_to_approval(&server_id, &runtime_kind, &request_id, decision)
+                .await
+            {
                 Ok(()) => serde_json::json!({
                     "id": input.id,
                     "ok": true,
@@ -1723,9 +1729,13 @@ async fn run_app_session(args: &AppArgs) -> Result<(), String> {
                 }),
             },
             AppSessionCommand::RespondToUserInput {
+                runtime_kind,
                 request_id,
                 answers,
-            } => match client.respond_to_user_input(&request_id, answers).await {
+            } => match client
+                .respond_to_user_input(&server_id, &runtime_kind, &request_id, answers)
+                .await
+            {
                 Ok(()) => serde_json::json!({
                     "id": input.id,
                     "ok": true,

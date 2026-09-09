@@ -16,6 +16,7 @@ endif
 ROOT := $(shell pwd)
 STAMPS := $(ROOT)/.build-stamps
 RUST_DIR := $(ROOT)/shared/rust-bridge
+RAMA_DNS_DIR := $(ROOT)/shared/third_party/rama-dns
 SUBMODULE_DIR := $(ROOT)/shared/third_party/codex
 IOS_DIR := $(ROOT)/apps/ios
 IOS_SCRIPTS := $(IOS_DIR)/scripts
@@ -171,7 +172,6 @@ BOUNDARY_SOURCES += $(shell find $(RUST_DIR)/codex-mobile-client/src -type f -na
 STAMP_SYNC := $(STAMPS)/sync
 STAMP_BINDINGS_S := $(STAMPS)/bindings-swift
 STAMP_BINDINGS_K := $(STAMPS)/bindings-kotlin
-STAMP_XCGEN := $(STAMPS)/xcgen
 
 GHOSTTY_DIR := $(ROOT)/shared/third_party/ghostty
 GHOSTTY_COMMIT := $(shell git -C $(GHOSTTY_DIR) rev-parse --short=12 HEAD 2>/dev/null || echo missing)
@@ -191,18 +191,20 @@ ANDROID_RUST_SOURCES := $(shell find $(RUST_DIR) \
 	-path '*/target' -prune -o \
 	-path '*/generated' -prune -o \
 	-type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name 'build.rs' \) -print 2>/dev/null)
+ANDROID_RUST_SOURCES += $(RAMA_DNS_DIR)/Cargo.toml $(wildcard $(RAMA_DNS_DIR)/src/*.rs)
+ANDROID_RUST_SOURCES += $(ROOT)/services/remora-link/Cargo.toml $(foreach crate,bridge-core claude-bridge pi-bridge opencode-bridge,$(shell find $(ROOT)/services/remora-link/crates/$(crate) -name '*.rs' -o -name Cargo.toml))
 
 $(shell mkdir -p $(STAMPS))
 
 .PHONY: all ios ios-sim ios-sim-fast ios-sim-run ios-device ios-device-fast ios-device-run ios-device-stop ios-run verify-ios-project catalyst catalyst-run catalyst-fast catalyst-fast-run \
 	android android-fast android-emulator-fast android-emulator-run android-device-run android-debug android-install android-emulator-install \
-	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-test rust-host-dev rust-shellcheck \
+	rust-ios rust-ios-package rust-ios-device-fast rust-ios-sim-fast rust-ios-macabi-fast rust-android rust-check rust-clippy rust-test rust-dns-test rust-host-dev rust-shellcheck \
 	ghostty-ios ghostty-android \
 	update-remora-link bootstrap-remora-link bootstrap-remora-link-test \
 	bindings bindings-swift bindings-kotlin bindings-hardener-test \
 	sync patch unpatch sync-ghostty unpatch-ghostty xcgen \
 	ios-build ios-build-sim ios-build-sim-fast ios-build-device ios-build-device-fast \
-	test test-rust test-ios test-android \
+	test test-rust test-ios test-android ci-tools-test dependency-boundaries-check \
 	clean clean-rust clean-ios clean-android \
 	rebuild-bindings tui tui-run export-fixture export-fixture-run help
 
@@ -383,9 +385,18 @@ rust-check: patch
 	@echo "==> cargo check (host, shared crates)..."
 	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo check --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client
 
-rust-test: patch rust-shellcheck
+rust-clippy: patch
+	@echo "==> cargo clippy (shared client, warnings denied)..."
+	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo clippy --locked --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib -- -D warnings
+
+rust-test: patch rust-shellcheck rust-dns-test
 	@echo "==> cargo test (host, shared crates)..."
-	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
+	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --locked --manifest-path $(RUST_DIR)/Cargo.toml --workspace --all-targets
+
+rust-dns-test:
+	@echo "==> cargo test (vendored DNS adapter)..."
+	@cp $(RUST_DIR)/Cargo.lock $(RAMA_DNS_DIR)/Cargo.lock
+	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RAMA_DNS_DIR)/Cargo.toml --lib
 
 # Lint the embedded SSH bootstrap shell scripts. shellcheck and pwsh are
 # best-effort: missing tools warn but don't fail the build (matches the
@@ -462,6 +473,7 @@ help:
 		'make android-device-run    fast Android dev build + install + launch with saved logcat under artifacts/android-device-run (override ANDROID_DEVICE_SERIAL; auto-uninstalls on versionCode downgrade; set ANDROID_REINSTALL_ON_SIGNATURE_MISMATCH=1 to also uninstall on signature mismatch)' \
 		'make rust-check         host cargo check for shared crates' \
 		'make rust-test          host cargo test for shared crates' \
+		'make rust-clippy        shared client Clippy with warnings denied' \
 		'make bindings-hardener-test  generated secret-binding hardener regression tests'
 
 sync: $(STAMP_SYNC)
@@ -515,11 +527,9 @@ $(STAMP_BINDINGS_K): $(STAMP_SYNC) $(BOUNDARY_SOURCES)
 	@cd $(RUST_DIR) && ./generate-bindings.sh --kotlin-only
 	@touch $@
 
-xcgen: $(STAMP_XCGEN)
-$(STAMP_XCGEN): $(IOS_DIR)/project.yml
+xcgen:
 	@echo "==> Regenerating Xcode project..."
 	@$(IOS_SCRIPTS)/regenerate-project.sh
-	@touch $@
 
 verify-ios-project:
 	@$(IOS_SCRIPTS)/regenerate-project.sh --repair-only
@@ -607,11 +617,15 @@ android-emulator-install: android-emulator-fast
 	if [ -z "$$EMU" ]; then echo "ERROR: no emulator found"; exit 1; fi && \
 	adb -s "$$EMU" install -r $(ANDROID_APK)
 
-test: bindings-hardener-test bootstrap-remora-link-test test-rust test-ios test-android
+ci-tools-test:
+	@python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
 
-test-rust: patch rust-shellcheck
-	@echo "==> Running Rust tests..."
-	@cd $(ROOT) && $(DEV_CARGO_ENV) cargo test --manifest-path $(RUST_DIR)/Cargo.toml -p codex-mobile-client --lib
+dependency-boundaries-check:
+	@python3 tools/ci/check_dependency_boundaries.py
+
+test: ci-tools-test bindings-hardener-test bootstrap-remora-link-test test-rust test-ios test-android
+
+test-rust: rust-test
 
 test-ios: xcgen
 	@echo "==> Running iOS tests..."
@@ -640,7 +654,7 @@ clean-rust:
 clean-ios:
 	@echo "==> Cleaning iOS artifacts..."
 	@rm -rf $(IOS_FW_DIR)/codex_mobile_client.xcframework $(IOS_FW_DIR)/GhosttyKit.xcframework $(IOS_GENERATED)
-	@rm -f $(STAMP_XCGEN) $(STAMP_BINDINGS_S) $(STAMPS)/ghostty-ios-*
+	@rm -f $(STAMPS)/xcodegen-cache $(STAMP_BINDINGS_S) $(STAMPS)/ghostty-ios-*
 
 clean-android:
 	@echo "==> Cleaning Android artifacts..."

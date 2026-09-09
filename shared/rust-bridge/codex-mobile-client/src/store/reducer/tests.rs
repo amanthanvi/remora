@@ -54,6 +54,262 @@ fn make_server_config(server_id: &str) -> ServerConfig {
 }
 
 #[test]
+fn targeted_store_reads_preserve_projection_and_unrelated_state() {
+    let reducer = AppStoreReducer::new();
+    reducer.upsert_server(&make_server_config("srv"), ServerHealthSnapshot::Connected);
+    let mut thread = ThreadSnapshot::from_info("srv", make_thread_info("selected"));
+    thread.initial_turns_loaded = true;
+    thread.older_turns_cursor = Some("older-page".to_string());
+    thread.items.push(make_error_item(
+        "selected-item".to_string(),
+        "selected message".to_string(),
+        None,
+    ));
+    let key = thread.key.clone();
+    reducer.upsert_thread_snapshot(thread);
+
+    let mut unrelated = ThreadSnapshot::from_info("srv", make_thread_info("unrelated"));
+    unrelated.items.push(make_error_item(
+        "unrelated-item".to_string(),
+        "unrelated history".repeat(8192),
+        None,
+    ));
+    let unrelated_key = unrelated.key.clone();
+    reducer.upsert_thread_snapshot(unrelated);
+    let before = reducer.snapshot();
+    let expected = super::super::project_thread_snapshot(&before, &key)
+        .expect("full snapshot projection")
+        .expect("selected thread");
+    let mut updates = reducer.subscribe();
+
+    let actual = reducer
+        .project_thread_snapshot(&key)
+        .expect("targeted projection")
+        .expect("selected thread");
+    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    assert!(
+        reducer
+            .project_thread_snapshot(&ThreadKey {
+                server_id: "srv".to_string(),
+                thread_id: "missing".to_string(),
+            })
+            .expect("missing thread projection")
+            .is_none()
+    );
+
+    let host_ptr = reducer.snapshot.read().expect("store lock").servers["srv"]
+        .host
+        .as_ptr();
+    assert_eq!(
+        reducer.project_server("srv", |server| server.host.as_ptr()),
+        Some(host_ptr),
+        "server projection must borrow canonical data rather than clone it"
+    );
+    assert!(reducer.project_server("missing", |_| ()).is_none());
+    let after = reducer
+        .thread_snapshot(&unrelated_key)
+        .expect("unrelated thread");
+    assert_eq!(
+        format!("{after:?}"),
+        format!("{:?}", before.threads[&unrelated_key])
+    );
+    assert!(drain_updates(&mut updates).is_empty());
+}
+
+#[test]
+#[ignore = "manual timing benchmark; run alone with --ignored --nocapture --test-threads=1"]
+fn targeted_projection_and_dispatch_reads_benchmark() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    const ITERATIONS: u32 = 200;
+    const BATCHES: usize = 7;
+    fn compare<A, B>(name: &str, mut before: impl FnMut() -> A, mut after: impl FnMut() -> B) {
+        for _ in 0..20 {
+            black_box(before());
+            black_box(after());
+        }
+        let mut baseline = Vec::new();
+        let mut targeted = Vec::new();
+        for batch in 0..BATCHES {
+            // Alternate which implementation runs first to reduce ordering bias.
+            for first in [true, false] {
+                let legacy = first == (batch % 2 == 0);
+                let start = Instant::now();
+                for _ in 0..ITERATIONS {
+                    if legacy {
+                        black_box(before());
+                    } else {
+                        black_box(after());
+                    }
+                }
+                let elapsed = start.elapsed().as_nanos() / u128::from(ITERATIONS);
+                if legacy {
+                    baseline.push(elapsed);
+                } else {
+                    targeted.push(elapsed);
+                }
+            }
+        }
+        baseline.sort_unstable();
+        targeted.sort_unstable();
+        eprintln!(
+            "{name}: clone_baseline_ns={} targeted_ns={}",
+            baseline[BATCHES / 2],
+            targeted[BATCHES / 2]
+        );
+    }
+
+    for threads in [1, 16, 64] {
+        let client = crate::MobileClient::new();
+        let reducer = &client.app_store;
+        reducer.upsert_server(&make_server_config("srv"), ServerHealthSnapshot::Connected);
+        for index in 0..threads {
+            let mut thread =
+                ThreadSnapshot::from_info("srv", make_thread_info(&format!("thread-{index}")));
+            thread.initial_turns_loaded = true;
+            for item in 0..16 {
+                thread.items.push(make_error_item(
+                    format!("item-{item}"),
+                    "x".repeat(4096),
+                    None,
+                ));
+            }
+            reducer.upsert_thread_snapshot(thread);
+        }
+        let key = ThreadKey {
+            server_id: "srv".to_string(),
+            thread_id: "thread-0".to_string(),
+        };
+        let approval = PendingApproval {
+            server_id: "srv".to_string(),
+            runtime_kind: "codex".to_string(),
+            id: "approval".to_string(),
+            kind: ApprovalKind::Command,
+            thread_id: Some(key.thread_id.clone()),
+            turn_id: None,
+            item_id: None,
+            command: Some("echo benchmark".to_string()),
+            path: None,
+            grant_root: None,
+            cwd: None,
+            reason: None,
+        };
+        let input = PendingUserInputRequest {
+            server_id: "srv".to_string(),
+            runtime_kind: "codex".to_string(),
+            id: "input".to_string(),
+            thread_id: key.thread_id.clone(),
+            turn_id: "turn".to_string(),
+            item_id: "item".to_string(),
+            questions: Vec::new(),
+            requester_agent_nickname: None,
+            requester_agent_role: None,
+        };
+        reducer.replace_pending_approvals(vec![approval.clone()]);
+        reducer.replace_pending_user_inputs(vec![input.clone()]);
+        let projection_baseline = || {
+            super::super::project_thread_snapshot(&reducer.snapshot(), &key)
+                .unwrap()
+                .unwrap()
+        };
+        let projection_targeted = || reducer.project_thread_snapshot(&key).unwrap().unwrap();
+        assert_eq!(
+            format!("{:?}", projection_baseline()),
+            format!("{:?}", projection_targeted())
+        );
+        assert_eq!(
+            reducer.pending_approval("srv", "codex", "approval"),
+            Some(approval)
+        );
+        assert_eq!(
+            reducer.pending_user_input("srv", "codex", "input"),
+            Some(input)
+        );
+        // The fixture has no route/model/provider overrides, so the original
+        // routing path returns this cloned thread's runtime unchanged.
+        let routing_baseline = || reducer.thread_snapshot(&key).unwrap().agent_runtime_kind;
+        assert_eq!(routing_baseline(), client.runtime_for_thread(&key));
+        eprintln!(
+            "fixture threads={threads} items_per_thread=16 text_bytes_per_item=4096 iterations={ITERATIONS} batches={BATCHES}"
+        );
+        compare(
+            "thread-projection",
+            projection_baseline,
+            projection_targeted,
+        );
+        compare(
+            "approval-lookup",
+            || {
+                reducer
+                    .snapshot()
+                    .pending_approvals
+                    .into_iter()
+                    .find(|request| request.id == "approval")
+            },
+            || reducer.pending_approval("srv", "codex", "approval"),
+        );
+        compare(
+            "input-lookup",
+            || {
+                reducer
+                    .snapshot()
+                    .pending_user_inputs
+                    .into_iter()
+                    .find(|request| request.id == "input")
+            },
+            || reducer.pending_user_input("srv", "codex", "input"),
+        );
+        compare(
+            "codex-runtime-routing-no-overrides",
+            routing_baseline,
+            || client.runtime_for_thread(&key),
+        );
+    }
+}
+
+#[test]
+fn history_epochs_reject_removed_and_recreated_threads() {
+    for removal in ["thread", "server", "sync", "finalize"] {
+        let reducer = AppStoreReducer::new();
+        let thread = ThreadSnapshot::from_info("srv", make_thread_info("thread"));
+        let key = thread.key.clone();
+        reducer.upsert_thread_snapshot(thread.clone());
+        let epoch = reducer.thread_history_epoch(&key).expect("history epoch");
+        reducer.upsert_thread_snapshot(thread.clone());
+        assert!(Arc::ptr_eq(
+            &epoch,
+            &reducer.thread_history_epoch(&key).unwrap()
+        ));
+
+        match removal {
+            "thread" => reducer.remove_thread(&key),
+            "server" => reducer.remove_server("srv"),
+            "sync" => reducer.sync_thread_list("srv", &[]),
+            "finalize" => reducer.finalize_thread_list_sync("srv", &HashSet::new()),
+            _ => unreachable!(),
+        }
+        reducer.upsert_thread_snapshot(thread);
+        let next_epoch = reducer
+            .thread_history_epoch(&key)
+            .expect("new history epoch");
+        assert!(!Arc::ptr_eq(&epoch, &next_epoch), "removal: {removal}");
+        assert!(
+            !reducer
+                .mutate_thread_history(&key, Some(&epoch), |_| {
+                    panic!("removed history must not be mutated")
+                })
+                .expect("stale history rejection")
+        );
+        assert!(
+            reducer
+                .mutate_thread_history(&key, Some(&next_epoch), |_| {})
+                .expect("new history can be mutated")
+        );
+    }
+}
+
+#[test]
 fn sync_thread_list_for_runtime_tags_threads() {
     let reducer = AppStoreReducer::new();
     let config = make_server_config("srv");
@@ -860,6 +1116,7 @@ fn resolved_user_input_appends_response_item() {
     };
     reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.replace_pending_user_inputs(vec![PendingUserInputRequest {
+        runtime_kind: "codex".to_string(),
         id: "req-1".to_string(),
         server_id: key.server_id.clone(),
         thread_id: key.thread_id.clone(),
@@ -881,6 +1138,8 @@ fn resolved_user_input_appends_response_item() {
     }]);
 
     reducer.resolve_pending_user_input_with_response(
+        "srv",
+        "codex",
         "req-1",
         vec![PendingUserInputAnswer {
             question_id: "q-1".to_string(),
@@ -905,9 +1164,127 @@ fn resolved_user_input_appends_response_item() {
 }
 
 #[test]
+fn pending_request_resolution_and_server_removal_are_scope_local() {
+    for (wire_id, hydrate_threads) in [
+        (upstream::RequestId::Integer(7), false),
+        (upstream::RequestId::String("7".into()), false),
+        (upstream::RequestId::Integer(7), true),
+        (upstream::RequestId::String("7".into()), true),
+    ] {
+        let reducer = AppStoreReducer::new();
+        let processor = crate::session::events::EventProcessor::new();
+        let mut events = processor.subscribe();
+        for server in ["a", "b"] {
+            reducer.upsert_server(&make_server_config(server), ServerHealthSnapshot::Connected);
+            if hydrate_threads {
+                reducer.upsert_thread_snapshot(ThreadSnapshot::from_info(
+                    server,
+                    make_thread_info("thread"),
+                ));
+            }
+            for runtime in ["codex", "pi"] {
+                processor.process_server_request(server, runtime.to_string(), &upstream::ServerRequest::CommandExecutionRequestApproval {
+                    request_id: wire_id.clone(),
+                    params: serde_json::from_value(serde_json::json!({
+                        "threadId": "thread", "turnId": "turn", "itemId": "item", "startedAtMs": 0,
+                        "command": "echo test"
+                    })).unwrap(),
+                });
+                reducer.apply_ui_event(&events.try_recv().unwrap());
+                processor.process_server_request(server, runtime.to_string(), &upstream::ServerRequest::ToolRequestUserInput {
+                    request_id: wire_id.clone(),
+                    params: serde_json::from_value(serde_json::json!({
+                        "threadId": "thread", "turnId": "turn", "itemId": "item",
+                        "questions": [{"id": "answer", "header": "Answer", "question": "Choose", "isOther": false, "isSecret": false, "options": null}]
+                    })).unwrap(),
+                });
+                reducer.apply_ui_event(&events.try_recv().unwrap());
+            }
+        }
+        assert_eq!(reducer.snapshot().pending_approvals.len(), 4);
+        assert_eq!(reducer.snapshot().pending_user_inputs.len(), 4);
+        let expected = reducer.snapshot();
+        for server in ["a", "b"] {
+            for runtime in ["codex", "pi"] {
+                assert_eq!(
+                    reducer.pending_approval(server, runtime, "7"),
+                    expected
+                        .pending_approvals
+                        .iter()
+                        .find(|request| {
+                            request.server_id == server
+                                && request.runtime_kind == runtime
+                                && request.id == "7"
+                        })
+                        .cloned(),
+                );
+                assert_eq!(
+                    reducer.pending_user_input(server, runtime, "7"),
+                    expected
+                        .pending_user_inputs
+                        .iter()
+                        .find(|request| {
+                            request.server_id == server
+                                && request.runtime_kind == runtime
+                                && request.id == "7"
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        for (server, runtime, id) in [
+            ("missing", "pi", "7"),
+            ("a", "missing", "7"),
+            ("a", "pi", "missing"),
+        ] {
+            assert!(reducer.pending_approval(server, runtime, id).is_none());
+            assert!(reducer.pending_user_input(server, runtime, id).is_none());
+        }
+        processor.process_notification(
+            "a",
+            "pi".into(),
+            &upstream::ServerNotification::ServerRequestResolved(
+                upstream::ServerRequestResolvedNotification {
+                    thread_id: "thread".into(),
+                    request_id: wire_id,
+                },
+            ),
+        );
+        reducer.apply_ui_event(&events.try_recv().unwrap());
+        assert_eq!(reducer.snapshot().pending_approvals.len(), 3);
+        assert_eq!(reducer.snapshot().pending_user_inputs.len(), 3);
+        assert!(reducer.pending_approval_seed("a", "pi", "7").is_none());
+        assert!(reducer.pending_user_input_seed("a", "pi", "7").is_none());
+        assert!(reducer.pending_approval("a", "pi", "7").is_none());
+        assert!(reducer.pending_user_input("a", "pi", "7").is_none());
+        assert!(reducer.pending_approval_seed("a", "codex", "7").is_some());
+        assert!(reducer.pending_user_input_seed("b", "pi", "7").is_some());
+        reducer.remove_server("a");
+        let snapshot = reducer.snapshot();
+        assert_eq!(snapshot.pending_approvals.len(), 2);
+        assert_eq!(snapshot.pending_user_inputs.len(), 2);
+        assert!(
+            snapshot
+                .pending_approvals
+                .iter()
+                .all(|request| request.server_id == "b")
+        );
+        assert!(
+            snapshot
+                .pending_user_inputs
+                .iter()
+                .all(|request| request.server_id == "b")
+        );
+        assert_eq!(snapshot.pending_approval_seeds.len(), 2);
+        assert_eq!(snapshot.pending_user_input_seeds.len(), 2);
+    }
+}
+
+#[test]
 fn replacing_identical_pending_user_inputs_is_silent() {
     let reducer = AppStoreReducer::new();
     let request = PendingUserInputRequest {
+        runtime_kind: "codex".to_string(),
         id: "req-1".to_string(),
         server_id: "srv".to_string(),
         thread_id: "thread".to_string(),
@@ -941,6 +1318,7 @@ fn replacing_identical_pending_user_inputs_is_silent() {
 fn replacing_identical_pending_approvals_with_seeds_is_silent() {
     let reducer = AppStoreReducer::new();
     let approval = PendingApproval {
+        runtime_kind: "codex".to_string(),
         id: "approval-1".to_string(),
         server_id: "srv".to_string(),
         kind: ApprovalKind::Command,
@@ -979,6 +1357,7 @@ fn resolved_user_input_hides_other_placeholder_when_note_present() {
     };
     reducer.upsert_thread_snapshot(ThreadSnapshot::from_info("srv", make_thread_info("thread")));
     reducer.replace_pending_user_inputs(vec![PendingUserInputRequest {
+        runtime_kind: "codex".to_string(),
         id: "req-1".to_string(),
         server_id: key.server_id.clone(),
         thread_id: key.thread_id.clone(),
@@ -1000,6 +1379,8 @@ fn resolved_user_input_hides_other_placeholder_when_note_present() {
     }]);
 
     reducer.resolve_pending_user_input_with_response(
+        "srv",
+        "codex",
         "req-1",
         vec![PendingUserInputAnswer {
             question_id: "q-1".to_string(),

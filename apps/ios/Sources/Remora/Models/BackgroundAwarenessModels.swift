@@ -42,6 +42,21 @@ struct OpaqueWakePayload: Equatable, Sendable {
     let eventClass: OpaqueWakeEventClass
     let expiresAt: Date
 
+    var relayHint: AppRelayWakeHint {
+        let relayClass: AppRelayEventClass
+        switch eventClass {
+        case .stateChanged: relayClass = .stateChanged
+        case .activityChanged: relayClass = .activityChanged
+        case .connectionChanged: relayClass = .connectionChanged
+        case .securityChanged: relayClass = .securityChanged
+        }
+        return AppRelayWakeHint(
+            schemaVersion: UInt16(Self.currentSchemaVersion),
+            installationId: installationID, eventId: eventID, cursor: cursor,
+            eventClass: relayClass, expiresAtMs: UInt64((expiresAt.timeIntervalSince1970 * 1_000).rounded())
+        )
+    }
+
     init(userInfo: [AnyHashable: Any], now: Date = Date()) throws {
         guard JSONSerialization.isValidJSONObject(userInfo),
               let encoded = try? JSONSerialization.data(withJSONObject: userInfo),
@@ -176,74 +191,10 @@ enum APNsEnvironment: String, Codable, Equatable, Sendable {
         .production
         #endif
     }
-}
 
-enum PushTokenProvider: String, Codable, Equatable, Sendable {
-    case apns
-}
-
-struct APNsTokenRegistration: Equatable, Sendable {
-    /// Stable, device-local idempotency scope. This is never a relay routing
-    /// identity and must never appear in an opaque wake payload.
-    let clientInstanceID: String
-    /// Relay-issued identity from a prior successful registration, if one is
-    /// already pinned locally. A registry adapter provisions/restores the
-    /// relay installation when this is nil.
-    let installationID: String?
-    let token: Data
-    let generation: UInt64
-    let replacesGeneration: UInt64?
-    let provider: PushTokenProvider
-    let environment: APNsEnvironment
-    let observedAt: Date
-}
-
-/// Authoritative receipt returned by the relay's atomic per-provider upsert.
-/// The registry adapter must persist the installation's scoped capabilities in
-/// Keychain before returning this receipt; this lifecycle pins only the opaque
-/// routing identity needed to validate wake hints.
-struct PushTokenRegistrationReceipt: Equatable, Sendable {
-    static let currentSchemaVersion: UInt64 = 1
-
-    let schemaVersion: UInt64
-    let installationID: String
-    let registrationID: String
-    let provider: PushTokenProvider
-    let environment: APNsEnvironment
-    let generation: UInt64
-    let replaced: Bool
-}
-
-struct APNsTokenTombstone: Equatable, Sendable {
-    let clientInstanceID: String
-    let installationID: String?
-    let throughGeneration: UInt64
-    let provider: PushTokenProvider
-    let environment: APNsEnvironment
-    let observedAt: Date
-}
-
-/// The deployed gateway adapter implements this protocol. Upsert must
-/// atomically replace any older generation for an installation; tombstone must
-/// make every generation through the supplied value undeliverable.
-@MainActor
-protocol PushTokenRegistry: AnyObject {
-    /// Creates/restores a relay installation when needed, securely persists the
-    /// relay-issued id plus scoped capabilities, then atomically replaces the
-    /// active token for this provider/environment.
-    func upsert(_ registration: APNsTokenRegistration) async throws -> PushTokenRegistrationReceipt
-    /// Idempotently revokes the active registration through this generation.
-    /// If `installationID` is nil after a crash boundary, the adapter must
-    /// restore its Keychain binding from `clientInstanceID` before revoking.
-    func tombstone(_ tombstone: APNsTokenTombstone) async throws
-}
-
-enum PushTokenSyncState: Equatable, Sendable {
-    case unavailable
-    case pending(generation: UInt64)
-    case synced(generation: UInt64)
-    case failed(generation: UInt64)
-    case tombstoned(generation: UInt64)
+    var relayEnvironment: AppRelayPushEnvironment {
+        self == .sandbox ? .sandbox : .production
+    }
 }
 
 enum RemoteNotificationRegistrationState: Equatable, Sendable {
@@ -259,18 +210,4 @@ enum BackgroundReconciliationResult: Equatable, Sendable {
     case timedOut
     case unavailable
     case failed
-}
-
-enum AuthenticatedBackgroundStateResult: Equatable, Sendable {
-    case changed
-    case unchanged
-    case failed
-}
-
-@MainActor
-protocol BackgroundStateReconciling: AnyObject {
-    /// `expectedCursor` is a high-water hint only. Implementations must fetch
-    /// authenticated state and must not mark the cursor applied merely because
-    /// APNs delivered it.
-    func reconcileBackgroundState(expectedCursor: UInt64) async -> AuthenticatedBackgroundStateResult
 }

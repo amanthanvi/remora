@@ -123,6 +123,7 @@ final class AppModelServerObservation {
         var transportState: AppServerTransportState?
         var isLocal: Bool
         var hasAccount: Bool
+        var requiresOpenaiAuth: Bool
         var availableModels: [ModelInfo]
     }
 
@@ -134,6 +135,7 @@ final class AppModelServerObservation {
         transportState: nil,
         isLocal: false,
         hasAccount: false,
+        requiresOpenaiAuth: false,
         availableModels: []
     )
 
@@ -141,6 +143,7 @@ final class AppModelServerObservation {
     var transportState: AppServerTransportState? { state.transportState }
     var isLocal: Bool { state.isLocal }
     var hasAccount: Bool { state.hasAccount }
+    var needsAuthentication: Bool { state.requiresOpenaiAuth && !state.hasAccount }
     var isConnected: Bool { state.transportState == .connected }
     var availableModels: [ModelInfo] { state.availableModels }
 
@@ -155,6 +158,7 @@ final class AppModelServerObservation {
             transportState: server?.transportState,
             isLocal: server?.isLocal ?? false,
             hasAccount: server?.account != nil,
+            requiresOpenaiAuth: server?.requiresOpenaiAuth ?? false,
             availableModels: server?.availableModels ?? []
         )
         guard state != nextState else { return }

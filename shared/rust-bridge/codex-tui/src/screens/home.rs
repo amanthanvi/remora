@@ -200,3 +200,36 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut HomeState, snapshot: &A
     ]);
     frame.render_widget(Paragraph::new(hints), chunks[3]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn cached_layout_survives_repeated_terminal_resizes() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut state = HomeState::default();
+        let snapshot = AppSnapshot::default();
+        for (width, height) in [(80, 30), (48, 20), (120, 40), (48, 20), (80, 30)] {
+            terminal.backend_mut().resize(width, height);
+            terminal.autoresize().unwrap();
+            terminal
+                .draw(|frame| render(frame, frame.area(), &mut state, &snapshot))
+                .unwrap();
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for label in ["codex-tui", "Recent Sessions", "Connected Servers", ":quit"] {
+                assert!(
+                    rendered.contains(label),
+                    "missing {label} at {width}x{height}"
+                );
+            }
+        }
+    }
+}

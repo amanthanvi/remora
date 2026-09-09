@@ -179,6 +179,8 @@ struct ContentView: View {
             ApprovalPromptView(approval: approval) { decision in
                 Task {
                     try? await appModel.store.respondToApproval(
+                        serverId: approval.serverId,
+                        runtimeKind: approval.runtimeKind,
                         requestId: approval.id,
                         decision: decision
                     )

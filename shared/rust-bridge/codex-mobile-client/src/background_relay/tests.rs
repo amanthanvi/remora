@@ -988,6 +988,7 @@ impl RelayAuthoritativeRepairPort for FakeRepair {
             .await
             .unwrap_or(expected_cursor);
         Ok(RelayRepairReceipt {
+            verified_barrier_id: None,
             applied_through_cursor,
             authoritative: true,
         })
@@ -2584,6 +2585,129 @@ async fn snapshot_and_repair_cursor_accounting_never_under_records_applied_state
             .await
             .contains(&Action::Ack(repair_ahead.to_owned(), 2))
     );
+}
+
+#[tokio::test]
+async fn untrusted_ahead_wake_uses_authenticated_cursor_and_preserves_later_delivery() {
+    for authenticated_cursor in [0, 1] {
+        let world = TestWorld::new();
+        let host = "untrusted-ahead-host";
+        let installation = "installation_untrusted_ahead_0001";
+        world.enroll(host, installation).await;
+        world
+            .transport
+            .enqueue_page(
+                installation,
+                0,
+                Ok(page(
+                    0,
+                    authenticated_cursor,
+                    (1..=authenticated_cursor).map(event).collect(),
+                )),
+            )
+            .await;
+
+        let receipt = world
+            .relay()
+            .ingest_wake(wake(installation, 100), 100, operation())
+            .await
+            .expect("a wake hint cannot invalidate an authentic lower watermark");
+        assert_eq!(receipt.applied_through_cursor, authenticated_cursor);
+        assert_eq!(receipt.acknowledged_through_cursor, authenticated_cursor);
+        let binding = world.journal.entry(host).await;
+        assert_eq!(binding.state, RelayBindingState::Active);
+        assert_eq!(binding.wake.highest_seen_cursor, authenticated_cursor);
+        assert_eq!(binding.wake.applied_cursor, authenticated_cursor);
+        assert!(binding.wake.recently_seen.is_empty());
+        assert!(
+            !world.actions.lock().await.iter().any(|action| {
+                matches!(action, Action::Ack(_, 100) | Action::LocalCommit(_, 100))
+            })
+        );
+
+        let next_cursor = authenticated_cursor + 1;
+        world
+            .transport
+            .enqueue_page(
+                installation,
+                authenticated_cursor,
+                Ok(page(
+                    authenticated_cursor,
+                    next_cursor,
+                    vec![event(next_cursor)],
+                )),
+            )
+            .await;
+        let receipt = world
+            .relay()
+            .ingest_wake(wake(installation, next_cursor), 100, operation())
+            .await
+            .expect("a later valid wake still repairs and acknowledges");
+        assert_eq!(receipt.applied_through_cursor, next_cursor);
+        assert_eq!(receipt.acknowledged_through_cursor, next_cursor);
+        assert_eq!(
+            world.journal.entry(host).await.state,
+            RelayBindingState::Active
+        );
+    }
+}
+
+#[tokio::test]
+async fn authenticated_watermark_cannot_roll_back_applied_or_remote_ack_cursor() {
+    for remote_ack_ahead in [false, true] {
+        let world = TestWorld::new();
+        let host = "authenticated-rollback-host";
+        let installation = "installation_authenticated_rollback_0001";
+        world.enroll(host, installation).await;
+        world
+            .transport
+            .enqueue_page(installation, 0, Ok(page(0, 1, vec![event(1)])))
+            .await;
+        if remote_ack_ahead {
+            world.transport.enqueue_ack_receipt(installation, 3).await;
+            world
+                .transport
+                .enqueue_page(installation, 1, Ok(page(1, 2, vec![event(2)])))
+                .await;
+            assert_eq!(
+                world
+                    .relay()
+                    .ingest_wake(wake(installation, 100), 100, operation())
+                    .await,
+                Err(RelayError::InvalidResponse)
+            );
+        } else {
+            world
+                .relay()
+                .ingest_wake(wake(installation, 1), 100, operation())
+                .await
+                .expect("establish durable applied authority");
+            world
+                .transport
+                .enqueue_page(installation, 1, Ok(page(1, 0, Vec::new())))
+                .await;
+            assert_eq!(
+                world
+                    .relay()
+                    .ingest_wake(wake(installation, 100), 100, operation())
+                    .await,
+                Err(RelayError::InvalidResponse)
+            );
+        }
+        let binding = world.journal.entry(host).await;
+        assert_eq!(binding.state, RelayBindingState::NeedsRepair);
+        assert_eq!(binding.wake.applied_cursor, 1);
+        assert_eq!(
+            binding.wake.remote_ack_ahead_cursor,
+            remote_ack_ahead.then_some(3)
+        );
+        assert!(!world.actions.lock().await.iter().any(|action| {
+            matches!(
+                action,
+                Action::Ack(_, 2 | 3 | 100) | Action::LocalCommit(_, 2 | 3 | 100)
+            )
+        }));
+    }
 }
 
 #[tokio::test]

@@ -1,0 +1,303 @@
+diff --git a/codex-rs/rmcp-client/src/bin/test_streamable_http_server.rs b/codex-rs/rmcp-client/src/bin/test_streamable_http_server.rs
+index d1c22f430..ec15337d5 100644
+--- a/codex-rs/rmcp-client/src/bin/test_streamable_http_server.rs
++++ b/codex-rs/rmcp-client/src/bin/test_streamable_http_server.rs
+@@ -90,7 +90,6 @@ struct EchoArgs {
+ #[tokio::main]
+ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let bind_addr = parse_bind_addr()?;
+-    let session_failure_state = SessionFailureState::default();
+     const MAX_BIND_RETRIES: u32 = 20;
+     const BIND_RETRY_DELAY: Duration = Duration::from_millis(50);
+ 
+@@ -117,6 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+     }
+     eprintln!("starting rmcp streamable http test server on http://{actual_bind_addr}/mcp");
+ 
++    let router = test_server_router(actual_bind_addr, std::env::var("MCP_EXPECT_BEARER").ok());
++    axum::serve(listener, router).await?;
++    task::yield_now().await;
++    Ok(())
++}
++
++fn test_server_router(actual_bind_addr: SocketAddr, bearer_token: Option<String>) -> Router {
++    let session_failure_state = SessionFailureState::default();
+     let router = Router::new()
+         .route(
+             SESSION_POST_FAILURE_CONTROL_PATH,
+@@ -160,28 +167,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+         ))
+         .with_state(session_failure_state);
+ 
+-    let router = if let Ok(token) = std::env::var("MCP_EXPECT_BEARER") {
++    let router = if let Some(token) = bearer_token {
+         let expected = Arc::new(format!("Bearer {token}"));
+         router.layer(middleware::from_fn_with_state(expected, require_bearer))
+     } else {
+         router
+     };
+ 
+-    axum::serve(listener, router).await?;
+-    task::yield_now().await;
+-    Ok(())
++    // Loopback binding alone does not prevent browser DNS rebinding. Check
++    // every route before auth or fixture middleware (RUSTSEC-2026-0189).
++    router.layer(middleware::from_fn_with_state(
++        Arc::new(allowed_hosts_for(actual_bind_addr)),
++        require_allowed_host,
++    ))
++}
++
++fn allowed_hosts_for(bind_addr: SocketAddr) -> Vec<String> {
++    let mut allowed = vec![bind_addr.to_string()];
++    if bind_addr.ip().is_loopback() || bind_addr.ip().is_unspecified() {
++        for host in ["localhost", "127.0.0.1", "[::1]"] {
++            allowed.push(format!("{host}:{}", bind_addr.port()));
++        }
++    }
++    if bind_addr.port() == 80 {
++        let default_authorities = allowed
++            .iter()
++            .filter_map(|authority| authority.strip_suffix(":80").map(str::to_owned))
++            .collect::<Vec<_>>();
++        allowed.extend(default_authorities);
++    }
++    allowed
++}
++
++fn host_is_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
++    let mut hosts = headers.get_all(HOST).iter();
++    let Some(host) = hosts.next().and_then(|value| value.to_str().ok()) else {
++        return false;
++    };
++    hosts.next().is_none() && allowed.iter().any(|value| value.eq_ignore_ascii_case(host))
++}
++
++async fn require_allowed_host(
++    State(allowed): State<Arc<Vec<String>>>,
++    request: Request<Body>,
++    next: Next,
++) -> Result<Response, StatusCode> {
++    if host_is_allowed(request.headers(), &allowed) {
++        Ok(next.run(request).await)
++    } else {
++        Err(StatusCode::FORBIDDEN)
++    }
+ }
+ 
+ impl ServerHandler for TestToolServer {
+     fn get_info(&self) -> ServerInfo {
+-        ServerInfo {
+-            capabilities: ServerCapabilities::builder()
++        ServerInfo::new(
++            ServerCapabilities::builder()
+                 .enable_tools()
+                 .enable_tool_list_changed()
+                 .enable_resources()
+                 .build(),
+-            ..ServerInfo::default()
+-        }
++        )
+     }
+ 
+     fn list_tools(
+@@ -232,14 +278,14 @@ impl ServerHandler for TestToolServer {
+         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+     ) -> Result<ReadResourceResult, McpError> {
+         if uri == MEMO_URI {
+-            Ok(ReadResourceResult {
+-                contents: vec![ResourceContents::TextResourceContents {
++            Ok(ReadResourceResult::new(vec![
++                ResourceContents::TextResourceContents {
+                     uri,
+                     mime_type: Some("text/plain".to_string()),
+                     text: Self::memo_text().to_string(),
+                     meta: None,
+-                }],
+-            })
++                },
++            ]))
+         } else {
+             Err(McpError::resource_not_found(
+                 "resource_not_found",
+@@ -274,12 +320,9 @@ impl ServerHandler for TestToolServer {
+                     "env": env_snapshot.get("MCP_TEST_VALUE"),
+                 });
+ 
+-                Ok(CallToolResult {
+-                    content: Vec::new(),
+-                    structured_content: Some(structured_content),
+-                    is_error: Some(false),
+-                    meta: None,
+-                })
++                let mut result = CallToolResult::success(Vec::new());
++                result.structured_content = Some(structured_content);
++                Ok(result)
+             }
+             other => Err(McpError::invalid_params(
+                 format!("unknown tool: {other}"),
+@@ -449,3 +492,164 @@ async fn fail_session_post_when_armed(
+ 
+     next.run(request).await
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use axum::http::HeaderValue;
++    use tokio::io::AsyncReadExt;
++    use tokio::io::AsyncWriteExt;
++    use tokio::net::TcpListener;
++    use tokio::net::TcpStream;
++
++    #[test]
++    fn host_allowlist_requires_single_exact_authority() {
++        let allowed = allowed_hosts_for("127.0.0.1:3920".parse().unwrap());
++        for host in [
++            "127.0.0.1:3920",
++            "localhost:3920",
++            "LOCALHOST:3920",
++            "[::1]:3920",
++        ] {
++            let mut headers = HeaderMap::new();
++            headers.insert(HOST, HeaderValue::from_str(host).unwrap());
++            assert!(host_is_allowed(&headers, &allowed), "{host}");
++        }
++        for host in [
++            "attacker.example:3920",
++            "localhost.attacker.example:3920",
++            "localhost",
++            "localhost:3921",
++            "127.0.0.1:03920",
++            "localhost:3920@attacker.example",
++            "localhost:3920,attacker.example:3920",
++            "[::1]",
++        ] {
++            let mut headers = HeaderMap::new();
++            headers.insert(HOST, HeaderValue::from_str(host).unwrap());
++            assert!(!host_is_allowed(&headers, &allowed), "{host}");
++        }
++        let mut headers = HeaderMap::new();
++        assert!(!host_is_allowed(&headers, &allowed));
++        headers.append(HOST, HeaderValue::from_static("localhost:3920"));
++        headers.append(HOST, HeaderValue::from_static("localhost:3920"));
++        assert!(!host_is_allowed(&headers, &allowed));
++
++        let private = allowed_hosts_for("192.0.2.10:3920".parse().unwrap());
++        assert_eq!(private, ["192.0.2.10:3920"]);
++        let ipv6 = allowed_hosts_for("[::1]:3920".parse().unwrap());
++        assert!(ipv6.contains(&"[::1]:3920".to_string()));
++        let wildcard = allowed_hosts_for("0.0.0.0:3920".parse().unwrap());
++        assert!(wildcard.contains(&"localhost:3920".to_string()));
++        assert!(!wildcard.contains(&"192.0.2.10:3920".to_string()));
++    }
++
++    #[test]
++    fn default_http_port_allows_only_matching_bare_authorities() {
++        for bind in ["127.0.0.1:80", "[::1]:80", "0.0.0.0:80"] {
++            let allowed = allowed_hosts_for(bind.parse().unwrap());
++            for host in ["localhost", "127.0.0.1", "[::1]", "localhost:80"] {
++                let mut headers = HeaderMap::new();
++                headers.insert(HOST, HeaderValue::from_str(host).unwrap());
++                assert!(host_is_allowed(&headers, &allowed), "{bind}: {host}");
++            }
++            for host in [
++                "attacker.example",
++                "localhost.attacker.example",
++                "localhost:81",
++                "localhost:080",
++            ] {
++                let mut headers = HeaderMap::new();
++                headers.insert(HOST, HeaderValue::from_str(host).unwrap());
++                assert!(!host_is_allowed(&headers, &allowed), "{bind}: {host}");
++            }
++        }
++        assert_eq!(
++            allowed_hosts_for("192.0.2.10:80".parse().unwrap()),
++            ["192.0.2.10:80", "192.0.2.10"]
++        );
++        assert_eq!(
++            allowed_hosts_for("[2001:db8::1]:80".parse().unwrap()),
++            ["[2001:db8::1]:80", "[2001:db8::1]"]
++        );
++    }
++
++    async fn request_status(
++        address: SocketAddr,
++        method: &str,
++        path: &str,
++        host: Option<&str>,
++        body: &str,
++    ) -> u16 {
++        let mut stream = TcpStream::connect(address).await.unwrap();
++        let host_header = host
++            .map(|host| format!("Host: {host}\r\n"))
++            .unwrap_or_default();
++        let request = format!(
++            "{method} {path} HTTP/1.1\r\n{host_header}Connection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
++            body.len()
++        );
++        stream.write_all(request.as_bytes()).await.unwrap();
++        let mut response = Vec::new();
++        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
++            .await
++            .unwrap()
++            .unwrap();
++        String::from_utf8(response)
++            .unwrap()
++            .split_whitespace()
++            .nth(1)
++            .unwrap()
++            .parse()
++            .unwrap()
++    }
++
++    #[tokio::test]
++    async fn host_gate_covers_mcp_control_and_metadata_routes() {
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let router = test_server_router(address, None);
++        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++        let allowed = format!("localhost:{}", address.port());
++        let foreign = format!("attacker.example:{}", address.port());
++        let body = r#"{"status":503,"remaining":1}"#;
++        for (method, path, body) in [
++            ("POST", "/mcp", "{}"),
++            ("POST", SESSION_POST_FAILURE_CONTROL_PATH, body),
++            ("GET", "/.well-known/oauth-authorization-server/mcp", ""),
++        ] {
++            assert_eq!(
++                request_status(address, method, path, Some(&foreign), body).await,
++                403
++            );
++            // HTTP parsers may reject a missing HTTP/1.1 Host before middleware.
++            assert!(matches!(
++                request_status(address, method, path, None, body).await,
++                400 | 403
++            ));
++        }
++        assert_eq!(
++            request_status(
++                address,
++                "GET",
++                "/.well-known/oauth-authorization-server/mcp",
++                Some(&allowed),
++                ""
++            )
++            .await,
++            200
++        );
++        assert_eq!(
++            request_status(
++                address,
++                "POST",
++                SESSION_POST_FAILURE_CONTROL_PATH,
++                Some(&address.to_string()),
++                body
++            )
++            .await,
++            204
++        );
++        server.abort();
++    }
++}

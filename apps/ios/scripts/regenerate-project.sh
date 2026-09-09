@@ -45,7 +45,10 @@ fi
 echo "==> Regenerating $PROJECT_FILE"
 (
   cd "$PROJECT_DIR"
-  xcodegen generate --spec project.yml
+  mkdir -p "$PROJECT_DIR/../../.build-stamps"
+  args=(--spec project.yml --cache-path "$PROJECT_DIR/../../.build-stamps/xcodegen-cache")
+  if [[ "$needs_regen" -eq 0 ]]; then args+=(--use-cache); fi
+  xcodegen generate "${args[@]}"
 )
 
 if [[ -d "$NESTED_PROJECT" ]]; then

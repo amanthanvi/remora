@@ -12,26 +12,24 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
         LLog.info("lifecycle", "application did finish launching")
         CurrentKeychainNamespaceCleanup.shared.start {
-            NotificationCenter.default.post(name: .remoraSecurityCutoverDidComplete, object: nil)
-            // Pre-initialize Rust bridges (tokio runtime) on a background
-            // thread only after the 1.6 authority cutover is durable.
-            DispatchQueue.global(qos: .userInitiated).async {
-                AppModel.prewarmRustBridges()
+            Task { @MainActor in
+                await AppRuntimeController.shared.prepareBackgroundRuntimeIfSecurityReady()
+                NotificationCenter.default.post(name: .remoraSecurityCutoverDidComplete, object: nil)
+                #if !targetEnvironment(macCatalyst)
+                // APNs registration never requests visible notification permission.
+                BackgroundAwarenessController.shared.start {
+                    application.registerForRemoteNotifications()
+                }
+                #endif
             }
         }
-        #if !targetEnvironment(macCatalyst)
-        // Register on every launch so APNs can report token rotation. This does
-        // not request alert permission; visible notification permission remains
-        // an explicit, in-context product decision.
-        BackgroundAwarenessController.shared.start {
-            application.registerForRemoteNotifications()
-        }
-        #endif
         DispatchQueue.main.async {
             CloudKVSBridge.shared.start()
         }
-        showSplashWindow()
-        scheduleKeyboardWarmup()
+        if application.applicationState != .background {
+            showSplashWindow()
+            scheduleKeyboardWarmup()
+        }
         return true
     }
 
@@ -75,6 +73,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             case .timedOut, .failed:
                 completionHandler(.failed)
             }
+        }
+    }
+
+    func applicationProtectedDataDidBecomeAvailable(_ application: UIApplication) {
+        Task { @MainActor in
+            await AppRuntimeController.shared.prepareBackgroundRuntimeIfSecurityReady()
+            BackgroundAwarenessController.shared.applicationDidBecomeActive()
         }
     }
 

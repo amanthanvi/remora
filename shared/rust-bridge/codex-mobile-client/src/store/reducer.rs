@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use codex_app_server_protocol as upstream;
 use tokio::sync::broadcast;
@@ -56,7 +56,7 @@ use super::voice::VoiceRealtimeState;
 /// A u64 collision would only cost us a single skipped `ThreadItemChanged`
 /// emit (followed immediately by another differing fingerprint on the next
 /// delta), which is acceptable at our item counts.
-fn item_fingerprint(item: &HydratedConversationItem) -> u64 {
+pub(crate) fn item_fingerprint(item: &HydratedConversationItem) -> u64 {
     struct HashWriter<'a>(&'a mut DefaultHasher);
     impl std::io::Write for HashWriter<'_> {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -71,6 +71,11 @@ fn item_fingerprint(item: &HydratedConversationItem) -> u64 {
     serde_json::to_writer(HashWriter(&mut hasher), item)
         .expect("HydratedConversationItem Serialize impl is infallible");
     hasher.finish()
+}
+
+pub(crate) enum RelayHistoryMode {
+    Merge,
+    Replace { older_cursor: Option<String> },
 }
 
 fn dedupe_agent_runtimes(runtimes: Vec<AgentRuntimeInfo>) -> Vec<AgentRuntimeInfo> {
@@ -94,6 +99,12 @@ pub struct AppStoreReducer {
     /// Serializes streamed UI-event application with conditional authoritative
     /// refresh commits. Network work never holds this lock.
     ui_event_generations: Mutex<HashMap<String, u64>>,
+    /// Opaque history epochs survive in-flight reads, preventing removal/recreation ABA.
+    /// Access only while holding the snapshot lock, always snapshot before epochs.
+    thread_history_epochs: Mutex<HashMap<ThreadKey, Arc<()>>>,
+    /// Composite resume commits may take multiple snapshot locks. History replacement
+    /// takes the write side before the snapshot lock to exclude rollback/removal.
+    thread_history_commits: RwLock<()>,
     last_thread_state_updates: RwLock<
         HashMap<
             ThreadKey,
@@ -143,6 +154,8 @@ impl AppStoreReducer {
         Self {
             snapshot: RwLock::new(AppSnapshot::default()),
             ui_event_generations: Mutex::new(HashMap::new()),
+            thread_history_epochs: Mutex::new(HashMap::new()),
+            thread_history_commits: RwLock::new(()),
             last_thread_state_updates: RwLock::new(HashMap::new()),
             last_thread_item_upserts: RwLock::new(HashMap::new()),
             dynamic_tool_arg_buffers: RwLock::new(HashMap::new()),
@@ -165,6 +178,169 @@ impl AppStoreReducer {
             .threads
             .get(key)
             .cloned()
+    }
+
+    pub(crate) fn thread_history_epoch(&self, key: &ThreadKey) -> Option<Arc<()>> {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        snapshot.threads.get(key)?;
+        Some(Arc::clone(
+            self.thread_history_epochs
+                .lock()
+                .expect("thread history epochs lock poisoned")
+                .entry(key.clone())
+                .or_default(),
+        ))
+    }
+
+    pub(crate) fn server_history_snapshot(
+        &self,
+        server_id: &str,
+    ) -> Vec<(ThreadSnapshot, Arc<()>)> {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        let mut epochs = self
+            .thread_history_epochs
+            .lock()
+            .expect("thread history epochs lock poisoned");
+        snapshot
+            .threads
+            .values()
+            .filter(|thread| thread.key.server_id == server_id)
+            .map(|thread| {
+                (
+                    thread.clone(),
+                    Arc::clone(epochs.entry(thread.key.clone()).or_default()),
+                )
+            })
+            .collect()
+    }
+
+    /// Hold the reset/removal fence across the complete relay list and history
+    /// commit. Page completion remains allowed and is merged under the snapshot lock.
+    pub(crate) fn apply_relay_history_if_current<R>(
+        &self,
+        server_id: &str,
+        expected: &[(ThreadKey, Arc<()>)],
+        runtime_pages: Vec<(AgentRuntimeKind, Vec<ThreadInfo>)>,
+        incoming_ids: &HashSet<String>,
+        apply: impl FnOnce(&Self) -> R,
+    ) -> Option<R> {
+        let _commit = self
+            .thread_history_commits
+            .write()
+            .expect("history commit lock poisoned");
+        {
+            let snapshot = self.snapshot.read().expect("app store lock poisoned");
+            let epochs = self
+                .thread_history_epochs
+                .lock()
+                .expect("thread history epochs lock poisoned");
+            if snapshot
+                .threads
+                .keys()
+                .filter(|key| key.server_id == server_id)
+                .count()
+                != expected.len()
+                || expected.iter().any(|(key, epoch)| {
+                    !snapshot.threads.contains_key(key)
+                        || !epochs
+                            .get(key)
+                            .is_some_and(|current| Arc::ptr_eq(current, epoch))
+                })
+            {
+                return None;
+            }
+        }
+        for (runtime, threads) in runtime_pages {
+            for info in threads {
+                let mut thread = ThreadSnapshot::from_info(server_id, info);
+                thread.agent_runtime_kind = runtime.clone();
+                self.upsert_thread_snapshot_prepared(thread, false, |existing, incoming| {
+                    if let Some(existing) = existing {
+                        incoming.initial_turns_loaded = existing.initial_turns_loaded;
+                        incoming.older_turns_cursor = existing.older_turns_cursor.clone();
+                    }
+                    false
+                });
+            }
+        }
+        self.finalize_thread_list_sync_locked(server_id, incoming_ids);
+        Some(apply(self))
+    }
+
+    fn invalidate_thread_history(&self, key: &ThreadKey) {
+        self.thread_history_epochs
+            .lock()
+            .expect("thread history epochs lock poisoned")
+            .remove(key);
+    }
+
+    pub(crate) fn apply_if_thread_history_current<R>(
+        &self,
+        key: &ThreadKey,
+        expected_epoch: &Arc<()>,
+        apply: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let _commit = self
+            .thread_history_commits
+            .read()
+            .expect("history commit lock poisoned");
+        if !self
+            .thread_history_epoch(key)
+            .is_some_and(|epoch| Arc::ptr_eq(&epoch, expected_epoch))
+        {
+            return None;
+        }
+        Some(apply())
+    }
+
+    pub(crate) fn thread_item_fingerprints(&self, key: &ThreadKey) -> HashMap<String, u64> {
+        self.project_thread(key, |thread| {
+            thread
+                .items
+                .iter()
+                .map(|item| (item.id.clone(), item_fingerprint(item)))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub(crate) fn mutate_thread_history(
+        &self,
+        key: &ThreadKey,
+        expected_epoch: Option<&Arc<()>>,
+        mutate: impl FnOnce(&mut ThreadSnapshot),
+    ) -> Result<bool, String> {
+        {
+            let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+            if let Some(expected_epoch) = expected_epoch
+                && !self
+                    .thread_history_epochs
+                    .lock()
+                    .expect("thread history epochs lock poisoned")
+                    .get(key)
+                    .is_some_and(|epoch| Arc::ptr_eq(epoch, expected_epoch))
+            {
+                return Ok(false);
+            }
+            let thread = snapshot
+                .threads
+                .get_mut(key)
+                .ok_or_else(|| format!("thread {} not in store", key.thread_id))?;
+            mutate(thread);
+            if !thread.queued_follow_up_drafts.is_empty() || thread.queued_follow_ups.is_empty() {
+                sync_thread_follow_up_projection(thread);
+            }
+        }
+        self.emit_thread_upsert(key);
+        Ok(true)
+    }
+
+    pub(crate) fn project_thread_snapshot(
+        &self,
+        key: &ThreadKey,
+    ) -> Result<Option<super::boundary::AppThreadSnapshot>, String> {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        super::project_thread_snapshot(&snapshot, key)
     }
 
     pub(crate) fn server_event_generation(&self, server_id: &str) -> u64 {
@@ -204,6 +380,16 @@ impl AppStoreReducer {
     ) -> Option<R> {
         let snapshot = self.snapshot.read().expect("app store lock poisoned");
         snapshot.threads.get(key).map(project)
+    }
+
+    /// Keep the projection bounded: it runs under the canonical store read lock.
+    pub(crate) fn project_server<R>(
+        &self,
+        server_id: &str,
+        project: impl FnOnce(&ServerSnapshot) -> R,
+    ) -> Option<R> {
+        let snapshot = self.snapshot.read().expect("app store lock poisoned");
+        snapshot.servers.get(server_id).map(project)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AppStoreUpdateRecord> {
@@ -288,6 +474,10 @@ impl AppStoreReducer {
     }
 
     pub fn remove_server(&self, server_id: &str) {
+        let _commit = self
+            .thread_history_commits
+            .write()
+            .expect("history commit lock poisoned");
         let mut removed_thread_keys = Vec::new();
         let agent_directory_version;
         {
@@ -296,6 +486,7 @@ impl AppStoreReducer {
             snapshot.threads.retain(|key, _| {
                 let keep = key.server_id != server_id;
                 if !keep {
+                    self.invalidate_thread_history(key);
                     removed_thread_keys.push(key.clone());
                 }
                 keep
@@ -307,12 +498,9 @@ impl AppStoreReducer {
             {
                 snapshot.active_thread = None;
             }
-            snapshot.pending_approvals.retain(|approval| {
-                approval
-                    .thread_id
-                    .as_deref()
-                    .is_none_or(|tid| !removed_thread_keys.iter().any(|key| key.thread_id == tid))
-            });
+            snapshot
+                .pending_approvals
+                .retain(|approval| approval.server_id != server_id);
             snapshot
                 .pending_approval_seeds
                 .retain(|key, _| key.server_id != server_id);
@@ -355,6 +543,10 @@ impl AppStoreReducer {
         runtime_kind: AgentRuntimeKind,
         threads: &[ThreadInfo],
     ) {
+        let _commit = self
+            .thread_history_commits
+            .write()
+            .expect("history commit lock poisoned");
         let incoming_ids = threads
             .iter()
             .map(|info| info.id.clone())
@@ -374,6 +566,7 @@ impl AppStoreReducer {
                     || incoming_ids.contains(&key.thread_id)
                     || active_thread_key.as_ref() == Some(key);
                 if !keep {
+                    self.invalidate_thread_history(key);
                     removed_thread_keys.push(key.clone());
                 }
                 keep
@@ -440,6 +633,7 @@ impl AppStoreReducer {
                 .iter()
                 .map(|approval| PendingApprovalKey {
                     server_id: approval.server_id.clone(),
+                    runtime_kind: approval.runtime_kind.clone(),
                     request_id: approval.id.clone(),
                 })
                 .collect::<HashSet<_>>();
@@ -464,6 +658,7 @@ impl AppStoreReducer {
                 .iter()
                 .map(|request| PendingUserInputKey {
                     server_id: request.server_id.clone(),
+                    runtime_kind: request.runtime_kind.clone(),
                     request_id: request.id.clone(),
                 })
                 .collect::<HashSet<_>>();
@@ -519,6 +714,14 @@ impl AppStoreReducer {
     }
 
     pub fn finalize_thread_list_sync(&self, server_id: &str, incoming_ids: &HashSet<String>) {
+        let _commit = self
+            .thread_history_commits
+            .write()
+            .expect("history commit lock poisoned");
+        self.finalize_thread_list_sync_locked(server_id, incoming_ids);
+    }
+
+    fn finalize_thread_list_sync_locked(&self, server_id: &str, incoming_ids: &HashSet<String>) {
         let mut removed_thread_keys = Vec::new();
         let mut active_thread_cleared = false;
         let mut pending_approvals = None;
@@ -532,6 +735,7 @@ impl AppStoreReducer {
                     || incoming_ids.contains(&key.thread_id)
                     || active_thread_key.as_ref() == Some(key);
                 if !keep {
+                    self.invalidate_thread_history(key);
                     removed_thread_keys.push(key.clone());
                 }
                 keep
@@ -561,6 +765,7 @@ impl AppStoreReducer {
                 .iter()
                 .map(|approval| PendingApprovalKey {
                     server_id: approval.server_id.clone(),
+                    runtime_kind: approval.runtime_kind.clone(),
                     request_id: approval.id.clone(),
                 })
                 .collect::<HashSet<_>>();
@@ -585,6 +790,7 @@ impl AppStoreReducer {
                 .iter()
                 .map(|request| PendingUserInputKey {
                     server_id: request.server_id.clone(),
+                    runtime_kind: request.runtime_kind.clone(),
                     request_id: request.id.clone(),
                 })
                 .collect::<HashSet<_>>();
@@ -642,11 +848,84 @@ impl AppStoreReducer {
         self.finalize_thread_list_sync(server_id, &retained_ids);
     }
 
-    pub fn upsert_thread_snapshot(&self, mut thread: ThreadSnapshot) {
+    pub fn upsert_thread_snapshot(&self, thread: ThreadSnapshot) {
+        self.upsert_thread_snapshot_inner(thread, false);
+    }
+
+    pub(crate) fn replace_thread_history(&self, mut thread: ThreadSnapshot) {
+        thread.initial_turns_loaded = true;
+        thread.older_turns_cursor = None;
+        self.upsert_thread_snapshot_inner(thread, true);
+    }
+
+    fn upsert_thread_snapshot_inner(&self, thread: ThreadSnapshot, replace_history: bool) {
+        self.upsert_thread_snapshot_prepared(thread, replace_history, |_, _| false);
+    }
+
+    pub(crate) fn upsert_relay_thread_snapshot(
+        &self,
+        thread: ThreadSnapshot,
+        turns: &[upstream::Turn],
+        history_mode: RelayHistoryMode,
+        dispatched_items: &HashMap<String, u64>,
+    ) {
+        self.upsert_thread_snapshot_prepared(thread, false, |existing, incoming| {
+            if let Some(existing) = existing {
+                crate::copy_thread_runtime_fields(existing, incoming);
+            }
+            if !turns.is_empty() || matches!(history_mode, RelayHistoryMode::Merge) {
+                crate::reconcile_active_turn(existing, incoming, turns);
+            }
+            if matches!(history_mode, RelayHistoryMode::Merge) {
+                let page = crate::types::AppListThreadTurnsResponse {
+                    turns: std::mem::take(&mut incoming.items),
+                    next_cursor: None,
+                    backwards_cursor: None,
+                };
+                let protected = existing
+                    .into_iter()
+                    .flat_map(|thread| thread.items.iter())
+                    .filter(|item| dispatched_items.get(&item.id) != Some(&item_fingerprint(item)))
+                    .map(|item| item.id.clone())
+                    .collect();
+                if let Some(existing) = existing {
+                    incoming.items = existing.items.clone();
+                    incoming.older_turns_cursor = existing.older_turns_cursor.clone();
+                }
+                super::reconcile::merge_paged_turns_preserving(
+                    incoming,
+                    &page,
+                    crate::types::AppTurnsSortDirection::Ascending,
+                    &protected,
+                );
+            } else if let RelayHistoryMode::Replace { older_cursor } = history_mode {
+                incoming.older_turns_cursor = older_cursor;
+                self.invalidate_thread_history(&incoming.key);
+            }
+            incoming.initial_turns_loaded = true;
+            true
+        });
+    }
+
+    fn upsert_thread_snapshot_prepared(
+        &self,
+        mut thread: ThreadSnapshot,
+        replace_history: bool,
+        prepare: impl FnOnce(Option<&ThreadSnapshot>, &mut ThreadSnapshot) -> bool,
+    ) {
+        let _commit = replace_history.then(|| {
+            self.thread_history_commits
+                .write()
+                .expect("history commit lock poisoned")
+        });
         let key = thread.key.clone();
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
+            if replace_history {
+                self.invalidate_thread_history(&key);
+            }
             let existing = snapshot.threads.get(&key).cloned();
+            let complete_items = prepare(existing.as_ref(), &mut thread);
             if let Some(existing) = existing.as_ref() {
                 let consume_claimed_follow_up = existing.active_turn_id.is_none()
                     && thread
@@ -725,7 +1004,11 @@ impl AppStoreReducer {
                 }
                 // Preserve existing items when the incoming snapshot has none
                 // (e.g. thread/read with include_turns=false).
-                if thread.items.is_empty() && !existing.items.is_empty() {
+                if !replace_history
+                    && !complete_items
+                    && thread.items.is_empty()
+                    && !existing.items.is_empty()
+                {
                     thread.items = existing.items.clone();
                 }
             }
@@ -1140,10 +1423,15 @@ impl AppStoreReducer {
     }
 
     pub fn remove_thread(&self, key: &ThreadKey) {
+        let _commit = self
+            .thread_history_commits
+            .write()
+            .expect("history commit lock poisoned");
         let agent_directory_version;
         {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
             snapshot.threads.remove(key);
+            self.invalidate_thread_history(key);
             if snapshot.active_thread.as_ref() == Some(key) {
                 snapshot.active_thread = None;
             }
@@ -1161,6 +1449,7 @@ impl AppStoreReducer {
                 .iter()
                 .map(|request| PendingUserInputKey {
                     server_id: request.server_id.clone(),
+                    runtime_kind: request.runtime_kind.clone(),
                     request_id: request.id.clone(),
                 })
                 .collect::<HashSet<_>>();
@@ -1224,6 +1513,7 @@ impl AppStoreReducer {
                 (
                     PendingApprovalKey {
                         server_id: entry.approval.server_id.clone(),
+                        runtime_kind: entry.approval.runtime_kind.clone(),
                         request_id: entry.approval.id.clone(),
                     },
                     entry.seed,
@@ -1261,6 +1551,7 @@ impl AppStoreReducer {
                     .iter()
                     .map(|request| PendingUserInputKey {
                         server_id: request.server_id.clone(),
+                        runtime_kind: request.runtime_kind.clone(),
                         request_id: request.id.clone(),
                     })
                     .collect::<HashSet<_>>();
@@ -1275,23 +1566,66 @@ impl AppStoreReducer {
         }
     }
 
-    pub fn resolve_approval(&self, request_id: &str) {
+    pub fn resolve_approval(&self, server_id: &str, runtime_kind: &str, request_id: &str) {
         let approvals = {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-            snapshot
-                .pending_approvals
-                .retain(|approval| approval.id != request_id);
-            snapshot
-                .pending_approval_seeds
-                .retain(|key, _| key.request_id != request_id);
+            snapshot.pending_approvals.retain(|approval| {
+                approval.server_id != server_id
+                    || approval.runtime_kind != runtime_kind
+                    || approval.id != request_id
+            });
+            snapshot.pending_approval_seeds.retain(|key, _| {
+                key.server_id != server_id
+                    || key.runtime_kind != runtime_kind
+                    || key.request_id != request_id
+            });
             snapshot.pending_approvals.clone()
         };
         self.emit(AppStoreUpdateRecord::PendingApprovalsChanged { approvals });
     }
 
+    pub(crate) fn pending_approval(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        request_id: &str,
+    ) -> Option<PendingApproval> {
+        self.snapshot
+            .read()
+            .expect("app store lock poisoned")
+            .pending_approvals
+            .iter()
+            .find(|approval| {
+                approval.server_id == server_id
+                    && approval.runtime_kind == runtime_kind
+                    && approval.id == request_id
+            })
+            .cloned()
+    }
+
+    pub(crate) fn pending_user_input(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        request_id: &str,
+    ) -> Option<PendingUserInputRequest> {
+        self.snapshot
+            .read()
+            .expect("app store lock poisoned")
+            .pending_user_inputs
+            .iter()
+            .find(|request| {
+                request.server_id == server_id
+                    && request.runtime_kind == runtime_kind
+                    && request.id == request_id
+            })
+            .cloned()
+    }
+
     pub(crate) fn pending_approval_seed(
         &self,
         server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
     ) -> Option<PendingApprovalSeed> {
         self.snapshot
@@ -1300,6 +1634,7 @@ impl AppStoreReducer {
             .pending_approval_seeds
             .get(&PendingApprovalKey {
                 server_id: server_id.to_string(),
+                runtime_kind: runtime_kind.to_string(),
                 request_id: request_id.to_string(),
             })
             .cloned()
@@ -1308,6 +1643,7 @@ impl AppStoreReducer {
     pub(crate) fn pending_user_input_seed(
         &self,
         server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
     ) -> Option<PendingUserInputSeed> {
         self.snapshot
@@ -1316,20 +1652,30 @@ impl AppStoreReducer {
             .pending_user_input_seeds
             .get(&PendingUserInputKey {
                 server_id: server_id.to_string(),
+                runtime_kind: runtime_kind.to_string(),
                 request_id: request_id.to_string(),
             })
             .cloned()
     }
 
-    pub fn resolve_pending_user_input(&self, request_id: &str) {
+    pub fn resolve_pending_user_input(
+        &self,
+        server_id: &str,
+        runtime_kind: &str,
+        request_id: &str,
+    ) {
         let requests = {
             let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-            snapshot
-                .pending_user_inputs
-                .retain(|request| request.id != request_id);
-            snapshot
-                .pending_user_input_seeds
-                .retain(|key, _| key.request_id != request_id);
+            snapshot.pending_user_inputs.retain(|request| {
+                request.server_id != server_id
+                    || request.runtime_kind != runtime_kind
+                    || request.id != request_id
+            });
+            snapshot.pending_user_input_seeds.retain(|key, _| {
+                key.server_id != server_id
+                    || key.runtime_kind != runtime_kind
+                    || key.request_id != request_id
+            });
             snapshot.pending_user_inputs.clone()
         };
         self.emit(AppStoreUpdateRecord::PendingUserInputsChanged { requests });
@@ -1337,6 +1683,8 @@ impl AppStoreReducer {
 
     pub fn resolve_pending_user_input_with_response(
         &self,
+        server_id: &str,
+        runtime_kind: &str,
         request_id: &str,
         answers: Vec<PendingUserInputAnswer>,
     ) {
@@ -1345,7 +1693,11 @@ impl AppStoreReducer {
             let request = snapshot
                 .pending_user_inputs
                 .iter()
-                .find(|request| request.id == request_id)
+                .find(|request| {
+                    request.server_id == server_id
+                        && request.runtime_kind == runtime_kind
+                        && request.id == request_id
+                })
                 .cloned();
 
             let mut thread_key = None;
@@ -1366,12 +1718,16 @@ impl AppStoreReducer {
                 }
             }
 
-            snapshot
-                .pending_user_inputs
-                .retain(|request| request.id != request_id);
-            snapshot
-                .pending_user_input_seeds
-                .retain(|key, _| key.request_id != request_id);
+            snapshot.pending_user_inputs.retain(|request| {
+                request.server_id != server_id
+                    || request.runtime_kind != runtime_kind
+                    || request.id != request_id
+            });
+            snapshot.pending_user_input_seeds.retain(|key, _| {
+                key.server_id != server_id
+                    || key.runtime_kind != runtime_kind
+                    || key.request_id != request_id
+            });
             (snapshot.pending_user_inputs.clone(), thread_key)
         };
         self.emit(AppStoreUpdateRecord::PendingUserInputsChanged { requests });
@@ -2089,15 +2445,16 @@ impl AppStoreReducer {
             UiEvent::ApprovalRequested { approval, .. } => {
                 let approvals = {
                     let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    if !snapshot
-                        .pending_approvals
-                        .iter()
-                        .any(|existing| existing.id == approval.approval.id)
-                    {
+                    if !snapshot.pending_approvals.iter().any(|existing| {
+                        existing.server_id == approval.approval.server_id
+                            && existing.runtime_kind == approval.approval.runtime_kind
+                            && existing.id == approval.approval.id
+                    }) {
                         snapshot.pending_approvals.push(approval.approval.clone());
                         snapshot.pending_approval_seeds.insert(
                             PendingApprovalKey {
                                 server_id: approval.approval.server_id.clone(),
+                                runtime_kind: approval.approval.runtime_kind.clone(),
                                 request_id: approval.approval.id.clone(),
                             },
                             approval.seed.clone(),
@@ -2107,7 +2464,11 @@ impl AppStoreReducer {
                 };
                 self.emit(AppStoreUpdateRecord::PendingApprovalsChanged { approvals });
             }
-            UiEvent::ServerRequestResolved { notification, .. } => {
+            UiEvent::ServerRequestResolved {
+                key,
+                runtime_kind,
+                notification,
+            } => {
                 let request_id_string;
                 let request_id = match &notification.request_id {
                     codex_app_server_protocol::RequestId::String(value) => value.as_str(),
@@ -2116,8 +2477,8 @@ impl AppStoreReducer {
                         request_id_string.as_str()
                     }
                 };
-                self.resolve_approval(request_id);
-                self.resolve_pending_user_input(request_id);
+                self.resolve_approval(&key.server_id, runtime_kind, request_id);
+                self.resolve_pending_user_input(&key.server_id, runtime_kind, request_id);
             }
             UiEvent::AccountRateLimitsUpdated {
                 server_id,
@@ -2189,12 +2550,15 @@ impl AppStoreReducer {
             UiEvent::UserInputRequested { request, seed } => {
                 let requests = {
                     let mut snapshot = self.snapshot.write().expect("app store lock poisoned");
-                    snapshot
-                        .pending_user_inputs
-                        .retain(|existing| existing.id != request.id);
+                    snapshot.pending_user_inputs.retain(|existing| {
+                        existing.server_id != request.server_id
+                            || existing.runtime_kind != request.runtime_kind
+                            || existing.id != request.id
+                    });
                     snapshot.pending_user_inputs.push(request.clone());
                     let key = PendingUserInputKey {
                         server_id: request.server_id.clone(),
+                        runtime_kind: request.runtime_kind.clone(),
                         request_id: request.id.clone(),
                     };
                     if let Some(seed) = seed {
@@ -2211,7 +2575,7 @@ impl AppStoreReducer {
                 };
                 self.emit_thread_metadata_changed(&key);
             }
-            UiEvent::RawNotification { .. } => {}
+            UiEvent::RawNotification { .. } | UiEvent::EventsLost { .. } => {}
         }
     }
 

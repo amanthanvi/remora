@@ -290,6 +290,9 @@ impl ScriptedHostV2 {
             restart: None,
             agents: None,
             session: None,
+            relay_enrollment: None,
+            relay_commit: None,
+            relay_barrier: None,
             error_code: None,
             error: None,
         }
@@ -601,6 +604,64 @@ impl HostPortV2 for ScriptedHostV2 {
                     attachment_id: None,
                 })
             }
+            RequestV2::RelayEnroll {
+                idempotency_key, ..
+            } => {
+                let mut response = Self::terminal(true);
+                response.relay_enrollment = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "relay_origin": "https://relay.example",
+                        "installation_id": "inst_0123456789abcdef",
+                        "command_id": idempotency_key,
+                        "read_capability": "r".repeat(43),
+                        "manage_capability": "m".repeat(43),
+                    }))
+                    .unwrap(),
+                );
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::RelayCommit {
+                installation_id,
+                idempotency_key,
+                ..
+            } => {
+                let mut response = Self::terminal(true);
+                response.relay_commit = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "installation_id": installation_id, "command_id": idempotency_key,
+                    }))
+                    .unwrap(),
+                );
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
+            RequestV2::RelayBarrier {
+                installation_id,
+                through_cursor,
+                ..
+            } => {
+                let mut response = Self::terminal(true);
+                let runtime = if self.include_out_of_grant_agent.load(Ordering::SeqCst) {
+                    "not-granted"
+                } else {
+                    "codex"
+                };
+                response.relay_barrier = Some(serde_json::from_value(serde_json::json!({
+                    "installation_id": installation_id, "through_cursor": through_cursor,
+                    "barrier_id": "a".repeat(64), "host_epoch": "b".repeat(64),
+                    "runtime_ids": [runtime],
+                    "runtime_states": [{"runtime_id": runtime, "session_id": "session-a", "state_revision": 7}],
+                })).unwrap());
+                Ok(FinishedExchangeV2 {
+                    response,
+                    attachment_id: None,
+                })
+            }
             RequestV2::RevokeSelf {
                 credential_id,
                 idempotency_key,
@@ -833,6 +894,59 @@ async fn enrollment_commits_only_after_hash_and_sas_match_and_journal_is_nonsecr
     assert!(!serialized.contains("private_key"));
     assert!(!serialized.contains("signature"));
     assert_eq!(harness.custody.sign_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn relay_operations_require_pairing_bind_identity_and_validate_runtime_authority() {
+    let harness = harness();
+    assert!(matches!(
+        harness.lifecycle.enroll_relay(&harness.host_id).await,
+        Err(LifecycleErrorV2::NotEnrolled)
+    ));
+    assert_eq!(harness.host.finish_count.load(Ordering::SeqCst), 0);
+    inspect_and_enroll(&harness).await;
+    let first = harness
+        .lifecycle
+        .enroll_relay(&harness.host_id)
+        .await
+        .unwrap();
+    let replay = harness
+        .lifecycle
+        .enroll_relay(&harness.host_id)
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    assert!(!format!("{first:?}").contains(first.read_capability.as_str()));
+    let commit = harness
+        .lifecycle
+        .commit_relay(
+            &harness.host_id,
+            first.installation_id.clone(),
+            first.command_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit.command_id, first.command_id);
+    let barrier = harness
+        .lifecycle
+        .relay_barrier(&harness.host_id, first.installation_id.clone(), 7)
+        .await
+        .unwrap();
+    assert_eq!(barrier.through_cursor, 7);
+    harness
+        .host
+        .include_out_of_grant_agent
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        harness
+            .lifecycle
+            .relay_barrier(&harness.host_id, first.installation_id.clone(), 7)
+            .await,
+        Err(LifecycleErrorV2::ProtocolViolation)
+    ));
+    let journal = serde_json::to_string(&harness.journal.entry(&harness.host_id)).unwrap();
+    assert!(!journal.contains(first.read_capability.as_str()));
+    assert!(!journal.contains(first.manage_capability.as_str()));
 }
 
 #[tokio::test]

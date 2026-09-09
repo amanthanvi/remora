@@ -1,0 +1,62 @@
+name: Remora Link CI
+
+on:
+  pull_request:
+    paths:
+      - "services/remora-link/**"
+      - "shared/third_party/codex"
+      - "patches/codex/**"
+      - "apps/ios/scripts/sync-codex.sh"
+      - ".github/workflows/host-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/remora-link/**"
+      - "shared/third_party/codex"
+      - "patches/codex/**"
+      - "apps/ios/scripts/sync-codex.sh"
+      - ".github/workflows/host-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: services/remora-link
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Apply retained Codex patches
+        shell: bash
+        run: ../../apps/ios/scripts/sync-codex.sh --preserve-current
+      - name: Verify experimental schema fixtures against retained source
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash crates/bridge-conformance/scripts/experimental-schemas.sh --check
+      - name: Lint host and core
+        run: cargo clippy --locked -p remora-host -p remora-bridge-core --all-targets -- -D warnings
+      - name: Test native host custody and sessions
+        run: cargo test --locked -p remora-host -p remora-bridge-core --all-targets
+      - name: Test host workspace and pinned-schema conformance
+        if: runner.os != 'Windows'
+        run: cargo test --locked --workspace --all-targets
+      - name: Build host CLI
+        run: cargo build --locked -p remora-link

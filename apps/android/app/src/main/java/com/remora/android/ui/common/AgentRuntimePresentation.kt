@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.painterResource
 import com.remora.android.ui.RemoraTheme
 import uniffi.codex_mobile_client.AppAgentMetadata
@@ -104,7 +105,7 @@ fun AgentIconView(
 ) {
     val context = LocalContext.current
     val resName = "agent_${kind.lowercase()}"
-    val resId = context.resources.getIdentifier(resName, "drawable", context.packageName)
+    val resId = LocalResources.current.getIdentifier(resName, "drawable", context.packageName)
     if (resId != 0) {
         Image(
             painter = painterResource(id = resId),

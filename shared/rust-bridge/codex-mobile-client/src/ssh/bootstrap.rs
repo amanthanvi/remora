@@ -392,13 +392,13 @@ impl SshClient {
                 }
             }
 
-            if let Some(p) = pid {
-                if !self.is_process_alive_shell(p, shell).await {
-                    let tail = self
-                        .fetch_process_log_tail_shell(stdout_log_path, None, shell)
-                        .await;
-                    return Err(if tail.is_empty() { last_error } else { tail });
-                }
+            if let Some(p) = pid
+                && !self.is_process_alive_shell(p, shell).await
+            {
+                let tail = self
+                    .fetch_process_log_tail_shell(stdout_log_path, None, shell)
+                    .await;
+                return Err(if tail.is_empty() { last_error } else { tail });
             }
 
             tokio::time::sleep(TUNNEL_HEALTH_INTERVAL).await;
@@ -591,98 +591,94 @@ impl SshClient {
                     break;
                 }
 
-                if let Some(p) = pid {
-                    if !self.is_process_alive_shell(p, shell).await {
-                        let tail = self
-                            .fetch_process_log_tail_shell(
-                                &log_path,
-                                stderr_log_path.as_deref(),
-                                shell,
-                            )
-                            .await;
-                        if tail.to_ascii_lowercase().contains("address already in use") {
-                            info!(
-                                "ssh bootstrap process exited due to occupied port shell={} port={} pid={:?}",
-                                remote_shell_name(shell),
-                                port,
-                                pid
-                            );
-                            break;
-                        }
-                        // If logs are empty, run the server synchronously to capture
-                        // its actual exit reason (e.g. node not on PATH).
-                        let tail = if tail.is_empty() {
-                            warn!(
-                                "ssh bootstrap logs empty, running sync probe shell={} port={}",
-                                remote_shell_name(shell),
-                                port
-                            );
-                            let diag_cmd = match shell {
-                                RemoteShell::PowerShell => format!(
-                                    r#"$nodeVer = & $env:ComSpec /d /c 'node --version' 2>&1 | Out-String; Write-Output "node_version:$($nodeVer.Trim())"; $out = & $env:ComSpec /d /c '"{bin}" {sub_args}--listen ws://{listen_addr}' 2>&1 | Out-String; Write-Output "server_output:$($out.Trim())""#,
-                                    bin = cmd_quote(codex_binary.path()),
-                                    sub_args = match codex_binary {
-                                        RemoteCodexBinary::Codex(_) => "app-server ",
-                                    },
-                                    listen_addr = listen_addr,
-                                ),
-                                RemoteShell::Posix => format!(
-                                    "{profile_init}\n\
+                if let Some(p) = pid
+                    && !self.is_process_alive_shell(p, shell).await
+                {
+                    let tail = self
+                        .fetch_process_log_tail_shell(&log_path, stderr_log_path.as_deref(), shell)
+                        .await;
+                    if tail.to_ascii_lowercase().contains("address already in use") {
+                        info!(
+                            "ssh bootstrap process exited due to occupied port shell={} port={} pid={:?}",
+                            remote_shell_name(shell),
+                            port,
+                            pid
+                        );
+                        break;
+                    }
+                    // If logs are empty, run the server synchronously to capture
+                    // its actual exit reason (e.g. node not on PATH).
+                    let tail = if tail.is_empty() {
+                        warn!(
+                            "ssh bootstrap logs empty, running sync probe shell={} port={}",
+                            remote_shell_name(shell),
+                            port
+                        );
+                        let diag_cmd = match shell {
+                            RemoteShell::PowerShell => format!(
+                                r#"$nodeVer = & $env:ComSpec /d /c 'node --version' 2>&1 | Out-String; Write-Output "node_version:$($nodeVer.Trim())"; $out = & $env:ComSpec /d /c '"{bin}" {sub_args}--listen ws://{listen_addr}' 2>&1 | Out-String; Write-Output "server_output:$($out.Trim())""#,
+                                bin = cmd_quote(codex_binary.path()),
+                                sub_args = match codex_binary {
+                                    RemoteCodexBinary::Codex(_) => "app-server ",
+                                },
+                                listen_addr = listen_addr,
+                            ),
+                            RemoteShell::Posix => format!(
+                                "{profile_init}\n\
                                      node_ver=\"$(node --version 2>&1)\" || node_ver='(node not found on PATH)'\n\
                                      printf 'node_version:%s\\n' \"$node_ver\"\n\
                                      out=\"$({bin} app-server --listen ws://{listen_addr} 2>&1)\"\n\
                                      printf 'server_output:%s\\n' \"$out\"",
-                                    profile_init = PROFILE_INIT,
-                                    bin = shell_quote(codex_binary.path()),
-                                    listen_addr = listen_addr,
-                                ),
-                            };
-                            match tokio::time::timeout(
-                                SYNC_DIAG_TIMEOUT,
-                                self.exec_shell(&diag_cmd, shell),
-                            )
-                            .await
-                            {
-                                Ok(Ok(r)) => {
-                                    let combined = format!(
-                                        "exit_code={}\nstdout:\n{}\nstderr:\n{}",
-                                        r.exit_code,
-                                        r.stdout.trim(),
-                                        r.stderr.trim()
-                                    );
-                                    info!(
-                                        "ssh bootstrap sync probe result shell={} port={} output={}",
-                                        remote_shell_name(shell),
-                                        port,
-                                        combined
-                                    );
-                                    if r.stdout.trim().is_empty() && r.stderr.trim().is_empty() {
-                                        format!(
-                                            "server process exited immediately (exit code {})",
-                                            r.exit_code
-                                        )
-                                    } else {
-                                        combined
-                                    }
-                                }
-                                Ok(Err(e)) => format!("sync probe failed: {e}"),
-                                Err(_) => "server process exited immediately".into(),
-                            }
-                        } else {
-                            tail
+                                profile_init = PROFILE_INIT,
+                                bin = shell_quote(codex_binary.path()),
+                                listen_addr = listen_addr,
+                            ),
                         };
-                        warn!(
-                            "ssh bootstrap process exited before listen shell={} port={} pid={:?} tail={}",
-                            remote_shell_name(shell),
-                            port,
-                            pid,
-                            tail
-                        );
-                        return Err(SshError::ExecFailed {
-                            exit_code: 1,
-                            stderr: tail,
-                        });
-                    }
+                        match tokio::time::timeout(
+                            SYNC_DIAG_TIMEOUT,
+                            self.exec_shell(&diag_cmd, shell),
+                        )
+                        .await
+                        {
+                            Ok(Ok(r)) => {
+                                let combined = format!(
+                                    "exit_code={}\nstdout:\n{}\nstderr:\n{}",
+                                    r.exit_code,
+                                    r.stdout.trim(),
+                                    r.stderr.trim()
+                                );
+                                info!(
+                                    "ssh bootstrap sync probe result shell={} port={} output={}",
+                                    remote_shell_name(shell),
+                                    port,
+                                    combined
+                                );
+                                if r.stdout.trim().is_empty() && r.stderr.trim().is_empty() {
+                                    format!(
+                                        "server process exited immediately (exit code {})",
+                                        r.exit_code
+                                    )
+                                } else {
+                                    combined
+                                }
+                            }
+                            Ok(Err(e)) => format!("sync probe failed: {e}"),
+                            Err(_) => "server process exited immediately".into(),
+                        }
+                    } else {
+                        tail
+                    };
+                    warn!(
+                        "ssh bootstrap process exited before listen shell={} port={} pid={:?} tail={}",
+                        remote_shell_name(shell),
+                        port,
+                        pid,
+                        tail
+                    );
+                    return Err(SshError::ExecFailed {
+                        exit_code: 1,
+                        stderr: tail,
+                    });
                 }
 
                 tokio::time::sleep(LISTEN_POLL_INTERVAL).await;
@@ -826,13 +822,13 @@ impl SshClient {
                 }
             }
 
-            if let Some(p) = pid {
-                if !self.is_process_alive_shell(p, shell).await {
-                    let tail = self
-                        .fetch_process_log_tail_shell(stdout_log_path, stderr_log_path, shell)
-                        .await;
-                    return Err(if tail.is_empty() { last_error } else { tail });
-                }
+            if let Some(p) = pid
+                && !self.is_process_alive_shell(p, shell).await
+            {
+                let tail = self
+                    .fetch_process_log_tail_shell(stdout_log_path, stderr_log_path, shell)
+                    .await;
+                return Err(if tail.is_empty() { last_error } else { tail });
             }
 
             tokio::time::sleep(TUNNEL_HEALTH_INTERVAL).await;

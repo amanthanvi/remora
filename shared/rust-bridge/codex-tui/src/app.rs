@@ -74,10 +74,13 @@ impl App {
         }
     }
 
-    pub async fn run(
+    pub async fn run<B: ratatui::backend::Backend>(
         &mut self,
-        terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
-    ) -> anyhow::Result<()> {
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> anyhow::Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
         let tick_rate = Duration::from_millis(100);
         let mut event_stream = crossterm::event::EventStream::new();
 
@@ -637,13 +640,19 @@ impl App {
     async fn handle_conversation_key(&mut self, key: KeyEvent) {
         // Approval keys
         if let Some(approval) = self.active_thread_approval() {
+            let approval = approval.clone();
             match key.code {
                 KeyCode::Char('y') => {
                     let id = approval.id.clone();
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
                         let _ = client
-                            .respond_to_approval(&id, ApprovalDecisionValue::Accept)
+                            .respond_to_approval(
+                                &approval.server_id,
+                                &approval.runtime_kind,
+                                &id,
+                                ApprovalDecisionValue::Accept,
+                            )
                             .await;
                     });
                     return;
@@ -653,7 +662,12 @@ impl App {
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
                         let _ = client
-                            .respond_to_approval(&id, ApprovalDecisionValue::Decline)
+                            .respond_to_approval(
+                                &approval.server_id,
+                                &approval.runtime_kind,
+                                &id,
+                                ApprovalDecisionValue::Decline,
+                            )
                             .await;
                     });
                     return;
@@ -663,7 +677,12 @@ impl App {
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
                         let _ = client
-                            .respond_to_approval(&id, ApprovalDecisionValue::AcceptForSession)
+                            .respond_to_approval(
+                                &approval.server_id,
+                                &approval.runtime_kind,
+                                &id,
+                                ApprovalDecisionValue::AcceptForSession,
+                            )
                             .await;
                     });
                     return;
@@ -673,7 +692,12 @@ impl App {
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
                         let _ = client
-                            .respond_to_approval(&id, ApprovalDecisionValue::Cancel)
+                            .respond_to_approval(
+                                &approval.server_id,
+                                &approval.runtime_kind,
+                                &id,
+                                ApprovalDecisionValue::Cancel,
+                            )
                             .await;
                     });
                     return;
@@ -820,6 +844,8 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(request) = self.active_thread_user_input() {
+                    let server_id = request.server_id.clone();
+                    let runtime_kind = request.runtime_kind.clone();
                     let request_id = request.id.clone();
                     let answers = request
                         .questions
@@ -831,7 +857,9 @@ impl App {
                         .collect();
                     let client = Arc::clone(&self.client);
                     tokio::spawn(async move {
-                        let _ = client.respond_to_user_input(&request_id, answers).await;
+                        let _ = client
+                            .respond_to_user_input(&server_id, &runtime_kind, &request_id, answers)
+                            .await;
                     });
                     self.user_input_text.clear();
                 }

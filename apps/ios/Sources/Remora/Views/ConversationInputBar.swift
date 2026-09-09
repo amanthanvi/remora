@@ -12,7 +12,7 @@ struct ConversationInputBar: View {
     @AppStorage("workDir") private var workDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "/"
     @AppStorage("fastMode") private var fastMode = false
 
-    let onSend: (String, UIImage?, [ComposerFileAttachment], [SkillMentionSelection], [PluginMentionSelection]) -> Void
+    let onSend: (String, UIImage?, [ComposerFileAttachment], [SkillMentionSelection], [PluginMentionSelection]) async throws -> Void
     let onFileSearch: (String) async throws -> [FileSearchResult]
     var bottomInset: CGFloat = 0
     let showModeChip: Bool
@@ -54,6 +54,7 @@ struct ConversationInputBar: View {
     @State private var skills: [SkillMetadata] = []
     @State private var skillsLoading = false
     @State private var mentionSkillPathsByName: [String: String] = [:]
+    @State private var recoveredSkillMentions: [SkillMentionSelection] = []
     @State private var hasAttemptedSkillMentionLoad = false
     @State private var pluginCacheByCwd: [String: [PluginSummary]] = [:]
     @State private var pluginUnsupportedCwds: Set<String> = []
@@ -65,10 +66,12 @@ struct ConversationInputBar: View {
     @State private var hasLoggedKeyboardShown = false
     @State private var isComposerFocused = false
     @State private var composerSelectionRange = NSRange(location: 0, length: 0)
+    @State private var isSavingDraft = false
+    @State private var draftContextRevision = 0
 
     private var pendingUserInputRequest: PendingUserInputRequest? {
         guard let request = snapshot.pendingUserInputRequest else { return nil }
-        return appState.isPendingUserInputDismissed(id: request.id) ? nil : request
+        return appState.isPendingUserInputDismissed(request: request) ? nil : request
     }
 
     private var pendingModelOverride: String? {
@@ -155,12 +158,16 @@ struct ConversationInputBar: View {
         .onChange(of: inputText) { _, next in
             scheduleComposerPopupRefresh(for: next)
         }
+        .onChange(of: snapshot.threadKey) { _, _ in
+            draftContextRevision += 1
+        }
         .onChange(of: snapshot.composerPrefillRequest?.id) { _, _ in
             guard let prefill = snapshot.composerPrefillRequest else { return }
             inputText = prefill.text
             composerSelectionRange = NSRange(location: (prefill.text as NSString).length, length: 0)
             attachedImage = nil
             attachedFiles = []
+            recoveredSkillMentions = []
             hideComposerPopups()
             appModel.clearComposerPrefill(id: prefill.id)
         }
@@ -194,8 +201,7 @@ struct ConversationInputBar: View {
                 request.finish(errorMessage: "Enter a message or attach a file before sending.")
                 return
             }
-            handleSend()
-            request.finish()
+            Task { request.finish(errorMessage: await handleSend()) }
         }
         .onDisappear {
             actionCenter.setComposerFocused(false, owner: composerActionOwner)
@@ -209,6 +215,9 @@ struct ConversationInputBar: View {
 
     private var composerSurface: some View {
         VStack(spacing: 0) {
+            ComposerRecoveryMenu(store: appModel.composerRecovery,
+                                 context: .thread(snapshot.threadKey), onRecover: recoverDraft)
+                .disabled(isSavingDraft)
             ConversationComposerContentView(
                 attachedImage: attachedImage,
                 attachedFiles: attachedFiles,
@@ -238,7 +247,7 @@ struct ConversationInputBar: View {
                 onRemovePluginMention: removePluginMention,
                 onPasteImage: { image in attachedImage = image },
                 onOpenModePicker: onOpenModePicker,
-                onSendText: handleSend,
+                onSendText: { Task { _ = await handleSend() } },
                 onStopRecording: stopVoiceRecording,
                 onStartRecording: startVoiceRecording,
                 onInterrupt: interruptActiveTurn,
@@ -312,6 +321,8 @@ struct ConversationInputBar: View {
         Task {
             do {
                 try await appModel.store.respondToUserInput(
+                    serverId: pendingUserInputRequest.serverId,
+                    runtimeKind: pendingUserInputRequest.runtimeKind,
                     requestId: pendingUserInputRequest.id,
                     answers: payload
                 )
@@ -347,13 +358,18 @@ struct ConversationInputBar: View {
         }
     }
 
-    private func handleSend() {
+    private func handleSend() async -> String? {
+        guard !isSavingDraft else { return "Your draft is being saved." }
+        let editorDraft = currentDraft
+        let contextRevision = draftContextRevision
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let image = attachedImage
         let files = attachedFiles
-        guard !text.isEmpty || image != nil || !files.isEmpty else { return }
+        guard !text.isEmpty || image != nil || !files.isEmpty else {
+            return "Enter a message or attach a file before sending."
+        }
         if let request = snapshot.pendingUserInputRequest {
-            appState.dismissPendingUserInput(id: request.id)
+            appState.dismissPendingUserInput(request: request)
         }
         if image == nil,
            files.isEmpty,
@@ -364,22 +380,86 @@ struct ConversationInputBar: View {
             hideComposerPopups()
             isComposerFocused = false
             executeSlashCommand(invocation.command, args: invocation.args)
-            return
+            return nil
         }
-        inputText = ""
-        attachedImage = nil
-        attachedFiles = []
-        hideComposerPopups()
-        isComposerFocused = false
         let skillMentions = collectSkillMentionsForSubmission(text)
         let pluginMentions = collectPluginMentionsForSubmission(text)
-        pluginMentionSelections = []
-        onSend(text, image, files, skillMentions, pluginMentions)
+        let threadKey = snapshot.threadKey
+        isSavingDraft = true
+        let submission: UUID
+        do {
+            submission = try await appModel.composerRecovery.begin(
+                RecoverableComposerDraft(text: text, image: image, files: files,
+                                         skills: skillMentions, plugins: pluginMentions),
+                in: .thread(threadKey)
+            )
+        } catch {
+            isSavingDraft = false
+            slashErrorMessage = error.localizedDescription
+            return error.localizedDescription
+        }
+        isSavingDraft = false
+        if draftContextRevision == contextRevision && currentDraft.matchesEditor(editorDraft) {
+            inputText = ""
+            attachedImage = nil
+            attachedFiles = []
+            hideComposerPopups()
+            isComposerFocused = false
+            pluginMentionSelections = []
+            recoveredSkillMentions = []
+        }
+        Task {
+            do {
+                try await onSend(text, image, files, skillMentions, pluginMentions)
+                try await appModel.composerRecovery.finish(submission)
+            } catch {
+                do { try await appModel.composerRecovery.finish(submission, error: error.localizedDescription) }
+                catch {
+                    slashErrorMessage = error.localizedDescription
+                    return
+                }
+                slashErrorMessage = "Submission not confirmed. Your draft is saved. Check the conversation before sending again."
+            }
+        }
+        return nil
+    }
+
+    private var currentDraft: RecoverableComposerDraft {
+        RecoverableComposerDraft(
+            text: inputText, image: attachedImage, files: attachedFiles,
+            skills: collectSkillMentionsForSubmission(inputText), plugins: pluginMentionSelections
+        )
+    }
+
+    private func recoverDraft(_ id: UUID) {
+        guard !isSavingDraft else { return }
+        let current = currentDraft
+        let threadKey = snapshot.threadKey
+        let contextRevision = draftContextRevision
+        isSavingDraft = true
+        Task {
+            defer { isSavingDraft = false }
+            do {
+                guard let draft = try await appModel.composerRecovery.recover(
+                    id, in: .thread(threadKey), preserving: current
+                ), draftContextRevision == contextRevision, currentDraft.matchesEditor(current) else { return }
+                inputText = draft.text
+                attachedImage = draft.image
+                attachedFiles = draft.files
+                pluginMentionSelections = draft.plugins
+                recoveredSkillMentions = draft.skills
+                for skill in draft.skills { mentionSkillPathsByName[skill.name.lowercased()] = skill.path }
+                composerSelectionRange = NSRange(location: (draft.text as NSString).length, length: 0)
+                isComposerFocused = true
+            } catch {
+                slashErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func dismissPendingUserInput() {
         guard let request = snapshot.pendingUserInputRequest else { return }
-        appState.dismissPendingUserInput(id: request.id)
+        appState.dismissPendingUserInput(request: request)
     }
 
     private func collectPluginMentionsForSubmission(_ text: String) -> [PluginMentionSelection] {
@@ -1202,14 +1282,14 @@ struct ConversationInputBar: View {
     }
 
     private func collectSkillMentionsForSubmission(_ text: String) -> [SkillMentionSelection] {
-        guard !skills.isEmpty else { return [] }
         let mentionNames = extractMentionNames(text)
         guard !mentionNames.isEmpty else { return [] }
 
         let skillsByName = Dictionary(grouping: skills, by: { $0.name.lowercased() })
         let skillsByPath = Dictionary(grouping: skills, by: \.path.value)
-        var seenPaths = Set<String>()
-        var resolved: [SkillMentionSelection] = []
+        let normalizedNames = Set(mentionNames.map { $0.lowercased() })
+        var resolved = recoveredSkillMentions.filter { normalizedNames.contains($0.name.lowercased()) }
+        var seenPaths = Set(resolved.map(\.path))
 
         for mentionName in mentionNames {
             let normalizedName = mentionName.lowercased()

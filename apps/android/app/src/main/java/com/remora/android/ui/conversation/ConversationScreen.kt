@@ -306,7 +306,7 @@ fun ConversationScreen(
     val pendingInput = remember(snapshot, threadKey, dismissedUserInputs.ids) {
         snapshot?.pendingUserInputs?.firstOrNull {
             it.isRelevantToThread(threadKey) &&
-                !dismissedUserInputs.isDismissed(it.id)
+                !dismissedUserInputs.isDismissed(it)
         }
     }
 
@@ -865,7 +865,7 @@ fun ConversationScreen(
                         onSlashError = { slashErrorMessage = it },
                         pendingUserInput = pendingInput,
                         onDismissPendingUserInput = {
-                            pendingInput?.let { dismissedUserInputs.dismiss(it.id) }
+                            pendingInput?.let { dismissedUserInputs.dismiss(it) }
                         },
                         onInputFocusChanged = { composerInteractionActive = it },
                     )

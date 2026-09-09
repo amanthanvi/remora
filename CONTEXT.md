@@ -16,10 +16,19 @@ Remora keeps mobile parity for:
 The embedded app-server is a retained Codex runtime. It is not a local terminal.
 Terminal sessions always run on a remote host.
 
-The repository includes a self-hostable Remora relay foundation and opaque
-mobile background-awareness clients. Push is a lossy wake hint over durable,
-sequenced Rust-owned state; it never carries prompts, transcripts, credentials,
-or approval actions. A managed hosted deployment and provider credentials are
+The repository includes the Remora Link host, self-hostable relay, and native
+background-awareness clients. Push is a lossy wake hint; it never carries
+prompts, transcripts, credentials, or approval actions. Authenticated pairing
+provisions relay capabilities directly into device custody. Rust owns
+registration, replay, host repair, durable freshness receipts, and cleanup;
+native code supplies atomic storage, OS tokens, wake ingress, and presentation.
+AppStore projections remain in memory. A durable relay receipt does not replace
+the mandatory authoritative foreground/cold-start repair.
+
+See [background relay](services/remora-link/docs/background-relay.md) for host
+configuration and [current validation](docs/reviews/2026-09-09-risk-gates.md) for
+the distinction between local integration, provider delivery, and physical
+device evidence. A managed hosted deployment and provider credentials are
 operational concerns outside this checkout. Live Activity support remains a
 typed bounded-status projection until its dedicated extension is implemented
 and verified. Watch and complications, CarPlay, store release/distribution
@@ -75,8 +84,9 @@ when the direct-upgrade floor advances beyond 1.6.
 The minimum cross-platform gate is:
 
 ```bash
-make bootstrap-remora-link-test bindings-hardener-test
+make ci-tools-test bootstrap-remora-link-test bindings-hardener-test
 make rebuild-bindings
+make rust-clippy
 make rust-test
 make ios-sim-fast
 make test-ios
@@ -91,3 +101,10 @@ Complete release verification also installs these exact build outputs on a
 simulator and emulator, exercises the 1.6 security cutover, captures both home
 screens, and checks runtime logs for crashes and cutover failures. Branch CI is
 defined in [`.github/workflows/mobile-ci.yml`](.github/workflows/mobile-ci.yml).
+
+Release tasks require complete `REMORA_FIREBASE_*` resource injection. CI uses
+non-production resource fixtures for JVM release tests in a separate step;
+those tests do not validate delivery or produce a distributable release app.
+Real release builds need the deployment's Firebase configuration.
+That build prerequisite does not establish provider delivery or physical OS
+wake behavior.

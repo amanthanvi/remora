@@ -22,7 +22,10 @@ pub(crate) use types::*;
 /// `AppClient` handle observes the same adapters and lifecycle.
 pub(crate) struct ConfiguredBackgroundRelay {
     pub(crate) relay: Arc<BackgroundRelay>,
+    pub(crate) journal: Arc<dyn RelayBindingJournalPort>,
     pub(crate) allow_loopback_http: bool,
+    /// Local custody transfer and retirement share one authority ordering.
+    pub(crate) provisioning: tokio::sync::Mutex<()>,
 }
 
 #[cfg(test)]

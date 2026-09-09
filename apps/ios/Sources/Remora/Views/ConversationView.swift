@@ -180,34 +180,32 @@ struct ConversationView: View {
         fileAttachments: [ComposerFileAttachment],
         skillMentions: [SkillMentionSelection],
         pluginMentions: [PluginMentionSelection]
-    ) {
+    ) async throws {
         localSendScrollToken &+= 1
-        Task {
-            do {
-                LLog.debug("conversation", "send message started", fields: [
-                    "server_id": activeThreadKey.serverId,
-                    "thread_id": activeThreadKey.threadId,
-                    "text_length": text.count
-                ])
-                let payload = try makeComposerPayload(
-                    text: text,
-                    attachmentImage: attachmentImage,
-                    fileAttachments: fileAttachments,
-                    skillMentions: skillMentions,
-                    pluginMentions: pluginMentions
-                )
-                try await appModel.startTurn(key: activeThreadKey, payload: payload)
-                LLog.debug("conversation", "send message turn start returned", fields: [
-                    "server_id": activeThreadKey.serverId,
-                    "thread_id": activeThreadKey.threadId
-                ])
-            } catch {
-                LLog.error("conversation", "send message failed", error: error, fields: [
-                    "server_id": activeThreadKey.serverId,
-                    "thread_id": activeThreadKey.threadId
-                ])
-                messageActionError = error.localizedDescription
-            }
+        do {
+            LLog.debug("conversation", "send message started", fields: [
+                "server_id": activeThreadKey.serverId,
+                "thread_id": activeThreadKey.threadId,
+                "text_length": text.count
+            ])
+            let payload = try await makeComposerPayload(
+                text: text,
+                attachmentImage: attachmentImage,
+                fileAttachments: fileAttachments,
+                skillMentions: skillMentions,
+                pluginMentions: pluginMentions
+            )
+            try await appModel.startTurn(key: activeThreadKey, payload: payload)
+            LLog.debug("conversation", "send message turn start returned", fields: [
+                "server_id": activeThreadKey.serverId,
+                "thread_id": activeThreadKey.threadId
+            ])
+        } catch {
+            LLog.error("conversation", "send message failed", error: error, fields: [
+                "server_id": activeThreadKey.serverId,
+                "thread_id": activeThreadKey.threadId
+            ])
+            throw error
         }
     }
 
@@ -216,7 +214,7 @@ struct ConversationView: View {
         localSendScrollToken &+= 1
         Task {
             do {
-                let payload = try makeComposerPayload(
+                let payload = try await makeComposerPayload(
                     text: text,
                     attachmentImage: nil,
                     fileAttachments: [],
@@ -322,8 +320,7 @@ struct ConversationView: View {
         fileAttachments: [ComposerFileAttachment],
         skillMentions: [SkillMentionSelection],
         pluginMentions: [PluginMentionSelection]
-    ) throws -> AppComposerPayload {
-        let preparedAttachment = attachmentImage.flatMap(ConversationAttachmentSupport.prepareImage)
+    ) async throws -> AppComposerPayload {
         var additionalInputs = skillMentions.map { mention in
             AppUserInput.skill(name: mention.name, path: AbsolutePath(value: mention.path))
         }
@@ -332,10 +329,8 @@ struct ConversationView: View {
                 AppUserInput.mention(name: mention.name, path: mention.path)
             )
         }
-        if let preparedAttachment {
-            additionalInputs.append(preparedAttachment.userInput)
-        }
-        return AppComposerPayload(
+        // Capture send settings before image preparation yields to newer UI edits.
+        var payload = AppComposerPayload(
             text: text,
             additionalInputs: additionalInputs,
             fileAttachments: fileAttachments,
@@ -345,6 +340,15 @@ struct ConversationView: View {
             effort: ReasoningEffort(wireValue: pendingReasoningOverride),
             serviceTier: ServiceTier(wireValue: fastMode ? "fast" : nil)
         )
+        let preparedAttachment = await ConversationAttachmentSupport.prepareImage(attachmentImage)
+        if attachmentImage != nil && preparedAttachment == nil {
+            throw NSError(domain: "Remora", code: 1021,
+                          userInfo: [NSLocalizedDescriptionKey: "The attached image could not be prepared."])
+        }
+        if let preparedAttachment {
+            payload.additionalInputs.append(preparedAttachment.userInput)
+        }
+        return payload
     }
 
     private func launchConfig() -> AppThreadLaunchConfig {

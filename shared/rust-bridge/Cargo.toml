@@ -25,10 +25,10 @@ codex-cloud-requirements = { path = "../third_party/codex/codex-rs/cloud-require
 codex-config = { path = "../third_party/codex/codex-rs/config" }
 codex-utils-absolute-path = { path = "../third_party/codex/codex-rs/utils/absolute-path" }
 codex-git-utils = { path = "../third_party/codex/codex-rs/git-utils" }
-remora-bridge-core = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-pi-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-claude-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
-remora-opencode-bridge = { git = "https://github.com/amanthanvi/remora-link.git", rev = "42e27678cda63bda440a8f6620344f10baefea4f" }
+remora-bridge-core = { path = "../../services/remora-link/crates/bridge-core" }
+remora-pi-bridge = { path = "../../services/remora-link/crates/pi-bridge" }
+remora-claude-bridge = { path = "../../services/remora-link/crates/claude-bridge" }
+remora-opencode-bridge = { path = "../../services/remora-link/crates/opencode-bridge" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
@@ -36,7 +36,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
-lru = "0.12"
+lru = "0.18.2"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 base64 = "0.22"
@@ -44,15 +44,14 @@ sha2 = "0.10"
 hmac = "0.12"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-russh = "0.62.4"
-russh-keys = "0.49.2"
+russh = { version = "0.62.4", default-features = false, features = ["flate2", "aws-lc-rs"] }
 futures = "0.3"
 url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
 shlex = "1"
-zeroize = "1.8.2"
+zeroize = { version = "1.8.2", features = ["serde"] }
 
 [profile.release]
 strip = true
@@ -96,11 +95,11 @@ debug-assertions = true
 codegen-units = 16
 
 [patch.crates-io]
+rama-dns = { path = "../third_party/rama-dns" }
 proc-macro-error2 = { git = "https://github.com/amanthanvi/proc-macro-error-2.git", rev = "6f42057ce7f88f03170f2f21e3b6997c783eb63f" }
 spin = { git = "https://github.com/amanthanvi/spin-rs.git", rev = "ec3ef0401685b58c5ea24abbdaef6e338f7c1402" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
-crossterm = { git = "https://github.com/nornagon/crossterm", branch = "nornagon/color-query" }
 
 [patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }

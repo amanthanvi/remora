@@ -18,6 +18,7 @@ final class AppRuntimeController {
     @ObservationIgnored private var remoraLinkConfigurationTask: Task<Void, Never>?
     @ObservationIgnored private var remoraLinkRetryRequested = false
     @ObservationIgnored private var hasStartedReachability = false
+    @ObservationIgnored private weak var relayClient: AppClient?
 
     private(set) var remoraLinkStatus: RemoraLinkNativeConfigurationStatus = .notConfigured
 
@@ -40,10 +41,50 @@ final class AppRuntimeController {
     func bind(appModel: AppModel, voiceRuntime: VoiceRuntimeController) {
         self.appModel = appModel
         self.voiceRuntime = voiceRuntime
-        BackgroundAwarenessController.shared.bind(reconciler: self)
+        bindBackgroundRelay(client: appModel.client)
         reachability.bind(appModel: appModel)
         startReachabilityIfNeeded()
         configureRemoraLinkIfNeeded(client: appModel.client)
+    }
+
+    /// Background APNs launch must not depend on a SwiftUI scene appearing.
+    func prepareBackgroundRuntimeIfSecurityReady() async {
+        guard CurrentKeychainNamespaceCleanup.shared.isComplete else { return }
+        await Task.detached(priority: .userInitiated) {
+            AppModel.prewarmRustBridges()
+        }.value
+        guard !Task.isCancelled else { return }
+        startBackgroundRuntimeIfSecurityReady()
+    }
+
+    func startBackgroundRuntimeIfSecurityReady() {
+        guard CurrentKeychainNamespaceCleanup.shared.isComplete else { return }
+        let model = appModel ?? AppModel.shared
+        appModel = model
+        model.start()
+        reachability.bind(appModel: model)
+        startReachabilityIfNeeded()
+        bindBackgroundRelay(client: model.client)
+        configureRemoraLinkIfNeeded(client: model.client)
+    }
+
+    private func bindBackgroundRelay(client: AppClient) {
+        guard relayClient !== client else { return }
+        relayClient = client
+        BackgroundAwarenessController.shared.bind(runtime: RustBackgroundRelayRuntime(
+            client: client,
+            preparePairedHosts: { [weak self, client] in
+                guard let self, CurrentKeychainNamespaceCleanup.shared.isComplete else {
+                    throw BackgroundRelayError.SecureStorageUnavailable
+                }
+                self.configureRemoraLinkIfNeeded(client: client)
+                await self.remoraLinkConfigurationTask?.value
+                guard self.remoraLinkStatus == .available,
+                      self.remoraLinkConfiguredClient === client else {
+                    throw BackgroundRelayError.SecureStorageUnavailable
+                }
+            }
+        ))
     }
 
     /// v2 custody is installed after the app's Rust client has been bound, not
@@ -162,19 +203,8 @@ final class AppRuntimeController {
             appModel: appModel,
             hasActiveVoiceSession: voiceRuntime?.activeVoiceSession != nil
         )
-        // If a background wake timed out or arrived before the Rust runtime was
-        // bound, retry it now. AppLifecycleController above remains the
-        // unconditional foreground repair path when APNs delivered nothing.
+        // Rust repairs paired relay bindings even if APNs delivered no hint.
+        // Direct-server foreground repair above remains independent.
         BackgroundAwarenessController.shared.applicationDidBecomeActive()
-    }
-}
-
-extension AppRuntimeController: BackgroundStateReconciling {
-    func reconcileBackgroundState(expectedCursor: UInt64) async -> AuthenticatedBackgroundStateResult {
-        guard let appModel else { return .failed }
-        return await lifecycle.reconcileBackgroundAwareness(
-            appModel: appModel,
-            expectedCursor: expectedCursor
-        )
     }
 }

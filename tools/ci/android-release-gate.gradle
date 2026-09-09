@@ -1,0 +1,7 @@
+// A neutral task name must still enforce release prerequisites transitively.
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.project(':app')
+    app.tasks.register('remoraGateProbe') {
+        dependsOn app.tasks.named('generateReleaseBuildConfig')
+    }
+}

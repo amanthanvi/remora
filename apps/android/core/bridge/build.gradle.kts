@@ -2,7 +2,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
 }
 
 fun String.asBuildFlag(): Boolean =
@@ -23,7 +22,7 @@ val enableGhosttyJni = System.getenv("REMORA_ENABLE_GHOSTTY_ANDROID")?.asBuildFl
 
 android {
     namespace = "com.remora.android.core.bridge"
-    compileSdk = 35
+    compileSdk = 37
     ndkVersion = System.getenv("ANDROID_NDK_VERSION")?.takeIf { it.isNotBlank() } ?: "30.0.14904198"
 
     defaultConfig {
@@ -37,7 +36,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
+            jniLibs.directories += "src/main/jniLibs"
         }
     }
 
@@ -62,9 +61,9 @@ kotlin {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.security:security-crypto:1.1.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     // 5.17 completes Android 16 KiB page-size support in jnidispatch.
     api("net.java.dev.jna:jna:5.17.0@aar")
 }

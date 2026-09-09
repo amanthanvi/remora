@@ -30,6 +30,10 @@ final class CurrentKeychainNamespaceCleanupTests: XCTestCase {
                             kSecAttrService as String: "retired.service",
                             kSecAttrAccount as String: "token",
                         ],
+                        [
+                            kSecAttrService as String: NativeRelaySecretBackend.service,
+                            kSecAttrAccount as String: NativeRelaySecretBackend.rollbackAnchor,
+                        ],
                     ] as CFArray
                 } else {
                     result?.pointee = [
@@ -51,12 +55,13 @@ final class CurrentKeychainNamespaceCleanupTests: XCTestCase {
 
         cleanup.start { completed = true }
 
-        XCTAssertEqual(deletedQueries.count, 3)
+        XCTAssertEqual(deletedQueries.count, 4)
         XCTAssertEqual(
             deletedQueries.compactMap { $0[kSecAttrService as String] as? String },
             [
                 RemoraLinkTransportIdentityKey.applicationV2.service,
                 "retired.service",
+                NativeRelaySecretBackend.service,
             ]
         )
         XCTAssertEqual(

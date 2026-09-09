@@ -81,14 +81,15 @@ val LocalAppModel = staticCompositionLocalOf<AppModel> {
  * overlay agree on what's been hidden.
  */
 class DismissedUserInputState {
-    var ids by mutableStateOf(setOf<String>())
+    var ids by mutableStateOf(setOf<Triple<String, String, String>>())
         private set
 
-    fun dismiss(id: String) {
-        ids = ids + id
+    fun dismiss(request: uniffi.codex_mobile_client.PendingUserInputRequest) {
+        ids = ids + Triple(request.serverId, request.runtimeKind, request.id)
     }
 
-    fun isDismissed(id: String): Boolean = ids.contains(id)
+    fun isDismissed(request: uniffi.codex_mobile_client.PendingUserInputRequest): Boolean =
+        ids.contains(Triple(request.serverId, request.runtimeKind, request.id))
 }
 
 val LocalDismissedUserInputs = staticCompositionLocalOf<DismissedUserInputState> {
@@ -326,7 +327,7 @@ fun RemoraApp(
             val currentThreadKey = currentRoute.threadKeyOrNull
             currentThreadKey != null &&
                 it.isRelevantToThread(currentThreadKey) &&
-                !dismissedUserInputs.isDismissed(it.id)
+                !dismissedUserInputs.isDismissed(it)
         }
         val globalInputBlocked = homeWorkflowBlocked ||
             conversationWorkflowBlocked ||

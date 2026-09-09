@@ -14,18 +14,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use codex_app_server_client::{
-    AppServerClient, AppServerEvent, RemoteAppServerClient, RemoteAppServerConnectArgs,
-    RemoteAppServerEndpoint,
+    AppServerClient, AppServerEvent, AppServerRequestHandle, RemoteAppServerClient,
+    RemoteAppServerConnectArgs, RemoteAppServerEndpoint,
 };
 use codex_app_server_protocol::{
     ClientNotification, ClientRequest, JSONRPCErrorError, RequestId, Result as JsonRpcResult,
     ServerNotification, ServerRequest,
 };
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use serde_json::Value as JsonValue;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::logging::{LogLevelName, log_rust};
+use crate::next_request_id;
 use crate::session::remote_transport::{
     Reconnected, RemoteTransport, ReplayOutcome, SessionKeepalive,
 };
@@ -39,6 +41,7 @@ const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
 const REMOTE_TURN_REQUEST_DEADLINE: Duration = Duration::from_secs(45);
 const REMOTE_NON_TURN_REQUEST_DEADLINE: Duration = Duration::from_secs(300);
 const REMOTE_COMMAND_RESPONSE_GRACE: Duration = Duration::from_secs(5);
+const REMOTE_MAX_IN_FLIGHT_REQUESTS: usize = 32;
 const CONNECTION_TIMELINE_CAPACITY: usize = 128;
 const OPENAI_BASE_URL_ENV_KEY: &str = "OPENAI_BASE_URL";
 const APP_SERVER_PROXY_WEBSOCKET_URL: &str = "ws://codex-app-server-proxy.localhost/rpc";
@@ -765,8 +768,8 @@ impl ReconnectBackoff {
     fn production() -> Self {
         let bytes = uuid::Uuid::new_v4().into_bytes();
         let mut seed = 0_u64;
-        for chunk in bytes.chunks_exact(8) {
-            seed ^= u64::from_le_bytes(chunk.try_into().expect("uuid chunk length"));
+        for chunk in bytes.as_chunks::<8>().0 {
+            seed ^= u64::from_le_bytes(*chunk);
         }
         Self::with_seed(seed)
     }
@@ -837,6 +840,9 @@ enum SessionCommand {
 /// or a typed server request.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    EventsLost {
+        skipped: u64,
+    },
     Notification {
         runtime_kind: AgentRuntimeKind,
         notification: ServerNotification,
@@ -1537,7 +1543,15 @@ impl ServerSession {
         let command_tx = self
             .runtime_command_txs
             .get(&runtime_kind)
-            .unwrap_or(&self.command_tx);
+            .or_else(|| {
+                (runtime_kind == "codex" && self.runtime_command_txs.is_empty())
+                    .then_some(&self.command_tx)
+            })
+            .ok_or_else(|| {
+                RpcError::Deserialization(format!(
+                    "response runtime {runtime_kind} is not connected"
+                ))
+            })?;
         command_tx
             .send(SessionCommand::Resolve {
                 request_id,
@@ -2252,7 +2266,7 @@ async fn request_in_process_client(
 }
 
 async fn request_remote_client(
-    client: &AppServerClient,
+    client: &AppServerRequestHandle,
     request: ClientRequest,
     deadline: Option<Duration>,
 ) -> Result<JsonValue, RpcError> {
@@ -2308,6 +2322,32 @@ fn request_is_safe_to_replay_after_transport_error(request: &ClientRequest) -> b
     )
 }
 
+struct PendingRemoteRequest {
+    request: ClientRequest,
+    deadline: Option<tokio::time::Instant>,
+    response_tx: oneshot::Sender<Result<JsonValue, RpcError>>,
+    generation: u64,
+    retry_allowed: bool,
+}
+
+fn poll_remote_request(
+    client: AppServerRequestHandle,
+    pending: PendingRemoteRequest,
+    mut connection_generation: watch::Receiver<u64>,
+) -> BoxFuture<'static, (PendingRemoteRequest, Result<JsonValue, RpcError>)> {
+    Box::pin(async move {
+        // A cancelled caller does not cancel a dispatched wire request. Keep its
+        // capacity slot until completion or retirement of the owning connection.
+        let result = tokio::select! {
+            biased;
+            _ = connection_generation.wait_for(|generation| *generation != pending.generation) =>
+                Err(RpcError::Transport(TransportError::Disconnected)),
+            result = request_remote_client(&client, pending.request.clone(), remaining_request_deadline(pending.deadline)) => result,
+        };
+        (pending, result)
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the worker owns independent runtime channels and reconnect resources that must move into one spawned task"
@@ -2328,8 +2368,41 @@ fn spawn_remote_runtime_worker(
     tokio::spawn(async move {
         let mut keepalive: Option<Arc<dyn SessionKeepalive>> = initial_keepalive;
         let mut reconnect_generation = 0_u64;
+        let (connection_generation_tx, _) = watch::channel(reconnect_generation);
+        let mut pending_requests: FuturesUnordered<
+            BoxFuture<'static, (PendingRemoteRequest, Result<JsonValue, RpcError>)>,
+        > = FuturesUnordered::new();
         loop {
             tokio::select! {
+                completed = pending_requests.next(), if !pending_requests.is_empty() => {
+                    let Some((mut pending, mut result)) = completed else { continue; };
+                    let stale_transport = pending.generation != *connection_generation_tx.borrow();
+                    if matches!(result, Err(RpcError::Transport(_))) || stale_transport {
+                        let mut connected = stale_transport;
+                        if !stale_transport {
+                            reconnect_generation = reconnect_generation.saturating_add(1);
+                            if let Some(replay_outcome) = reconnect_remote_client(
+                                &mut client, &mut keepalive, &reconnect_args, &reconnect_url,
+                                &health, &timeline, &runtime_kind, ConnectionTrigger::RequestTransportError,
+                                reconnect_generation, reconnect_transport.as_ref(),
+                            ).await {
+                                connection_generation_tx.send_replace(reconnect_generation);
+                                emit_transport_reconnected(&event_tx, &runtime_kind, reconnect_generation, replay_outcome);
+                                connected = true;
+                            }
+                        }
+                        if connected && pending.retry_allowed && !pending.response_tx.is_closed() && request_is_safe_to_replay_after_transport_error(&pending.request) {
+                            pending.generation = *connection_generation_tx.borrow();
+                            pending.retry_allowed = false;
+                            pending_requests.push(poll_remote_request(client.request_handle(), pending, connection_generation_tx.subscribe()));
+                            continue;
+                        }
+                        if stale_transport && result.is_ok() {
+                            result = Err(RpcError::Transport(TransportError::Disconnected));
+                        }
+                    }
+                    let _ = pending.response_tx.send(result);
+                }
                 command = command_rx.recv() => {
                     let Some(command) = command else { break; };
                     match command {
@@ -2338,9 +2411,16 @@ fn spawn_remote_runtime_worker(
                             turn_deadline,
                             response_tx,
                         } => {
-                            let request_retry = request.clone();
-                            let safe_to_replay =
-                                request_is_safe_to_replay_after_transport_error(&request);
+                            if response_tx.is_closed() {
+                                continue;
+                            }
+                            if pending_requests.len() >= REMOTE_MAX_IN_FLIGHT_REQUESTS {
+                                let _ = response_tx.send(Err(RpcError::Server {
+                                    code: -32000,
+                                    message: "session request capacity reached before dispatch".to_string(),
+                                }));
+                                continue;
+                            }
                             if turn_deadline
                                 .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
                             {
@@ -2354,45 +2434,10 @@ fn spawn_remote_runtime_worker(
                                 turn_deadline,
                                 non_turn_request_deadline,
                             );
-                            let mut result = request_remote_client(
-                                &client,
-                                request,
-                                remaining_request_deadline(request_deadline),
-                            )
-                            .await;
-                            if matches!(result, Err(RpcError::Transport(_))) {
-                                reconnect_generation = reconnect_generation.saturating_add(1);
-                                if let Some(replay_outcome) = reconnect_remote_client(
-                                    &mut client,
-                                    &mut keepalive,
-                                    &reconnect_args,
-                                    &reconnect_url,
-                                    &health,
-                                    &timeline,
-                                    &runtime_kind,
-                                    ConnectionTrigger::RequestTransportError,
-                                    reconnect_generation,
-                                    reconnect_transport.as_ref(),
-                                )
-                                .await
-                                {
-                                    emit_transport_reconnected(
-                                        &event_tx,
-                                        &runtime_kind,
-                                        reconnect_generation,
-                                        replay_outcome,
-                                    );
-                                    if safe_to_replay {
-                                        result = request_remote_client(
-                                            &client,
-                                            request_retry,
-                                            remaining_request_deadline(request_deadline),
-                                        )
-                                        .await;
-                                    }
-                                }
-                            }
-                            let _ = response_tx.send(result);
+                            pending_requests.push(poll_remote_request(client.request_handle(), PendingRemoteRequest {
+                                request, deadline: request_deadline, response_tx,
+                                generation: *connection_generation_tx.borrow(), retry_allowed: true,
+                            }, connection_generation_tx.subscribe()));
                         }
                         SessionCommand::Notify { notification, response_tx } => {
                             let result = client.notify(notification).await.map_err(|error| {
@@ -2444,6 +2489,7 @@ fn spawn_remote_runtime_worker(
                             reconnect_transport.as_ref(),
                         )
                         .await {
+                            connection_generation_tx.send_replace(reconnect_generation);
                             emit_transport_reconnected(
                                 &event_tx,
                                 &runtime_kind,
@@ -2469,6 +2515,7 @@ fn spawn_remote_runtime_worker(
                             reconnect_transport.as_ref(),
                         )
                         .await {
+                            connection_generation_tx.send_replace(reconnect_generation);
                             emit_transport_reconnected(
                                 &event_tx,
                                 &runtime_kind,
@@ -2541,6 +2588,9 @@ fn route_app_server_event(
         }
         AppServerEvent::Lagged { skipped } => {
             warn!("event: lagged, skipped {skipped} events");
+            let _ = event_tx.send(ServerEvent::EventsLost {
+                skipped: *skipped as u64,
+            });
         }
         AppServerEvent::Disconnected { message } => {
             warn!("event: disconnected: {message}");
@@ -2571,12 +2621,19 @@ fn route_in_process_event(
         }
         InProcessServerEvent::Lagged { skipped } => {
             warn!("in-process event: lagged, skipped {skipped} events");
+            let _ = event_tx.send(ServerEvent::EventsLost {
+                skipped: skipped as u64,
+            });
         }
     }
 }
 
 #[cfg(test)]
 impl ServerSession {
+    pub(crate) fn test_publish_event(&self, event: ServerEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
     pub(crate) fn test_stub(config: ServerConfig) -> Self {
         Self::test_stub_with_handlers(config, None, None, None)
     }
@@ -2686,6 +2743,18 @@ impl ServerSession {
             worker_handle,
         }
     }
+
+    pub(crate) fn test_stub_with_runtime_resolve_handlers(
+        config: ServerConfig,
+        handlers: Vec<(AgentRuntimeKind, TestResolveHandler)>,
+    ) -> Self {
+        let mut session = Self::test_stub(config);
+        for (runtime, handler) in handlers {
+            let (tx, _) = spawn_test_command_worker(None, Some(handler), None);
+            session.runtime_command_txs.insert(runtime, tx);
+        }
+        session
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2700,12 +2769,6 @@ fn json_value_to_request_id(value: &JsonValue) -> Result<RequestId, RpcError> {
             "invalid request id type".to_string(),
         )),
     }
-}
-
-fn next_request_id() -> i64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static COUNTER: AtomicI64 = AtomicI64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -2755,6 +2818,11 @@ mod tests {
         DropOnFirstRequest,
         NeverRespond,
         NeverRespondAfterNotifying(Arc<tokio::sync::Notify>),
+        HoldRequestWhileServingControl(oneshot::Sender<()>),
+        TrackHeldRequests {
+            requests_seen: mpsc::UnboundedSender<JsonValue>,
+            closed: oneshot::Sender<()>,
+        },
         Respond(JsonValue),
     }
 
@@ -2787,6 +2855,46 @@ mod tests {
             let _ = lines.next_line().await;
 
             match behavior {
+                TestJsonLineServer::TrackHeldRequests {
+                    requests_seen,
+                    closed,
+                } => {
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let request = serde_json::from_str(&line).unwrap();
+                        let _ = requests_seen.send(request);
+                    }
+                    let _ = closed.send(());
+                }
+                TestJsonLineServer::HoldRequestWhileServingControl(approval_seen) => {
+                    let _ = lines.next_line().await;
+                    let notification = json!({ "jsonrpc": "2.0", "method": "thread/name/updated",
+                        "params": { "threadId": "thread", "threadName": "stream progressed" } });
+                    let approval = json!({ "jsonrpc": "2.0", "id": "approval",
+                        "method": "item/commandExecution/requestApproval", "params": {
+                            "threadId": "thread", "turnId": "turn", "itemId": "item"
+                        } });
+                    writer
+                        .write_all(format!("{notification}\n{approval}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    writer.flush().await.unwrap();
+                    let mut approval_seen = Some(approval_seen);
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let message: JsonValue = serde_json::from_str(&line).unwrap();
+                        if message["id"] == "approval" && message.get("result").is_some() {
+                            if let Some(sender) = approval_seen.take() {
+                                let _ = sender.send(());
+                            }
+                        } else if let Some(id) = message.get("id") {
+                            let response = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
+                            writer
+                                .write_all(format!("{response}\n").as_bytes())
+                                .await
+                                .unwrap();
+                            writer.flush().await.unwrap();
+                        }
+                    }
+                }
                 TestJsonLineServer::DropOnFirstRequest => {
                     // Consume one request and then close the stream without a
                     // response, simulating the app-server process/bridge dying
@@ -2958,6 +3066,397 @@ mod tests {
             Some(ReplayOutcome::AuthoritativeRefreshRequired)
         );
         assert_eq!(*health_rx.borrow(), ConnectionHealth::Connected);
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_polls_events_and_controls_while_request_is_held() {
+        for cancel_request in [false, true] {
+            let (approval_seen_tx, approval_seen_rx) = oneshot::channel();
+            let client = app_server_client_for_json_line_server(
+                TestJsonLineServer::HoldRequestWhileServingControl(approval_seen_tx),
+                "held-control",
+            )
+            .await;
+            let (command_tx, command_rx) = mpsc::channel(4);
+            let (event_tx, mut event_rx) = broadcast::channel(8);
+            let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+            let worker = spawn_remote_runtime_worker(
+                "codex".to_string(),
+                client,
+                None,
+                command_rx,
+                event_tx,
+                RuntimeHealthReporter {
+                    runtime_kind: "codex".to_string(),
+                    state: Arc::new(StdMutex::new(RuntimeHealthState {
+                        by_runtime: HashMap::from([(
+                            "codex".to_string(),
+                            ConnectionHealth::Connected,
+                        )]),
+                        generation: 0,
+                        cold_repair_claimed: false,
+                    })),
+                    session_health_tx: health_tx,
+                },
+                ConnectionTimeline::default(),
+                test_remote_args("held-control"),
+                "held-control".to_string(),
+                REMOTE_NON_TURN_REQUEST_DEADLINE,
+                None,
+            );
+            let (response_tx, response_rx) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::Request {
+                    request: serde_json::from_value(json!({"id": 1, "method": "command/exec",
+                    "params": {"command": ["held"], "disableTimeout": true}}))
+                    .unwrap(),
+                    turn_deadline: None,
+                    response_tx,
+                })
+                .await
+                .unwrap();
+            let notification = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(notification, ServerEvent::Notification { .. }));
+            let request = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(request, ServerEvent::Request { .. }));
+            let mut response_rx = Some(response_rx);
+            if cancel_request {
+                drop(response_rx.take());
+            }
+            let (response_tx, resolved) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::Resolve {
+                    request_id: RequestId::String("approval".to_string()),
+                    result: json!({"decision": "accept"}),
+                    response_tx,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), resolved)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), approval_seen_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let (response_tx, second_response) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::Request {
+                    request: serde_json::from_value(
+                        json!({"id": 2, "method": "model/list", "params": {}}),
+                    )
+                    .unwrap(),
+                    turn_deadline: None,
+                    response_tx,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), second_response)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            command_tx.send(SessionCommand::Shutdown).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(response_rx) = response_rx {
+                assert!(response_rx.await.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_event_loss_is_forwarded_from_remote_and_in_process_routes() {
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let health = RuntimeHealthReporter {
+            runtime_kind: "codex".to_string(),
+            state: Arc::new(StdMutex::new(RuntimeHealthState {
+                by_runtime: HashMap::new(),
+                generation: 0,
+                cold_repair_claimed: false,
+            })),
+            session_health_tx: health_tx,
+        };
+        route_app_server_event(
+            &event_tx,
+            &health,
+            "codex".to_string(),
+            &AppServerEvent::Lagged { skipped: 7 },
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            ServerEvent::EventsLost { skipped: 7 }
+        ));
+        route_in_process_event(
+            &event_tx,
+            codex_app_server::in_process::InProcessServerEvent::Lagged { skipped: 9 },
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            ServerEvent::EventsLost { skipped: 9 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_bounds_outstanding_requests_and_still_shuts_down() {
+        let client = app_server_client_for_json_line_server(
+            TestJsonLineServer::NeverRespond,
+            "bounded-requests",
+        )
+        .await;
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: Arc::new(StdMutex::new(RuntimeHealthState {
+                    by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+                    generation: 0,
+                    cold_repair_claimed: false,
+                })),
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("bounded-requests"),
+            "bounded-requests".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
+            None,
+        );
+        let mut responses = Vec::new();
+        for id in 0..=REMOTE_MAX_IN_FLIGHT_REQUESTS {
+            let (response_tx, response_rx) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::Request {
+                    request: serde_json::from_value(
+                        json!({"id": id, "method": "model/list", "params": {}}),
+                    )
+                    .unwrap(),
+                    turn_deadline: None,
+                    response_tx,
+                })
+                .await
+                .unwrap();
+            responses.push(response_rx);
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), responses.pop().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, RpcError::Server { code: -32000, .. }));
+        command_tx.send(SessionCommand::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        for response in responses {
+            assert!(response.await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_counts_cancelled_dispatched_requests_until_retirement() {
+        let (requests_seen, mut requests) = mpsc::unbounded_channel();
+        let (closed, closed_rx) = oneshot::channel();
+        let client = app_server_client_for_json_line_server(
+            TestJsonLineServer::TrackHeldRequests {
+                requests_seen,
+                closed,
+            },
+            "cancelled-capacity",
+        )
+        .await;
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: Arc::new(StdMutex::new(RuntimeHealthState {
+                    by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+                    generation: 0,
+                    cold_repair_claimed: false,
+                })),
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("cancelled-capacity"),
+            "cancelled-capacity".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
+            None,
+        );
+        for id in 0..REMOTE_MAX_IN_FLIGHT_REQUESTS {
+            let (response_tx, response_rx) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::Request {
+                    request: serde_json::from_value(json!({"id": id, "method": "command/exec",
+                    "params": {"command": ["held"], "disableTimeout": true}}))
+                    .unwrap(),
+                    turn_deadline: None,
+                    response_tx,
+                })
+                .await
+                .unwrap();
+            let dispatched = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(dispatched["id"], json!(id));
+            drop(response_rx);
+        }
+        let (response_tx, response_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request: serde_json::from_value(
+                    json!({"id": 99, "method": "model/list", "params": {}}),
+                )
+                .unwrap(),
+                turn_deadline: None,
+                response_tx,
+            })
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), response_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, RpcError::Server { code: -32000, .. }));
+        assert!(requests.try_recv().is_err());
+        command_tx.send(SessionCommand::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_worker_retires_timeout_disabled_requests_after_reconnect() {
+        let (requests_seen, mut requests) = mpsc::unbounded_channel();
+        let (closed, closed_rx) = oneshot::channel();
+        let client = app_server_client_for_json_line_server(
+            TestJsonLineServer::TrackHeldRequests {
+                requests_seen,
+                closed,
+            },
+            "retire-held",
+        )
+        .await;
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _) = broadcast::channel(4);
+        let (health_tx, _) = watch::channel(ConnectionHealth::Connected);
+        let worker = spawn_remote_runtime_worker(
+            "codex".to_string(),
+            client,
+            None,
+            command_rx,
+            event_tx,
+            RuntimeHealthReporter {
+                runtime_kind: "codex".to_string(),
+                state: Arc::new(StdMutex::new(RuntimeHealthState {
+                    by_runtime: HashMap::from([("codex".to_string(), ConnectionHealth::Connected)]),
+                    generation: 0,
+                    cold_repair_claimed: false,
+                })),
+                session_health_tx: health_tx,
+            },
+            ConnectionTimeline::default(),
+            test_remote_args("retire-held"),
+            "retire-held".to_string(),
+            REMOTE_NON_TURN_REQUEST_DEADLINE,
+            Some(Arc::new(TestReconnectTransport {
+                reconnects: Arc::clone(&reconnects),
+            })),
+        );
+        let (response_tx, held_response) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request: serde_json::from_value(json!({"id": 1, "method": "command/exec",
+                "params": {"command": ["held"], "disableTimeout": true}}))
+                .unwrap(),
+                turn_deadline: None,
+                response_tx,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (response_tx, trigger_response) = oneshot::channel();
+        command_tx.send(SessionCommand::Request {
+            request: serde_json::from_value(json!({"id": 2, "method": "turn/start", "params": {
+                "threadId": "thread", "input": [{"type": "text", "text": "once", "textElements": []}]
+            }})).unwrap(),
+            turn_deadline: Some(tokio::time::Instant::now() + Duration::from_millis(50)), response_tx,
+        }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        for response in [trigger_response, held_response] {
+            let error = tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(matches!(error, RpcError::Transport(_)));
+        }
+        tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
+        let (response_tx, response_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Request {
+                request: serde_json::from_value(
+                    json!({"id": 3, "method": "model/list", "params": {}}),
+                )
+                .unwrap(),
+                turn_deadline: None,
+                response_tx,
+            })
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), response_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, json!({"source": "reconnected"}));
+        command_tx.send(SessionCommand::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3926,12 +4425,14 @@ mod tests {
     }
 
     #[test]
-    fn next_request_id_is_monotonic() {
+    fn session_and_direct_request_ids_share_one_sequence() {
         let a = next_request_id();
-        let b = next_request_id();
+        let b = crate::next_request_id();
         let c = next_request_id();
+        let d = crate::next_request_id();
         assert!(b > a);
         assert!(c > b);
+        assert!(d > c);
     }
 
     #[test]

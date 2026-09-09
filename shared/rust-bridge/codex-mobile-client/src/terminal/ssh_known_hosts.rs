@@ -146,10 +146,10 @@ impl TerminalSshTrustStore {
 pub(crate) fn normalize_host(host: &str) -> String {
     let mut value = host.trim().trim_matches('[').trim_matches(']').to_string();
     value = value.replace("%25", "%");
-    if !value.contains(':') {
-        if let Some(idx) = value.find('%') {
-            value.truncate(idx);
-        }
+    if !value.contains(':')
+        && let Some(idx) = value.find('%')
+    {
+        value.truncate(idx);
     }
     value.to_lowercase()
 }

@@ -3,7 +3,7 @@
 //! Reuses [`crate::ssh::SshClient`] for the TCP/handshake/auth phase, then
 //! allocates a single session channel for an interactive PTY shell. Inbound
 //! `ChannelMsg::Data` / `ExtendedData{ext:1}` is forwarded to the renderer
-//! as terminal bytes; `ExitStatus` and `Close` end the stream.
+//! as terminal bytes; `ExitStatus` records the result and `Close` ends the stream.
 //!
 //! `russh::Channel` is `!Sync`, so the channel itself never crosses an
 //! `await` boundary held by the backend. Instead, the open path spawns a
@@ -62,23 +62,13 @@ enum TerminalControl {
 }
 
 pub(crate) async fn open(
-    host: String,
-    port: u16,
-    username: String,
-    auth: TerminalSshAuth,
+    credentials: SshCredentials,
     shell: Option<String>,
     accept_unknown_host: bool,
     cwd: Option<String>,
     size: TerminalSize,
     trust_store: Option<Arc<TerminalSshTrustStore>>,
 ) -> Result<OpenBackendResult, TerminalError> {
-    let credentials = SshCredentials {
-        host: host.clone(),
-        port,
-        username,
-        auth: auth.into_ssh_auth(),
-        unlock_macos_keychain: false,
-    };
     // Same shared policy the app-server SSH paths use, including the
     // trust-on-first-use serialization and the compare-and-set that records
     // the pin only after authentication succeeds. The terminal owns a per-open
@@ -217,7 +207,9 @@ async fn drive_channel(
                     Some(ChannelMsg::ExitSignal { .. }) => {
                         exit_code = Some(exit_code.unwrap_or(-1));
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    // EOF ends data, not the channel; exit-status can follow it.
+                    Some(ChannelMsg::Eof) => {}
+                    Some(ChannelMsg::Close) | None => break,
                     _ => {}
                 }
             }
@@ -337,18 +329,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_unknown_host_false_rejects_first_connect() {
-        // Without a live target, this test verifies the policy-mapping path
-        // by routing through an unreachable host. We expect a connect-failed
-        // path, which proves the host_key_callback closure compiles and the
-        // SshCredentials shape matches. The specific connect-failure detail
-        // text is environment-dependent and isn't asserted here.
+    async fn unreachable_ssh_endpoint_returns_error() {
         let result = open(
-            "127.0.0.1".to_string(),
-            1,
-            "nobody".to_string(),
-            TerminalSshAuth::Password {
-                password: "x".to_string(),
+            SshCredentials {
+                host: "127.0.0.1".to_string(),
+                port: 1,
+                username: "nobody".to_string(),
+                auth: SshAuth::Password("x".to_string()),
+                unlock_macos_keychain: false,
             },
             None,
             false,
@@ -363,10 +351,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a live SSH host; set REMORA_TERMINAL_LIVE_SSH=user:password@host:port"]
     async fn live_remote_ssh_terminal_round_trips_shell_io() {
-        let Some((host, port, username, auth)) = parse_live_target() else {
-            eprintln!("skipping: REMORA_TERMINAL_LIVE_SSH is not set");
-            return;
-        };
+        let (host, port, username, auth) = parse_live_target().expect(
+            "live SSH verification requires REMORA_TERMINAL_LIVE_SSH=user:password@host:port",
+        );
 
         let session = TerminalSession::open(
             TerminalBackendKind::RemoteSsh {
@@ -406,7 +393,7 @@ mod tests {
         }));
 
         session
-            .write_input(b"printf 'remote-ssh-ready\\n'; stty size; exit 0\n".to_vec())
+            .write_input(b"printf 'remote-ssh-ready\\n'; stty size\n".to_vec())
             .await
             .expect("write shell input");
 
@@ -423,6 +410,18 @@ mod tests {
             }
         }
 
+        session
+            .resize(TerminalSize {
+                cols: 101,
+                rows: 43,
+            })
+            .await
+            .expect("resize SSH terminal");
+        session
+            .write_input(b"stty size; exit 17\n".to_vec())
+            .await
+            .expect("write resized shell input");
+
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if !exits.lock().unwrap().is_empty() {
@@ -434,6 +433,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
+        assert!(String::from_utf8_lossy(&bytes.lock().unwrap()).contains("43 101"));
+        assert_eq!(*exits.lock().unwrap(), vec![17]);
         session.close_session().await.ok();
     }
 }

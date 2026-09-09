@@ -77,6 +77,7 @@ final class AppModel {
     let ssh: SshBridge
     let reconnectController: ReconnectController
     let chromeObservation = AppModelChromeObservation()
+    let composerRecovery = ComposerRecoveryStore()
     let navigationObservation = AppModelNavigationObservation()
     let settingsObservation = AppModelSettingsObservation()
 
@@ -1622,12 +1623,6 @@ final class AppModel {
             if attempt + 1 < maxAttempts {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-        }
-
-        if let activeKey = snapshot?.activeThread,
-           activeKey.serverId == currentKey.serverId,
-           threadSnapshot(for: activeKey) != nil {
-            return activeKey
         }
 
         return nil

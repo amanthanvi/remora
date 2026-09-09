@@ -7,7 +7,9 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.remora.android.BuildConfig
+import com.remora.android.state.AndroidRelayRuntime
 import com.remora.android.util.LLog
+import java.util.concurrent.TimeUnit
 
 /**
  * Data-only FCM ingress. No notification channel, action, approval, deep link,
@@ -16,27 +18,23 @@ import com.remora.android.util.LLog
 @SuppressLint("MissingFirebaseInstanceTokenRefresh")
 class RemoraFirebaseMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) {
-        runCatching {
-            PushRegistrationStore(applicationContext).recordRegistered(
-                providerRegistrationId = installationId,
-                nowMs = System.currentTimeMillis(),
-            )
-            BackgroundAwarenessWork.enqueueRegistrationSync(applicationContext)
-        }.onFailure {
+        val bytes = installationId.toByteArray(Charsets.UTF_8)
+        try {
+            AndroidRelayRuntime.get(applicationContext).tokenInputs.registered(bytes)
+            BackgroundAwarenessWork.enqueueRegistrationSync(applicationContext).result.get(5, TimeUnit.SECONDS)
+        } catch (_: Exception) {
             LLog.w(TAG, "FCM registration persistence failed")
-        }
+        } finally { bytes.fill(0) }
     }
 
     override fun onUnregistered(installationId: String) {
-        runCatching {
-            PushRegistrationStore(applicationContext).recordUnregistered(
-                providerRegistrationId = installationId,
-                nowMs = System.currentTimeMillis(),
-            )
-            BackgroundAwarenessWork.enqueueRegistrationSync(applicationContext)
-        }.onFailure {
+        val bytes = installationId.toByteArray(Charsets.UTF_8)
+        try {
+            AndroidRelayRuntime.get(applicationContext).tokenInputs.unregistered(bytes)
+            BackgroundAwarenessWork.enqueueRegistrationSync(applicationContext).result.get(5, TimeUnit.SECONDS)
+        } catch (_: Exception) {
             LLog.w(TAG, "FCM registration tombstone persistence failed")
-        }
+        } finally { bytes.fill(0) }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -47,10 +45,7 @@ class RemoraFirebaseMessagingService : FirebaseMessagingService() {
         val decoded = OpaqueWakeHintDecoder.decode(message.data)
         if (decoded !is OpaqueWakeDecodeResult.Accepted) return
         runCatching {
-            val outcome = WakeLedger(applicationContext).ingest(decoded.hint)
-            if (outcome == WakeIngestOutcome.ACCEPTED) {
-                BackgroundAwarenessWork.enqueueReconciliation(applicationContext)
-            }
+            BackgroundAwarenessWork.enqueueReconciliation(applicationContext, message.data).result.get(5, TimeUnit.SECONDS)
         }.onFailure {
             LLog.w(TAG, "Opaque wake persistence failed")
         }
@@ -58,8 +53,7 @@ class RemoraFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onDeletedMessages() {
         runCatching {
-            WakeLedger(applicationContext).requestFullRepair()
-            BackgroundAwarenessWork.enqueueReconciliation(applicationContext)
+            BackgroundAwarenessWork.enqueueReconciliation(applicationContext).result.get(5, TimeUnit.SECONDS)
         }.onFailure {
             LLog.w(TAG, "FCM deletion repair scheduling failed")
         }

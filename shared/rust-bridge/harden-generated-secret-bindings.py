@@ -927,34 +927,6 @@ public struct FfiConverterTypeAppRelaySecretValue: FfiConverter"""
             cancellable_method,
             f"Swift {method} cancellable future",
         )
-    source = replace_once(
-        source,
-        """open func backgroundRelayStageEnrollment(hostId: String, relayOrigin: String, installationId: String, commandId: String, readCapability: AppRelaySecretValue, manageCapability: AppRelaySecretValue)async throws   {
-    return
-""",
-        """open func backgroundRelayStageEnrollment(hostId: String, relayOrigin: String, installationId: String, commandId: String, readCapability: AppRelaySecretValue, manageCapability: AppRelaySecretValue)async throws   {
-    let manageCapabilityForLowering: AppRelaySecretValue
-    if manageCapability === readCapability {
-        manageCapabilityForLowering = manageCapability.withUnsafeBytes {
-            AppRelaySecretValue(copying: $0)
-        }
-    } else {
-        manageCapabilityForLowering = manageCapability
-    }
-    defer {
-        readCapability.zeroize()
-        manageCapabilityForLowering.zeroize()
-    }
-    return
-""",
-        "Swift aliased enrollment secret preparation",
-    )
-    source = replace_once(
-        source,
-        "FfiConverterTypeAppRelaySecretValue_lower(readCapability),FfiConverterTypeAppRelaySecretValue_lower(manageCapability)",
-        "FfiConverterTypeAppRelaySecretValue_lower(readCapability),FfiConverterTypeAppRelaySecretValue_lower(manageCapabilityForLowering)",
-        "Swift aliased enrollment secret lowering",
-    )
     secret_result_callback = """            let uniffiHandleSuccess = { (returnValue: AppRelaySecretValue) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
@@ -1128,13 +1100,13 @@ public struct FfiConverterTypeAppRelaySecretValue: FfiConverter"""
     require_exact(
         source,
         "readCapability: AppRelaySecretValue",
-        2,
+        0,
         "Swift direct enrollment read-capability argument",
     )
     require_exact(
         source,
         "manageCapability: AppRelaySecretValue",
-        2,
+        0,
         "Swift direct enrollment manage-capability argument",
     )
     require_exact(
@@ -2093,54 +2065,6 @@ public object FfiConverterTypeAppRemoraLinkPairingCode: FfiConverterRustBuffer<A
     )
     source = replace_once(
         source,
-        """    override suspend fun `backgroundRelayStageEnrollment`(`hostId`: kotlin.String, `relayOrigin`: kotlin.String, `installationId`: kotlin.String, `commandId`: kotlin.String, `readCapability`: AppRelaySecretValue, `manageCapability`: AppRelaySecretValue) {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_codex_mobile_client_fn_method_appclient_background_relay_stage_enrollment(
-                uniffiHandle,
-                FfiConverterString.lower(`hostId`),FfiConverterString.lower(`relayOrigin`),FfiConverterString.lower(`installationId`),FfiConverterString.lower(`commandId`),FfiConverterTypeAppRelaySecretValue.lower(`readCapability`),FfiConverterTypeAppRelaySecretValue.lower(`manageCapability`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_poll_void(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_complete_void(future, continuation) },
-        { future -> UniffiLib.ffi_codex_mobile_client_rust_future_free_void(future) },
-        // lift function
-        { Unit },
-        \n        // Error FFI converter
-        BackgroundRelayException.ErrorHandler,
-    )
-    }
-""",
-        """    override suspend fun `backgroundRelayStageEnrollment`(`hostId`: kotlin.String, `relayOrigin`: kotlin.String, `installationId`: kotlin.String, `commandId`: kotlin.String, `readCapability`: AppRelaySecretValue, `manageCapability`: AppRelaySecretValue) {
-        val manageCapabilityForLowering =
-            if (`manageCapability` === `readCapability`) `manageCapability`.copyOf()
-            else `manageCapability`
-        try {
-            return uniffiRustCallAsync(
-            callWithHandle { uniffiHandle ->
-                UniffiLib.uniffi_codex_mobile_client_fn_method_appclient_background_relay_stage_enrollment(
-                    uniffiHandle,
-                    FfiConverterString.lower(`hostId`),FfiConverterString.lower(`relayOrigin`),FfiConverterString.lower(`installationId`),FfiConverterString.lower(`commandId`),FfiConverterTypeAppRelaySecretValue.lower(`readCapability`),FfiConverterTypeAppRelaySecretValue.lower(manageCapabilityForLowering),
-                )
-            },
-            { future, callback, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_poll_void(future, callback, continuation) },
-            { future, continuation -> UniffiLib.ffi_codex_mobile_client_rust_future_complete_void(future, continuation) },
-            { future -> UniffiLib.ffi_codex_mobile_client_rust_future_free_void(future) },
-            // lift function
-            { Unit },
-            \n            // Error FFI converter
-            BackgroundRelayException.ErrorHandler,
-        )
-        } finally {
-            `readCapability`.fill(0)
-            manageCapabilityForLowering.fill(0)
-        }
-    }
-""",
-        "Kotlin aliased enrollment secret lowering",
-    )
-    source = replace_once(
-        source,
         """internal inline fun<T> uniffiTraitInterfaceCallAsync(
     crossinline makeCall: suspend () -> T,
     crossinline handleSuccess: (T) -> Unit,
@@ -2558,13 +2482,13 @@ internal val uniffiForeignFutureHandleMap = UniffiHandleMap<Job>()
     require_exact(
         source,
         "`readCapability`: AppRelaySecretValue",
-        2,
+        0,
         "Kotlin direct enrollment read-capability argument",
     )
     require_exact(
         source,
         "`manageCapability`: AppRelaySecretValue",
-        2,
+        0,
         "Kotlin direct enrollment manage-capability argument",
     )
     require_exact(

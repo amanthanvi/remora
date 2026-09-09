@@ -14,6 +14,11 @@ struct LagRefreshFence<'a> {
     session: &'a Arc<ServerSession>,
 }
 
+struct ThreadHistoryFence<'a> {
+    epoch: &'a Arc<()>,
+    session: &'a Arc<ServerSession>,
+}
+
 fn reconcile_completed_turn_probe(
     existing: &ThreadSnapshot,
     turns: &[upstream::Turn],
@@ -432,7 +437,6 @@ impl MobileClient {
             match self
                 .resume_thread_for_runtime(
                     server_id,
-                    thread_id,
                     &key,
                     runtime_kind.clone(),
                     exclude_turns,
@@ -448,8 +452,7 @@ impl MobileClient {
                         self.pending_turn_reconciliation().contains_key(&key);
                     if supports_pagination
                         && (force_authoritative || ambiguous_reconciliation_pending)
-                    {
-                        if !self
+                        && !self
                             .reconcile_active_turn_via_turn_list_probe(
                                 server_id,
                                 thread_id,
@@ -458,9 +461,8 @@ impl MobileClient {
                                 lag_fence.as_ref(),
                             )
                             .await?
-                        {
-                            return Ok(false);
-                        }
+                    {
+                        return Ok(false);
                     }
                     return Ok(true);
                 }
@@ -537,12 +539,37 @@ impl MobileClient {
     async fn resume_thread_for_runtime(
         &self,
         server_id: &str,
-        thread_id: &str,
         key: &ThreadKey,
         runtime_kind: AgentRuntimeKind,
         exclude_turns: bool,
         lag_fence: Option<&LagRefreshFence<'_>>,
     ) -> Result<bool, RpcError> {
+        let session = self.get_session(server_id)?;
+        let epoch = self.app_store.thread_history_epoch(key);
+        let history_fence = epoch.as_ref().map(|epoch| ThreadHistoryFence {
+            epoch,
+            session: &session,
+        });
+        self.resume_thread_for_runtime_fenced(
+            key,
+            runtime_kind,
+            exclude_turns,
+            lag_fence,
+            history_fence.as_ref(),
+        )
+        .await
+    }
+
+    async fn resume_thread_for_runtime_fenced(
+        &self,
+        key: &ThreadKey,
+        runtime_kind: AgentRuntimeKind,
+        exclude_turns: bool,
+        lag_fence: Option<&LagRefreshFence<'_>>,
+        history_fence: Option<&ThreadHistoryFence<'_>>,
+    ) -> Result<bool, RpcError> {
+        let server_id = key.server_id.as_str();
+        let thread_id = key.thread_id.as_str();
         // Use thread/resume (not thread/read) so the server attaches a
         // conversation listener for this connection. Without the listener
         // the WebSocket client only receives ThreadStatusChanged — no
@@ -556,13 +583,24 @@ impl MobileClient {
                 ..Default::default()
             },
         };
-        let (response, request_session) = self
-            .request_typed_for_server_runtime_with_session::<upstream::ThreadResumeResponse>(
+        let (response, request_session) = if let Some(fence) = history_fence {
+            let response = self
+                .request_typed_for_session_runtime_rpc::<upstream::ThreadResumeResponse>(
+                    server_id,
+                    Arc::clone(fence.session),
+                    runtime_kind.clone(),
+                    resume_request,
+                )
+                .await?;
+            (response, Arc::clone(fence.session))
+        } else {
+            self.request_typed_for_server_runtime_with_session::<upstream::ThreadResumeResponse>(
                 server_id,
                 runtime_kind.clone(),
                 resume_request,
             )
-            .await?;
+            .await?
+        };
         let turns = response.thread.turns.clone();
         let server_honored_exclude_turns = exclude_turns && turns.is_empty();
         // Legacy v0.124 remotes ignore `exclude_turns` and return the
@@ -728,8 +766,17 @@ impl MobileClient {
             }
         };
         let applied = self
-            .apply_if_refresh_current(server_id, &request_session, lag_fence, apply_response)
-            .is_some();
+            .apply_if_refresh_current(server_id, &request_session, lag_fence, |store| {
+                if let Some(fence) = history_fence {
+                    store
+                        .apply_if_thread_history_current(key, fence.epoch, || apply_response(store))
+                        .is_some()
+                } else {
+                    apply_response(store);
+                    true
+                }
+            })
+            .unwrap_or(false);
         Ok(applied)
     }
 
@@ -766,6 +813,9 @@ impl MobileClient {
             },
         };
         let probe_session = self.get_session(server_id)?;
+        let Some(history_epoch) = self.app_store.thread_history_epoch(key) else {
+            return Ok(false);
+        };
         let response = match self
             .request_typed_for_session_runtime_rpc::<upstream::ThreadTurnsListResponse>(
                 server_id,
@@ -782,27 +832,29 @@ impl MobileClient {
                     // implement the lightweight turn-list probe. Fall back to
                     // one embedded-turn resume so reconcile_active_turn can
                     // still clear a stale active turn after mobile reconnects.
-                    if runtime_kind == "codex" {
-                        if self
-                            .apply_if_refresh_current(
-                                server_id,
-                                &probe_session,
-                                lag_fence,
-                                |store| store.set_server_supports_turn_pagination(server_id, false),
-                            )
-                            .is_none()
-                        {
-                            return Ok(false);
-                        }
+                    let current = self
+                        .apply_if_refresh_current(server_id, &probe_session, lag_fence, |store| {
+                            store.apply_if_thread_history_current(key, &history_epoch, || {
+                                if runtime_kind == "codex" {
+                                    store.set_server_supports_turn_pagination(server_id, false);
+                                }
+                            })
+                        })
+                        .flatten()
+                        .is_some();
+                    if !current {
+                        return Ok(false);
                     }
                     return self
-                        .resume_thread_for_runtime(
-                            server_id,
-                            thread_id,
+                        .resume_thread_for_runtime_fenced(
                             key,
                             runtime_kind.clone(),
                             false,
                             lag_fence,
+                            Some(&ThreadHistoryFence {
+                                epoch: &history_epoch,
+                                session: &probe_session,
+                            }),
                         )
                         .await;
                 }
@@ -1044,7 +1096,10 @@ impl MobileClient {
             true
         };
         Ok(self
-            .apply_if_refresh_current(server_id, &probe_session, lag_fence, apply_response)
+            .apply_if_refresh_current(server_id, &probe_session, lag_fence, |store| {
+                store.apply_if_thread_history_current(key, &history_epoch, || apply_response(store))
+            })
+            .flatten()
             .unwrap_or(false))
     }
 
@@ -1077,17 +1132,30 @@ impl MobileClient {
                 .is_none_or(|thread| thread.items.is_empty() && !thread.initial_turns_loaded);
             if needs_embedded_resume {
                 let runtime_kind = self.runtime_for_thread(&key);
-                self.resume_thread_for_runtime(
-                    server_id,
-                    thread_id,
-                    &key,
-                    runtime_kind,
-                    false,
-                    None,
-                )
-                .await?;
+                let session = self.get_session(server_id)?;
+                let epoch = self.app_store.thread_history_epoch(&key);
+                let history_fence = epoch.as_ref().map(|epoch| ThreadHistoryFence {
+                    epoch,
+                    session: &session,
+                });
+                let event_fence = LagRefreshFence {
+                    generation: self.app_store.server_event_generation(server_id),
+                    session: &session,
+                };
+                let loaded = self
+                    .resume_thread_for_runtime_fenced(
+                        &key,
+                        runtime_kind,
+                        false,
+                        Some(&event_fence),
+                        history_fence.as_ref(),
+                    )
+                    .await?;
+                if !loaded {
+                    let _ = self.authoritative_repair_requests.try_send(());
+                }
                 return Ok(crate::types::AppLoadThreadTurnsOutcome {
-                    loaded: true,
+                    loaded,
                     has_more: false,
                 });
             }
@@ -1108,9 +1176,23 @@ impl MobileClient {
             params,
         };
         let runtime_kind = self.runtime_for_thread(&key);
+        let request_session = self.get_session(server_id)?;
+        let history_epoch = self
+            .app_store
+            .thread_history_epoch(&key)
+            .ok_or_else(|| RpcError::Deserialization(format!("thread {thread_id} not in store")))?;
+        let skipped_outcome = || crate::types::AppLoadThreadTurnsOutcome {
+            loaded: false,
+            has_more: self
+                .app_store
+                .project_thread(&key, |thread| thread.older_turns_cursor.is_some())
+                .unwrap_or(false),
+        };
+        let item_fingerprints = self.app_store.thread_item_fingerprints(&key);
         match self
-            .request_typed_for_server_runtime::<upstream::ThreadTurnsListResponse>(
+            .request_typed_for_session_runtime_rpc::<upstream::ThreadTurnsListResponse>(
                 server_id,
+                Arc::clone(&request_session),
                 runtime_kind.clone(),
                 request,
             )
@@ -1119,38 +1201,70 @@ impl MobileClient {
             Ok(response) => {
                 let has_more = response.next_cursor.is_some();
                 let page: crate::types::AppListThreadTurnsResponse = response.into();
-                self.apply_thread_turns_page(
-                    server_id,
-                    thread_id,
-                    &page,
-                    crate::types::AppTurnsSortDirection::Descending,
-                )
-                .map_err(RpcError::Deserialization)?;
+                let applied = self
+                    .apply_if_session_current(server_id, &request_session, |store| {
+                        store.apply_thread_turns_pages_preserving(
+                            &key,
+                            Some(&history_epoch),
+                            Some(&item_fingerprints),
+                            std::iter::once(&page),
+                            crate::types::AppTurnsSortDirection::Descending,
+                        )
+                    })
+                    .transpose()
+                    .map_err(RpcError::Deserialization)?
+                    .unwrap_or(false);
+                if !applied {
+                    return Ok(skipped_outcome());
+                }
                 Ok(crate::types::AppLoadThreadTurnsOutcome {
                     loaded: true,
                     has_more,
                 })
             }
-            Err(error) if is_method_not_found(&error) => {
-                if runtime_kind == "codex".to_string() {
+            Err(error) if is_method_not_found(&error.to_string()) => {
+                let current = self
+                    .apply_if_session_current(server_id, &request_session, |store| {
+                        store
+                            .thread_history_epoch(&key)
+                            .is_some_and(|epoch| Arc::ptr_eq(&epoch, &history_epoch))
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return Ok(skipped_outcome());
+                }
+                if runtime_kind == "codex" {
                     self.app_store
                         .set_server_supports_turn_pagination(server_id, false);
                 }
-                self.resume_thread_for_runtime(
-                    server_id,
-                    thread_id,
-                    &key,
-                    runtime_kind,
-                    false,
-                    None,
-                )
-                .await?;
+                let event_fence = LagRefreshFence {
+                    generation: self.app_store.server_event_generation(server_id),
+                    session: &request_session,
+                };
+                let loaded = self
+                    .resume_thread_for_runtime_fenced(
+                        &key,
+                        runtime_kind,
+                        false,
+                        Some(&event_fence),
+                        Some(&ThreadHistoryFence {
+                            epoch: &history_epoch,
+                            session: &request_session,
+                        }),
+                    )
+                    .await?;
+                if !loaded {
+                    // The capability is now disabled, so a later native page request
+                    // can short-circuit. Keep repair alive through the existing gate.
+                    let _ = self.authoritative_repair_requests.try_send(());
+                    return Ok(skipped_outcome());
+                }
                 Ok(crate::types::AppLoadThreadTurnsOutcome {
-                    loaded: true,
+                    loaded,
                     has_more: false,
                 })
             }
-            Err(error) => Err(RpcError::Deserialization(error)),
+            Err(error) => Err(RpcError::Deserialization(error.to_string())),
         }
     }
 
@@ -1518,7 +1632,6 @@ impl MobileClient {
                 )
                 .await;
             let result = completion_client.finish_turn_start_request(
-                &completion_server_id,
                 &completion_thread_key,
                 &completion_command_id,
                 completion_overlay_id.as_deref(),
@@ -1570,7 +1683,6 @@ impl MobileClient {
 
     fn finish_turn_start_request(
         self: &Arc<Self>,
-        server_id: &str,
         thread_key: &ThreadKey,
         direct_command_id: &str,
         optimistic_overlay_id: Option<&str>,
@@ -1578,6 +1690,7 @@ impl MobileClient {
         reconciliation_baseline: PendingTurnReconciliation,
         response_result: Result<upstream::TurnStartResponse, RpcError>,
     ) -> Result<(), RpcError> {
+        let server_id = thread_key.server_id.as_str();
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
@@ -1739,7 +1852,7 @@ impl MobileClient {
             .map_err(RpcError::Deserialization)?;
             copy_thread_runtime_fields(&current, &mut snapshot);
             reconcile_active_turn(Some(&current), &mut snapshot, &turns);
-            self.app_store.upsert_thread_snapshot(snapshot);
+            self.app_store.replace_thread_history(snapshot);
         }
 
         self.set_active_thread(Some(key.clone()));
@@ -1751,12 +1864,7 @@ impl MobileClient {
         &self,
         key: &ThreadKey,
         selected_turn_index: u32,
-        cwd: Option<String>,
-        model: Option<String>,
-        approval_policy: Option<crate::types::AppAskForApproval>,
-        sandbox: Option<crate::types::AppSandboxMode>,
-        developer_instructions: Option<String>,
-        persist_extended_history: bool,
+        params: crate::types::AppForkThreadFromMessageRequest,
     ) -> Result<ThreadKey, RpcError> {
         self.get_session(&key.server_id)?;
         let source = self.snapshot_thread(key)?;
@@ -1768,12 +1876,12 @@ impl MobileClient {
                 &key.server_id,
                 crate::types::AppForkThreadRequest {
                     thread_id: key.thread_id.clone(),
-                    model,
-                    cwd,
-                    approval_policy,
-                    sandbox,
-                    developer_instructions,
-                    persist_extended_history,
+                    model: params.model,
+                    cwd: params.cwd,
+                    approval_policy: params.approval_policy,
+                    sandbox: params.sandbox,
+                    developer_instructions: params.developer_instructions,
+                    persist_extended_history: params.persist_extended_history,
                     exclude_turns: false,
                 }
                 .try_into()
@@ -1819,7 +1927,11 @@ impl MobileClient {
             .map_err(RpcError::Deserialization)?;
         }
 
-        self.app_store.upsert_thread_snapshot(snapshot);
+        if rollback_depth > 0 {
+            self.app_store.replace_thread_history(snapshot);
+        } else {
+            self.app_store.upsert_thread_snapshot(snapshot);
+        }
         self.set_active_thread(Some(next_key.clone()));
         Ok(next_key)
     }

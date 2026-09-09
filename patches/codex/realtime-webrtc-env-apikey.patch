@@ -1,7 +1,8 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index f604a63..974e9ee 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -518,6 +518,7 @@
+@@ -518,6 +518,7 @@ impl ModelClient {
          &self,
          sdp: String,
          session_config: ApiRealtimeSessionConfig,
@@ -9,7 +10,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
          mut extra_headers: ApiHeaderMap,
      ) -> Result<RealtimeWebrtcCallStart> {
          // Create the media call over HTTP first, then retain matching auth so realtime can attach
-@@ -531,11 +532,40 @@
+@@ -531,11 +532,36 @@ impl ModelClient {
              client_setup.api_auth.as_ref(),
          ));
          let transport = ReqwestTransport::new(build_reqwest_client());
@@ -23,11 +24,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
 +            client_setup.api_provider,
 +            client_setup.api_auth,
 +        )
-+        .create_with_session_and_headers(
-+            sdp.clone(),
-+            session_config.clone(),
-+            extra_headers.clone(),
-+        )
++        .create_with_session_and_headers(sdp.clone(), session_config.clone(), extra_headers.clone())
 +        .await
 +        {
 +            Ok(response) => response,

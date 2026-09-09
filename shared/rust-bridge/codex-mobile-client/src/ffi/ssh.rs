@@ -65,6 +65,12 @@ pub struct AppSshBridgeConnectResult {
     pub agent_name: String,
 }
 
+impl Default for SshBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl SshBridge {
     #[uniffi::constructor]
@@ -76,6 +82,10 @@ impl SshBridge {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "flat native SSH credential boundary; internal connections use SshCredentials"
+    )]
     pub async fn ssh_connect_and_bootstrap(
         &self,
         host: String,
@@ -206,6 +216,10 @@ impl SshBridge {
         })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "flat native SSH credential boundary; internal connections use SshCredentials"
+    )]
     pub async fn ssh_open_session(
         &self,
         host: String,
@@ -276,6 +290,10 @@ impl SshBridge {
         Ok(availability)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "flat native bridge boundary; internal connections use SshBridgeConnection"
+    )]
     pub async fn ssh_connect_bridge_session(
         &self,
         session_id: String,
@@ -310,12 +328,14 @@ impl SshBridge {
         let outcome = mobile_client
             .connect_remote_over_ssh_bridges(
                 Arc::clone(&managed.client),
-                server_id,
-                display_name,
-                host,
-                state_root,
-                runtime_kinds,
-                transport,
+                crate::mobile_client::SshBridgeConnection {
+                    server_id,
+                    display_name,
+                    host,
+                    state_root,
+                    runtime_kinds,
+                    transport,
+                },
             )
             .await
             .map_err(|error| ClientError::Transport(error.to_string()))?;
@@ -396,12 +416,12 @@ impl SshBridge {
 
     pub(crate) async fn ssh_read_wake_mac(&self, session: Arc<SshClient>) -> Option<String> {
         let rt = Arc::clone(&self.rt);
-        let result = tokio::task::spawn_blocking(move || {
+
+        tokio::task::spawn_blocking(move || {
             rt.block_on(async move { read_wake_mac(session).await })
         })
         .await
-        .ok()?;
-        result
+        .ok()?
     }
 }
 
@@ -642,9 +662,8 @@ pub(crate) fn map_ssh_error(error: SshError) -> ClientError {
         // Display is already the stable `host-key-changed:` / `unknown-host:` /
         // `host-key-store-unavailable:` message platforms can parse; see
         // `ssh::host_trust`.
-        error @ (SshError::HostKeyVerification { .. } | SshError::HostKeyStoreUnavailable { .. }) => {
-            ClientError::Transport(error.to_string())
-        }
+        error @ (SshError::HostKeyVerification { .. }
+        | SshError::HostKeyStoreUnavailable { .. }) => ClientError::Transport(error.to_string()),
         SshError::Timeout => ClientError::Transport("SSH operation timed out".into()),
         SshError::Disconnected => ClientError::Transport("SSH session disconnected".into()),
     }
@@ -672,20 +691,16 @@ pub(crate) fn ssh_auth(
 
 pub(crate) fn normalize_ssh_host(host: &str) -> String {
     let mut normalized = host.trim().trim_matches(['[', ']']).replace("%25", "%");
-    if !normalized.contains(':') {
-        if let Some((base, _scope)) = normalized.split_once('%') {
-            normalized = base.to_string();
-        }
+    if !normalized.contains(':')
+        && let Some((base, _scope)) = normalized.split_once('%')
+    {
+        normalized = base.to_string();
     }
     normalized
 }
 
 fn normalize_wake_mac(raw: &str) -> Option<String> {
-    let compact = raw
-        .trim()
-        .replace(':', "")
-        .replace('-', "")
-        .to_ascii_lowercase();
+    let compact = raw.trim().replace([':', '-'], "").to_ascii_lowercase();
     if compact.len() != 12 || !compact.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return None;
     }

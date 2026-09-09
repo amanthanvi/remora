@@ -25,7 +25,17 @@ if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -z "${ANDROID_NDK_ROOT:-}" ]; then
 fi
 
 if [ "${CARGO_INCREMENTAL:-}" != "1" ] && command -v sccache >/dev/null 2>&1; then
-  export RUSTC_WRAPPER="$(command -v sccache)"
+  RUSTC_WRAPPER="$(command -v sccache)"
+  export RUSTC_WRAPPER
+fi
+
+# rustup's rust-objcopy needs LLVM from the selected toolchain's top-level lib,
+# not its rustlib host directory. Keep this lookup local to this build's tools.
+if [ "$(uname -s)" = "Darwin" ]; then
+  RUST_SYSROOT="$(rustc --print sysroot)"
+  if [ -f "$RUST_SYSROOT/lib/libLLVM.dylib" ]; then
+    export DYLD_LIBRARY_PATH="$RUST_SYSROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+  fi
 fi
 
 # libghostty.so per-ABI must exist before the Android JNI bridge links
@@ -99,11 +109,11 @@ mkdir -p "$OUT_DIR"
 
 # Remove stale output from the retired legacy JNI shim so Gradle cannot
 # continue packaging it after the single-library cutover.
-rm -f "$OUT_DIR"/*/libcodex_*bridge.so
+rm -f "${OUT_DIR:?}"/*/libcodex_*bridge.so
 
 for abi_dir in arm64-v8a x86_64; do
   if [[ " $SELECTED_ABIS " != *" $abi_dir "* ]]; then
-    rm -rf "$OUT_DIR/$abi_dir"
+    rm -rf "${OUT_DIR:?}/$abi_dir"
   fi
 done
 

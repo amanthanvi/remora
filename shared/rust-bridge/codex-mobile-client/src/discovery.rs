@@ -760,13 +760,13 @@ impl DiscoveryService {
 
             let mut metadata = seed.txt;
             metadata.insert("service_type".to_string(), seed.service_type);
-            if let Some(sp) = ssh_port {
-                if let Some(banner) = grab_ssh_banner(&host, sp, self.config.probe_timeout).await {
-                    if let Some(os) = parse_ssh_banner_os(&banner) {
-                        metadata.insert("os".to_string(), os);
-                    }
-                    metadata.insert("ssh_banner".to_string(), banner);
+            if let Some(sp) = ssh_port
+                && let Some(banner) = grab_ssh_banner(&host, sp, self.config.probe_timeout).await
+            {
+                if let Some(os) = parse_ssh_banner_os(&banner) {
+                    metadata.insert("os".to_string(), os);
                 }
+                metadata.insert("ssh_banner".to_string(), banner);
             }
             let port = primary_port(codex_port, ssh_port);
             if port == 0 {
@@ -903,7 +903,7 @@ async fn all_reachable_ports(host: &str, ports: &[u16], timeout: Duration) -> Ve
     ports
         .iter()
         .copied()
-        .zip(results.into_iter())
+        .zip(results)
         .filter_map(|(port, reachable)| reachable.then_some(port))
         .collect()
 }
@@ -930,13 +930,13 @@ async fn server_from_reachable_ports(
     let port = primary_port(codex_port, ssh_port);
 
     let mut metadata = HashMap::new();
-    if ssh_port.is_some() {
-        if let Some(banner) = grab_ssh_banner(host, SSH_PORT, probe_timeout).await {
-            if let Some(os) = parse_ssh_banner_os(&banner) {
-                metadata.insert("os".to_string(), os);
-            }
-            metadata.insert("ssh_banner".to_string(), banner);
+    if ssh_port.is_some()
+        && let Some(banner) = grab_ssh_banner(host, SSH_PORT, probe_timeout).await
+    {
+        if let Some(os) = parse_ssh_banner_os(&banner) {
+            metadata.insert("os".to_string(), os);
         }
+        metadata.insert("ssh_banner".to_string(), banner);
     }
 
     DiscoveredServer {
@@ -1015,7 +1015,7 @@ async fn first_reachable_port(host: &str, ports: &[u16], timeout: Duration) -> O
     ports
         .iter()
         .copied()
-        .zip(results.into_iter())
+        .zip(results)
         .find_map(|(port, reachable)| reachable.then_some(port))
 }
 
@@ -1260,31 +1260,27 @@ fn parse_arp_table() -> Vec<String> {
     // Format: hostname (ip) at mac on iface ...
     if let Ok(output) = std::process::Command::new("arp").arg("-a").output() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if let Some(start) = line.find('(') {
-                if let Some(end) = line.find(')') {
-                    let ip = &line[start + 1..end];
-                    if ip != "127.0.0.1" && is_likely_ipv4(ip) {
-                        // Skip incomplete entries
-                        if !line.contains("incomplete") {
-                            candidates.push(ip.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        candidates.extend(
+            stdout
+                .lines()
+                .filter_map(macos_arp_address)
+                .map(str::to_owned),
+        );
     }
 
     candidates
 }
 
+fn macos_arp_address(line: &str) -> Option<&str> {
+    let (_, address) = line.split_once('(')?;
+    let (address, _) = address.split_once(')')?;
+    (address != "127.0.0.1" && is_likely_ipv4(address) && !line.contains("incomplete"))
+        .then_some(address)
+}
+
 /// Check if a string looks like a valid IPv4 address.
 fn is_likely_ipv4(value: &str) -> bool {
-    let parts: Vec<&str> = value.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
+    value.parse::<Ipv4Addr>().is_ok()
 }
 
 /// Remove `.local` suffix and trailing dots from a hostname.
@@ -1481,16 +1477,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Hits real system state (arp table / tailscale); slow on dev machines.
-    fn test_parse_arp_table_doesnt_panic() {
-        let _candidates = parse_arp_table();
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_tailscale_peers_handles_unavailable() {
-        let result = fetch_tailscale_peers().await;
-        let _ = result;
+    fn macos_arp_parser_rejects_malformed_and_incomplete_entries() {
+        assert_eq!(
+            macos_arp_address("host (192.0.2.1) at aa:bb on en0"),
+            Some("192.0.2.1")
+        );
+        for line in [
+            "host ) (",
+            "host (192.0.2.1",
+            "host (999.0.0.1)",
+            "host (127.0.0.1)",
+            "host (192.0.2.1) at (incomplete)",
+        ] {
+            assert_eq!(macos_arp_address(line), None);
+        }
     }
 
     #[test]
@@ -1552,24 +1552,22 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Probes a TEST-NET IP; can stall depending on network config.
     async fn test_bonjour_with_mock_browser() {
-        struct MockBrowser;
+        struct MockBrowser(u16);
 
         #[async_trait::async_trait]
         impl PlatformMdnsBrowser for MockBrowser {
-            fn browse(&self, _service_type: &str) -> mpsc::Receiver<MdnsServiceEvent> {
+            fn browse(&self, service_type: &str) -> mpsc::Receiver<MdnsServiceEvent> {
                 let (tx, rx) = mpsc::channel(8);
-                tokio::spawn(async move {
-                    let _ = tx
-                        .send(MdnsServiceEvent::Found {
-                            name: "test-server.local".to_string(),
-                            host: "192.0.2.42".to_string(),
-                            port: 8390,
-                            txt: HashMap::new(),
-                        })
-                        .await;
-                });
+                if service_type == "_codex._tcp." {
+                    tx.try_send(MdnsServiceEvent::Found {
+                        name: "test-server.local".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: self.0,
+                        txt: HashMap::new(),
+                    })
+                    .unwrap();
+                }
                 rx
             }
 
@@ -1584,16 +1582,16 @@ mod tests {
             probe_timeout: Duration::from_millis(100),
             ..Default::default()
         };
-        let svc = DiscoveryService::with_mdns_browser(config, Arc::new(MockBrowser));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let svc = DiscoveryService::with_mdns_browser(config, Arc::new(MockBrowser(port)));
 
         let results = svc.scan_bonjour().await;
-        // 192.0.2.42 is TEST-NET-1 (RFC 5737) — typically unreachable.
-        // If the probe fails the result list will be empty; if the
-        // environment happens to route it, verify the entry is well-formed.
-        for srv in &results {
-            assert_eq!(srv.source, DiscoverySource::Bonjour);
-            assert!(!srv.host.is_empty());
-            assert!(srv.port > 0);
-        }
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source, DiscoverySource::Bonjour);
+        assert_eq!(results[0].host, "127.0.0.1");
+        assert_eq!(results[0].display_name, "test-server");
+        assert_eq!(results[0].codex_port, Some(port));
+        assert!(results[0].reachable);
     }
 }

@@ -458,15 +458,15 @@ impl OscParser {
                 true
             }
             "B" => {
-                if let Some(mark) = guard.prompts.last_mut() {
-                    if mark.end_row.is_none() {
-                        mark.command_row = Some(row);
-                        let cmd = extract_cmd(parts);
-                        if !cmd.is_empty() {
-                            mark.command_text = cmd;
-                        }
-                        return true;
+                if let Some(mark) = guard.prompts.last_mut()
+                    && mark.end_row.is_none()
+                {
+                    mark.command_row = Some(row);
+                    let cmd = extract_cmd(parts);
+                    if !cmd.is_empty() {
+                        mark.command_text = cmd;
                     }
+                    return true;
                 }
                 // No active mark — synthesize one anchored at command row.
                 guard.prompts.push(TerminalPromptMark {
@@ -480,11 +480,11 @@ impl OscParser {
                 true
             }
             "C" => {
-                if let Some(mark) = guard.prompts.last_mut() {
-                    if mark.end_row.is_none() {
-                        mark.output_row = Some(row);
-                        return true;
-                    }
+                if let Some(mark) = guard.prompts.last_mut()
+                    && mark.end_row.is_none()
+                {
+                    mark.output_row = Some(row);
+                    return true;
                 }
                 guard.prompts.push(TerminalPromptMark {
                     start_row: None,
@@ -502,12 +502,12 @@ impl OscParser {
                     .next()
                     .and_then(|s| s.split('=').next_back())
                     .and_then(|s| s.parse::<i32>().ok());
-                if let Some(mark) = guard.prompts.last_mut() {
-                    if mark.end_row.is_none() {
-                        mark.end_row = Some(row);
-                        mark.exit_code = exit;
-                        return true;
-                    }
+                if let Some(mark) = guard.prompts.last_mut()
+                    && mark.end_row.is_none()
+                {
+                    mark.end_row = Some(row);
+                    mark.exit_code = exit;
+                    return true;
                 }
                 // Orphan D: still record so callers see exit signals.
                 guard.prompts.push(TerminalPromptMark {
@@ -611,12 +611,13 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

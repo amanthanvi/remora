@@ -43,7 +43,6 @@ chrono = { workspace = true }
 regex = { workspace = true }
 base64 = { workspace = true }
 russh = { workspace = true }
-russh-keys = { workspace = true }
 futures = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }

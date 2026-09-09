@@ -9,7 +9,7 @@ import UIKit
 /// cutover therefore removes retired-namespace generic passwords, the current
 /// Remora Link transport identity, and every signing key visible to this app.
 /// Current Remora SSH and OAuth credentials remain intact. Saved hosts and the
-/// Remora Link journal are cleared, and the marker is written only after every
+/// Remora Link and relay journals are cleared, and the marker is written only after every
 /// step succeeds.
 @MainActor
 final class CurrentKeychainNamespaceCleanup: NSObject {
@@ -57,7 +57,9 @@ final class CurrentKeychainNamespaceCleanup: NSObject {
                 SavedServerStore.removeAllForSecurityCutover(from: defaults)
             let removedJournal =
                 RemoraLinkJournalStore.shared.discardForSecurityCutover()
-            return removedSavedServers && removedJournal
+            let removedRelayJournal =
+                NativeRelayJournalBackend.shared.discardForSecurityCutover()
+            return removedSavedServers && removedJournal && removedRelayJournal
         }
     }
 
@@ -142,7 +144,8 @@ final class CurrentKeychainNamespaceCleanup: NSObject {
             guard let service = item[kSecAttrService as String] as? String,
                   let account = item[kSecAttrAccount as String] as? String,
                   !service.hasPrefix(Self.currentServicePrefix)
-                    || service == RemoraLinkTransportIdentityKey.applicationV2.service else {
+                    || service == RemoraLinkTransportIdentityKey.applicationV2.service
+                    || service == NativeRelaySecretBackend.service else {
                 continue
             }
             let deleteStatus = deleteItems([

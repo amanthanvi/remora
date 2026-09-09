@@ -49,7 +49,8 @@ struct FcmRequest<'a> {
 
 #[derive(Serialize)]
 struct FcmMessage<'a> {
-    token: &'a str,
+    // Android registers FIDs; legacy registration tokens require fresh registration.
+    fid: &'a str,
     data: FcmData,
     android: FcmAndroid<'a>,
 }
@@ -80,7 +81,7 @@ pub(crate) fn payload_json(attempt: &PushAttempt, now_ms: i64) -> serde_json::Re
         .div_euclid(1_000);
     serde_json::to_vec(&FcmRequest {
         message: FcmMessage {
-            token: attempt.token.expose_secret(),
+            fid: attempt.token.expose_secret(),
             data: FcmData {
                 schema_version: attempt.hint.schema_version.to_string(),
                 installation_id: attempt.hint.installation_id.as_str().to_owned(),
@@ -178,15 +179,18 @@ fn contains_unregistered_code(body: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    fn visit(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::String(value) => value == "UNREGISTERED",
-            serde_json::Value::Array(values) => values.iter().any(visit),
-            serde_json::Value::Object(values) => values.values().any(visit),
-            _ => false,
-        }
-    }
-    visit(&value)
+    value
+        .get("error")
+        .and_then(|error| error.get("details"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|details| {
+            details.iter().any(|detail| {
+                detail.get("@type").and_then(serde_json::Value::as_str)
+                    == Some("type.googleapis.com/google.firebase.fcm.v1.FcmError")
+                    && detail.get("errorCode").and_then(serde_json::Value::as_str)
+                        == Some("UNREGISTERED")
+            })
+        })
 }
 
 #[cfg(test)]
@@ -199,7 +203,7 @@ mod tests {
     #[test]
     fn fcm_data_has_only_opaque_contract_fields() {
         let attempt = PushAttempt {
-            token: SecretString::from("destination-provider-token".to_owned()),
+            token: SecretString::from("c0123456789abcdefghijk".to_owned()),
             hint: OpaqueWakeHint {
                 schema_version: SCHEMA_VERSION,
                 installation_id: OpaqueId::parse("inst_0123456789abcdef").unwrap(),
@@ -220,10 +224,16 @@ mod tests {
             .collect();
         assert_eq!(
             message_keys,
-            ["android", "data", "token"]
+            ["android", "data", "fid"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
+        );
+        assert_eq!(value["message"]["fid"], "c0123456789abcdefghijk");
+        assert!(value["message"].get("token").is_none());
+        assert_ne!(
+            value["message"]["fid"],
+            value["message"]["data"]["installation_id"]
         );
         let keys: std::collections::BTreeSet<_> = data.keys().cloned().collect();
         assert_eq!(
@@ -251,11 +261,18 @@ mod tests {
     #[test]
     fn only_explicit_unregistered_code_tombstones_token() {
         assert!(contains_unregistered_code(
-            br#"{"error":{"details":[{"errorCode":"UNREGISTERED"}]}}"#
+            br#"{"error":{"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}"#
         ));
-        assert!(!contains_unregistered_code(
-            br#"{"error":{"status":"NOT_FOUND"}}"#
-        ));
+        for body in [
+            r#"{"error":{"status":"NOT_FOUND"}}"#,
+            r#"{"error":{"message":"UNREGISTERED"}}"#,
+            r#"{"error":{"details":[{"errorCode":"UNREGISTERED"}]}}"#,
+            r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","errorCode":"UNREGISTERED"}]}}"#,
+            r#"{"error":{"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","nested":{"errorCode":"UNREGISTERED"}}]}}"#,
+            r#"{"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}"#,
+        ] {
+            assert!(!contains_unregistered_code(body.as_bytes()), "{body}");
+        }
     }
 
     #[tokio::test]

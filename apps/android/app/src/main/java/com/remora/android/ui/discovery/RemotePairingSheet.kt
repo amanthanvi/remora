@@ -122,10 +122,14 @@ fun RemotePairingSheet(
             override suspend fun accept(
                 acceptance: AppRemoraLinkAcceptance,
             ): AppRemoraLinkPairingOutcome =
-                appModel.withRemoraLinkV2 { it.acceptRemoraLinkOffer(acceptance) }
+                appModel.withRemoraLinkV2 { it.acceptRemoraLinkOffer(acceptance) }.also {
+                    com.remora.android.background.BackgroundAwareness.onPairingChanged(context)
+                }
 
             override suspend fun await(hostId: String): AppRemoraLinkPairingOutcome =
-                appModel.withRemoraLinkV2 { it.awaitRemoraLinkPairing(hostId, null) }
+                appModel.withRemoraLinkV2 { it.awaitRemoraLinkPairing(hostId, null) }.also {
+                    com.remora.android.background.BackgroundAwareness.onPairingChanged(context)
+                }
 
             override suspend fun cancel(
                 hostId: String,

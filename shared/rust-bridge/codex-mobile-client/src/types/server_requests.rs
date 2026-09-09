@@ -231,6 +231,8 @@ pub struct PendingApproval {
     pub id: String,
     /// Server that owns this approval.
     pub server_id: String,
+    /// Runtime channel that originated the request; never inferred from thread state.
+    pub runtime_kind: String,
     /// What kind of approval is being requested.
     pub kind: ApprovalKind,
     /// Thread this approval belongs to.
@@ -268,12 +270,14 @@ pub(crate) struct PendingApprovalWithSeed {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PendingApprovalKey {
     pub server_id: String,
+    pub runtime_kind: String,
     pub request_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PendingUserInputKey {
     pub server_id: String,
+    pub runtime_kind: String,
     pub request_id: String,
 }
 
@@ -316,6 +320,7 @@ pub struct PendingUserInputQuestion {
 pub struct PendingUserInputRequest {
     pub id: String,
     pub server_id: String,
+    pub runtime_kind: String,
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
@@ -1234,6 +1239,7 @@ mod tests {
     #[test]
     fn pending_approval_roundtrip() {
         let approval = PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "42".to_string(),
             server_id: "srv_1".to_string(),
             kind: ApprovalKind::Command,
@@ -1254,6 +1260,7 @@ mod tests {
     #[test]
     fn pending_approval_file_change() {
         let approval = PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "req-abc".to_string(),
             server_id: "srv_1".to_string(),
             kind: ApprovalKind::FileChange,
@@ -1274,6 +1281,7 @@ mod tests {
     #[test]
     fn pending_approval_minimal() {
         let approval = PendingApproval {
+            runtime_kind: "codex".to_string(),
             id: "1".to_string(),
             server_id: "srv_1".to_string(),
             kind: ApprovalKind::Permissions,

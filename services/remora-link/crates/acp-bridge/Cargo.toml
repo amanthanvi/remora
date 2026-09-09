@@ -1,0 +1,48 @@
+[package]
+name = "remora-acp-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Codex app-server façade over ACP (Agent Client Protocol) compliant agents, used by the remora daemon."
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.wix]
+upgrade-guid = "E2F3G4H5-I6J7-8901-KLMN-OP2345678901"
+path-guid = "F3G4H5I6-J7K8-9012-LMNO-P34567890123"
+license = false
+eula = false
+
+[[bin]]
+name = "remora-acp-bridge"
+path = "src/main.rs"
+
+[lib]
+name = "remora_acp_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+remora-bridge-core = { workspace = true }
+remora-codex-proto = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+dashmap = "6"
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
