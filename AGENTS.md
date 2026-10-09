@@ -77,3 +77,26 @@ terminals; the embedded app-server is not an on-device shell.
 - Use concise imperative commit subjects. PRs describe purpose, changes,
   verification, and screenshots for UI changes. Do not commit or push unless
   requested.
+
+## Build output hygiene
+
+- `shared/rust-bridge/target/` is gitignored and has reached hundreds of GB.
+  Each checkout or worktree gets its own copy unless
+  `REMORA_SHARED_RUST_TARGET=1` (Makefile default `0`). Build with
+  `REMORA_SHARED_RUST_TARGET=1` so every checkout reuses
+  `~/Library/Caches/remora-build/cargo-target`.
+- Reuse the Makefile output paths. Do not create per-task `CARGO_TARGET_DIR`,
+  `-derivedDataPath`, `--scratch-path`, or `mktemp -d` build dirs; if
+  isolation is truly required, delete that dir as soon as verification ends.
+- Prefer the narrowest lane (`rust-check`, `*-fast` targets) and build only the
+  platform you are changing.
+- Check `du -sh shared/rust-bridge/target apps/ios/build apps/ios/GeneratedRust
+  apps/android/build` around heavy builds. Above 20GB, run `make clean-rust`,
+  `make clean-ios`, or `make clean-android` before finishing. `clean-rust`
+  skips the shared target; clear `~/Library/Caches/remora-build` by hand only
+  when it exceeds ~60GB.
+- Before finishing in a worktree, remove its heavy gitignored artifacts
+  (`shared/rust-bridge/target`, `apps/ios/build`, `apps/ios/GeneratedRust`,
+  `apps/android/build`, `apps/android/.gradle`) and any scratch or logs the
+  task created. Remove the worktree itself only once its work is merged and
+  `git status` is clean.
